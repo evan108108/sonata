@@ -63,7 +63,13 @@ struct EmailView: View {
 
                     // Detail pane
                     if let email = selectedEmail {
-                        EmailDetailView(email: email, onAction: { await vm.fetch() })
+                        EmailDetailView(email: email, onAction: {
+                            await vm.fetch()
+                            // Update selected email with refreshed data
+                            if let updated = vm.emails.first(where: { $0._id == email._id }) {
+                                selectedEmail = updated
+                            }
+                        })
                     } else {
                         VStack(spacing: 12) {
                             Image(systemName: "envelope.fill")
