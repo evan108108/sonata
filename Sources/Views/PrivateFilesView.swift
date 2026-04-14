@@ -154,6 +154,7 @@ struct PrivateFilesView: View {
         var nodes: [FileNode] = []
         for item in items.sorted() {
             if item.hasPrefix(".") { continue }
+            if item == "journal.md" { continue }  // Private — Sona only
             let fullPath = "\(path)/\(item)"
             var isDir: ObjCBool = false
             fm.fileExists(atPath: fullPath, isDirectory: &isDir)
