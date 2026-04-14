@@ -131,7 +131,7 @@ class WorkerManager: ObservableObject {
 
     func addWorker(label: String? = nil) {
         let index = workers.count + 1
-        let workerLabel = label ?? "Worker \(index)"
+        let workerLabel = label ?? "sona-worker-\(index)"
         let worker = Worker(label: workerLabel)
         workers.append(worker)
         selectedWorkerId = worker.id
