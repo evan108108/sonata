@@ -15,7 +15,7 @@ struct ContentView: View {
             ScheduleView()
                 .tabItem { Label("Schedule", systemImage: "calendar") }
 
-            WebDashboardView(filename: "email.html")
+            EmailView()
                 .tabItem { Label("Email", systemImage: "envelope.fill") }
 
             WikiView()
