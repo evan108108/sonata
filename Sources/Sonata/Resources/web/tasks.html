@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tasks — Sonata</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <input type="search" id="q" placeholder="Filter tasks…" style="flex:1;">
+    </div>
+    <div class="sidebar-list" id="list">
+      <div class="empty"><span class="spinner"></span>&nbsp; Loading…</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <h1 id="title">Tasks</h1>
+      <div class="spacer"></div>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="content" id="detail">
+      <div class="empty">Select a task to view details</div>
+    </div>
+  </div>
+</div>
+
+<script src="marked.min.js"></script>
+<script src="shared.js"></script>
+<script>
+let tasks = [];
+let filter = '';
+let selectedId = null;
+
+const STATUS_ORDER = ['active', 'in_progress', 'pending', 'completed', 'done', 'failed', 'cancelled'];
+const STATUS_COLOR = {
+  active: 'green', in_progress: 'green',
+  pending: 'yellow',
+  completed: 'blue', done: 'blue',
+  failed: 'red', cancelled: 'red',
+};
+
+async function loadTasks() {
+  const list = document.getElementById('list');
+  showLoading(list);
+  try {
+    const data = await apiGet('/api/task/list', { limit: 200 });
+    tasks = data.tasks || data.items || data || [];
+    renderList();
+  } catch (e) {
+    showError(list, e);
+  }
+}
+
+function renderList() {
+  const list = document.getElementById('list');
+  const f = filter.toLowerCase();
+  const filtered = tasks.filter(t => !f
+    || (t.title || '').toLowerCase().includes(f)
+    || (t.status || '').toLowerCase().includes(f));
+
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty">No tasks</div>';
+    return;
+  }
+
+  const groups = {};
+  filtered.forEach(t => {
+    const s = (t.status || 'unknown').toLowerCase();
+    (groups[s] = groups[s] || []).push(t);
+  });
+
+  const ordered = STATUS_ORDER.filter(s => groups[s]).concat(
+    Object.keys(groups).filter(s => !STATUS_ORDER.includes(s))
+  );
+
+  list.innerHTML = ordered.map(status => {
+    const items = groups[status];
+    const color = STATUS_COLOR[status] || '';
+    return `<div class="section-header">${escapeHtml(status)} (${items.length})</div>` +
+      items.map(t => {
+        const id = t.id || t._id || '';
+        return `<div class="sidebar-item ${id === selectedId ? 'active' : ''}" data-id="${escapeHtml(id)}">
+          ${escapeHtml(t.title || '(untitled)')}
+          <span class="meta">
+            <span class="badge ${color}">${escapeHtml(status)}</span>
+            ${escapeHtml(fmtDate(t.createdAt || t.created_at))}
+          </span>
+        </div>`;
+      }).join('');
+  }).join('');
+
+  list.querySelectorAll('.sidebar-item').forEach(el => {
+    el.addEventListener('click', () => selectItem(el.dataset.id));
+  });
+}
+
+function selectItem(id) {
+  selectedId = id;
+  const t = tasks.find(x => (x.id || x._id) === id);
+  renderList();
+  const detail = document.getElementById('detail');
+  if (!t) { detail.innerHTML = '<div class="empty">Not found</div>'; return; }
+
+  const status = (t.status || 'unknown').toLowerCase();
+  const color = STATUS_COLOR[status] || '';
+  detail.innerHTML = `
+    <h2 style="margin-bottom:10px;font-size:18px;">${escapeHtml(t.title || '(untitled)')}</h2>
+    <div style="margin-bottom:14px;">
+      <span class="badge ${color}">${escapeHtml(status)}</span>
+      ${t.assignedTo ? `<span class="badge">→ ${escapeHtml(t.assignedTo)}</span>` : ''}
+      ${t.parentId ? `<span class="badge purple">subtask</span>` : ''}
+      <span style="color:var(--text-dim);font-size:11px;margin-left:8px;">
+        created ${escapeHtml(fmtDate(t.createdAt || t.created_at))}
+      </span>
+    </div>
+    ${t.prompt ? `<div class="section-header">Prompt</div><pre>${escapeHtml(t.prompt)}</pre>` : ''}
+    ${t.result ? `<div class="section-header">Result</div><pre>${escapeHtml(typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2))}</pre>` : ''}
+    ${t.error ? `<div class="section-header">Error</div><pre style="color:var(--red);">${escapeHtml(t.error)}</pre>` : ''}
+    <div class="section-header">Raw</div>
+    <pre style="font-size:10px;color:var(--text-dim);">${escapeHtml(JSON.stringify(t, null, 2))}</pre>
+  `;
+}
+
+document.getElementById('q').addEventListener('input', debounce(e => { filter = e.target.value.trim(); renderList(); }, 150));
+document.getElementById('refresh').addEventListener('click', loadTasks);
+loadTasks();
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# Swift build
+.build/
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~
+*.hmap
+*.abi.json
+*.swiftsourceinfo
+*.swiftdoc
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# Dependencies (resolved via SPM)
+# Package.resolved is committed for reproducible builds

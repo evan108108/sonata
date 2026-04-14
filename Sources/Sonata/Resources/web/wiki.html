@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wiki — Sonata</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <input type="search" id="q" placeholder="Filter pages…" style="flex:1;">
+    </div>
+    <div class="sidebar-list" id="list">
+      <div class="empty"><span class="spinner"></span>&nbsp; Loading…</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <h1 id="title">Wiki</h1>
+      <div class="spacer"></div>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="content" id="detail">
+      <div class="empty">Select a page to read</div>
+    </div>
+  </div>
+</div>
+
+<script src="marked.min.js"></script>
+<script src="shared.js"></script>
+<script>
+let pages = [];
+let filter = '';
+let selectedSlug = null;
+let currentNamespace = null;
+
+async function loadPages() {
+  const list = document.getElementById('list');
+  showLoading(list);
+  try {
+    const data = await apiGet('/api/wiki/pages');
+    pages = data.pages || data.items || data || [];
+    renderList();
+  } catch (e) {
+    showError(list, e);
+  }
+}
+
+// Track which categories are expanded (persisted to sessionStorage)
+let expanded = JSON.parse(sessionStorage.getItem('wiki-expanded') || '{}');
+function saveExpanded() { sessionStorage.setItem('wiki-expanded', JSON.stringify(expanded)); }
+
+function renderList() {
+  const list = document.getElementById('list');
+  const filtered = pages.filter(p => {
+    if (!filter) return true;
+    const f = filter.toLowerCase();
+    return (p.title || '').toLowerCase().includes(f)
+      || (p.slug || '').toLowerCase().includes(f);
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty">No pages</div>';
+    return;
+  }
+
+  // When filtering, show flat list so all matches are visible
+  if (filter) {
+    list.innerHTML = filtered.map(p => {
+      const slug = p.slug || p.id || '';
+      const title = p.title || slug;
+      const updated = fmtDate(p.updatedAt || p.updated_at || p.compiledAt);
+      return `<div class="sidebar-item ${slug === selectedSlug ? 'active' : ''}" data-slug="${escapeHtml(slug)}">
+        ${escapeHtml(title)}
+        <span class="meta">${escapeHtml(updated)}</span>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.sidebar-item').forEach(el => {
+      el.addEventListener('click', () => loadPage(el.dataset.slug));
+    });
+    return;
+  }
+
+  // Build tree: top-level pages (no parentSlug) and children grouped under parents
+  const topLevel = filtered.filter(p => !p.parentSlug);
+  const byParent = {};
+  filtered.forEach(p => {
+    if (p.parentSlug) {
+      (byParent[p.parentSlug] = byParent[p.parentSlug] || []).push(p);
+    }
+  });
+
+  // Sort top-level: categories with children first, then standalone pages
+  topLevel.sort((a, b) => {
+    const aHas = byParent[a.slug] ? 1 : 0;
+    const bHas = byParent[b.slug] ? 1 : 0;
+    if (aHas !== bHas) return bHas - aHas;
+    return (a.title || a.slug || '').localeCompare(b.title || b.slug || '');
+  });
+
+  let html = '';
+  for (const p of topLevel) {
+    const slug = p.slug || p.id || '';
+    const title = p.title || slug;
+    const children = byParent[slug] || [];
+    const hasChildren = children.length > 0;
+    const isExpanded = expanded[slug] || false;
+    // Auto-expand if selected page is a child
+    const childSelected = children.some(c => c.slug === selectedSlug);
+    const open = isExpanded || childSelected;
+
+    if (hasChildren) {
+      children.sort((a, b) => (a.title || a.slug || '').localeCompare(b.title || b.slug || ''));
+      html += `<div class="tree-group${open ? ' open' : ''}">
+        <div class="tree-parent" data-slug="${escapeHtml(slug)}">
+          <span class="tree-arrow">${open ? '▾' : '▸'}</span>
+          <span class="tree-label ${slug === selectedSlug ? 'active' : ''}">${escapeHtml(title)}</span>
+          <span class="meta tree-count">${children.length}</span>
+        </div>
+        <div class="tree-children" style="display:${open ? 'block' : 'none'}">
+          ${children.map(c => {
+            const cs = c.slug || c.id || '';
+            const ct = c.title || c.topic || cs.split('/').pop();
+            return `<div class="sidebar-item tree-child ${cs === selectedSlug ? 'active' : ''}" data-slug="${escapeHtml(cs)}">
+              ${escapeHtml(ct)}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    } else {
+      html += `<div class="sidebar-item ${slug === selectedSlug ? 'active' : ''}" data-slug="${escapeHtml(slug)}">
+        ${escapeHtml(title)}
+      </div>`;
+    }
+  }
+  list.innerHTML = html;
+
+  // Bind click handlers
+  list.querySelectorAll('.sidebar-item').forEach(el => {
+    el.addEventListener('click', () => loadPage(el.dataset.slug));
+  });
+  list.querySelectorAll('.tree-parent').forEach(el => {
+    // Click arrow to toggle, click label to navigate
+    el.querySelector('.tree-arrow').addEventListener('click', e => {
+      e.stopPropagation();
+      const group = el.closest('.tree-group');
+      const slug = el.dataset.slug;
+      const isOpen = group.classList.toggle('open');
+      expanded[slug] = isOpen;
+      saveExpanded();
+      group.querySelector('.tree-children').style.display = isOpen ? 'block' : 'none';
+      el.querySelector('.tree-arrow').textContent = isOpen ? '▾' : '▸';
+    });
+    el.querySelector('.tree-label').addEventListener('click', e => {
+      e.stopPropagation();
+      loadPage(el.dataset.slug);
+    });
+  });
+}
+
+async function loadPage(slug) {
+  selectedSlug = slug;
+  renderList();
+  const detail = document.getElementById('detail');
+  showLoading(detail, 'Loading page');
+  try {
+    let data;
+    try {
+      data = await apiGet('/api/wiki/page', { slug });
+    } catch (e1) {
+      // If slug not found, try with current page's parent namespace prepended
+      // e.g. clicking "infrastructure.md" while on "adaptengine" → try "adaptengine/infrastructure"
+      if (selectedSlug && selectedSlug.includes('/')) {
+        const parent = selectedSlug.split('/').slice(0, -1).join('/');
+        data = await apiGet('/api/wiki/page', { slug: parent + '/' + slug });
+        slug = parent + '/' + slug;
+      } else if (currentNamespace) {
+        data = await apiGet('/api/wiki/page', { slug: currentNamespace + '/' + slug });
+        slug = currentNamespace + '/' + slug;
+      } else {
+        throw e1;
+      }
+    }
+    const page = data.page || data;
+    if (!page.title && !page.content) throw new Error('Page not found: ' + slug);
+    const content = page.content || page.body || page.markdown || '';
+    // Track current namespace for relative link resolution
+    currentNamespace = slug.includes('/') ? slug.split('/')[0] : slug;
+    selectedSlug = slug;
+    document.getElementById('title').textContent = page.title || slug;
+    detail.innerHTML = `
+      <div style="margin-bottom:10px;color:var(--text-dim);font-size:11px;">
+        ${escapeHtml(slug)} · updated ${escapeHtml(fmtDate(page.updatedAt || page.updated_at || page.compiledAt))}
+      </div>
+      <div class="markdown">${renderMarkdown(content)}</div>
+    `;
+  } catch (e) {
+    showError(detail, e);
+  }
+}
+
+document.getElementById('q').addEventListener('input', debounce(e => {
+  filter = e.target.value.trim();
+  renderList();
+}, 150));
+document.getElementById('refresh').addEventListener('click', loadPages);
+
+// Handle ALL link clicks in the wiki content area
+document.addEventListener('click', e => {
+  const link = e.target.closest('a');
+  if (!link) return;
+
+  e.preventDefault();
+
+  // Wiki cross-links (from [[Page Name]] pre-processing)
+  if (link.classList.contains('wiki-link')) {
+    loadPage(link.dataset.slug);
+    return;
+  }
+
+  const href = link.getAttribute('href') || '';
+
+  // Internal wiki links — .md file paths like "adaptengine/architecture.md" or "../memory-system.md"
+  if (href.endsWith('.md') || (href.includes('/') && !href.startsWith('http'))) {
+    // Convert file path to slug: "adaptengine/architecture.md" → "adaptengine/architecture"
+    // Also handle "../parent.md" → strip ../ and .md
+    let slug = href.replace(/\.md$/, '').replace(/^\.\.\//g, '');
+    loadPage(slug);
+    return;
+  }
+
+  // Anchor links (#section)
+  if (href.startsWith('#')) {
+    const target = document.getElementById(href.slice(1));
+    if (target) target.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+
+  // External links — open in system browser
+  if (href.startsWith('http')) {
+    window.open(href, '_blank');
+  }
+});
+
+loadPages();
+</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Memory — Sonata</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <input type="search" id="q" placeholder="Search memories…" style="flex:1;">
+    </div>
+    <div class="sidebar-list" id="list">
+      <div class="empty"><span class="spinner"></span>&nbsp; Loading…</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <h1 id="title">Memory</h1>
+      <div class="spacer"></div>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="content" id="detail">
+      <div class="empty">Select a memory to view details</div>
+    </div>
+  </div>
+</div>
+
+<script src="marked.min.js"></script>
+<script src="shared.js"></script>
+<script>
+let currentItems = [];
+let selectedId = null;
+
+async function loadRecent() {
+  const list = document.getElementById('list');
+  showLoading(list);
+  try {
+    const data = await apiGet('/api/memory/recent', { limit: 50 });
+    currentItems = data.memories || data.items || data || [];
+    renderList();
+  } catch (e) {
+    showError(list, e);
+  }
+}
+
+async function search(q) {
+  const list = document.getElementById('list');
+  if (!q) return loadRecent();
+  showLoading(list, 'Searching');
+  try {
+    const data = await apiGet('/api/memory/search', { q, limit: 50 });
+    currentItems = data.memories || data.results || data.items || data || [];
+    renderList();
+  } catch (e) {
+    showError(list, e);
+  }
+}
+
+function renderList() {
+  const list = document.getElementById('list');
+  if (!currentItems.length) {
+    list.innerHTML = '<div class="empty">No memories</div>';
+    return;
+  }
+  list.innerHTML = currentItems.map(m => {
+    const id = m.id || m._id || '';
+    const content = (m.content || m.text || '').slice(0, 120);
+    const type = m.type || m.memoryType || 'memory';
+    const when = fmtDate(m.createdAt || m.created_at || m.timestamp);
+    return `<div class="sidebar-item ${id === selectedId ? 'active' : ''}" data-id="${escapeHtml(id)}">
+      ${escapeHtml(content || '(empty)')}
+      <span class="meta">${escapeHtml(type)} · ${escapeHtml(when)}</span>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.sidebar-item').forEach(el => {
+    el.addEventListener('click', () => selectItem(el.dataset.id));
+  });
+}
+
+function selectItem(id) {
+  selectedId = id;
+  const item = currentItems.find(m => (m.id || m._id) === id);
+  renderList();
+  const detail = document.getElementById('detail');
+  if (!item) {
+    detail.innerHTML = '<div class="empty">Not found</div>';
+    return;
+  }
+  const tags = (item.tags || []).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join(' ');
+  detail.innerHTML = `
+    <div style="margin-bottom:14px;">
+      <span class="badge blue">${escapeHtml(item.type || item.memoryType || 'memory')}</span>
+      ${item.source ? `<span class="badge">${escapeHtml(item.source)}</span>` : ''}
+      ${item.importance != null ? `<span class="badge yellow">★ ${item.importance}</span>` : ''}
+      <span style="color: var(--text-dim); font-size: 11px; margin-left: 8px;">${escapeHtml(fmtDate(item.createdAt || item.created_at || item.timestamp))}</span>
+    </div>
+    <div class="markdown">${renderMarkdown(item.content || item.text || '')}</div>
+    ${tags ? `<div style="margin-top:14px;">${tags}</div>` : ''}
+    <pre style="margin-top:18px;font-size:10px;color:var(--text-dim);">${escapeHtml(JSON.stringify(item, null, 2))}</pre>
+  `;
+}
+
+document.getElementById('q').addEventListener('input', debounce(e => search(e.target.value.trim()), 250));
+document.getElementById('refresh').addEventListener('click', () => {
+  const q = document.getElementById('q').value.trim();
+  q ? search(q) : loadRecent();
+});
+
+loadRecent();
+</script>
+</body>
+</html>

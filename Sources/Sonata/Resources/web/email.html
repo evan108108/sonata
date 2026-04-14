@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Email — Sonata</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <input type="search" id="q" placeholder="Filter…" style="flex:1;">
+    </div>
+    <div class="sidebar-list" id="list">
+      <div class="empty"><span class="spinner"></span>&nbsp; Loading…</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <h1 id="title">Inbox</h1>
+      <div class="spacer"></div>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="content" id="detail">
+      <div class="empty">Select an email to view</div>
+    </div>
+  </div>
+</div>
+
+<script src="marked.min.js"></script>
+<script src="shared.js"></script>
+<script>
+let emails = [];
+let filter = '';
+let selectedId = null;
+
+async function loadEmails() {
+  const list = document.getElementById('list');
+  showLoading(list);
+  try {
+    const data = await apiGet('/api/email/recent', { limit: 100 });
+    emails = data.emails || data.items || data || [];
+    renderList();
+  } catch (e) {
+    showError(list, e);
+  }
+}
+
+function renderList() {
+  const list = document.getElementById('list');
+  const f = filter.toLowerCase();
+  const filtered = emails.filter(e => !f
+    || (e.subject || '').toLowerCase().includes(f)
+    || (e.from || '').toLowerCase().includes(f));
+
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty">No emails</div>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(e => {
+    const id = e.id || e._id || '';
+    const status = e.status || (e.replied ? 'replied' : (e.read ? 'read' : 'unread'));
+    const color = status === 'unread' ? 'yellow' : status === 'replied' ? 'green' : '';
+    return `<div class="sidebar-item ${id === selectedId ? 'active' : ''}" data-id="${escapeHtml(id)}">
+      <strong>${escapeHtml((e.from || '').split('<')[0].trim() || e.from || '?')}</strong><br>
+      ${escapeHtml(e.subject || '(no subject)')}
+      <span class="meta">
+        <span class="badge ${color}">${escapeHtml(status)}</span>
+        ${escapeHtml(fmtDate(e.receivedAt || e.received_at || e.createdAt))}
+      </span>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.sidebar-item').forEach(el => {
+    el.addEventListener('click', () => selectItem(el.dataset.id));
+  });
+}
+
+function selectItem(id) {
+  selectedId = id;
+  const e = emails.find(x => (x.id || x._id) === id);
+  renderList();
+  const detail = document.getElementById('detail');
+  if (!e) { detail.innerHTML = '<div class="empty">Not found</div>'; return; }
+
+  const status = e.status || (e.replied ? 'replied' : (e.read ? 'read' : 'unread'));
+  const color = status === 'unread' ? 'yellow' : status === 'replied' ? 'green' : '';
+  detail.innerHTML = `
+    <h2 style="margin-bottom:6px;font-size:18px;">${escapeHtml(e.subject || '(no subject)')}</h2>
+    <div style="margin-bottom:14px;color:var(--text-dim);font-size:12px;">
+      <div><strong>From:</strong> ${escapeHtml(e.from || '?')}</div>
+      ${e.to ? `<div><strong>To:</strong> ${escapeHtml(e.to)}</div>` : ''}
+      <div><strong>Date:</strong> ${escapeHtml(fmtDate(e.receivedAt || e.received_at || e.createdAt))}</div>
+      <div style="margin-top:6px;"><span class="badge ${color}">${escapeHtml(status)}</span></div>
+    </div>
+    <pre style="white-space:pre-wrap;">${escapeHtml(e.body || e.text || e.preview || '(no body)')}</pre>
+  `;
+}
+
+document.getElementById('q').addEventListener('input', debounce(ev => { filter = ev.target.value.trim(); renderList(); }, 150));
+document.getElementById('refresh').addEventListener('click', loadEmails);
+loadEmails();
+</script>
+</body>
+</html>
