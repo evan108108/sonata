@@ -21,8 +21,8 @@ struct ContentView: View {
             WikiView()
                 .tabItem { Label("Wiki", systemImage: "book.fill") }
 
-            WebDashboardView(filename: "files.html")
-                .tabItem { Label("Files", systemImage: "folder.fill") }
+            PrivateFilesView()
+                .tabItem { Label("Files", systemImage: "person.text.rectangle") }
 
             HealthView()
                 .tabItem { Label("Health", systemImage: "heart.text.square.fill") }
