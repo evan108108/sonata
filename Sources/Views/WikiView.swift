@@ -94,26 +94,32 @@ struct WikiView: View {
         // Collect all category names that have subpages
         let categoryNames = Set(grouped.keys.filter { !$0.isEmpty })
 
-        // Top-level pages that DON'T match a category name
-        if let topLevel = grouped[""] {
-            for page in topLevel.sorted(by: { $0.title < $1.title }) {
-                if categoryNames.contains(page.slug) {
-                    continue  // This page belongs inside its category folder
-                }
-                nodes.append(WikiTreeNode(
-                    id: "page-\(page.slug)", label: page.displayTitle,
-                    icon: "doc.text", page: page, children: nil
-                ))
+        // Every page gets a folder. Top-level pages without a category
+        // become their own folder with just "Overview" inside.
+        let topLevel = grouped[""] ?? []
+
+        // First: create folders for top-level pages that DON'T have a matching category
+        for page in topLevel.sorted(by: { $0.title < $1.title }) {
+            if categoryNames.contains(page.slug) {
+                continue  // Will be added as Overview inside its category folder
             }
+            // Standalone page — wrap in its own folder
+            let childNode = WikiTreeNode(
+                id: "page-\(page.slug)", label: "Overview",
+                icon: "doc.text.fill", page: page, children: nil
+            )
+            nodes.append(WikiTreeNode(
+                id: "cat-\(page.slug)", label: page.displayTitle,
+                icon: "folder.fill", page: nil, children: [childNode]
+            ))
         }
 
-        // Category folders with child pages
+        // Then: category folders with their subpages
         let sortedCategories = categoryNames.sorted()
         for cat in sortedCategories {
             let catPages = grouped[cat] ?? []
             let displayName = cat.replacingOccurrences(of: "-", with: " ").capitalized
 
-            // Build child nodes — subpages of this category
             var childNodes = catPages.sorted(by: { $0.title < $1.title }).map { page in
                 WikiTreeNode(
                     id: "page-\(page.slug)", label: page.displayTitle,
@@ -122,8 +128,7 @@ struct WikiView: View {
             }
 
             // If a top-level page matches this category name, add it as "Overview" at the top
-            if let topLevel = grouped[""],
-               let parentPage = topLevel.first(where: { $0.slug == cat }) {
+            if let parentPage = topLevel.first(where: { $0.slug == cat }) {
                 childNodes.insert(WikiTreeNode(
                     id: "page-\(parentPage.slug)", label: "Overview",
                     icon: "doc.text.fill", page: parentPage, children: nil
@@ -135,6 +140,9 @@ struct WikiView: View {
                 icon: "folder.fill", page: nil, children: childNodes
             ))
         }
+
+        // Sort all folders alphabetically
+        nodes.sort { $0.label < $1.label }
 
         return nodes
     }
