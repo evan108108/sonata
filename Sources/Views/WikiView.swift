@@ -331,10 +331,50 @@ struct WikiView: View {
     }
 
     private func recompile(slug: String) async {
-        guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/wiki/dirty?slug=\(slug.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? slug)") else { return }
-        var request = URLRequest(url: url)
+        // Find the page to get its title and file path
+        guard let page = pages.first(where: { $0.slug == slug }) else { return }
+        let namespace = page.slug.contains("/") ? String(page.slug.prefix(upTo: page.slug.firstIndex(of: "/")!)) : page.slug
+
+        // Dispatch a task to a worker with a proper wiki compilation prompt
+        let prompt = """
+        You are Sona Claude running a wiki page compilation task.
+
+        ## Task: Recompile wiki page "\(page.title)" (slug: \(slug))
+
+        1. Use mem_recall MCP tool to search for memories related to "\(namespace)" and "\(page.title)"
+        2. Use mem_search MCP tool with topic "\(namespace)" to find additional relevant memories
+        3. Read the current wiki page at \(page.filePath) to understand the existing structure
+        4. Synthesize the memories into an updated, well-structured markdown wiki page
+        5. Keep the existing page structure and headings where possible, but update content with new information
+        6. Write the updated content to \(page.filePath)
+        7. The page should be comprehensive but concise — synthesize, don't just list memories
+
+        After writing, the page will be marked as freshly compiled.
+        """
+
+        // Create a task for the worker
+        guard let taskURL = URL(string: "http://127.0.0.1:\(sonataPort)/api/task/") else { return }
+        var request = URLRequest(url: taskURL)
         request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "title": "Wiki recompile: \(page.title)",
+            "prompt": prompt,
+            "source": "sonata-wiki",
+            "priority": "normal",
+            "project": "memory",
+            "assignedTo": "scheduler",
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         _ = try? await URLSession.shared.data(for: request)
+
+        // Mark the page as dirty so it shows compilation in progress
+        if let dirtyURL = URL(string: "http://127.0.0.1:\(sonataPort)/api/wiki/dirty?slug=\(slug.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? slug)") {
+            var dirtyReq = URLRequest(url: dirtyURL)
+            dirtyReq.httpMethod = "POST"
+            _ = try? await URLSession.shared.data(for: dirtyReq)
+        }
+
         await fetchPages()
     }
 }
