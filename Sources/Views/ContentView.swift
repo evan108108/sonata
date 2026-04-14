@@ -18,7 +18,7 @@ struct ContentView: View {
             WebDashboardView(filename: "email.html")
                 .tabItem { Label("Email", systemImage: "envelope.fill") }
 
-            WebDashboardView(filename: "wiki.html")
+            WikiView()
                 .tabItem { Label("Wiki", systemImage: "book.fill") }
 
             WebDashboardView(filename: "files.html")

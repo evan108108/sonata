@@ -47,17 +47,97 @@ private struct WikiCategory: Identifiable {
     }
 }
 
+/// Tree node for hierarchical wiki sidebar. Category nodes have children, leaf pages don't.
+private struct WikiTreeNode: Identifiable, Hashable {
+    let id: String
+    let label: String
+    let icon: String
+    let page: WikiPage?         // nil for category folders
+    let children: [WikiTreeNode]?  // nil for leaf pages
+
+    static func == (lhs: WikiTreeNode, rhs: WikiTreeNode) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
 // MARK: - View
 
 struct WikiView: View {
     @State private var pages: [WikiPage] = []
     @State private var selectedPage: WikiPage?
+    @State private var selectedNodeId: String?
     @State private var markdownContent: String?
     @State private var searchText = ""
     @State private var isLoading = false
     @State private var isLoadingContent = false
     @State private var error: String?
     @State private var recompileSlug: String?
+
+    private var treeNodes: [WikiTreeNode] {
+        let filtered: [WikiPage]
+        if searchText.isEmpty {
+            filtered = pages
+        } else {
+            let q = searchText.lowercased()
+            filtered = pages.filter {
+                $0.title.lowercased().contains(q) ||
+                $0.slug.lowercased().contains(q) ||
+                ($0.abstract?.lowercased().contains(q) ?? false)
+            }
+        }
+
+        // Group by category
+        let grouped = Dictionary(grouping: filtered) { $0.category }
+
+        // Build tree: each category becomes a folder node with page children
+        var nodes: [WikiTreeNode] = []
+
+        // Collect all category names that have subpages
+        let categoryNames = Set(grouped.keys.filter { !$0.isEmpty })
+
+        // Top-level pages that DON'T match a category name
+        if let topLevel = grouped[""] {
+            for page in topLevel.sorted(by: { $0.title < $1.title }) {
+                if categoryNames.contains(page.slug) {
+                    continue  // This page belongs inside its category folder
+                }
+                nodes.append(WikiTreeNode(
+                    id: "page-\(page.slug)", label: page.displayTitle,
+                    icon: "doc.text", page: page, children: nil
+                ))
+            }
+        }
+
+        // Category folders with child pages
+        let sortedCategories = categoryNames.sorted()
+        for cat in sortedCategories {
+            let catPages = grouped[cat] ?? []
+            let displayName = cat.replacingOccurrences(of: "-", with: " ").capitalized
+
+            // Build child nodes — subpages of this category
+            var childNodes = catPages.sorted(by: { $0.title < $1.title }).map { page in
+                WikiTreeNode(
+                    id: "page-\(page.slug)", label: page.displayTitle,
+                    icon: "doc.text", page: page, children: nil
+                )
+            }
+
+            // If a top-level page matches this category name, add it as "Overview" at the top
+            if let topLevel = grouped[""],
+               let parentPage = topLevel.first(where: { $0.slug == cat }) {
+                childNodes.insert(WikiTreeNode(
+                    id: "page-\(parentPage.slug)", label: "Overview",
+                    icon: "doc.text.fill", page: parentPage, children: nil
+                ), at: 0)
+            }
+
+            nodes.append(WikiTreeNode(
+                id: "cat-\(cat)", label: displayName,
+                icon: "folder.fill", page: nil, children: childNodes
+            ))
+        }
+
+        return nodes
+    }
 
     private var categories: [WikiCategory] {
         let filtered: [WikiPage]
@@ -130,19 +210,26 @@ struct WikiView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(selection: $selectedPage) {
-                        ForEach(categories) { category in
-                            Section(header: Text(category.displayName)) {
-                                ForEach(category.pages) { page in
-                                    WikiSidebarRow(page: page)
-                                        .tag(page)
-                                }
+                    List(treeNodes, children: \.children, selection: $selectedNodeId) { node in
+                        HStack(spacing: 6) {
+                            Image(systemName: node.icon)
+                                .foregroundStyle(node.children != nil ? .blue : .secondary)
+                                .frame(width: 16)
+                            Text(node.label)
+                                .lineLimit(1)
+                            if let kids = node.children {
+                                Text("(\(kids.count))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
                             }
                         }
                     }
                     .listStyle(.sidebar)
-                    .onChange(of: selectedPage) { _, newPage in
-                        if let page = newPage {
+                    .onChange(of: selectedNodeId) { _, newId in
+                        guard let newId, newId.hasPrefix("page-") else { return }
+                        let slug = String(newId.dropFirst(5))
+                        if let page = pages.first(where: { $0.slug == slug }) {
+                            selectedPage = page
                             Task { await loadMarkdown(for: page) }
                         }
                     }
@@ -173,6 +260,13 @@ struct WikiView: View {
                     isLoadingContent: isLoadingContent,
                     onRecompile: {
                         Task { await recompile(slug: page.slug) }
+                    },
+                    onLinkClick: { slug in
+                        if let target = pages.first(where: { $0.slug == slug }) {
+                            selectedPage = target
+                            selectedNodeId = "page-\(slug)"
+                            Task { await loadMarkdown(for: target) }
+                        }
                     }
                 )
             } else {
@@ -294,6 +388,7 @@ private struct WikiDetailView: View {
     let markdownContent: String?
     let isLoadingContent: Bool
     let onRecompile: () -> Void
+    var onLinkClick: ((String) -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -351,14 +446,7 @@ private struct WikiDetailView: View {
                 ProgressView("Loading...")
                 Spacer()
             } else if let content = markdownContent {
-                ScrollView {
-                    VStack(alignment: .leading) {
-                        Text(renderMarkdown(content))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding()
-                }
+                MarkdownWebView(markdown: content, onLinkClick: onLinkClick)
             } else {
                 Spacer()
                 Text("No content loaded")
@@ -392,5 +480,136 @@ private struct WikiDetailView: View {
         } catch {
             return AttributedString(text)
         }
+    }
+}
+
+// MARK: - Markdown WebView
+
+import WebKit
+
+private struct MarkdownWebView: NSViewRepresentable {
+    let markdown: String
+    var onLinkClick: ((String) -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onLinkClick: onLinkClick)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let webView = WKWebView()
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = context.coordinator
+        return webView
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate {
+        let onLinkClick: ((String) -> Void)?
+
+        init(onLinkClick: ((String) -> Void)?) {
+            self.onLinkClick = onLinkClick
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // Allow initial page load
+            if navigationAction.navigationType == .other {
+                decisionHandler(.allow)
+                return
+            }
+
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+
+            let urlStr = url.absoluteString
+
+            // Internal wiki links — relative markdown links like (../adaptengine.md) or (memory-system/recall.md)
+            if urlStr.hasSuffix(".md") || !urlStr.hasPrefix("http") {
+                // Extract slug from the link
+                var slug = urlStr
+                    .replacingOccurrences(of: ".md", with: "")
+                    .replacingOccurrences(of: "../", with: "")
+                    .replacingOccurrences(of: "about:blank/", with: "")
+                // Clean up any leading slashes
+                while slug.hasPrefix("/") { slug = String(slug.dropFirst()) }
+                if !slug.isEmpty {
+                    onLinkClick?(slug)
+                }
+                decisionHandler(.cancel)
+                return
+            }
+
+            // External links — open in browser
+            if urlStr.hasPrefix("http") {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+
+            decisionHandler(.allow)
+        }
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        let escaped = markdown
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "`", with: "\\`")
+            .replacingOccurrences(of: "$", with: "\\$")
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+                color: #e0e0e0;
+                background: transparent;
+                padding: 16px 24px;
+                max-width: 100%;
+                word-wrap: break-word;
+            }
+            h1 { font-size: 1.8em; border-bottom: 1px solid #333; padding-bottom: 8px; }
+            h2 { font-size: 1.4em; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; margin-top: 24px; }
+            h3 { font-size: 1.15em; margin-top: 20px; }
+            a { color: #58a6ff; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+            code {
+                background: #1a1a2e;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-family: 'SF Mono', Menlo, monospace;
+                font-size: 0.9em;
+            }
+            pre {
+                background: #1a1a2e;
+                padding: 12px 16px;
+                border-radius: 8px;
+                overflow-x: auto;
+            }
+            pre code { background: none; padding: 0; }
+            table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+            th, td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
+            th { background: #1a1a2e; font-weight: 600; }
+            blockquote { border-left: 3px solid #444; margin: 12px 0; padding: 4px 16px; color: #999; }
+            ul, ol { padding-left: 24px; }
+            li { margin: 4px 0; }
+            hr { border: none; border-top: 1px solid #333; margin: 20px 0; }
+            img { max-width: 100%; }
+        </style>
+        <script src="http://127.0.0.1:\(sonataPort)/web/marked.min.js"></script>
+        </head>
+        <body>
+        <div id="content"></div>
+        <script>
+            const md = `\(escaped)`;
+            document.getElementById('content').innerHTML = marked.parse(md);
+        </script>
+        </body>
+        </html>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
     }
 }
