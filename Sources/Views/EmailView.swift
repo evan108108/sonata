@@ -82,7 +82,6 @@ struct EmailView: View {
             vm.startMonitoring()
         }
         .onAppear { Task { await vm.fetch() } }
-        .onDisappear { vm.stopMonitoring() }
     }
 }
 

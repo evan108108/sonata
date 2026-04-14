@@ -107,7 +107,6 @@ struct ScheduleView: View {
             vm.startMonitoring()
         }
         .onAppear { Task { await vm.fetch() } }
-        .onDisappear { vm.stopMonitoring() }
         .sheet(isPresented: $showingCreateEvent) {
             CreateCalendarEventSheet { await vm.fetch() }
         }
