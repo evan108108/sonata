@@ -1,0 +1,319 @@
+import Foundation
+import GRDB
+import Hummingbird
+
+// Phase 2 migration: action definitions for /api/worker routes.
+// Handler logic is duplicated from WorkerRoutes.swift.
+
+// MARK: - Response shapes specific to actions
+
+private struct WorkerListItem: Encodable {
+    let _id: String
+    let workerId: String
+    let sessionLabel: String
+    let status: String
+    let capabilities: String  // raw JSON string, matching existing route behaviour
+    let lastHeartbeat: Int64
+    let currentEventId: String
+    let registeredAt: Int64
+    let currentTask: String?
+    let assignedAt: Int64?
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(_id, forKey: ._id)
+        try c.encode(workerId, forKey: .workerId)
+        try c.encode(sessionLabel, forKey: .sessionLabel)
+        try c.encode(status, forKey: .status)
+        try c.encode(capabilities, forKey: .capabilities)
+        try c.encode(lastHeartbeat, forKey: .lastHeartbeat)
+        try c.encode(currentEventId, forKey: .currentEventId)
+        try c.encode(registeredAt, forKey: .registeredAt)
+        try c.encodeIfPresent(currentTask, forKey: .currentTask)
+        try c.encodeIfPresent(assignedAt, forKey: .assignedAt)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case _id, workerId, sessionLabel, status, capabilities
+        case lastHeartbeat, currentEventId, registeredAt, currentTask, assignedAt
+    }
+}
+
+// MARK: - Helpers
+
+/// Sweep workers whose lastHeartbeat is older than 60s ago, set them offline,
+/// fail their active events and associated tasks. Mirrors sweepStaleWorkers in WorkerRoutes.swift.
+private func sweepStaleWorkersForActions(in db: Database) throws {
+    let cutoff = nowMs() - 60_000
+
+    let staleWorkers = try Row.fetchAll(db, sql: """
+        SELECT workerId, currentEventId FROM workers
+        WHERE lastHeartbeat < ? AND status != 'offline'
+    """, arguments: [cutoff])
+
+    try db.execute(sql: """
+        UPDATE workers SET status = 'offline'
+        WHERE lastHeartbeat < ? AND status != 'offline'
+    """, arguments: [cutoff])
+
+    let now = nowMs()
+    for row in staleWorkers {
+        do {
+            guard let workerId = row["workerId"] as? String,
+                  let eventId = row["currentEventId"] as? String, !eventId.isEmpty else { continue }
+
+            try db.execute(sql: """
+                UPDATE workerEvents SET status = 'failed', result = 'Worker lost heartbeat', completedAt = ?
+                WHERE id = ? AND status = 'assigned'
+            """, arguments: [now, eventId])
+
+            if let event = try Row.fetchOne(db, sql: "SELECT payload FROM workerEvents WHERE id = ?", arguments: [eventId]),
+               let payload = event["payload"] as? String,
+               let payloadData = payload.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+               let taskId = json["task_id"] as? String {
+                try db.execute(sql: """
+                    UPDATE tasks SET status = 'failed', lastError = 'Worker lost heartbeat', updatedAt = ?
+                    WHERE id = ? AND status = 'active'
+                """, arguments: [now, taskId])
+
+                let dependents = try Row.fetchAll(db, sql: """
+                    SELECT id, blockedBy FROM tasks WHERE status = 'pending' AND blockedBy LIKE ?
+                """, arguments: ["%\(taskId)%"])
+                for dep in dependents {
+                    guard let depId = dep["id"] as? String else { continue }
+                    let blockedByJSON = dep["blockedBy"] as? String ?? "[]"
+                    if let data = blockedByJSON.data(using: .utf8),
+                       var arr = try? JSONDecoder().decode([String].self, from: data) {
+                        arr.removeAll { $0 == taskId }
+                        if let newJSON = try? JSONEncoder().encode(arr),
+                           let newStr = String(data: newJSON, encoding: .utf8) {
+                            try db.execute(sql: "UPDATE tasks SET blockedBy = ?, updatedAt = ? WHERE id = ?",
+                                           arguments: [newStr, now, depId])
+                        }
+                    }
+                }
+            }
+
+            try db.execute(sql: "UPDATE workers SET currentEventId = NULL WHERE workerId = ?",
+                           arguments: [workerId])
+        } catch {
+            continue
+        }
+    }
+}
+
+let workerActions: [SonataAction] = [
+
+    // POST /api/worker/register — upsert worker by workerId, sweep stale
+    SonataAction(
+        name: "worker_register",
+        description: "Register a worker (upsert by workerId) and sweep stale workers.",
+        group: "/api/worker",
+        path: "/register",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier"),
+            ActionParam("sessionLabel", .string, required: true, description: "Human-readable session label"),
+            ActionParam("capabilities", .stringArray, description: "Capabilities (comma-separated or array)"),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            let sessionLabel = ctx.params.string("sessionLabel") ?? ""
+
+            let now = nowMs()
+            let capsJSON = encodeTags(ctx.params.stringArray("capabilities") ?? [])
+
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(
+                        sql: """
+                        INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt)
+                        VALUES (?, ?, ?, 'idle', ?, ?, ?)
+                        ON CONFLICT(workerId) DO UPDATE SET
+                            sessionLabel = excluded.sessionLabel,
+                            capabilities = excluded.capabilities,
+                            lastHeartbeat = excluded.lastHeartbeat,
+                            status = 'idle'
+                        """,
+                        arguments: [newUUID(), workerId, sessionLabel, capsJSON, now, now]
+                    )
+                    try sweepStaleWorkersForActions(in: db)
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // POST /api/worker/heartbeat — update lastHeartbeat, sweep stale
+    SonataAction(
+        name: "worker_heartbeat",
+        description: "Heartbeat a worker; update lastHeartbeat and sweep stale workers.",
+        group: "/api/worker",
+        path: "/heartbeat",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier"),
+            ActionParam("lastProgressAt", .integer, description: "Last progress timestamp (epoch ms)"),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            let lastProgressAt = ctx.params.int("lastProgressAt").map { Int64($0) }
+
+            let now = nowMs()
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE workers SET lastHeartbeat = ?, lastProgressAt = COALESCE(?, lastProgressAt) WHERE workerId = ?",
+                        arguments: [now, lastProgressAt, workerId]
+                    )
+                    try sweepStaleWorkersForActions(in: db)
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // POST /api/worker/unregister?workerId= — delete worker
+    SonataAction(
+        name: "worker_unregister",
+        description: "Unregister a worker by workerId.",
+        group: "/api/worker",
+        path: "/unregister",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier", source: .query),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(sql: "DELETE FROM workers WHERE workerId = ?", arguments: [workerId])
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // POST /api/worker/purge — delete stale workers, unassign their events
+    SonataAction(
+        name: "worker_purge",
+        description: "Purge workers whose lastHeartbeat is older than 60s; unassign their events.",
+        group: "/api/worker",
+        path: "/purge",
+        method: .post,
+        params: [],
+        handler: { ctx in
+            let cutoff = nowMs() - 60_000
+            do {
+                let purged = try await ctx.dbPool.write { db -> Int in
+                    let staleRows = try Row.fetchAll(db,
+                        sql: "SELECT workerId FROM workers WHERE lastHeartbeat < ?",
+                        arguments: [cutoff]
+                    )
+                    let staleIds = staleRows.map { $0["workerId"] as String }
+
+                    for wid in staleIds {
+                        try db.execute(
+                            sql: """
+                            UPDATE workerEvents SET assignedTo = NULL, status = 'pending'
+                            WHERE assignedTo = ? AND status = 'assigned'
+                            """,
+                            arguments: [wid]
+                        )
+                    }
+
+                    try db.execute(
+                        sql: "DELETE FROM workers WHERE lastHeartbeat < ?",
+                        arguments: [cutoff]
+                    )
+                    return staleIds.count
+                }
+                return PurgeResponse(purged: purged)
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // GET /api/worker/list — all workers with current task info
+    SonataAction(
+        name: "worker_list",
+        description: "List all workers with their current task, heartbeat, and status.",
+        group: "/api/worker",
+        path: "/list",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                let rows: [Row] = try await ctx.dbPool.read { db in
+                    try Row.fetchAll(db, sql: """
+                        SELECT w.*,
+                            COALESCE(
+                                json_extract(e.payload, '$.title'),
+                                t.title
+                            ) as currentTask,
+                            e.assignedAt as eventAssignedAt
+                        FROM workers w
+                        LEFT JOIN workerEvents e ON w.currentEventId = e.id
+                        LEFT JOIN tasks t ON json_extract(e.payload, '$.task_id') = t.id
+                        ORDER BY w.lastHeartbeat DESC
+                    """)
+                }
+                return rows.map { row -> WorkerListItem in
+                    WorkerListItem(
+                        _id: row["id"] as? String ?? "",
+                        workerId: row["workerId"] as? String ?? "",
+                        sessionLabel: row["sessionLabel"] as? String ?? "",
+                        status: row["status"] as? String ?? "offline",
+                        capabilities: row["capabilities"] as? String ?? "[]",
+                        lastHeartbeat: row["lastHeartbeat"] as? Int64 ?? 0,
+                        currentEventId: row["currentEventId"] as? String ?? "",
+                        registeredAt: row["registeredAt"] as? Int64 ?? 0,
+                        currentTask: row["currentTask"] as? String,
+                        assignedAt: row["eventAssignedAt"] as? Int64
+                    )
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // GET /api/worker/status — summary
+    SonataAction(
+        name: "worker_status",
+        description: "Summary worker status: online, busy, pending event counts.",
+        group: "/api/worker",
+        path: "/status",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                let cutoff = nowMs() - 60_000
+                return try await ctx.dbPool.read { db -> WorkerStatusResponse in
+                    let online = try Int.fetchOne(db,
+                        sql: "SELECT COUNT(*) FROM workers WHERE lastHeartbeat >= ?",
+                        arguments: [cutoff]
+                    ) ?? 0
+                    let busy = try Int.fetchOne(db,
+                        sql: "SELECT COUNT(*) FROM workers WHERE status = 'busy' AND lastHeartbeat >= ?",
+                        arguments: [cutoff]
+                    ) ?? 0
+                    let pending = try Int.fetchOne(db,
+                        sql: "SELECT COUNT(*) FROM workerEvents WHERE status = 'pending'"
+                    ) ?? 0
+                    return WorkerStatusResponse(online: online, busy: busy, pendingEvents: pending)
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+]
