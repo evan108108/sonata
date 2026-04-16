@@ -10,6 +10,8 @@ class Worker: ObservableObject, Identifiable {
 
     @Published var status: WorkerStatus = .starting
     @Published var currentTask: String = ""
+    @Published var currentEventId: String = ""
+    @Published var taskStartedAt: Int64 = 0
     @Published var eventsHandled: Int = 0
 
     let terminalView: LocalProcessTerminalView
@@ -99,7 +101,7 @@ class WorkerManager: ObservableObject {
 
     static var workingDirectory: String {
         ProcessInfo.processInfo.environment["SONA_WORKING_DIR"]
-            ?? "\(ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory())/memory"
+            ?? "\(ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory())/.sonata/worker"
     }
 
     static var skipPermissions: Bool {
@@ -154,52 +156,52 @@ class WorkerManager: ObservableObject {
     }
 
     private func startHealthPolling() {
-        healthTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.pollHealth()
         }
     }
 
     private func pollHealth() {
-        guard let endpoint = WorkerManager.healthEndpoint,
-              let url = URL(string: endpoint) else { return }
+        guard let endpoint = WorkerManager.healthEndpoint else { return }
+        let listUrl = endpoint.replacingOccurrences(of: "/status", with: "/list")
+        guard let url = URL(string: listUrl) else { return }
 
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let serverWorkers = json["workers"] as? [[String: Any]] else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self, let data, error == nil else { return }
+            guard let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+
+            var serverState: [String: [String: Any]] = [:]
+            for row in rows {
+                if let wid = row["workerId"] as? String {
+                    serverState[wid] = row
+                }
+            }
 
             DispatchQueue.main.async {
-                guard let workers = self?.workers else { return }
-
-                // Index the API response by workerId so we can match each
-                // local Worker to its authoritative server row. Matching by
-                // array position was wrong — server order is unstable and
-                // doesn't correspond to local worker insertion order, which
-                // caused workers executing tasks to show "Idle" while a
-                // different slot showed "Busy" with someone else's task.
-                var byId: [String: [String: Any]] = [:]
-                for info in serverWorkers {
-                    if let id = info["workerId"] as? String {
-                        byId[id] = info
-                    }
-                }
-
-                for worker in workers {
-                    guard let info = byId[worker.id] else {
-                        // No server-side row for this worker — leave its
-                        // status alone (it may still be starting or the
-                        // register call may not have landed yet).
-                        continue
-                    }
-                    let serverStatus = info["status"] as? String ?? "offline"
-                    switch serverStatus {
-                    case "idle": worker.status = .idle
-                    case "busy": worker.status = .busy
-                    case "offline": worker.status = .offline
-                    default: break
-                    }
-                    if let task = info["currentTask"] as? String {
-                        worker.currentTask = task
+                for worker in self.workers {
+                    if let info = serverState[worker.id] {
+                        let status = info["status"] as? String ?? "offline"
+                        switch status {
+                        case "idle": worker.status = .idle
+                        case "busy": worker.status = .busy
+                        case "offline": worker.status = .offline
+                        default: break
+                        }
+                        if let eventId = info["currentEventId"] as? String, !eventId.isEmpty {
+                            worker.currentEventId = eventId
+                            worker.currentTask = info["currentTask"] as? String ?? "Working..."
+                            if let assignedAt = info["assignedAt"] as? Int64 {
+                                worker.taskStartedAt = assignedAt
+                            }
+                        } else {
+                            worker.currentEventId = ""
+                            worker.currentTask = ""
+                            worker.taskStartedAt = 0
+                        }
+                    } else {
+                        if worker.status != .starting && worker.status != .restarting {
+                            worker.status = .offline
+                        }
                     }
                 }
             }
@@ -466,15 +468,34 @@ struct WorkerSidebarRow: View {
                     Text(worker.status.rawValue)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if !worker.currentTask.isEmpty {
-                        Text("· \(worker.currentTask)")
+                }
+                if worker.status == .busy && !worker.currentTask.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(worker.currentTask)
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
+                        if worker.taskStartedAt > 0 {
+                            let elapsed = (Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 60_000
+                            Text("\(Int(elapsed))m")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                 }
             }
             Spacer()
+            if worker.status == .busy && !worker.currentEventId.isEmpty {
+                Button {
+                    Task { await releaseWorker(worker) }
+                } label: {
+                    Text("Release")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+                .help("Fail current event and free this worker")
+            }
             if worker.eventsHandled > 0 {
                 Text("\(worker.eventsHandled)")
                     .font(.caption)
@@ -485,5 +506,17 @@ struct WorkerSidebarRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func releaseWorker(_ worker: Worker) async {
+        guard !worker.currentEventId.isEmpty,
+              let endpoint = WorkerManager.healthEndpoint else { return }
+        let baseUrl = endpoint.replacingOccurrences(of: "/status", with: "")
+        guard let url = URL(string: "\(baseUrl)/events/fail?eventId=\(worker.currentEventId)") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{\"error\":\"Released by user\"}".utf8)
+        _ = try? await URLSession.shared.data(for: request)
     }
 }

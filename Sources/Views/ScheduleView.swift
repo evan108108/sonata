@@ -3,6 +3,7 @@ import SwiftUI
 struct ScheduleView: View {
     @StateObject private var vm = ScheduleViewModel()
     @State private var showingCreateEvent = false
+    @State private var showCompleted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,22 +49,39 @@ struct ScheduleView: View {
                                     .foregroundStyle(.indigo)
                                 Text("Calendar Events")
                                     .font(.headline)
-                                Text("(\(vm.calendarEvents.count))")
+                                let activeCount = vm.calendarEvents.filter { $0.enabled || $0.recurrence != nil }.count
+                                let completedCount = vm.calendarEvents.count - activeCount
+                                Text("(\(activeCount))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                if completedCount > 0 {
+                                    Button {
+                                        showCompleted.toggle()
+                                    } label: {
+                                        Text(showCompleted ? "Hide completed (\(completedCount))" : "Show completed (\(completedCount))")
+                                            .font(.caption)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .foregroundStyle(.secondary)
+                                }
                             }
                             .padding(.horizontal)
 
-                            if vm.calendarEvents.isEmpty {
+                            let visibleEvents = showCompleted ? vm.calendarEvents : vm.calendarEvents.filter { $0.enabled || $0.recurrence != nil }
+                            if visibleEvents.isEmpty {
                                 Text("No calendar events")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal)
                             } else {
-                                ForEach(vm.calendarEvents) { event in
-                                    CalendarEventRowView(event: event, onToggle: {
-                                        Task { await vm.toggleCalendarEvent(event) }
-                                    })
+                                ForEach(visibleEvents) { event in
+                                    CalendarEventRowView(
+                                        event: event,
+                                        onToggle: { Task { await vm.toggleCalendarEvent(event) } },
+                                        onRunNow: { Task { await vm.runCalendarEvent(event) } },
+                                        onDelete: { Task { await vm.deleteCalendarEvent(event) } },
+                                        isRunning: vm.runningCalendarIds.contains(event._id)
+                                    )
                                 }
                             }
                         }
@@ -91,9 +109,12 @@ struct ScheduleView: View {
                                     .padding(.horizontal)
                             } else {
                                 ForEach(vm.cronJobs) { job in
-                                    CronJobRow(job: job, onTrigger: {
-                                        Task { await vm.triggerCronJob(job) }
-                                    })
+                                    CronJobRow(
+                                        job: job,
+                                        onTrigger: { Task { await vm.triggerCronJob(job) } },
+                                        onDelete: { Task { await vm.deleteCronJob(job) } },
+                                        isRunning: vm.runningCronNames.contains(job.name)
+                                    )
                                 }
                             }
                         }
@@ -119,10 +140,13 @@ struct ScheduleView: View {
 private struct CalendarEventRowView: View {
     let event: CalendarEvent
     let onToggle: () -> Void
+    var onRunNow: (() -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+    var isRunning: Bool = false
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         HStack(spacing: 12) {
-            // Enabled indicator
             Circle()
                 .fill(event.enabled ? .green : .gray)
                 .frame(width: 10, height: 10)
@@ -132,7 +156,6 @@ private struct CalendarEventRowView: View {
                     .font(.headline)
                     .lineLimit(1)
                 HStack(spacing: 8) {
-                    // Next fire time
                     HStack(spacing: 3) {
                         Image(systemName: "clock")
                         Text(event.nextFireString)
@@ -157,17 +180,60 @@ private struct CalendarEventRowView: View {
 
             Spacer()
 
-            Toggle("", isOn: Binding(
-                get: { event.enabled },
-                set: { _ in onToggle() }
-            ))
-            .toggleStyle(.switch)
-            .labelsHidden()
+            if isRunning {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("Running...")
+                ScheduleStatusBadge(status: "running")
+            } else {
+                if let onRunNow = onRunNow {
+                    Button { onRunNow() } label: {
+                        Image(systemName: "play.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.indigo)
+                    .help("Run now")
+                }
+
+                if onDelete != nil {
+                    Button { showDeleteConfirm = true } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .help("Delete")
+                }
+
+                Toggle("", isOn: Binding(
+                    get: { event.enabled },
+                    set: { _ in onToggle() }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+            }
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
         .background(Color.primary.opacity(0.02), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal)
+        .contextMenu {
+            if let onRunNow = onRunNow {
+                Button("Run Now") { onRunNow() }
+            }
+            Button(event.enabled ? "Disable" : "Enable") { onToggle() }
+            Divider()
+            if let onDelete = onDelete {
+                Button("Delete", role: .destructive) { onDelete() }
+            }
+        }
+        .alert("Delete \"\(event.title)\"?", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) { onDelete?() }
+        } message: {
+            Text("This cannot be undone.")
+        }
     }
 }
 
@@ -176,6 +242,9 @@ private struct CalendarEventRowView: View {
 private struct CronJobRow: View {
     let job: CronJob
     let onTrigger: () -> Void
+    var onDelete: (() -> Void)? = nil
+    var isRunning: Bool = false
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -204,13 +273,6 @@ private struct CronJobRow: View {
                         .foregroundStyle(.secondary)
                     }
 
-                    if let result = job.lastResult {
-                        Text(String(result.prefix(40)))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-
                     if let exitCode = job.lastExitCode {
                         ScheduleStatusBadge(status: exitCode == 0 ? "success" : "failed")
                     }
@@ -219,20 +281,48 @@ private struct CronJobRow: View {
 
             Spacer()
 
-            Button {
-                onTrigger()
-            } label: {
-                Image(systemName: "play.fill")
-                    .font(.caption)
+            if isRunning {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("Running...")
+                ScheduleStatusBadge(status: "running")
+            } else {
+                Button { onTrigger() } label: {
+                    Image(systemName: "play.fill")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .tint(.indigo)
+                .help("Trigger now")
+
+                if onDelete != nil {
+                    Button { showDeleteConfirm = true } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .help("Delete")
+                }
             }
-            .buttonStyle(.bordered)
-            .tint(.indigo)
-            .help("Trigger now")
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
         .background(Color.primary.opacity(0.02), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal)
+        .contextMenu {
+            Button("Trigger Now") { onTrigger() }
+            Divider()
+            if let onDelete = onDelete {
+                Button("Delete", role: .destructive) { onDelete() }
+            }
+        }
+        .alert("Delete \"\(job.name)\"?", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) { onDelete?() }
+        } message: {
+            Text("This cannot be undone.")
+        }
     }
 }
 
@@ -377,6 +467,10 @@ struct CalendarEvent: Identifiable, Decodable {
     var id: String { _id }
 
     var nextFireString: String {
+        // Disabled one-shot that ran successfully = completed
+        if !enabled && recurrence == nil && lastRunStatus == "success" {
+            return "completed"
+        }
         let nowMs = Date().timeIntervalSince1970 * 1000
         let diffSeconds = (Double(scheduledAt) - nowMs) / 1000
         if diffSeconds < 0 {

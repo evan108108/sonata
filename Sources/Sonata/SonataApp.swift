@@ -4,6 +4,7 @@ import Hummingbird
 import HummingbirdWebSocket
 import GRDB
 import Logging
+import SwiftTerm
 
 // MARK: - App Entry Point
 
@@ -51,6 +52,32 @@ func ensureGlobalMCPServers() {
         }
     } catch {
         sonataFileLog("MCP setup: failed to update ~/.claude.json — \(error)")
+    }
+}
+
+/// Ensure ~/.sonata/worker/ and ~/.sonata/supervisor/ directories exist with CLAUDE.md files.
+/// Copies defaults from the app bundle if not present. Does not overwrite existing files.
+func ensureRoleDirectories() {
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+    let sonataDir = home.appendingPathComponent(".sonata")
+
+    for role in ["worker", "supervisor"] {
+        let roleDir = sonataDir.appendingPathComponent(role)
+        let claudeMdDest = roleDir.appendingPathComponent("CLAUDE.md")
+
+        // Create directory
+        try? fm.createDirectory(at: roleDir, withIntermediateDirectories: true)
+
+        // Copy CLAUDE.md from bundle if not present
+        if !fm.fileExists(atPath: claudeMdDest.path) {
+            if let sourceURL = Bundle.module.url(forResource: "CLAUDE", withExtension: "md", subdirectory: role) {
+                try? fm.copyItem(at: sourceURL, to: claudeMdDest)
+                sonataFileLog("Role setup: copied \(role)/CLAUDE.md from bundle")
+            } else {
+                sonataFileLog("Role setup: \(role)/CLAUDE.md not found in bundle")
+            }
+        }
     }
 }
 
@@ -143,6 +170,9 @@ struct SonataApp: App {
         // Ensure memory + sonata-bridge MCP servers are in global ~/.claude.json
         ensureGlobalMCPServers()
 
+        // Ensure worker + supervisor role directories exist with CLAUDE.md
+        ensureRoleDirectories()
+
         let pool = self.dbPool
         let port = sonataPort
 
@@ -172,7 +202,8 @@ struct SonataApp: App {
                 registerCalendarRoutes(on: router, dbPool: pool, scheduler: scheduler)
                 registerTaskRoutes(on: router, dbPool: pool)
                 registerWorkerRoutes(on: router, dbPool: pool)
-                registerScheduledJobRoutes(on: router, dbPool: pool)
+                registerSupervisorRoutes(on: router, dbPool: pool)
+                registerScheduledJobRoutes(on: router, dbPool: pool, scheduler: scheduler)
                 registerWikiRoutes(on: router, dbPool: pool)
                 registerSecretRoutes(on: router)
                 registerBackgroundRoutes(on: router, dbPool: pool)
@@ -316,6 +347,14 @@ struct SonataApp: App {
                 }
                 logger.info("Spawned \(workerCount) default workers")
 
+                // 6b. Spawn the supervisor window (hidden by default — accessible from Window menu).
+                // Creating the NSWindow spins up the SupervisorTerminalView, which starts Claude
+                // with the supervisor prompt and role. Window close hides instead of destroying.
+                await MainActor.run {
+                    SupervisorWindowController.shared.ensureStarted()
+                }
+                logger.info("Supervisor window created (hidden)")
+
                 // Register shutdown handler
                 let shutdownHandler = {
                     logger.info("Sonata shutting down — stopping all services")
@@ -370,6 +409,13 @@ struct SonataApp: App {
                     importSonataData()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
+            }
+
+            CommandGroup(after: .windowArrangement) {
+                Button("Supervisor") {
+                    SupervisorWindowController.shared.show()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
             }
         }
     }
@@ -491,5 +537,65 @@ struct SonataApp: App {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         return f.string(from: Date())
+    }
+}
+
+// MARK: - Supervisor Window
+
+/// Manages the persistent supervisor NSWindow. Created hidden at startup so the
+/// underlying Claude process keeps running even when the user has never opened
+/// the window. Close events hide the window instead of destroying it.
+@MainActor
+final class SupervisorWindowController: NSObject, NSWindowDelegate {
+    static let shared = SupervisorWindowController()
+
+    private var window: NSWindow?
+
+    /// Create the window (and start the underlying process) if it doesn't exist yet.
+    /// The window is created hidden — the user must explicitly open it.
+    private var coordinator: SupervisorCoordinator?
+
+    func ensureStarted() {
+        guard window == nil else { return }
+
+        // Create terminal view directly (same pattern as Worker)
+        let termView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let coord = SupervisorCoordinator(terminalView: termView)
+        self.coordinator = coord
+        termView.processDelegate = coord
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "Supervisor"
+        win.contentView = termView
+        win.isReleasedWhenClosed = false
+        win.delegate = self
+        win.center()
+
+        self.window = win
+
+        // Start the process after a brief delay for the view to lay out
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            coord.startProcess()
+        }
+    }
+
+    func show() {
+        ensureStarted()
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - NSWindowDelegate
+
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        DispatchQueue.main.async {
+            sender.orderOut(nil)
+        }
+        return false
     }
 }

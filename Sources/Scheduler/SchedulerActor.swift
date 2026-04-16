@@ -5,6 +5,7 @@ import Logging
 /// A scheduled job entry loaded from SQLite, used to build the run queue.
 struct ScheduledEntry: Sendable {
     let id: String
+    let name: String
     let jobType: JobType
     let nextFireTime: Date
     let payload: JobPayload
@@ -38,10 +39,23 @@ protocol ClaudeProcessRunner: Sendable {
     func run(prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String?
 }
 
-/// Default no-op runner used when no real runner is registered.
-struct StubClaudeRunner: ClaudeProcessRunner {
+/// Default runner that creates a task for the TaskOrchestrator to dispatch via channel.
+struct DefaultClaudeRunner: ClaudeProcessRunner {
+    let dbPool: DatabasePool
+
     func run(prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String? {
-        nil
+        let taskId = UUID().uuidString.lowercased()
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let title = String(prompt.prefix(80))
+
+        try await dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO tasks (id, title, prompt, status, priority, assignedTo, source, workingDir, model, maxTurns, createdAt, updatedAt)
+                VALUES (?, ?, ?, 'pending', 'high', 'scheduler', 'scheduler', ?, ?, ?, ?, ?)
+            """, arguments: [taskId, title, prompt, workingDir, model, maxTurns, now, now])
+        }
+
+        return "Task created: \(taskId)"
     }
 }
 
@@ -68,8 +82,8 @@ public actor SchedulerActor {
     /// Logger instance.
     private let logger: Logger
 
-    /// Claude process runner — set via `setClaudeRunner`.
-    private var claudeRunner: any ClaudeProcessRunner = StubClaudeRunner()
+    /// Claude process runner — creates tasks for orchestrator dispatch.
+    private var claudeRunner: any ClaudeProcessRunner
 
     /// Registered internal functions, keyed by name.
     private var internalFunctions: [String: @Sendable () async throws -> Void] = [:]
@@ -93,6 +107,7 @@ public actor SchedulerActor {
 
     init(dbPool: DatabasePool, logger: Logger? = nil) {
         self.dbPool = dbPool
+        self.claudeRunner = DefaultClaudeRunner(dbPool: dbPool)
         var log = logger ?? Logger(label: "sonata.scheduler")
         log.logLevel = .info
         self.logger = log
@@ -141,6 +156,51 @@ public actor SchedulerActor {
         queue.removeAll()
     }
 
+    /// Trigger a specific job immediately by its DB id, regardless of schedule.
+    func triggerNow(jobId: String) async {
+        // Find the job in the queue
+        if let idx = queue.firstIndex(where: { $0.entry.id == jobId }) {
+            let (entry, source) = queue.remove(at: idx)
+            logger.info("Triggering job \"\(entry.name)\" immediately")
+            await fireJob(entry: entry, source: source)
+            return
+        }
+        // Not in queue — load it from DB directly
+        do {
+            // Try scheduledJobs first
+            let row: Row? = try await dbPool.read { db in
+                try Row.fetchOne(db, sql: "SELECT id, name, schedule, command FROM scheduledJobs WHERE id = ?", arguments: [jobId])
+            }
+            if let row = row, let id = row["id"] as? String,
+               let command = row["command"] as? String {
+                let name = row["name"] as? String ?? id
+                let entry = ScheduledEntry(id: id, name: name, jobType: .shell, nextFireTime: Date(), payload: .shellCommand(command: command))
+                logger.info("Triggering job \"\(name)\" immediately (loaded from DB)")
+                await fireJob(entry: entry, source: .scheduledJob)
+                return
+            }
+            // Try calendarEvents
+            let calRow: Row? = try await dbPool.read { db in
+                try Row.fetchOne(db, sql: "SELECT id, title, prompt, taskType, workingDir, model, maxTurns FROM calendarEvents WHERE id = ?", arguments: [jobId])
+            }
+            if let row = calRow, let id = row["id"] as? String {
+                let title = row["title"] as? String ?? id
+                let prompt = row["prompt"] as? String ?? title
+                let workingDir = row["workingDir"] as? String
+                let model = row["model"] as? String
+                let maxTurns = row["maxTurns"] as? Int
+                let payload: ScheduledEntry.JobPayload = .claude(prompt: prompt, workingDir: workingDir, model: model, maxTurns: maxTurns)
+                let entry = ScheduledEntry(id: id, name: title, jobType: .spawnClaude, nextFireTime: Date(), payload: payload)
+                logger.info("Triggering calendar event \"\(title)\" immediately (loaded from DB)")
+                await fireJob(entry: entry, source: .calendarEvent)
+                return
+            }
+            logger.warning("triggerNow: job \(jobId) not found in queue or DB")
+        } catch {
+            logger.error("triggerNow failed: \(error)")
+        }
+    }
+
     /// Reload all jobs from the database (e.g. after external edits via HTTP API).
     func reload() async {
         queue.removeAll()
@@ -158,8 +218,8 @@ public actor SchedulerActor {
     }
 
     /// Returns the current queue state for diagnostics.
-    func status() -> [(id: String, type: String, nextFire: Date)] {
-        queue.map { ($0.entry.id, $0.entry.jobType.rawValue, $0.entry.nextFireTime) }
+    func status() -> [(id: String, name: String, type: String, nextFire: Date)] {
+        queue.map { ($0.entry.id, $0.entry.name, $0.entry.jobType.rawValue, $0.entry.nextFireTime) }
     }
 
     // MARK: - Job Loading
@@ -204,11 +264,8 @@ public actor SchedulerActor {
                 // Determine next fire time with stale job detection
                 var nextFire = scheduledAt
                 if nextFire <= now, let rec = recurrence, let schedule = CronParser.parse(rec) {
-                    // Recurring: advance past now
-                    let interval = CronParser.recurrenceInterval(for: schedule)
-                    while nextFire <= now {
-                        nextFire = nextFire.addingTimeInterval(interval)
-                    }
+                    // Recurring: compute next fire directly
+                    nextFire = CronParser.nextFire(for: schedule, after: now)
                 } else if nextFire < staleThreshold {
                     // One-shot and stale (>1 hour overdue) — skip it
                     return nil
@@ -232,7 +289,8 @@ public actor SchedulerActor {
                     payload = .internalFunc(name: prompt ?? taskTypeStr)
                 }
 
-                return (ScheduledEntry(id: id, jobType: jobType, nextFireTime: nextFire, payload: payload), .calendarEvent)
+                let title = row["title"] as? String ?? id
+                return (ScheduledEntry(id: id, name: title, jobType: jobType, nextFireTime: nextFire, payload: payload), .calendarEvent)
             }
         }
 
@@ -256,10 +314,8 @@ public actor SchedulerActor {
                 if let ts = nextRunAtRaw, ts > 0 {
                     nextFire = Date(timeIntervalSince1970: ts / 1000.0)
                     if nextFire <= now, let schedule = CronParser.parse(scheduleStr) {
-                        let interval = CronParser.recurrenceInterval(for: schedule)
-                        while nextFire <= now {
-                            nextFire = nextFire.addingTimeInterval(interval)
-                        }
+                        // Use nextFire() directly — avoids slow loop for cron schedules
+                        nextFire = CronParser.nextFire(for: schedule, after: now)
                     } else if nextFire < staleThreshold {
                         // Stale one-shot scheduled job — skip
                         return nil
@@ -270,12 +326,37 @@ public actor SchedulerActor {
                     return nil // Can't determine when to fire
                 }
 
+                let name = row["name"] as? String ?? id
                 let payload: ScheduledEntry.JobPayload = .shellCommand(command: command)
-                return (ScheduledEntry(id: id, jobType: .shell, nextFireTime: nextFire, payload: payload), .scheduledJob)
+                return (ScheduledEntry(id: id, name: name, jobType: .shell, nextFireTime: nextFire, payload: payload), .scheduledJob)
             }
         }
 
         queue = (calendarEntries + scheduledEntries).sorted { $0.0.nextFireTime < $1.0.nextFireTime }
+
+        // Persist computed nextFire times back to DB so the UI stays in sync
+        try await dbPool.write { db in
+            for (entry, source) in calendarEntries {
+                let nextMs = Int64(entry.nextFireTime.timeIntervalSince1970 * 1000)
+                switch source {
+                case .calendarEvent:
+                    try db.execute(sql: "UPDATE calendarEvents SET scheduledAt = ?, updatedAt = ? WHERE id = ?",
+                                   arguments: [nextMs, nextMs, entry.id])
+                case .scheduledJob:
+                    break
+                }
+            }
+            for (entry, source) in scheduledEntries {
+                let nextMs = entry.nextFireTime.timeIntervalSince1970 * 1000
+                switch source {
+                case .scheduledJob:
+                    try db.execute(sql: "UPDATE scheduledJobs SET nextRunAt = ? WHERE id = ?",
+                                   arguments: [nextMs, entry.id])
+                case .calendarEvent:
+                    break
+                }
+            }
+        }
 
         // Count how many enabled rows existed vs how many made it into the queue
         let totalEnabled: Int = try await dbPool.read { db in
@@ -453,13 +534,21 @@ public actor SchedulerActor {
         }
 
         guard let rec = recurrence, let schedule = CronParser.parse(rec) else {
-            // One-shot job — don't re-queue
+            // One-shot job — disable it so the UI shows "completed" instead of "overdue"
+            if case .calendarEvent = source {
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                try? await dbPool.write { db in
+                    try db.execute(sql: "UPDATE calendarEvents SET enabled = 0, updatedAt = ? WHERE id = ?",
+                                   arguments: [nowMs, entry.id])
+                }
+            }
             return
         }
 
         let nextFire = CronParser.nextFire(for: schedule, after: Date())
         let newEntry = ScheduledEntry(
             id: entry.id,
+            name: entry.name,
             jobType: entry.jobType,
             nextFireTime: nextFire,
             payload: entry.payload

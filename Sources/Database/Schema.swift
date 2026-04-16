@@ -415,6 +415,9 @@ func createSchema(in db: Database) throws {
     try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS workers_by_workerId ON workers(workerId)")
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workers_by_status          ON workers(status)")
 
+    // Migration: add lastProgressAt column (idempotent — silently fails if already exists)
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN lastProgressAt INTEGER") } catch { /* column exists */ }
+
     // MARK: workerEvents
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS workerEvents (
@@ -434,6 +437,43 @@ func createSchema(in db: Database) throws {
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_status     ON workerEvents(status)")
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_assignedTo ON workerEvents(assignedTo)")
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_createdAt  ON workerEvents(createdAt)")
+
+    // MARK: supervisorMessages
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS supervisorMessages (
+            id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            replyTo     TEXT,
+            actions     TEXT,
+            severity    TEXT,
+            dismissedAt INTEGER,
+            createdAt   INTEGER NOT NULL
+        )
+    """)
+    try db.execute(sql: "CREATE INDEX IF NOT EXISTS supervisorMessages_by_created ON supervisorMessages(createdAt)")
+
+    // MARK: supervisorState
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS supervisorState (
+            id              TEXT PRIMARY KEY DEFAULT 'singleton',
+            lastHeartbeat   INTEGER NOT NULL,
+            lastCheckAt     INTEGER,
+            sessionId       TEXT
+        )
+    """)
+
+    // MARK: supervisorEvents
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS supervisorEvents (
+            id         TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            type       TEXT NOT NULL,
+            payload    TEXT NOT NULL DEFAULT '{}',
+            createdAt  INTEGER NOT NULL,
+            claimedAt  INTEGER
+        )
+    """)
+    try db.execute(sql: "CREATE INDEX IF NOT EXISTS supervisorEvents_by_claimed ON supervisorEvents(claimedAt, createdAt)")
 
     // MARK: relations
     try db.execute(sql: """

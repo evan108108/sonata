@@ -16,7 +16,6 @@ actor TaskOrchestrator {
     private let channelServer: SonataChannelServer
     private var isRunning = false
     private var activeTasks: Set<String> = []  // task IDs currently being executed
-    private let maxConcurrent = 2
 
     init(dbPool: DatabasePool) {
         self.dbPool = dbPool
@@ -29,8 +28,11 @@ actor TaskOrchestrator {
     func start() {
         guard !isRunning else { return }
         isRunning = true
-        logger.info("TaskOrchestrator started (polling every 10s, max \(maxConcurrent) concurrent)")
-        Task { await pollLoop() }
+        logger.info("TaskOrchestrator started (polling every 10s, dynamic concurrency)")
+        Task {
+            await recoverOrphans()
+            await pollLoop()
+        }
     }
 
     func stop() {
@@ -49,10 +51,16 @@ actor TaskOrchestrator {
     }
 
     private func poll() async throws {
-        // Don't dispatch if at capacity
-        let currentCount = activeTasks.count
-        guard currentCount < maxConcurrent else { return }
-        let slotsAvailable = maxConcurrent - currentCount
+        // Dynamic concurrency: match available idle workers
+        let idleWorkerCount: Int = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM workers
+                WHERE status = 'idle' AND lastHeartbeat >= ?
+            """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 60_000]) ?? 0
+        }) ?? 0
+
+        guard idleWorkerCount > 0 else { return }
+        let slotsAvailable = idleWorkerCount  // one task per idle worker
 
         // Find actionable tasks: pending, assigned to scheduler, not blocked
         let tasks = try await dbPool.read { db -> [OrchestratorTaskRow] in
@@ -75,9 +83,7 @@ actor TaskOrchestrator {
         }
 
         for task in tasks {
-            let isActive = activeTasks.contains(task.id)
-            let atCapacity = activeTasks.count >= maxConcurrent
-            guard !isActive, !atCapacity else { continue }
+            guard !activeTasks.contains(task.id) else { continue }
             await dispatch(task)
         }
     }
@@ -86,18 +92,8 @@ actor TaskOrchestrator {
         let taskId = task.id
         let title = task.title
         let prompt = task.prompt ?? task.title
-        activeTasks.insert(taskId)
 
         logger.info("Dispatching: \"\(title)\" (\(taskId))")
-
-        // Mark as active
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        try? await dbPool.write { db in
-            try db.execute(
-                sql: "UPDATE tasks SET status = 'active', startedAt = ?, updatedAt = ? WHERE id = ?",
-                arguments: [now, now, taskId]
-            )
-        }
 
         // Strategy 1: Try channel dispatch to an idle TUI worker
         if let eventId = await channelServer.dispatchToChannel(
@@ -106,23 +102,37 @@ actor TaskOrchestrator {
             prompt: prompt,
             priority: priorityToInt(task.priority)
         ) {
+            // Dispatch succeeded — NOW mark active
+            activeTasks.insert(taskId)
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try? await dbPool.write { db in
+                try db.execute(
+                    sql: "UPDATE tasks SET status = 'active', startedAt = ?, updatedAt = ? WHERE id = ?",
+                    arguments: [now, now, taskId]
+                )
+            }
+
             logger.info("Task \"\(title)\" dispatched via channel (event: \(eventId))")
 
-            // Wait for completion in a detached task
+            // Track for concurrency only — completion handled by /api/worker/events/complete
             Task.detached { [weak self] in
                 guard let self = self else { return }
-                let (success, detail) = await self.channelServer.waitForCompletion(
-                    eventId: eventId,
-                    timeoutMs: 600_000
-                )
-                if success {
-                    let result = ClaudeResult(
-                        numTurns: 0, totalCost: 0, durationMs: 0, peakContext: 0,
-                        isError: false, errorMessage: nil, sessionId: nil
-                    )
-                    await self.completeTask(taskId: taskId, result: result)
-                } else {
-                    await self.failTask(taskId: taskId, error: detail ?? "Channel dispatch failed")
+                let startTime = Date()
+                let timeoutInterval: TimeInterval = 86400 // 24h safety timeout
+                while true {
+                    try? await Task.sleep(nanoseconds: 10_000_000_000) // 10s
+                    let status: String? = try? await self.dbPool.read { db in
+                        try String.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [taskId])
+                    }
+                    if status == "completed" || status == "failed" || status == "cancelled" || status == "pending" {
+                        await self.removeActiveTask(taskId)
+                        break
+                    }
+                    // Safety: 24h timeout — just remove from active set, don't change task status
+                    if Date().timeIntervalSince(startTime) > timeoutInterval {
+                        await self.removeActiveTask(taskId)
+                        break
+                    }
                 }
             }
             return
@@ -130,6 +140,16 @@ actor TaskOrchestrator {
 
         // Strategy 2: Fall back to headless claude -p process
         logger.info("No channel workers — falling back to ClaudeProcessManager for \"\(title)\"")
+
+        // Mark active only after confirming we can run it
+        activeTasks.insert(taskId)
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try? await dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE tasks SET status = 'active', startedAt = ?, updatedAt = ? WHERE id = ?",
+                arguments: [now, now, taskId]
+            )
+        }
 
         if let workerId = try? await findIdleWorker() {
             try? await dbPool.write { db in
@@ -187,26 +207,8 @@ actor TaskOrchestrator {
                 arguments: [summary, now, now, taskId]
             )
 
-            // Unblock dependent tasks — remove this ID from other tasks' blockedBy arrays
-            let dependents = try Row.fetchAll(db, sql: """
-                SELECT id, blockedBy FROM tasks WHERE status = 'pending' AND blockedBy LIKE ?
-            """, arguments: ["%\(taskId)%"])
-
-            for row in dependents {
-                let depId = row["id"] as! String
-                let blockedByJSON = row["blockedBy"] as? String ?? "[]"
-                if let data = blockedByJSON.data(using: .utf8),
-                   var arr = try? JSONDecoder().decode([String].self, from: data) {
-                    arr.removeAll { $0 == taskId }
-                    if let newJSON = try? JSONEncoder().encode(arr),
-                       let newStr = String(data: newJSON, encoding: .utf8) {
-                        try db.execute(
-                            sql: "UPDATE tasks SET blockedBy = ?, updatedAt = ? WHERE id = ?",
-                            arguments: [newStr, now, depId]
-                        )
-                    }
-                }
-            }
+            // Unblock dependent tasks
+            try unblockDependents(taskId: taskId, in: db, now: now)
         }
 
         // Reset worker to idle
@@ -229,6 +231,9 @@ actor TaskOrchestrator {
                 sql: "UPDATE tasks SET status = 'failed', lastError = ?, updatedAt = ? WHERE id = ?",
                 arguments: [error, now, taskId]
             )
+
+            // Unblock dependent tasks so they don't stay stuck forever
+            try unblockDependents(taskId: taskId, in: db, now: now)
         }
 
         // Reset worker to idle
@@ -240,6 +245,46 @@ actor TaskOrchestrator {
         }
 
         activeTasks.remove(taskId)
+    }
+
+    private func removeActiveTask(_ taskId: String) {
+        activeTasks.remove(taskId)
+    }
+
+    /// On startup, find tasks stuck in 'active' with no assigned worker event.
+    /// These are orphans from prior crashes. Reset to 'pending' if active > 5 min.
+    private func recoverOrphans() async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let fiveMinAgo = now - 300_000
+        do {
+            try await dbPool.write { [logger] db in
+                let orphans = try Row.fetchAll(db, sql: """
+                    SELECT t.id, t.title, t.startedAt FROM tasks t
+                    WHERE t.status = 'active'
+                    AND (t.startedAt IS NULL OR t.startedAt < ?)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workerEvents e
+                        WHERE json_extract(e.payload, '$.task_id') = t.id
+                        AND e.status = 'assigned'
+                    )
+                """, arguments: [fiveMinAgo])
+
+                for row in orphans {
+                    let taskId = row["id"] as! String
+                    let title = row["title"] as? String ?? taskId
+                    try db.execute(sql: """
+                        UPDATE tasks SET status = 'pending', startedAt = NULL, updatedAt = ?
+                        WHERE id = ?
+                    """, arguments: [now, taskId])
+                    logger.info("Recovered orphaned task: \"\(title)\" (\(taskId))")
+                }
+                if !orphans.isEmpty {
+                    logger.info("Recovered \(orphans.count) orphaned active task(s)")
+                }
+            }
+        } catch {
+            logger.error("Orphan recovery failed: \(error.localizedDescription)")
+        }
     }
 
     private func findIdleWorker() async throws -> String? {

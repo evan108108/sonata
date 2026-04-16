@@ -23,7 +23,9 @@ let package = Package(
             ],
             path: "Sources",
             resources: [
-                .copy("Sonata/Resources/web")
+                .copy("Sonata/Resources/web"),
+                .copy("Sonata/Resources/worker"),
+                .copy("Sonata/Resources/supervisor"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)

@@ -157,6 +157,16 @@ private struct TaskRowView: View {
                 Text(task.title)
                     .font(.headline)
                     .lineLimit(1)
+                if task.status == "active",
+                   let startedAt = task.startedAt,
+                   (Date().timeIntervalSince1970 * 1000 - Double(startedAt)) > 1_800_000 {
+                    Text("stuck?")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.yellow.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.yellow)
+                }
                 Spacer()
                 TaskStatusBadge(status: task.status)
             }
@@ -539,6 +549,7 @@ struct TaskItem: Identifiable, Hashable, Decodable {
     let assignedTo: String?
     let retryCount: Int
     let lastError: String?
+    let startedAt: Int64?
     let createdAt: Int64
     let updatedAt: Int64
 

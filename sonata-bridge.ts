@@ -21,9 +21,12 @@ const WORKER_ID = process.env.WORKER_ID || `worker-${Date.now().toString(36)}`;
 const SESSION_LABEL = process.env.SESSION_LABEL || "worker";
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
+let lastProgressMs = Date.now();
 
 // Only act as a worker when SONA_WORKER=1 is set.
 const IS_WORKER = process.env.SONA_WORKER === "1";
+const SONATA_ROLE = process.env.SONATA_ROLE || "worker";
+const IS_SUPERVISOR = SONATA_ROLE === "supervisor";
 
 // --- MCP Server ---
 
@@ -122,6 +125,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
 
   if (name === "complete_event") {
+    lastProgressMs = Date.now();
     const { event_id, result } = args as { event_id: string; result?: string };
     try {
       await fetch(`${SONATA_API}/api/worker/events/complete`, {
@@ -136,12 +140,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   if (name === "fail_event") {
+    lastProgressMs = Date.now();
     const { event_id, error: errMsg } = args as { event_id: string; error: string };
     try {
-      await fetch(`${SONATA_API}/api/worker/events/complete`, {
+      await fetch(`${SONATA_API}/api/worker/events/fail`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId: event_id, workerId: WORKER_ID, result: `FAILED: ${errMsg}` }),
+        body: JSON.stringify({ eventId: event_id, workerId: WORKER_ID, error: errMsg }),
       });
       return { content: [{ type: "text" as const, text: `Event ${event_id} failed` }] };
     } catch (err: any) {
@@ -159,78 +164,139 @@ console.error(`[sonata-bridge] Connected. Worker: ${WORKER_ID}`);
 
 // --- Worker mode ---
 
-if (IS_WORKER) {
+if (IS_WORKER || IS_SUPERVISOR) {
   // Register
-  try {
-    await fetch(`${SONATA_API}/api/worker/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workerId: WORKER_ID,
-        sessionLabel: SESSION_LABEL,
-        capabilities: ["email", "task", "alert"],
-      }),
-    });
-    console.error(`[sonata-bridge] Registered as ${WORKER_ID}`);
-  } catch (err: any) {
-    console.error(`[sonata-bridge] Registration failed: ${err.message}`);
-  }
-
-  // Heartbeat
-  setInterval(async () => {
+  if (IS_SUPERVISOR) {
     try {
-      await fetch(`${SONATA_API}/api/worker/heartbeat`, {
+      await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workerId: WORKER_ID }),
+        body: JSON.stringify({ sessionId: WORKER_ID }),
       });
+      console.error(`[sonata-bridge] Supervisor registered as ${WORKER_ID}`);
+    } catch (err: any) {
+      console.error(`[sonata-bridge] Supervisor registration failed: ${err.message}`);
+    }
+  } else {
+    try {
+      await fetch(`${SONATA_API}/api/worker/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workerId: WORKER_ID,
+          sessionLabel: SESSION_LABEL,
+          capabilities: ["email", "task", "alert"],
+        }),
+      });
+      console.error(`[sonata-bridge] Registered as ${WORKER_ID}`);
+    } catch (err: any) {
+      console.error(`[sonata-bridge] Registration failed: ${err.message}`);
+    }
+  }
+
+  // Heartbeat — different endpoint for supervisor
+  setInterval(async () => {
+    try {
+      if (IS_SUPERVISOR) {
+        await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: WORKER_ID }),
+        });
+      } else {
+        await fetch(`${SONATA_API}/api/worker/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workerId: WORKER_ID, lastProgressAt: lastProgressMs }),
+        });
+      }
     } catch {}
   }, HEARTBEAT_INTERVAL_MS);
 
-  // Poll for events — claim pending, then push assigned into session
+  // Poll for events — different source for supervisor
   let knownEventIds = new Set<string>();
 
   setInterval(async () => {
     try {
-      // Claim a pending event
-      await fetch(`${SONATA_API}/api/worker/events/claim`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workerId: WORKER_ID }),
-      });
+      if (IS_SUPERVISOR) {
+        // Supervisor: poll supervisorEvents table
+        const res = await fetch(`${SONATA_API}/api/supervisor/events/claim`);
+        if (!res.ok) return;
+        const data: any = await res.json();
+        if (!data || !data._id) return;
 
-      // Fetch assigned events
-      const res = await fetch(`${SONATA_API}/api/worker/events/recent?limit=10`);
-      const events: any[] = await res.json();
+        const eventId = data._id;
+        const eventType = data.type || "check";
+        const payload = data.payload || "{}";
 
-      for (const evt of events) {
-        if (evt.assignedTo !== WORKER_ID) continue;
-        if (evt.status !== "assigned") continue;
-        if (knownEventIds.has(evt._id)) continue;
-        knownEventIds.add(evt._id);
+        if (knownEventIds.has(eventId)) return;
+        knownEventIds.add(eventId);
+        lastProgressMs = Date.now();
 
-        console.error(`[sonata-bridge] Pushing event: ${evt.type} (${evt._id})`);
+        let content = "";
+        const meta: Record<string, string> = { event_id: eventId, event_type: eventType };
 
-        try {
-          const payload = JSON.parse(evt.payload);
-          const content = typeof payload === "string"
-            ? payload
-            : payload.summary || payload.prompt || payload.body || JSON.stringify(payload);
+        if (eventType === "check") {
+          content = "Periodic health check. Run your checklist and report findings.";
+        } else if (eventType === "query") {
+          try {
+            const parsed = JSON.parse(payload);
+            content = parsed.message || payload;
+            if (parsed.messageId) meta.message_id = String(parsed.messageId);
+          } catch {
+            content = payload;
+          }
+        } else {
+          content = payload;
+        }
 
-          await mcp.notification({
-            method: "notifications/claude/channel",
-            params: {
-              content: `[${evt.type.toUpperCase()}] ${content}`,
-              meta: {
-                event_id: evt._id,
-                event_type: evt.type,
-                priority: String(evt.priority),
-                timestamp: new Date(evt.createdAt).toISOString(),
+        console.error(`[sonata-bridge] Supervisor event ${eventId} (${eventType})`);
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: { content, meta },
+        });
+      } else {
+        // Worker: claim a pending event, then push assigned into session
+        await fetch(`${SONATA_API}/api/worker/events/claim`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workerId: WORKER_ID }),
+        });
+
+        // Fetch assigned events
+        const res = await fetch(`${SONATA_API}/api/worker/events/recent?limit=10`);
+        const events: any[] = await res.json();
+
+        for (const evt of events) {
+          if (evt.assignedTo !== WORKER_ID) continue;
+          if (evt.status !== "assigned") continue;
+          if (knownEventIds.has(evt._id)) continue;
+          knownEventIds.add(evt._id);
+          lastProgressMs = Date.now();
+
+          console.error(`[sonata-bridge] Pushing event: ${evt.type} (${evt._id})`);
+
+          try {
+            const payload = JSON.parse(evt.payload);
+            const content = typeof payload === "string"
+              ? payload
+              : payload.summary || payload.prompt || payload.body || JSON.stringify(payload);
+
+            await mcp.notification({
+              method: "notifications/claude/channel",
+              params: {
+                content: `[${evt.type.toUpperCase()}] ${content}`,
+                meta: {
+                  event_id: evt._id,
+                  event_type: evt.type,
+                  priority: String(evt.priority),
+                  timestamp: new Date(evt.createdAt).toISOString(),
+                },
               },
-            },
-          });
-        } catch (err: any) {
-          console.error(`[sonata-bridge] Push error: ${err.message}`);
+            });
+          } catch (err: any) {
+            console.error(`[sonata-bridge] Push error: ${err.message}`);
+          }
         }
       }
     } catch {}
@@ -238,19 +304,22 @@ if (IS_WORKER) {
 
   // Cleanup on exit
   const cleanup = async () => {
-    try {
-      await fetch(`${SONATA_API}/api/worker/unregister`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workerId: WORKER_ID }),
-      });
-    } catch {}
+    if (!IS_SUPERVISOR) {
+      try {
+        await fetch(`${SONATA_API}/api/worker/unregister`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workerId: WORKER_ID }),
+        });
+      } catch {}
+    }
     process.exit(0);
   };
   process.on("SIGTERM", cleanup);
   process.on("SIGINT", cleanup);
 
-  console.error(`[sonata-bridge] Worker mode active. Claiming every ${CLAIM_INTERVAL_MS / 1000}s.`);
+  const modeLabel = IS_SUPERVISOR ? "Supervisor" : "Worker";
+  console.error(`[sonata-bridge] ${modeLabel} mode active. Claiming every ${CLAIM_INTERVAL_MS / 1000}s.`);
 } else {
   console.error(`[sonata-bridge] Passive mode. Tools available but not claiming events.`);
 }

@@ -76,39 +76,20 @@ private func jobToResponse(_ row: ScheduledJobRow) -> ScheduledJobResponse {
     )
 }
 
-/// Parse a cron schedule string and compute the next run time from `after`.
-/// Supports: "@every Ns/Nm/Nh" and standard 5-field cron (minute-level).
+/// Compute the next run time (in epoch ms) using CronParser.
 private func computeNextRunAt(schedule: String, after: Double) -> Double? {
-    // Handle @every syntax: @every 30s, @every 5m, @every 1h
-    if schedule.hasPrefix("@every ") {
-        let spec = schedule.dropFirst(7).trimmingCharacters(in: .whitespaces)
-        var seconds: Double = 0
-        if spec.hasSuffix("s"), let n = Double(spec.dropLast()) {
-            seconds = n
-        } else if spec.hasSuffix("m"), let n = Double(spec.dropLast()) {
-            seconds = n * 60
-        } else if spec.hasSuffix("h"), let n = Double(spec.dropLast()) {
-            seconds = n * 3600
-        }
-        if seconds > 0 {
-            return after + seconds * 1000  // ms
-        }
-    }
-
-    // Handle @hourly, @daily
-    if schedule == "@hourly" { return after + 3600_000 }
-    if schedule == "@daily"  { return after + 86400_000 }
-
-    // For standard cron: fall back to a simple interval guess (run in 60s).
-    // A full cron parser can be added later.
-    return after + 60_000
+    let afterDate = Date(timeIntervalSince1970: after / 1000.0)
+    guard let parsed = CronParser.parse(schedule) else { return nil }
+    let next = CronParser.nextFire(for: parsed, after: afterDate)
+    return next.timeIntervalSince1970 * 1000.0
 }
 
 // MARK: - Route Registration
 
 public func registerScheduledJobRoutes(
     on router: Router<some RequestContext>,
-    dbPool: DatabasePool
+    dbPool: DatabasePool,
+    scheduler: SchedulerActor? = nil
 ) {
     let api = router.group("/api/cron")
 
@@ -157,6 +138,7 @@ public func registerScheduledJobRoutes(
             return errorResponse("Database error: \(error.localizedDescription)", status: .internalServerError)
         }
 
+        if let scheduler = scheduler { await scheduler.reload() }
         return jsonResponse(SuccessResponse(), status: .created)
     }
 
@@ -174,6 +156,7 @@ public func registerScheduledJobRoutes(
             return errorResponse("Database error: \(error.localizedDescription)", status: .internalServerError)
         }
 
+        if let scheduler = scheduler { await scheduler.reload() }
         return jsonResponse(SuccessResponse())
     }
 
@@ -231,25 +214,44 @@ public func registerScheduledJobRoutes(
         return jsonResponse(SuccessResponse())
     }
 
-    // POST /api/cron/trigger?name= — set nextRunAt = now (make it due immediately)
+    // POST /api/cron/trigger?name= — fire immediately via scheduler
     api.post("/trigger") { request, _ -> Response in
         guard let name = request.uri.queryParameters["name"].map(String.init), !name.isEmpty else {
             return errorResponse("name parameter is required")
         }
 
-        let now = Double(nowMs())
+        // Look up the job ID by name
+        let jobId: String? = try? await dbPool.read { db in
+            try String.fetchOne(db, sql: "SELECT id FROM scheduledJobs WHERE name = ?", arguments: [name])
+        }
 
-        do {
-            try await dbPool.write { db in
-                try db.execute(
-                    sql: "UPDATE scheduledJobs SET nextRunAt = ? WHERE name = ?",
-                    arguments: [now, name]
-                )
-            }
-        } catch {
-            return errorResponse("Database error: \(error.localizedDescription)", status: .internalServerError)
+        guard let id = jobId else {
+            return errorResponse("Job not found: \(name)", status: .notFound)
+        }
+
+        if let scheduler = scheduler {
+            await scheduler.triggerNow(jobId: id)
         }
 
         return jsonResponse(SuccessResponse())
+    }
+
+    // GET /api/scheduler/queue — expose the in-memory scheduler queue
+    router.get("/api/scheduler/queue") { _, _ -> Response in
+        guard let scheduler = scheduler else {
+            return errorResponse("Scheduler not available", status: .serviceUnavailable)
+        }
+
+        let entries = await scheduler.status()
+        let iso = ISO8601DateFormatter()
+        let result = entries.map { entry in
+            [
+                "id": entry.id,
+                "name": entry.name,
+                "type": entry.type,
+                "nextFire": iso.string(from: entry.nextFire)
+            ]
+        }
+        return jsonResponse(result)
     }
 }

@@ -434,4 +434,17 @@ public func registerCalendarRoutes(
 
         return jsonResponse(SuccessResponse())
     }
+
+    // POST /api/calendar/trigger?id= — fire immediately via scheduler
+    api.post("/trigger") { request, _ -> Response in
+        guard let id = request.uri.queryParameters["id"].map(String.init), !id.isEmpty else {
+            return errorResponse("id parameter is required")
+        }
+
+        if let scheduler = scheduler {
+            await scheduler.triggerNow(jobId: id)
+        }
+
+        return jsonResponse(SuccessResponse())
+    }
 }

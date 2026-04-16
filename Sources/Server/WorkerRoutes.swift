@@ -44,7 +44,10 @@ struct WorkerEventRow: FetchableRecord, PersistableRecord, Codable {
 
 // MARK: - Request Bodies
 
-struct WorkerHeartbeatRequest: Decodable { let workerId: String }
+struct WorkerHeartbeatRequest: Decodable {
+    let workerId: String
+    let lastProgressAt: Int64?
+}
 
 struct RegisterWorkerRequest: Decodable {
     let workerId: String
@@ -56,6 +59,12 @@ struct CompleteEventBody: Decodable {
     let eventId: String
     let workerId: String?
     let result: String?
+}
+
+struct FailEventBody: Decodable {
+    let eventId: String
+    let workerId: String?
+    let error: String?
 }
 
 struct EnqueueEventRequest: Decodable {
@@ -131,16 +140,74 @@ private func eventToResponse(_ row: WorkerEventRow) -> WorkerEventResponse {
     )
 }
 
-/// Sweep workers whose lastHeartbeat is older than 60s ago, set them offline.
+/// Sweep workers whose lastHeartbeat is older than 60s ago, set them offline,
+/// fail their active events and associated tasks.
 private func sweepStaleWorkers(in db: Database) throws {
     let cutoff = nowMs() - 60_000
-    try db.execute(
-        sql: """
+
+    // Find workers going offline
+    let staleWorkers = try Row.fetchAll(db, sql: """
+        SELECT workerId, currentEventId FROM workers
+        WHERE lastHeartbeat < ? AND status != 'offline'
+    """, arguments: [cutoff])
+
+    // Mark them offline
+    try db.execute(sql: """
         UPDATE workers SET status = 'offline'
         WHERE lastHeartbeat < ? AND status != 'offline'
-        """,
-        arguments: [cutoff]
-    )
+    """, arguments: [cutoff])
+
+    // Fail their active events and tasks
+    let now = nowMs()
+    for row in staleWorkers {
+        do {
+            guard let workerId = row["workerId"] as? String,
+                  let eventId = row["currentEventId"] as? String, !eventId.isEmpty else { continue }
+
+            // Fail the event
+            try db.execute(sql: """
+                UPDATE workerEvents SET status = 'failed', result = 'Worker lost heartbeat', completedAt = ?
+                WHERE id = ? AND status = 'assigned'
+            """, arguments: [now, eventId])
+
+            // Find and fail the associated task
+            if let event = try Row.fetchOne(db, sql: "SELECT payload FROM workerEvents WHERE id = ?", arguments: [eventId]),
+               let payload = event["payload"] as? String,
+               let payloadData = payload.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+               let taskId = json["task_id"] as? String {
+                try db.execute(sql: """
+                    UPDATE tasks SET status = 'failed', lastError = 'Worker lost heartbeat', updatedAt = ?
+                    WHERE id = ? AND status = 'active'
+                """, arguments: [now, taskId])
+
+                // Unblock dependents of the failed task
+                let dependents = try Row.fetchAll(db, sql: """
+                    SELECT id, blockedBy FROM tasks WHERE status = 'pending' AND blockedBy LIKE ?
+                """, arguments: ["%\(taskId)%"])
+                for dep in dependents {
+                    guard let depId = dep["id"] as? String else { continue }
+                    let blockedByJSON = dep["blockedBy"] as? String ?? "[]"
+                    if let data = blockedByJSON.data(using: .utf8),
+                       var arr = try? JSONDecoder().decode([String].self, from: data) {
+                        arr.removeAll { $0 == taskId }
+                        if let newJSON = try? JSONEncoder().encode(arr),
+                           let newStr = String(data: newJSON, encoding: .utf8) {
+                            try db.execute(sql: "UPDATE tasks SET blockedBy = ?, updatedAt = ? WHERE id = ?",
+                                           arguments: [newStr, now, depId])
+                        }
+                    }
+                }
+            }
+
+            // Clear the worker's event assignment
+            try db.execute(sql: "UPDATE workers SET currentEventId = NULL WHERE workerId = ?",
+                           arguments: [workerId])
+        } catch {
+            // One bad worker shouldn't block the entire sweep
+            continue
+        }
+    }
 }
 
 // MARK: - Route Registration
@@ -197,8 +264,8 @@ public func registerWorkerRoutes(
         do {
             try await dbPool.write { db in
                 try db.execute(
-                    sql: "UPDATE workers SET lastHeartbeat = ? WHERE workerId = ?",
-                    arguments: [now, body.workerId]
+                    sql: "UPDATE workers SET lastHeartbeat = ?, lastProgressAt = COALESCE(?, lastProgressAt) WHERE workerId = ?",
+                    arguments: [now, body.lastProgressAt, body.workerId]
                 )
                 try sweepStaleWorkers(in: db)
             }
@@ -263,13 +330,44 @@ public func registerWorkerRoutes(
         }
     }
 
-    // GET /api/worker/list — list all workers
+    // GET /api/worker/list — all workers with current task info
     api.get("/list") { _, _ -> Response in
         do {
-            let rows = try await dbPool.read { db in
-                try WorkerRow.fetchAll(db, sql: "SELECT * FROM workers ORDER BY lastHeartbeat DESC")
+            let rows: [Row] = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT w.*,
+                        COALESCE(
+                            json_extract(e.payload, '$.title'),
+                            t.title
+                        ) as currentTask,
+                        e.assignedAt as eventAssignedAt
+                    FROM workers w
+                    LEFT JOIN workerEvents e ON w.currentEventId = e.id
+                    LEFT JOIN tasks t ON json_extract(e.payload, '$.task_id') = t.id
+                    ORDER BY w.lastHeartbeat DESC
+                """)
             }
-            return jsonResponse(rows.map(workerToResponse))
+            let result = rows.map { row -> [String: Any] in
+                var dict: [String: Any] = [
+                    "_id": row["id"] as? String ?? "",
+                    "workerId": row["workerId"] as? String ?? "",
+                    "sessionLabel": row["sessionLabel"] as? String ?? "",
+                    "status": row["status"] as? String ?? "offline",
+                    "capabilities": row["capabilities"] as? String ?? "[]",
+                    "lastHeartbeat": row["lastHeartbeat"] as? Int64 ?? 0,
+                    "currentEventId": row["currentEventId"] as? String ?? "",
+                    "registeredAt": row["registeredAt"] as? Int64 ?? 0,
+                ]
+                if let task = row["currentTask"] as? String {
+                    dict["currentTask"] = task
+                }
+                if let assignedAt = row["eventAssignedAt"] as? Int64 {
+                    dict["assignedAt"] = assignedAt
+                }
+                return dict
+            }
+            let data = try JSONSerialization.data(withJSONObject: result)
+            return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: .init(data: data)))
         } catch {
             return errorResponse("Database error: \(error.localizedDescription)", status: .internalServerError)
         }
@@ -348,10 +446,23 @@ public func registerWorkerRoutes(
 
         do {
             let event = try await dbPool.write { db -> WorkerEventRow? in
-                // Find highest priority pending event
-                guard let row = try WorkerEventRow.fetchOne(db,
-                    sql: "SELECT * FROM workerEvents WHERE status = 'pending' ORDER BY priority DESC, createdAt ASC LIMIT 1"
-                ) else {
+                // Guard: don't let a busy worker claim a second event
+                let currentEvent = try String.fetchOne(db, sql: """
+                    SELECT currentEventId FROM workers WHERE workerId = ? AND currentEventId IS NOT NULL
+                """, arguments: [workerId])
+                if currentEvent != nil {
+                    return nil  // Already busy — reject claim
+                }
+
+                // Find event: first check for events pre-assigned to this worker, then pending
+                guard let row = try WorkerEventRow.fetchOne(db, sql: """
+                    SELECT * FROM workerEvents
+                    WHERE (status = 'assigned' AND assignedTo = ?) OR status = 'pending'
+                    ORDER BY
+                        CASE WHEN status = 'assigned' AND assignedTo = ? THEN 0 ELSE 1 END,
+                        priority DESC, createdAt ASC
+                    LIMIT 1
+                """, arguments: [workerId, workerId]) else {
                     return nil
                 }
 
@@ -422,6 +533,22 @@ public func registerWorkerRoutes(
                         arguments: [workerId]
                     )
                 }
+
+                // Also complete the associated task + unblock dependents
+                do {
+                    if let payload = row?.payload,
+                       let payloadData = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let taskId = json["task_id"] as? String {
+                        try db.execute(
+                            sql: "UPDATE tasks SET status = 'completed', result = ?, completedAt = ?, updatedAt = ? WHERE id = ? AND status = 'active'",
+                            arguments: [resultText ?? "Completed via channel", now, now, taskId]
+                        )
+                        try unblockDependents(taskId: taskId, in: db, now: now)
+                    }
+                } catch {
+                    // Don't fail the event completion if task update fails
+                }
             }
         } catch {
             return errorResponse("Database error: \(error.localizedDescription)", status: .internalServerError)
@@ -430,9 +557,17 @@ public func registerWorkerRoutes(
         return jsonResponse(SuccessResponse())
     }
 
-    // POST /api/worker/events/fail?eventId= — set failed
-    events.post("/fail") { request, _ -> Response in
-        guard let eventId = request.uri.queryParameters["eventId"].map(String.init), !eventId.isEmpty else {
+    // POST /api/worker/events/fail — set failed, accepts eventId via query param OR JSON body
+    events.post("/fail") { request, context -> Response in
+        var eventId = request.uri.queryParameters["eventId"].map(String.init) ?? ""
+        var errorText: String? = nil
+        if eventId.isEmpty {
+            if let body = try? await request.decode(as: FailEventBody.self, context: context) {
+                eventId = body.eventId
+                errorText = body.error
+            }
+        }
+        guard !eventId.isEmpty else {
             return errorResponse("eventId parameter is required")
         }
 
@@ -445,8 +580,8 @@ public func registerWorkerRoutes(
                 )
 
                 try db.execute(
-                    sql: "UPDATE workerEvents SET status = 'failed', completedAt = ? WHERE id = ?",
-                    arguments: [now, eventId]
+                    sql: "UPDATE workerEvents SET status = 'failed', result = ?, completedAt = ? WHERE id = ?",
+                    arguments: [errorText, now, eventId]
                 )
 
                 if let workerId = row?.assignedTo {
@@ -454,6 +589,22 @@ public func registerWorkerRoutes(
                         sql: "UPDATE workers SET status = 'idle', currentEventId = NULL WHERE workerId = ?",
                         arguments: [workerId]
                     )
+                }
+
+                // Also fail the associated task + unblock dependents
+                do {
+                    if let payload = row?.payload,
+                       let payloadData = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let taskId = json["task_id"] as? String {
+                        try db.execute(
+                            sql: "UPDATE tasks SET status = 'failed', lastError = ?, updatedAt = ? WHERE id = ? AND status = 'active'",
+                            arguments: [errorText ?? "Failed via channel", now, taskId]
+                        )
+                        try unblockDependents(taskId: taskId, in: db, now: now)
+                    }
+                } catch {
+                    // Don't fail the event failure if task update fails
                 }
             }
         } catch {

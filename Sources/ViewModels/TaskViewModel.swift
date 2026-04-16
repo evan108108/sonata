@@ -41,7 +41,7 @@ class TaskViewModel: ObservableObject {
     }
 
     func startMonitoring() {
-        pollTimer = Timer.publish(every: 10, on: .main, in: .common)
+        pollTimer = Timer.publish(every: 3, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -58,7 +58,7 @@ class TaskViewModel: ObservableObject {
         guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/task/list?limit=200") else { return }
         guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
         if lastDataHash != 0 && data.hashValue != lastDataHash {
-            isStale = true
+            await fetch()
         }
     }
 }

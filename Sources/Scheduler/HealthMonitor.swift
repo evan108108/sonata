@@ -51,6 +51,12 @@ actor HealthMonitor {
     /// Minimum interval between alerts for the same check (5 minutes).
     private let alertCooldown: TimeInterval = 300
 
+    /// Interval between supervisor check-event pushes (3 minutes).
+    private let supervisorCheckInterval: TimeInterval = 180
+
+    /// Last time a supervisor check event was pushed.
+    private var lastSupervisorCheckPushedAt: Date?
+
     /// Weak reference to the scheduler for status checks.
     private let schedulerStatus: (@Sendable () async -> Bool)?
 
@@ -188,11 +194,46 @@ actor HealthMonitor {
                 logger.warning("\(failedChecks.count) health check(s) failed: \(failedChecks.map(\.name).joined(separator: ", "))")
             }
 
+            // Push a periodic check event to the supervisor (every 3 min, only if running).
+            if lastSupervisorCheckPushedAt.map({ Date().timeIntervalSince($0) >= supervisorCheckInterval }) ?? true {
+                await pushSupervisorCheck()
+                lastSupervisorCheckPushedAt = Date()
+            }
+
             do {
                 try await Task.sleep(for: .seconds(checkInterval))
             } catch {
                 break  // Cancelled
             }
+        }
+    }
+
+    // MARK: - Supervisor Push
+
+    /// Insert a 'check' event into supervisorEvents if the supervisor is running
+    /// (lastHeartbeat within the past 60s). Skips if offline — no point queuing
+    /// work for a session that isn't listening.
+    private func pushSupervisorCheck() async {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - 60_000
+        let running = (try? await dbPool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT COUNT(*) > 0 FROM supervisorState WHERE lastHeartbeat >= ?
+            """, arguments: [cutoff])
+        }) ?? false
+
+        guard running == true else { return }
+
+        do {
+            try await dbPool.write { db in
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                try db.execute(sql: """
+                    INSERT INTO supervisorEvents (id, type, payload, createdAt)
+                    VALUES (?, 'check', '{}', ?)
+                """, arguments: [UUID().uuidString.lowercased(), now])
+            }
+            logger.debug("Pushed supervisor check event")
+        } catch {
+            logger.warning("Failed to push supervisor check: \(error.localizedDescription)")
         }
     }
 
