@@ -37,8 +37,10 @@ struct MCPManagerView: View {
         case failure(String)
     }
 
+    // Claude Code uses ~/.claude/mcp.json; Claude Desktop uses ~/.claude.json
+    // The Settings UI manages Claude Code's config (what workers/supervisor use)
     private let claudeConfigPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude.json")
+        .appendingPathComponent(".claude/mcp.json")
 
     var body: some View {
         VStack(spacing: 0) {
@@ -78,7 +80,7 @@ struct MCPManagerView: View {
                     Text("No MCP servers configured")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    Text("Add servers to ~/.claude.json")
+                    Text("Add servers to ~/.claude/mcp.json")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }

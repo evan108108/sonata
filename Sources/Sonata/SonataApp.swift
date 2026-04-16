@@ -11,17 +11,33 @@ import SwiftTerm
 /// Port for the Sonata HTTP server, configurable via SONATA_PORT env var.
 let sonataPort: Int = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
 
-/// Ensure memory + sonata-bridge MCP servers are registered in ~/.claude.json.
+/// Deploy MCP bridge scripts from the app bundle to ~/.sonata/mcp/ and ensure
+/// memory + sonata-bridge MCP servers are registered in ~/.claude/mcp.json.
 /// Called on startup so every Claude Code session has access to Sona's memory.
 func ensureGlobalMCPServers() {
-    let configPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".claude.json")
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+
+    // 1. Deploy bundled MCP scripts to ~/.sonata/mcp/
+    let mcpDir = home.appendingPathComponent(".sonata/mcp")
+    try? fm.createDirectory(at: mcpDir, withIntermediateDirectories: true)
+
+    // Copy mem-server.ts from bundle (always overwrite to keep in sync with app version)
+    if let sourceURL = Bundle.module.url(forResource: "mem-server", withExtension: "ts", subdirectory: "mcp") {
+        let dest = mcpDir.appendingPathComponent("mem-server.ts")
+        try? fm.removeItem(at: dest)
+        try? fm.copyItem(at: sourceURL, to: dest)
+        sonataFileLog("MCP setup: deployed mem-server.ts to ~/.sonata/mcp/")
+    }
+
+    // 2. Register in both ~/.claude/mcp.json (Claude Code) and ~/.claude.json (Claude Desktop)
+    let memServerPath = mcpDir.appendingPathComponent("mem-server.ts").path
 
     let requiredServers: [String: [String: Any]] = [
         "memory": [
             "type": "stdio",
             "command": "bun",
-            "args": ["run", "/Users/evan/memory/mcp/mem-server.ts"],
+            "args": ["run", memServerPath],
         ],
         "sonata-bridge": [
             "type": "stdio",
@@ -30,28 +46,42 @@ func ensureGlobalMCPServers() {
         ],
     ]
 
-    do {
-        let data = try Data(contentsOf: configPath)
-        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        var mcpServers = json["mcpServers"] as? [String: Any] ?? [:]
+    let configPaths = [
+        home.appendingPathComponent(".claude/mcp.json"),   // Claude Code
+        home.appendingPathComponent(".claude.json"),        // Claude Desktop
+    ]
 
-        var changed = false
-        for (name, config) in requiredServers {
-            if mcpServers[name] == nil {
+    for configPath in configPaths {
+        do {
+            var json: [String: Any] = [:]
+            if let data = try? Data(contentsOf: configPath) {
+                json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            }
+            var mcpServers = json["mcpServers"] as? [String: Any] ?? [:]
+
+            var changed = false
+            for (name, config) in requiredServers {
+                if let existing = mcpServers[name] as? [String: Any],
+                   let existingArgs = existing["args"] as? [String],
+                   let newConfig = config as? [String: Any],
+                   let newArgs = newConfig["args"] as? [String],
+                   existingArgs == newArgs {
+                    continue  // Already correct
+                }
                 mcpServers[name] = config
                 changed = true
-                sonataFileLog("MCP setup: added '\(name)' to ~/.claude.json")
+                sonataFileLog("MCP setup: set '\(name)' in \(configPath.lastPathComponent)")
             }
-        }
 
-        if changed {
-            json["mcpServers"] = mcpServers
-            let output = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-            try output.write(to: configPath)
-            sonataFileLog("MCP setup: updated ~/.claude.json with \(requiredServers.count) servers")
+            if changed {
+                json["mcpServers"] = mcpServers
+                let output = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+                try output.write(to: configPath)
+                sonataFileLog("MCP setup: updated \(configPath.lastPathComponent)")
+            }
+        } catch {
+            sonataFileLog("MCP setup: failed to update \(configPath.lastPathComponent) — \(error)")
         }
-    } catch {
-        sonataFileLog("MCP setup: failed to update ~/.claude.json — \(error)")
     }
 }
 

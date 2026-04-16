@@ -299,8 +299,8 @@ let supervisorActions: [SonataAction] = [
             do {
                 return try await ctx.dbPool.read { db -> SupervisorStatusResponse in
                     let isRunning = try Bool.fetchOne(db, sql: """
-                        SELECT COUNT(*) > 0 FROM workers
-                        WHERE sessionLabel = 'supervisor' AND lastHeartbeat >= ?
+                        SELECT COUNT(*) > 0 FROM supervisorState
+                        WHERE lastHeartbeat >= ?
                     """, arguments: [nowMs() - 60_000]) ?? false
 
                     let unreadAlerts = try Int.fetchOne(db, sql: """

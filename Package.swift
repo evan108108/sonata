@@ -26,6 +26,7 @@ let package = Package(
                 .copy("Sonata/Resources/web"),
                 .copy("Sonata/Resources/worker"),
                 .copy("Sonata/Resources/supervisor"),
+                .copy("Sonata/Resources/mcp"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
