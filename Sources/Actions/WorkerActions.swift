@@ -317,3 +317,246 @@ let workerActions: [SonataAction] = [
         }
     ),
 ]
+
+// MARK: - Worker Event Actions (claim, complete, fail, recent, enqueue)
+
+private func eventToResponse(_ row: WorkerEventRow) -> WorkerEventResponse {
+    WorkerEventResponse(
+        _id: row.id,
+        type: row.type,
+        payload: row.payload,
+        priority: row.priority,
+        assignedTo: row.assignedTo,
+        status: row.status,
+        result: row.result,
+        createdAt: row.createdAt,
+        assignedAt: row.assignedAt,
+        completedAt: row.completedAt
+    )
+}
+
+private struct ClaimedFalseResponse: Encodable {
+    let claimed = false
+}
+
+let workerEventActions: [SonataAction] = [
+
+    // POST /api/worker/events/enqueue — create a worker event
+    SonataAction(
+        name: "worker_event_enqueue",
+        description: "Create a pending worker event.",
+        group: "/api/worker/events",
+        path: "/enqueue",
+        method: .post,
+        params: [
+            ActionParam("type", .string, required: true, description: "Event type (email, task, alert)"),
+            ActionParam("payload", .string, required: true, description: "JSON payload"),
+            ActionParam("priority", .integer, description: "Priority 1-10 (default 5)"),
+        ],
+        handler: { ctx in
+            let type = try ctx.params.require("type")
+            let payload = try ctx.params.require("payload")
+            let priority = ctx.params.int("priority") ?? 5
+            let now = nowMs()
+            let id = newUUID()
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(sql: """
+                        INSERT INTO workerEvents (id, type, payload, priority, status, createdAt)
+                        VALUES (?, ?, ?, ?, 'pending', ?)
+                    """, arguments: [id, type, payload, priority, now])
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return StoreResponse(id: id)
+        }
+    ),
+
+    // POST /api/worker/events/claim — claim next pending event for a worker
+    SonataAction(
+        name: "worker_event_claim",
+        description: "Claim the next pending worker event. Returns the event or {claimed:false}.",
+        group: "/api/worker/events",
+        path: "/claim",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier"),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            let now = nowMs()
+            do {
+                let event = try await ctx.dbPool.write { db -> WorkerEventRow? in
+                    // Don't let a busy worker claim a second event
+                    let currentEvent = try String.fetchOne(db, sql: """
+                        SELECT currentEventId FROM workers WHERE workerId = ? AND currentEventId IS NOT NULL
+                    """, arguments: [workerId])
+                    if currentEvent != nil { return nil }
+
+                    // Find event: pre-assigned to this worker first, then any pending
+                    guard let row = try WorkerEventRow.fetchOne(db, sql: """
+                        SELECT * FROM workerEvents
+                        WHERE (status = 'assigned' AND assignedTo = ?) OR status = 'pending'
+                        ORDER BY
+                            CASE WHEN status = 'assigned' AND assignedTo = ? THEN 0 ELSE 1 END,
+                            priority DESC, createdAt ASC
+                        LIMIT 1
+                    """, arguments: [workerId, workerId]) else {
+                        return nil
+                    }
+
+                    // Assign it
+                    try db.execute(sql: """
+                        UPDATE workerEvents SET assignedTo = ?, status = 'assigned', assignedAt = ?
+                        WHERE id = ?
+                    """, arguments: [workerId, now, row.id])
+
+                    // Mark worker busy
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'busy', currentEventId = ? WHERE workerId = ?
+                    """, arguments: [row.id, workerId])
+
+                    return try WorkerEventRow.fetchOne(db,
+                        sql: "SELECT * FROM workerEvents WHERE id = ?",
+                        arguments: [row.id])
+                }
+                if let event {
+                    return eventToResponse(event)
+                } else {
+                    return ClaimedFalseResponse()
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // POST /api/worker/events/complete — mark event completed, free worker
+    SonataAction(
+        name: "worker_event_complete",
+        description: "Mark a worker event as completed and set worker back to idle.",
+        group: "/api/worker/events",
+        path: "/complete",
+        method: .post,
+        params: [
+            ActionParam("eventId", .string, required: true, description: "Event ID"),
+            ActionParam("workerId", .string, description: "Worker ID (optional)"),
+            ActionParam("result", .string, description: "Result summary"),
+        ],
+        handler: { ctx in
+            let eventId = try ctx.params.require("eventId")
+            let resultText = ctx.params.string("result")
+            let now = nowMs()
+            do {
+                try await ctx.dbPool.write { db in
+                    let row = try WorkerEventRow.fetchOne(db,
+                        sql: "SELECT * FROM workerEvents WHERE id = ?",
+                        arguments: [eventId])
+
+                    try db.execute(sql: """
+                        UPDATE workerEvents SET status = 'completed', result = ?, completedAt = ? WHERE id = ?
+                    """, arguments: [resultText, now, eventId])
+
+                    // Set worker back to idle
+                    if let workerId = row?.assignedTo {
+                        try db.execute(sql: """
+                            UPDATE workers SET status = 'idle', currentEventId = NULL WHERE workerId = ?
+                        """, arguments: [workerId])
+                    }
+
+                    // Complete associated task + unblock dependents
+                    if let payload = row?.payload,
+                       let payloadData = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let taskId = json["task_id"] as? String {
+                        try db.execute(sql: """
+                            UPDATE tasks SET status = 'completed', result = ?, completedAt = ?, updatedAt = ?
+                            WHERE id = ? AND status = 'active'
+                        """, arguments: [resultText ?? "Completed via channel", now, now, taskId])
+                        try unblockDependents(taskId: taskId, in: db, now: now)
+                    }
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // POST /api/worker/events/fail — mark event failed, free worker
+    SonataAction(
+        name: "worker_event_fail",
+        description: "Mark a worker event as failed and set worker back to idle.",
+        group: "/api/worker/events",
+        path: "/fail",
+        method: .post,
+        params: [
+            ActionParam("eventId", .string, required: true, description: "Event ID"),
+            ActionParam("workerId", .string, description: "Worker ID (optional)"),
+            ActionParam("error", .string, description: "Error description"),
+        ],
+        handler: { ctx in
+            let eventId = try ctx.params.require("eventId")
+            let errorText = ctx.params.string("error")
+            let now = nowMs()
+            do {
+                try await ctx.dbPool.write { db in
+                    let row = try WorkerEventRow.fetchOne(db,
+                        sql: "SELECT * FROM workerEvents WHERE id = ?",
+                        arguments: [eventId])
+
+                    try db.execute(sql: """
+                        UPDATE workerEvents SET status = 'failed', result = ?, completedAt = ? WHERE id = ?
+                    """, arguments: [errorText, now, eventId])
+
+                    if let workerId = row?.assignedTo {
+                        try db.execute(sql: """
+                            UPDATE workers SET status = 'idle', currentEventId = NULL WHERE workerId = ?
+                        """, arguments: [workerId])
+                    }
+
+                    // Fail associated task + unblock dependents
+                    if let payload = row?.payload,
+                       let payloadData = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let taskId = json["task_id"] as? String {
+                        try db.execute(sql: """
+                            UPDATE tasks SET status = 'failed', lastError = ?, updatedAt = ?
+                            WHERE id = ? AND status = 'active'
+                        """, arguments: [errorText ?? "Failed via channel", now, taskId])
+                        try unblockDependents(taskId: taskId, in: db, now: now)
+                    }
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // GET /api/worker/events/recent — list recent worker events
+    SonataAction(
+        name: "worker_event_recent",
+        description: "List recent worker events ordered by createdAt DESC.",
+        group: "/api/worker/events",
+        path: "/recent",
+        method: .get,
+        params: [
+            ActionParam("limit", .integer, description: "Max results (default 20)"),
+        ],
+        handler: { ctx in
+            let limit = ctx.params.int("limit") ?? 20
+            do {
+                let rows = try await ctx.dbPool.read { db in
+                    try WorkerEventRow.fetchAll(db,
+                        sql: "SELECT * FROM workerEvents ORDER BY createdAt DESC LIMIT ?",
+                        arguments: [limit])
+                }
+                return rows.map { eventToResponse($0) }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+]
