@@ -12,18 +12,6 @@ actor EmailHandler {
     /// Poll interval: 2 minutes.
     static let pollIntervalSeconds: TimeInterval = 120
 
-    /// Inboxes to monitor. Each entry owns its dispatch instructions.
-    static let inboxes: [InboxConfig] = [
-        InboxConfig(
-            address: "sona@agentmail.to",
-            role: .sona
-        ),
-        InboxConfig(
-            address: "scoutleader@agentmail.to",
-            role: .scoutleader
-        ),
-    ]
-
     /// AgentMail API base URL.
     private static let apiBase = "https://api.agentmail.to/v0"
 
@@ -47,6 +35,10 @@ actor EmailHandler {
     /// The polling task — cancelled on shutdown.
     private var pollTask: Task<Void, Never>?
 
+    /// Inboxes as of the last successful load from the `emailInboxes` table.
+    /// Refreshed at each poll cycle so UI changes take effect within one cycle.
+    private var currentInboxes: [InboxConfig] = []
+
     // MARK: - Init
 
     init(dbPool: DatabasePool, logger: Logger? = nil) {
@@ -68,8 +60,10 @@ actor EmailHandler {
 
         await seedKnownIds()
 
-        let inboxList = Self.inboxes.map(\.address).joined(separator: ", ")
-        logger.info("EmailHandler: starting (poll every \(Self.pollIntervalSeconds)s, inboxes: \(inboxList))")
+        // Prime the inbox list so the startup log shows accurate state.
+        currentInboxes = await loadInboxes()
+        let inboxList = currentInboxes.map(\.address).joined(separator: ", ")
+        logger.info("EmailHandler: starting (poll every \(Self.pollIntervalSeconds)s, inboxes: \(inboxList.isEmpty ? "none configured" : inboxList))")
 
         pollTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
@@ -93,9 +87,15 @@ actor EmailHandler {
     private func poll() async {
         guard let apiKey, !apiKey.isEmpty else { return }
 
+        // Reload from DB each cycle so config changes take effect within one poll.
+        currentInboxes = await loadInboxes()
+        if currentInboxes.isEmpty {
+            return
+        }
+
         var newEmailsByInbox: [String: [EmailRecord]] = [:]
 
-        for inbox in Self.inboxes {
+        for inbox in currentInboxes {
             do {
                 let threads = try await fetchThreads(inboxId: inbox.address, apiKey: apiKey)
 
@@ -148,7 +148,7 @@ actor EmailHandler {
 
         if !initialized {
             initialized = true
-            logger.info("EmailHandler: initialized with \(knownEmailIds.count) known email(s) across \(Self.inboxes.count) inbox(es)")
+            logger.info("EmailHandler: initialized with \(knownEmailIds.count) known email(s) across \(currentInboxes.count) inbox(es)")
             // Check for any pre-existing unread emails in the DB and dispatch them
             await dispatchPendingUnreadEmails()
             return
@@ -160,7 +160,7 @@ actor EmailHandler {
         }
 
         // Dispatch each inbox's new emails as its own worker event
-        for inbox in Self.inboxes {
+        for inbox in currentInboxes {
             guard let newEmails = newEmailsByInbox[inbox.address], !newEmails.isEmpty else { continue }
             for email in newEmails {
                 try? await storeEmail(email, status: "unread")
@@ -271,7 +271,7 @@ actor EmailHandler {
         }
 
         // Dispatch grouped by inbox
-        for inbox in Self.inboxes {
+        for inbox in currentInboxes {
             guard let emails = toDispatch[inbox.address], !emails.isEmpty else { continue }
             logger.info("EmailHandler: dispatching \(emails.count) pending unread email(s) for \(inbox.address)")
             await processNewEmails(emails, inbox: inbox)
@@ -282,6 +282,13 @@ actor EmailHandler {
 
     /// Dispatch a worker event to handle a batch of new emails for one inbox.
     private func processNewEmails(_ emails: [EmailRecord], inbox: InboxConfig) async {
+        // Honor the per-inbox autoReply toggle. When off, store the emails
+        // (which already happened before this call) but don't dispatch a worker.
+        guard inbox.autoReply else {
+            logger.info("EmailHandler: autoReply disabled for \(inbox.address) — skipping dispatch for \(emails.count) email(s)")
+            return
+        }
+
         guard !isProcessing else {
             logger.info("EmailHandler: already processing — will catch on next poll")
             return
@@ -305,7 +312,8 @@ actor EmailHandler {
         let prompt = inbox.role.buildPrompt(
             inboxAddress: inbox.address,
             emailCount: emails.count,
-            emailDetails: emailDetails
+            emailDetails: emailDetails,
+            customPrompt: inbox.systemPrompt
         )
 
         logger.info("EmailHandler: dispatching \(emails.count) email(s) from \(inbox.address) to worker via channel")
@@ -430,6 +438,36 @@ actor EmailHandler {
 
     // MARK: - SQLite
 
+    /// Load enabled inboxes from the `emailInboxes` table. Returns an empty list
+    /// (and logs) on error so the poll loop never crashes.
+    private func loadInboxes() async -> [InboxConfig] {
+        do {
+            let rows: [Row] = try await dbPool.read { db -> [Row] in
+                try Row.fetchAll(db, sql: """
+                    SELECT address, role, displayName, autoReply, dispatchTo, systemPrompt
+                    FROM emailInboxes
+                    WHERE enabled = 1
+                    ORDER BY createdAt ASC
+                """)
+            }
+            return rows.map { row in
+                let roleStr: String = row["role"]
+                let role = InboxRole(rawValue: roleStr) ?? .custom
+                return InboxConfig(
+                    address: row["address"],
+                    role: role,
+                    displayName: row["displayName"],
+                    autoReply: (row["autoReply"] as Int64? ?? 1) != 0,
+                    dispatchTo: row["dispatchTo"],
+                    systemPrompt: row["systemPrompt"]
+                )
+            }
+        } catch {
+            logger.error("EmailHandler: failed to load inboxes — \(error)")
+            return []
+        }
+    }
+
     /// Seed known email IDs from the database so we don't re-process old emails on restart.
     private func seedKnownIds() async {
         do {
@@ -473,9 +511,35 @@ actor EmailHandler {
 enum InboxRole: String, Sendable {
     case sona
     case scoutleader
+    case relay
+    case custom
 
     /// Build the dispatch prompt for a batch of new emails at this inbox.
-    func buildPrompt(inboxAddress: String, emailCount: Int, emailDetails: String) -> String {
+    /// For `custom` / `relay` (or when a per-inbox `systemPrompt` is provided),
+    /// the caller should pass `customPrompt` to override the built-in role prompt.
+    func buildPrompt(
+        inboxAddress: String,
+        emailCount: Int,
+        emailDetails: String,
+        customPrompt: String? = nil
+    ) -> String {
+        if let customPrompt, !customPrompt.isEmpty {
+            return """
+            # Unread Emails for \(inboxAddress)
+
+            You have \(emailCount) unread email(s) at \(inboxAddress).
+
+            \(emailDetails)
+
+            ## Instructions
+
+            \(customPrompt)
+
+            After replying, mark each email as replied:
+               curl -s -X POST http://localhost:3211/api/email/mark-replied -H "Content-Type: application/json" -d '{"id": "THE_EMAIL_ID"}'
+            """
+        }
+
         switch self {
         case .sona:
             return """
@@ -538,6 +602,23 @@ enum InboxRole: String, Sendable {
 
             Be precise, data-driven, and always cite profile IDs + lead IDs when reporting results.
             """
+
+        case .relay, .custom:
+            // No customPrompt was provided — fall back to a generic, neutral prompt.
+            return """
+            # Unread Emails at \(inboxAddress)
+
+            You have \(emailCount) unread email(s).
+
+            \(emailDetails)
+
+            ## Instructions
+
+            Read the emails carefully and reply thoughtfully using AgentMail MCP tools (send_message or reply_to_message).
+
+            After replying, mark each email as replied:
+               curl -s -X POST http://localhost:3211/api/email/mark-replied -H "Content-Type: application/json" -d '{"id": "THE_EMAIL_ID"}'
+            """
         }
     }
 }
@@ -546,6 +627,26 @@ enum InboxRole: String, Sendable {
 struct InboxConfig: Sendable {
     let address: String
     let role: InboxRole
+    let displayName: String?
+    let autoReply: Bool
+    let dispatchTo: String?
+    let systemPrompt: String?
+
+    init(
+        address: String,
+        role: InboxRole,
+        displayName: String? = nil,
+        autoReply: Bool = true,
+        dispatchTo: String? = nil,
+        systemPrompt: String? = nil
+    ) {
+        self.address = address
+        self.role = role
+        self.displayName = displayName
+        self.autoReply = autoReply
+        self.dispatchTo = dispatchTo
+        self.systemPrompt = systemPrompt
+    }
 }
 
 /// An email fetched from AgentMail, before storing in SQLite.

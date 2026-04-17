@@ -62,22 +62,25 @@ actor TaskOrchestrator {
         guard idleWorkerCount > 0 else { return }
         let slotsAvailable = idleWorkerCount  // one task per idle worker
 
-        // Find actionable tasks: pending, assigned to scheduler, not blocked
+        // Find actionable tasks: pending, assigned to scheduler, not blocked,
+        // and leaf-only (parent/container tasks with subtasks are skipped —
+        // they have no prompt and would waste worker turns).
         let tasks = try await dbPool.read { db -> [OrchestratorTaskRow] in
             try OrchestratorTaskRow.fetchAll(db, sql: """
-                SELECT * FROM tasks
-                WHERE status = 'pending'
-                AND (assignedTo = 'scheduler' OR assignedTo IS NULL)
-                AND (blockedBy IS NULL OR blockedBy = '[]' OR blockedBy = '')
+                SELECT * FROM tasks t
+                WHERE t.status = 'pending'
+                AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL)
+                AND (t.blockedBy IS NULL OR t.blockedBy = '[]' OR t.blockedBy = '')
+                AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parentTask = t.id)
                 ORDER BY
-                    CASE priority
+                    CASE t.priority
                         WHEN 'critical' THEN 0
                         WHEN 'high' THEN 1
                         WHEN 'normal' THEN 2
                         WHEN 'low' THEN 3
                         WHEN 'backlog' THEN 4
                     END,
-                    createdAt ASC
+                    t.createdAt ASC
                 LIMIT ?
             """, arguments: [slotsAvailable])
         }
@@ -209,6 +212,9 @@ actor TaskOrchestrator {
 
             // Unblock dependent tasks
             try unblockDependents(taskId: taskId, in: db, now: now)
+
+            // Roll status up to any parent container.
+            try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
         }
 
         // Reset worker to idle
@@ -234,6 +240,9 @@ actor TaskOrchestrator {
 
             // Unblock dependent tasks so they don't stay stuck forever
             try unblockDependents(taskId: taskId, in: db, now: now)
+
+            // Roll status up to any parent container.
+            try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
         }
 
         // Reset worker to idle

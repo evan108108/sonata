@@ -51,11 +51,21 @@ actor HealthMonitor {
     /// Minimum interval between alerts for the same check (5 minutes).
     private let alertCooldown: TimeInterval = 300
 
-    /// Interval between supervisor check-event pushes (3 minutes).
-    private let supervisorCheckInterval: TimeInterval = 180
+    /// Fallback interval between supervisor check-event pushes (3 minutes).
+    /// Only used if the supervisorConfig singleton row cannot be read.
+    private let fallbackSupervisorCheckInterval: TimeInterval = 180
 
     /// Last time a supervisor check event was pushed.
     private var lastSupervisorCheckPushedAt: Date?
+
+    /// Cached snapshot of the supervisorConfig singleton (refreshed each loop).
+    private struct SupervisorSchedule {
+        var dayIntervalSec: Int
+        var nightIntervalSec: Int
+        var nightStartHour: Int
+        var nightEndHour: Int
+        var enabled: Bool
+    }
 
     /// Weak reference to the scheduler for status checks.
     private let schedulerStatus: (@Sendable () async -> Bool)?
@@ -194,10 +204,15 @@ actor HealthMonitor {
                 logger.warning("\(failedChecks.count) health check(s) failed: \(failedChecks.map(\.name).joined(separator: ", "))")
             }
 
-            // Push a periodic check event to the supervisor (every 3 min, only if running).
-            if lastSupervisorCheckPushedAt.map({ Date().timeIntervalSince($0) >= supervisorCheckInterval }) ?? true {
-                await pushSupervisorCheck()
-                lastSupervisorCheckPushedAt = Date()
+            // Push a periodic check event to the supervisor, driven by
+            // the configurable day/night schedule in supervisorConfig.
+            let schedule = await loadSupervisorSchedule()
+            if schedule.enabled {
+                let interval = currentSupervisorInterval(schedule: schedule)
+                if lastSupervisorCheckPushedAt.map({ Date().timeIntervalSince($0) >= interval }) ?? true {
+                    await pushSupervisorCheck()
+                    lastSupervisorCheckPushedAt = Date()
+                }
             }
 
             do {
@@ -206,6 +221,59 @@ actor HealthMonitor {
                 break  // Cancelled
             }
         }
+    }
+
+    // MARK: - Supervisor Schedule
+
+    /// Load the supervisorConfig singleton. Falls back to built-in defaults
+    /// (day 180s, night 1800s, 22→07, enabled) if the row is missing or
+    /// the DB read fails.
+    private func loadSupervisorSchedule() async -> SupervisorSchedule {
+        do {
+            let row: Row? = try await dbPool.read { db -> Row? in
+                try Row.fetchOne(db, sql: """
+                    SELECT dayIntervalSec, nightIntervalSec, nightStartHour,
+                           nightEndHour, enabled
+                    FROM supervisorConfig WHERE id = 'singleton'
+                """)
+            }
+            if let row {
+                return SupervisorSchedule(
+                    dayIntervalSec: Int((row["dayIntervalSec"] as Int64?) ?? Int64(fallbackSupervisorCheckInterval)),
+                    nightIntervalSec: Int((row["nightIntervalSec"] as Int64?) ?? 1800),
+                    nightStartHour: Int((row["nightStartHour"] as Int64?) ?? 22),
+                    nightEndHour: Int((row["nightEndHour"] as Int64?) ?? 7),
+                    enabled: ((row["enabled"] as Int64?) ?? 1) != 0
+                )
+            }
+        } catch {
+            logger.warning("Could not read supervisorConfig (\(error.localizedDescription)) — using defaults")
+        }
+        return SupervisorSchedule(
+            dayIntervalSec: Int(fallbackSupervisorCheckInterval),
+            nightIntervalSec: 1800,
+            nightStartHour: 22,
+            nightEndHour: 7,
+            enabled: true
+        )
+    }
+
+    /// Resolve the effective push interval for the current wall-clock hour.
+    /// Day vs night is selected by the configured night window; the window
+    /// wraps at midnight when nightStartHour > nightEndHour (e.g. 22→07).
+    private func currentSupervisorInterval(schedule: SupervisorSchedule) -> TimeInterval {
+        let hour = Calendar.current.component(.hour, from: Date())
+        let start = schedule.nightStartHour
+        let end = schedule.nightEndHour
+        let isNight: Bool
+        if start == end {
+            isNight = false
+        } else if start < end {
+            isNight = hour >= start && hour < end
+        } else {
+            isNight = hour >= start || hour < end
+        }
+        return TimeInterval(isNight ? schedule.nightIntervalSec : schedule.dayIntervalSec)
     }
 
     // MARK: - Supervisor Push

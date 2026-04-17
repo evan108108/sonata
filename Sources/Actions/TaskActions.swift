@@ -424,6 +424,7 @@ let taskActions: [SonataAction] = [
                         arguments: [now, now, id]
                     )
                     try unblockDependents(taskId: id, in: db, now: now)
+                    try rollUpParentStatus(childTaskId: id, in: db, now: now)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -459,6 +460,8 @@ let taskActions: [SonataAction] = [
                     sql += " WHERE id = ?"
                     args.append(id)
                     try db.execute(sql: sql, arguments: StatementArguments(args))
+                    try unblockDependents(taskId: id, in: db, now: now)
+                    try rollUpParentStatus(childTaskId: id, in: db, now: now)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -486,6 +489,8 @@ let taskActions: [SonataAction] = [
                         sql: "UPDATE tasks SET status = 'cancelled', updatedAt = ? WHERE id = ?",
                         arguments: [now, id]
                     )
+                    try unblockDependents(taskId: id, in: db, now: now)
+                    try rollUpParentStatus(childTaskId: id, in: db, now: now)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)

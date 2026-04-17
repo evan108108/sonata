@@ -465,7 +465,7 @@ let workerEventActions: [SonataAction] = [
                         """, arguments: [workerId])
                     }
 
-                    // Complete associated task + unblock dependents
+                    // Complete associated task + unblock dependents + parent rollup
                     if let payload = row?.payload,
                        let payloadData = payload.data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
@@ -475,6 +475,7 @@ let workerEventActions: [SonataAction] = [
                             WHERE id = ? AND status = 'active'
                         """, arguments: [resultText ?? "Completed via channel", now, now, taskId])
                         try unblockDependents(taskId: taskId, in: db, now: now)
+                        try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
                     }
                 }
             } catch {
@@ -516,7 +517,7 @@ let workerEventActions: [SonataAction] = [
                         """, arguments: [workerId])
                     }
 
-                    // Fail associated task + unblock dependents
+                    // Fail associated task + unblock dependents + parent rollup
                     if let payload = row?.payload,
                        let payloadData = payload.data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
@@ -526,6 +527,7 @@ let workerEventActions: [SonataAction] = [
                             WHERE id = ? AND status = 'active'
                         """, arguments: [errorText ?? "Failed via channel", now, taskId])
                         try unblockDependents(taskId: taskId, in: db, now: now)
+                        try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
                     }
                 }
             } catch {

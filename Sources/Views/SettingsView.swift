@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -7,6 +8,7 @@ struct SettingsView: View {
     @State private var showingImportPicker = false
     @State private var showingPathInput = false
     @State private var importPath = "~/memory/.env"
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,6 +24,48 @@ struct SettingsView: View {
 
             ScrollView {
                 VStack(spacing: 24) {
+                    // MARK: - General Section
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text("General")
+                                .font(.headline)
+                            Spacer()
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+
+                        Divider()
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Launch at Login")
+                                    .font(.body)
+                                Text("Start Sonata automatically when you log in")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Toggle("", isOn: $launchAtLogin)
+                                .toggleStyle(.switch)
+                                .onChange(of: launchAtLogin) { _, enabled in
+                                    do {
+                                        if enabled {
+                                            try SMAppService.mainApp.register()
+                                        } else {
+                                            try SMAppService.mainApp.unregister()
+                                        }
+                                    } catch {
+                                        launchAtLogin = SMAppService.mainApp.status == .enabled
+                                    }
+                                }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                    }
+                    .background(.background)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+
                     // MARK: - Secrets Section
                     VStack(spacing: 0) {
                         HStack {
@@ -115,6 +159,18 @@ struct SettingsView: View {
 
                     // MARK: - MCP Servers Section
                     MCPManagerView()
+                        .background(.background)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+
+                    // MARK: - Email Inboxes Section
+                    EmailConfigView()
+                        .background(.background)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+
+                    // MARK: - Supervisor Schedule Section
+                    SupervisorConfigView()
                         .background(.background)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))

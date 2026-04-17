@@ -232,8 +232,10 @@ struct SonataApp: App {
                 registry.register(workerEventActions)
                 registry.register(calendarActions)
                 registry.register(emailActions)
+                registry.register(emailInboxActions)
                 registry.register(schedulerActions)
                 registry.register(supervisorActions)
+                registry.register(supervisorConfigActions)
                 registry.register(wikiActions)
                 registry.register(coreBlockActions)
                 registry.register(checkpointActions)
@@ -337,6 +339,11 @@ struct SonataApp: App {
                 // --- Phase 3: Initialize all scheduler services ---
 
                 // 1. Scheduler Actor (created earlier, before routes)
+                // Register internal functions before start so any due calendar
+                // events of taskType=internal can fire immediately.
+                await scheduler.registerInternal("wiki-compilation") { [pool] in
+                    try await WikiCompilationJob.run(dbPool: pool)
+                }
                 await scheduler.start()
                 _ = await scheduler.status()
 
@@ -376,7 +383,11 @@ struct SonataApp: App {
                 let backupManager = BackupManager(dbPool: pool)
                 await backupManager.start()
 
-                logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled")
+                // 8. Wiki File Watcher (FSEvents on ~/.sonata/wiki/ and ~/.sonata/private/)
+                let wikiWatcher = WikiFileWatcher(dbPool: pool)
+                await wikiWatcher.start()
+
+                logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")
 
                 // 6. Spawn default workers (runs on MainActor since it creates terminal views)
                 let workerCount = WorkerManager.defaultWorkerCount
@@ -402,6 +413,7 @@ struct SonataApp: App {
                     await jobRunner.shutdown()
                     await healthMonitor.shutdown()
                     await backupManager.shutdown()
+                    await wikiWatcher.shutdown()
                     logger.info("Sonata shutdown complete")
                 }
 
@@ -431,12 +443,40 @@ struct SonataApp: App {
         }
     }
 
+    @FocusedValue(\.selectedTab) var selectedTab
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
         }
         .commands {
+            // Tab navigation: Cmd+1 through Cmd+9, Cmd+0
+            CommandGroup(after: .toolbar) {
+                Section {
+                    Button("Workers") { selectedTab?.wrappedValue = .workers }
+                        .keyboardShortcut("1", modifiers: .command)
+                    Button("Memory") { selectedTab?.wrappedValue = .memory }
+                        .keyboardShortcut("2", modifiers: .command)
+                    Button("Tasks") { selectedTab?.wrappedValue = .tasks }
+                        .keyboardShortcut("3", modifiers: .command)
+                    Button("Schedule") { selectedTab?.wrappedValue = .schedule }
+                        .keyboardShortcut("4", modifiers: .command)
+                    Button("Email") { selectedTab?.wrappedValue = .email }
+                        .keyboardShortcut("5", modifiers: .command)
+                    Button("People") { selectedTab?.wrappedValue = .people }
+                        .keyboardShortcut("6", modifiers: .command)
+                    Button("Wiki") { selectedTab?.wrappedValue = .wiki }
+                        .keyboardShortcut("7", modifiers: .command)
+                    Button("Files") { selectedTab?.wrappedValue = .files }
+                        .keyboardShortcut("8", modifiers: .command)
+                    Button("Health") { selectedTab?.wrappedValue = .health }
+                        .keyboardShortcut("9", modifiers: .command)
+                    Button("Settings") { selectedTab?.wrappedValue = .settings }
+                        .keyboardShortcut("0", modifiers: .command)
+                }
+            }
+
             CommandGroup(after: .importExport) {
                 Button("Export Sonata Data...") {
                     exportSonataData()

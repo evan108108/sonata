@@ -139,6 +139,12 @@ struct PrivateFilesView: View {
             }
         }
         .onAppear { loadTree() }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("SonataPrivateFilesChanged"))) { _ in
+            loadTree()
+            if let path = selectedFilePath {
+                loadFile(at: path)
+            }
+        }
     }
 
     // MARK: - Tree Loading

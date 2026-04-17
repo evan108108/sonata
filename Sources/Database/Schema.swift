@@ -505,6 +505,69 @@ func createSchema(in db: Database) throws {
     """)
 
     try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS appState_by_app_key ON appState(app, key)")
+
+    // MARK: emailInboxes
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS emailInboxes (
+            id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            address       TEXT NOT NULL UNIQUE,
+            role          TEXT NOT NULL,
+            displayName   TEXT,
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            autoReply     INTEGER NOT NULL DEFAULT 1,
+            dispatchTo    TEXT,
+            systemPrompt  TEXT,
+            createdAt     INTEGER NOT NULL,
+            updatedAt     INTEGER NOT NULL
+        )
+    """)
+
+    try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS emailInboxes_by_address ON emailInboxes(address)")
+    try db.execute(sql: "CREATE INDEX IF NOT EXISTS emailInboxes_by_enabled ON emailInboxes(enabled)")
+
+    // MARK: supervisorConfig (singleton row)
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS supervisorConfig (
+            id               TEXT PRIMARY KEY DEFAULT 'singleton',
+            dayIntervalSec   INTEGER NOT NULL DEFAULT 180,
+            nightIntervalSec INTEGER NOT NULL DEFAULT 1800,
+            nightStartHour   INTEGER NOT NULL DEFAULT 22,
+            nightEndHour     INTEGER NOT NULL DEFAULT 7,
+            enabled          INTEGER NOT NULL DEFAULT 1,
+            updatedAt        INTEGER NOT NULL
+        )
+    """)
+}
+
+/// Seed the supervisorConfig singleton row with defaults if not present.
+/// Idempotent — safe to call at startup or from a migration.
+func seedSupervisorConfigIfEmpty(in db: Database) throws {
+    let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM supervisorConfig") ?? 0
+    guard count == 0 else { return }
+
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+    try db.execute(sql: """
+        INSERT INTO supervisorConfig
+            (id, dayIntervalSec, nightIntervalSec, nightStartHour, nightEndHour, enabled, updatedAt)
+        VALUES
+            ('singleton', 180, 1800, 22, 7, 1, ?)
+    """, arguments: [now])
+}
+
+/// Seed the emailInboxes table with the two historically hardcoded inboxes
+/// if the table is empty. Idempotent — safe to call at startup or from a migration.
+func seedEmailInboxesIfEmpty(in db: Database) throws {
+    let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emailInboxes") ?? 0
+    guard count == 0 else { return }
+
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+    try db.execute(sql: """
+        INSERT INTO emailInboxes
+            (id, address, role, displayName, enabled, autoReply, dispatchTo, createdAt, updatedAt)
+        VALUES
+            (lower(hex(randomblob(16))), 'sona@agentmail.to',        'sona',        'Sona (Primary)', 1, 1, 'worker', ?, ?),
+            (lower(hex(randomblob(16))), 'scoutleader@agentmail.to', 'scoutleader', 'Scout Leader',    1, 1, 'worker', ?, ?)
+    """, arguments: [now, now, now, now])
 }
 
 // MARK: - Migrator Registration
@@ -513,6 +576,47 @@ extension DatabaseMigrator {
     mutating func registerSonataSchema() {
         registerMigration("v1_initial_schema") { db in
             try createSchema(in: db)
+        }
+
+        // v2: emailInboxes table + seed data for existing installs.
+        // CREATE TABLE uses IF NOT EXISTS so it's a no-op on new installs
+        // (v1 already created it). Seed is idempotent via row count check.
+        registerMigration("v2_email_inboxes") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS emailInboxes (
+                    id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                    address       TEXT NOT NULL UNIQUE,
+                    role          TEXT NOT NULL,
+                    displayName   TEXT,
+                    enabled       INTEGER NOT NULL DEFAULT 1,
+                    autoReply     INTEGER NOT NULL DEFAULT 1,
+                    dispatchTo    TEXT,
+                    systemPrompt  TEXT,
+                    createdAt     INTEGER NOT NULL,
+                    updatedAt     INTEGER NOT NULL
+                )
+            """)
+            try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS emailInboxes_by_address ON emailInboxes(address)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS emailInboxes_by_enabled ON emailInboxes(enabled)")
+            try seedEmailInboxesIfEmpty(in: db)
+        }
+
+        // v3: supervisorConfig singleton table + seed default row.
+        // CREATE TABLE uses IF NOT EXISTS so it's a no-op on new installs
+        // (v1 already created it). Seed is idempotent via row count check.
+        registerMigration("v3_supervisor_config") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS supervisorConfig (
+                    id               TEXT PRIMARY KEY DEFAULT 'singleton',
+                    dayIntervalSec   INTEGER NOT NULL DEFAULT 180,
+                    nightIntervalSec INTEGER NOT NULL DEFAULT 1800,
+                    nightStartHour   INTEGER NOT NULL DEFAULT 22,
+                    nightEndHour     INTEGER NOT NULL DEFAULT 7,
+                    enabled          INTEGER NOT NULL DEFAULT 1,
+                    updatedAt        INTEGER NOT NULL
+                )
+            """)
+            try seedSupervisorConfigIfEmpty(in: db)
         }
     }
 }
