@@ -6,6 +6,47 @@ import Hummingbird
 // Handler logic is duplicated from MemoryRoutes.swift so the two implementations
 // run side-by-side. When the old routes are retired these become canonical.
 
+// Write a memory to ~/.sonata/archive/ as a markdown file for Spotlight indexing.
+// Called when memories are archived or superseded so the full text remains searchable
+// via mdfind even after the memory leaves active recall.
+private func writeMemoryToArchive(_ row: MemoryRow) {
+    let fm = FileManager.default
+    let archiveDir = fm.homeDirectoryForCurrentUser
+        .appendingPathComponent("memory/archive")
+    try? fm.createDirectory(at: archiveDir, withIntermediateDirectories: true)
+
+    // Format date from createdAt (ms epoch)
+    let date = Date(timeIntervalSince1970: Double(row.createdAt) / 1000.0)
+    let fmt = DateFormatter()
+    fmt.dateFormat = "yyyy-MM-dd"
+    let dateStr = fmt.string(from: date)
+
+    let shortId = String(row.id.prefix(8))
+    let filename = "\(dateStr)_\(shortId).md"
+    let filePath = archiveDir.appendingPathComponent(filename)
+
+    // Build frontmatter
+    var lines: [String] = ["---"]
+    lines.append("id: \(row.id)")
+    lines.append("type: \(row.type)")
+    if let source = row.source { lines.append("source: \(source)") }
+    lines.append("importance: \(Int(row.importance))")
+    if let project = row.project { lines.append("project: \(project)") }
+    if let topic = row.topic { lines.append("topic: \(topic)") }
+    lines.append("tags: \(row.tagsJSON)")
+    lines.append("created: \(dateStr)")
+    if let status = row.status { lines.append("status: \(status)") }
+    if let supersededBy = row.supersededBy { lines.append("superseded_by: \(supersededBy)") }
+    if let revisionOf = row.revisionOf { lines.append("revision_of: \(revisionOf)") }
+    lines.append("---")
+    lines.append("")
+    lines.append(row.content)
+    lines.append("")
+
+    let content = lines.joined(separator: "\n")
+    try? content.write(to: filePath, atomically: true, encoding: .utf8)
+}
+
 private let validMemoryTypesForActions: Set<String> = [
     "learning", "observation", "decision", "preference",
     "error_pattern", "code_pattern", "conversation_summary",
@@ -492,6 +533,13 @@ let memoryActions: [SonataAction] = [
                 throw ActionError.database(error.localizedDescription)
             }
 
+            // Write the original to disk before it disappears from recall
+            var archivedOrig = orig
+            archivedOrig.status = "superseded"
+            archivedOrig.supersededBy = newId
+            writeMemoryToArchive(archivedOrig)
+            if let meili = ctx.search { await meili.indexArchivedMemory(archivedOrig) }
+
             return StoreResponse(id: newId)
         }
     ),
@@ -513,6 +561,10 @@ let memoryActions: [SonataAction] = [
 
             let now = nowMs()
             do {
+                // Fetch the memory before superseding so we can write it to disk
+                let row = try await ctx.dbPool.read { db in
+                    try MemoryRow.fetchOne(db, sql: "SELECT * FROM memories WHERE id = ?", arguments: [oldId])
+                }
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
@@ -530,6 +582,12 @@ let memoryActions: [SonataAction] = [
                         """,
                         arguments: [oldId, now, newId]
                     )
+                }
+                if var supersededRow = row {
+                    supersededRow.status = "superseded"
+                    supersededRow.supersededBy = newId
+                    writeMemoryToArchive(supersededRow)
+                    if let meili = ctx.search { await meili.indexArchivedMemory(supersededRow) }
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -552,11 +610,20 @@ let memoryActions: [SonataAction] = [
             let id = try ctx.params.require("id")
             let now = nowMs()
             do {
+                // Fetch the memory before archiving so we can write it to disk
+                let row = try await ctx.dbPool.read { db in
+                    try MemoryRow.fetchOne(db, sql: "SELECT * FROM memories WHERE id = ?", arguments: [id])
+                }
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: "UPDATE memories SET status = 'archived', updatedAt = ? WHERE id = ?",
                         arguments: [now, id]
                     )
+                }
+                if var archivedRow = row {
+                    archivedRow.status = "archived"
+                    writeMemoryToArchive(archivedRow)
+                    if let meili = ctx.search { await meili.indexArchivedMemory(archivedRow) }
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)

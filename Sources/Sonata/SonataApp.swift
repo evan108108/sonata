@@ -30,8 +30,17 @@ func ensureGlobalMCPServers() {
         sonataFileLog("MCP setup: deployed mem-server.ts to ~/.sonata/mcp/")
     }
 
+    // Copy sonata-bridge.ts from bundle (always overwrite to keep in sync with app version)
+    if let bridgeURL = Bundle.module.url(forResource: "sonata-bridge", withExtension: "ts", subdirectory: "mcp") {
+        let dest = mcpDir.appendingPathComponent("sonata-bridge.ts")
+        try? fm.removeItem(at: dest)
+        try? fm.copyItem(at: bridgeURL, to: dest)
+        sonataFileLog("MCP setup: deployed sonata-bridge.ts to ~/.sonata/mcp/")
+    }
+
     // 2. Register in both ~/.claude/mcp.json (Claude Code) and ~/.claude.json (Claude Desktop)
     let memServerPath = mcpDir.appendingPathComponent("mem-server.ts").path
+    let bridgePath = mcpDir.appendingPathComponent("sonata-bridge.ts").path
 
     let requiredServers: [String: [String: Any]] = [
         "memory": [
@@ -42,7 +51,8 @@ func ensureGlobalMCPServers() {
         "sonata-bridge": [
             "type": "stdio",
             "command": "bun",
-            "args": ["/Users/evan/memory/Sonata/sonata-bridge.ts"],
+            "args": [bridgePath],
+            "env": ["SONA_WORKER": "1"],
         ],
     ]
 
@@ -216,6 +226,11 @@ struct SonataApp: App {
                 sonataFileLog("HTTP task: entered detached task, about to build router")
 
                 // Create scheduler early so routes can reference it
+                // MeiliSearch full-text search subsystem
+                let meili = MeiliSearchManager()
+                await meili.start()
+                await meili.ensureIndexes()
+
                 let scheduler = SchedulerActor(dbPool: pool)
 
                 let router = Router(context: BasicWebSocketRequestContext.self)
@@ -224,6 +239,7 @@ struct SonataApp: App {
                 // comes from a single definition. See Sources/Actions/*.swift.
                 let registry = ActionRegistry()
                 registry.scheduler = scheduler
+                registry.search = meili
                 registry.register(memoryActions)
                 registry.register(recallActions)
                 registry.register(entityActions)
@@ -385,8 +401,14 @@ struct SonataApp: App {
                 await backupManager.start()
 
                 // 8. Wiki File Watcher (FSEvents on ~/.sonata/wiki/ and ~/.sonata/private/)
-                let wikiWatcher = WikiFileWatcher(dbPool: pool)
+                let wikiWatcher = WikiFileWatcher(dbPool: pool, search: meili)
                 await wikiWatcher.start()
+
+                // 8a. MeiliSearch initial backfill (first run or after data clear)
+                Task {
+                    await meili.backfillWiki(dbPool: pool)
+                    await meili.backfillArchive(dbPool: pool)
+                }
 
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")
 
@@ -415,6 +437,7 @@ struct SonataApp: App {
                     await healthMonitor.shutdown()
                     await backupManager.shutdown()
                     await wikiWatcher.shutdown()
+                    await meili.shutdown()
                     logger.info("Sonata shutdown complete")
                 }
 

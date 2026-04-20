@@ -150,6 +150,13 @@ private struct TokenUsageAction: Encodable {
     let truncated: Bool
 }
 
+private struct DocSearchResultResponse: Encodable {
+    let id: String
+    let title: String
+    let snippet: String
+    let index: String
+}
+
 private struct RecallResponseAction: Encodable {
     let memories: [RecallMemoryAction]
     let entities: [EntityResponse]
@@ -491,56 +498,23 @@ private func recallWanderFromAnchors(
     return (temporal: temporal, graph: graph, periphery: periphery)
 }
 
-// MARK: - Spotlight Wiki Search
+// MARK: - MeiliSearch Wiki Search
 
-private let recallWikiDir = "/Users/evan/memory/wiki"
+private let recallWikiDir = NSHomeDirectory() + "/.sonata/wiki"
 
-private func recallSpotlightSearchWiki(query: String, limit: Int = 3) async -> [WikiPageResultAction] {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-    process.arguments = ["-onlyin", recallWikiDir, query]
-
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
-
-    do {
-        try process.run()
-    } catch {
-        return []
-    }
-
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-
-    guard let output = String(data: data, encoding: .utf8), !output.isEmpty else {
-        return []
-    }
-
-    let paths = output.split(separator: "\n")
-        .map(String.init)
-        .filter { $0.hasSuffix(".md") }
-        .prefix(limit)
+private func recallSearchWiki(query: String, limit: Int = 3, search: (any SearchService)?) async -> [WikiPageResultAction] {
+    guard let search = search else { return [] }
+    let hits = await search.searchWiki(query: query, limit: limit)
 
     var results: [WikiPageResultAction] = []
-    for path in paths {
-        let relativePath = path.replacingOccurrences(of: recallWikiDir + "/", with: "")
-        let slug = relativePath.replacingOccurrences(of: ".md", with: "")
-
-        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-
-        let title: String
-        if let firstLine = content.split(separator: "\n", maxSplits: 5, omittingEmptySubsequences: true)
-            .first(where: { $0.hasPrefix("# ") }) {
-            title = String(firstLine.dropFirst(2))
-        } else {
-            title = slug
-        }
-
+    for hit in hits {
+        let slug = hit.id
+        let title = hit.title
+        let filePath = recallWikiDir + "/" + slug + ".md"
+        let content = (try? String(contentsOfFile: filePath, encoding: .utf8)) ?? ""
         let snippet = String(content.prefix(500))
-        results.append(WikiPageResultAction(slug: slug, title: title, snippet: snippet, path: path))
+        results.append(WikiPageResultAction(slug: slug, title: title, snippet: snippet, path: filePath))
     }
-
     return results
 }
 
@@ -577,9 +551,9 @@ let recallActions: [SonataAction] = [
             var timings: [String: Int] = [:]
 
             do {
-                // Concurrent: Wiki Spotlight
+                // Concurrent: Wiki search (MeiliSearch)
                 let wikiTask: Task<[WikiPageResultAction], Never> = Task {
-                    await recallSpotlightSearchWiki(query: topic, limit: 3)
+                    await recallSearchWiki(query: topic, limit: 3, search: ctx.search)
                 }
 
                 // Concurrent: Vector search
@@ -988,6 +962,47 @@ let recallActions: [SonataAction] = [
                 )
             } catch {
                 throw ActionError.custom("Recall failed: \(error.localizedDescription)", .internalServerError)
+            }
+        }
+    ),
+
+    // GET /api/recall/doc-search — full-text search across wiki pages and archived memories via MeiliSearch
+    SonataAction(
+        name: "mem_doc_search",
+        description: "Full-text search across wiki pages and archived memories.",
+        group: "/api/recall",
+        path: "/doc-search",
+        method: .get,
+        params: [
+            ActionParam("q", .string, required: true, description: "Search query"),
+            ActionParam("index", .string, description: "Index: wiki, archive, or all (default: all)"),
+            ActionParam("limit", .integer, description: "Max results (default 5)"),
+        ],
+        handler: { ctx in
+            guard let search = ctx.search else {
+                throw ActionError.custom("Search service not available", .internalServerError)
+            }
+            let q = try ctx.params.require("q")
+            let index = ctx.params.string("index") ?? "all"
+            let limit = ctx.params.int("limit") ?? 5
+
+            let results: [SearchResult]
+            switch index {
+            case "wiki":
+                results = await search.searchWiki(query: q, limit: limit)
+            case "archive":
+                results = await search.searchArchive(query: q, limit: limit)
+            default:
+                results = await search.search(query: q, limit: limit)
+            }
+
+            return results.map { r in
+                DocSearchResultResponse(
+                    id: r.id,
+                    title: r.title,
+                    snippet: r.snippet,
+                    index: r.index
+                )
             }
         }
     ),

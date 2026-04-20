@@ -163,6 +163,7 @@ let wikiActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+
             return SuccessResponse()
         }
     ),

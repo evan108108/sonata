@@ -119,15 +119,18 @@ struct ActionContext: @unchecked Sendable {
     let params: ActionParams
     let dbPool: DatabasePool
     let scheduler: SchedulerActor?
+    let search: (any SearchService)?
 
     init(
         params: ActionParams,
         dbPool: DatabasePool,
-        scheduler: SchedulerActor? = nil
+        scheduler: SchedulerActor? = nil,
+        search: (any SearchService)? = nil
     ) {
         self.params = params
         self.dbPool = dbPool
         self.scheduler = scheduler
+        self.search = search
     }
 }
 

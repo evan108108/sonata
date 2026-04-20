@@ -16,6 +16,7 @@ actor WikiFileWatcher {
     // MARK: - State
 
     private let dbPool: DatabasePool
+    private let search: (any SearchService)?
     nonisolated let logger: Logger
     nonisolated let wikiDir: String
     nonisolated let privateDir: String
@@ -24,8 +25,9 @@ actor WikiFileWatcher {
 
     // MARK: - Init
 
-    init(dbPool: DatabasePool, logger: Logger? = nil) {
+    init(dbPool: DatabasePool, search: (any SearchService)? = nil, logger: Logger? = nil) {
         self.dbPool = dbPool
+        self.search = search
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         self.wikiDir = "\(home)/.sonata/wiki"
         self.privateDir = "\(home)/.sonata/private"
@@ -131,6 +133,9 @@ actor WikiFileWatcher {
 
         if !exists {
             await archivePage(slug: slug)
+            if let search = search {
+                await search.removeWikiPage(slug: slug)
+            }
             return
         }
 
@@ -152,6 +157,15 @@ actor WikiFileWatcher {
             await markDirty(slug: slug)
         } else {
             await registerNewPage(path: path, slug: slug)
+        }
+
+        // Update MeiliSearch index
+        if let search = search {
+            let title = readFirstLineTitle(path: path) ?? slug
+            let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            let components = slug.split(separator: "/").map(String.init)
+            let namespace = components.first
+            await search.indexWikiPage(slug: slug, title: title, content: content, namespace: namespace, filePath: path)
         }
     }
 
