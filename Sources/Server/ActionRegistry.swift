@@ -9,6 +9,7 @@ import HTTPTypes
 final class ActionRegistry: @unchecked Sendable {
     private var actions: [SonataAction] = []
     private var byName: [String: SonataAction] = [:]
+    var scheduler: SchedulerActor?
 
     /// Register a batch of actions
     func register(_ newActions: [SonataAction]) {
@@ -56,6 +57,7 @@ final class ActionRegistry: @unchecked Sendable {
         action: SonataAction,
         dbPool: DatabasePool
     ) -> @Sendable (Request, Context) async throws -> Response {
+        let scheduler = self.scheduler
         return { request, context in
             do {
                 // Extract parameters based on HTTP method and param source
@@ -85,7 +87,8 @@ final class ActionRegistry: @unchecked Sendable {
 
                 let ctx = ActionContext(
                     params: ActionParams(finalParams),
-                    dbPool: dbPool
+                    dbPool: dbPool,
+                    scheduler: scheduler
                 )
                 let result = try await action.handler(ctx)
                 return jsonResponse(AnyEncodable(result))
@@ -202,7 +205,8 @@ final class ActionRegistry: @unchecked Sendable {
 
             let ctx = ActionContext(
                 params: ActionParams(finalArgs),
-                dbPool: dbPool
+                dbPool: dbPool,
+                scheduler: scheduler
             )
 
             let result = try await action.handler(ctx)

@@ -2,14 +2,8 @@ import Foundation
 import GRDB
 import Hummingbird
 
-// Phase 2 migration: action definitions for /api/cron + /api/scheduler routes.
-// Handler logic is duplicated from ScheduledJobRoutes.swift.
-//
-// Note: scheduler.reload() / scheduler.triggerNow() / scheduler.status() side-
-// effects from the original routes can't be reached through ActionContext.
-// scheduler_trigger returns SuccessResponse without invoking the scheduler;
-// scheduler_queue returns an empty list here. Phase 3 will wire up scheduler
-// access via an extended ActionContext.
+// Action definitions for /api/cron + /api/scheduler routes.
+// Scheduler side-effects (triggerNow, status) are wired via ctx.scheduler when set.
 
 private struct SchedulerQueueEntry: Encodable {
     let id: String
@@ -207,11 +201,9 @@ let schedulerActions: [SonataAction] = [
     ),
 
     // POST /api/cron/trigger?name=
-    // Original route fires via SchedulerActor.triggerNow(jobId:). Without
-    // scheduler injection this performs only the existence lookup.
     SonataAction(
         name: "scheduler_trigger",
-        description: "Trigger a scheduled job immediately (via scheduler, when wired).",
+        description: "Trigger a scheduled job immediately via SchedulerActor.",
         group: "/api/cron",
         path: "/trigger",
         method: .post,
@@ -223,25 +215,38 @@ let schedulerActions: [SonataAction] = [
             let jobId: String? = try? await ctx.dbPool.read { db in
                 try String.fetchOne(db, sql: "SELECT id FROM scheduledJobs WHERE name = ?", arguments: [name])
             }
-            guard jobId != nil else {
+            guard let id = jobId else {
                 throw ActionError.notFound("Job not found: \(name)")
+            }
+            if let scheduler = ctx.scheduler {
+                await scheduler.triggerNow(jobId: id)
             }
             return SuccessResponse()
         }
     ),
 
     // GET /api/scheduler/queue
-    // Original route returns SchedulerActor.status(). Without scheduler
-    // injection this returns an empty queue.
     SonataAction(
         name: "scheduler_queue",
-        description: "Expose the in-memory scheduler queue (empty until scheduler is wired).",
+        description: "Expose the in-memory scheduler queue from SchedulerActor.status().",
         group: "/api/scheduler",
         path: "/queue",
         method: .get,
         params: [],
-        handler: { _ in
-            [SchedulerQueueEntry]()
+        handler: { ctx in
+            guard let scheduler = ctx.scheduler else {
+                return [SchedulerQueueEntry]()
+            }
+            let entries = await scheduler.status()
+            let iso = ISO8601DateFormatter()
+            return entries.map { entry in
+                SchedulerQueueEntry(
+                    id: entry.id,
+                    name: entry.name,
+                    type: entry.type,
+                    nextFire: iso.string(from: entry.nextFire)
+                )
+            }
         }
     ),
 ]

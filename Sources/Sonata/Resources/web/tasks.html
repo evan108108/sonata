@@ -31,27 +31,47 @@
 <script src="shared.js"></script>
 <script>
 let tasks = [];
+let stats = null;
 let filter = '';
 let selectedId = null;
+const finishedLimits = { completed: 20, failed: 20, cancelled: 20 };
 
 const STATUS_ORDER = ['active', 'in_progress', 'pending', 'completed', 'done', 'failed', 'cancelled'];
 const STATUS_COLOR = {
   active: 'green', in_progress: 'green',
   pending: 'yellow',
   completed: 'blue', done: 'blue',
-  failed: 'red', cancelled: 'red',
+  failed: 'red', cancelled: 'purple',
 };
 
 async function loadTasks() {
   const list = document.getElementById('list');
   showLoading(list);
   try {
-    const data = await apiGet('/api/task/list', { limit: 200 });
-    tasks = data.tasks || data.items || data || [];
+    // Fetch stats for real totals
+    stats = await apiGet('/api/task/stats');
+    // Fetch active + pending fully (always small)
+    const [active, pending, completed, failed, cancelled] = await Promise.all([
+      apiGet('/api/task/list', { limit: 500, status: 'active' }),
+      apiGet('/api/task/list', { limit: 500, status: 'pending' }),
+      apiGet('/api/task/list', { limit: finishedLimits.completed, status: 'completed' }),
+      apiGet('/api/task/list', { limit: finishedLimits.failed, status: 'failed' }),
+      apiGet('/api/task/list', { limit: finishedLimits.cancelled, status: 'cancelled' }),
+    ]);
+    const toArr = d => d.tasks || d.items || d || [];
+    // Each finished status gets its own limit
+    tasks = [...toArr(pending), ...toArr(active), ...toArr(completed).slice(0, finishedLimits.completed), ...toArr(failed).slice(0, finishedLimits.failed), ...toArr(cancelled).slice(0, finishedLimits.cancelled)];
     renderList();
   } catch (e) {
     showError(list, e);
   }
+}
+
+async function loadMore(status) {
+  if (finishedLimits[status] !== undefined) {
+    finishedLimits[status] += 20;
+  }
+  await loadTasks();
 }
 
 function renderList() {
@@ -76,10 +96,25 @@ function renderList() {
     Object.keys(groups).filter(s => !STATUS_ORDER.includes(s))
   );
 
+  // Show real totals from stats in section headers
+  const realCount = (status) => {
+    if (!stats) return null;
+    const s = status.toLowerCase();
+    if (s === 'active' || s === 'in_progress') return stats.active;
+    if (s === 'pending') return stats.pending;
+    if (s === 'completed' || s === 'done') return stats.completed;
+    if (s === 'failed') return stats.failed;
+    if (s === 'cancelled') return stats.cancelled;
+    return null;
+  };
+
   list.innerHTML = ordered.map(status => {
     const items = groups[status];
     const color = STATUS_COLOR[status] || '';
-    return `<div class="section-header">${escapeHtml(status)} (${items.length})</div>` +
+    const total = realCount(status);
+    const countLabel = total !== null && total !== items.length ? `${items.length} of ${total}` : `${items.length}`;
+    const sectionHasMore = total !== null && total > items.length && finishedLimits[status] !== undefined;
+    return `<div class="section-header">${escapeHtml(status)} (${countLabel})</div>` +
       items.map(t => {
         const id = t.id || t._id || '';
         return `<div class="sidebar-item ${id === selectedId ? 'active' : ''}" data-id="${escapeHtml(id)}">
@@ -89,7 +124,8 @@ function renderList() {
             ${escapeHtml(fmtDate(t.createdAt || t.created_at))}
           </span>
         </div>`;
-      }).join('');
+      }).join('') +
+      (sectionHasMore ? `<div class="sidebar-item" style="text-align:center;opacity:0.6;cursor:pointer;" onclick="loadMore('${status}')">Load more ${escapeHtml(status)}…</div>` : '');
   }).join('');
 
   list.querySelectorAll('.sidebar-item').forEach(el => {

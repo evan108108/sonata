@@ -118,6 +118,17 @@ struct ActionParams: @unchecked Sendable {
 struct ActionContext: @unchecked Sendable {
     let params: ActionParams
     let dbPool: DatabasePool
+    let scheduler: SchedulerActor?
+
+    init(
+        params: ActionParams,
+        dbPool: DatabasePool,
+        scheduler: SchedulerActor? = nil
+    ) {
+        self.params = params
+        self.dbPool = dbPool
+        self.scheduler = scheduler
+    }
 }
 
 // MARK: - Action Error

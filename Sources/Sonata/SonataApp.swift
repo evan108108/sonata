@@ -223,6 +223,7 @@ struct SonataApp: App {
                 // Unified action registry — every HTTP endpoint and MCP tool
                 // comes from a single definition. See Sources/Actions/*.swift.
                 let registry = ActionRegistry()
+                registry.scheduler = scheduler
                 registry.register(memoryActions)
                 registry.register(recallActions)
                 registry.register(entityActions)

@@ -74,20 +74,3 @@ struct ContentView: View {
         .focusedSceneValue(\.selectedTab, $selectedTab)
     }
 }
-
-struct PlaceholderTab: View {
-    let name: String
-    let icon: String
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: icon)
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("\(name) — coming soon")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}

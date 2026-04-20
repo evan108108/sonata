@@ -172,12 +172,14 @@ let taskActions: [SonataAction] = [
         method: .get,
         params: [
             ActionParam("limit", .integer, description: "Max results (default 50)"),
+            ActionParam("offset", .integer, description: "Skip N results (for pagination, default 0)"),
             ActionParam("status", .string, description: "Filter by status"),
             ActionParam("project", .string, description: "Filter by project"),
             ActionParam("assignedTo", .string, description: "Filter by assignee"),
         ],
         handler: { ctx in
             let limit = ctx.params.int("limit") ?? 50
+            let offset = ctx.params.int("offset") ?? 0
             let status = ctx.params.string("status")
             let project = ctx.params.string("project")
             let assignedTo = ctx.params.string("assignedTo")
@@ -197,8 +199,9 @@ let taskActions: [SonataAction] = [
                 sql += " AND assignedTo = ?"
                 args.append(a)
             }
-            sql += " ORDER BY createdAt DESC LIMIT ?"
+            sql += " ORDER BY createdAt DESC LIMIT ? OFFSET ?"
             args.append(limit)
+            args.append(offset)
 
             do {
                 let rows = try await ctx.dbPool.read { db in

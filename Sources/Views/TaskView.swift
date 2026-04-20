@@ -24,7 +24,7 @@ struct TaskView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("Tasks")
+                Text("Tasks (v2)")
                     .font(.title.bold())
                 Spacer()
 
@@ -113,6 +113,18 @@ struct TaskView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
+                        }
+                        if vm.hasMoreCompleted {
+                            Button {
+                                Task { await vm.loadMore() }
+                            } label: {
+                                Text("Load more completed tasks…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderless)
+                            .padding(.vertical, 6)
                         }
                     }
                     .listStyle(.sidebar)

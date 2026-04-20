@@ -2,12 +2,8 @@ import Foundation
 import GRDB
 import Hummingbird
 
-// Phase 2 migration: action definitions for /api/calendar routes.
-// Handler logic is duplicated from CalendarRoutes.swift.
-//
-// Note: scheduler.reload() / scheduler.triggerNow() side-effects from the
-// original routes are omitted here — SchedulerActor isn't reachable through
-// ActionContext. They'll be wired up in Phase 3 when actions replace routes.
+// Action definitions for /api/calendar routes.
+// Scheduler side-effects (triggerNow) are wired via ctx.scheduler when set.
 
 private func rowToCalendarResponseForAction(_ row: CalendarEventRow) -> CalendarEventResponse {
     CalendarEventResponse(
@@ -386,11 +382,9 @@ let calendarActions: [SonataAction] = [
     ),
 
     // POST /api/calendar/trigger?id=
-    // Original route fires the event via SchedulerActor.triggerNow. Without
-    // scheduler injection (see file header note) this is a no-op acknowledgement.
     SonataAction(
         name: "calendar_trigger",
-        description: "Trigger a calendar event to run immediately (via scheduler, when wired).",
+        description: "Trigger a calendar event to run immediately via SchedulerActor.",
         group: "/api/calendar",
         path: "/trigger",
         method: .post,
@@ -398,7 +392,10 @@ let calendarActions: [SonataAction] = [
             ActionParam("id", .string, required: true, description: "Event id", source: .query),
         ],
         handler: { ctx in
-            _ = try ctx.params.require("id")
+            let id = try ctx.params.require("id")
+            if let scheduler = ctx.scheduler {
+                await scheduler.triggerNow(jobId: id)
+            }
             return SuccessResponse()
         }
     ),
