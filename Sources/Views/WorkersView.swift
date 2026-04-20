@@ -330,6 +330,8 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
         let commonPaths = [
             "\(home)/.local/bin",
+            "\(home)/.bun/bin",
+            "\(home)/.nvm/versions/node/v25.8.1/bin",
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "/usr/bin",
@@ -345,6 +347,23 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("WORKER_ID=\(workerId)")
         env.append("SONA_WORKER=1")
 
+        // Pass through auth and API keys from parent environment or .env file
+        let passthrough = [
+            "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+            "AGENTMAIL_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+            "CF_D1_EDIT_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
+            "EYEBROWSE_URL", "EYEBROWSE_TOKEN",
+        ]
+        // Try parent env first, then ~/.sonata/.env
+        let dotEnv = loadDotEnv(path: "\(home)/.sonata/.env")
+        for key in passthrough {
+            if let val = ProcessInfo.processInfo.environment[key] {
+                env.append("\(key)=\(val)")
+            } else if let val = dotEnv[key] {
+                env.append("\(key)=\(val)")
+            }
+        }
+
         if let extra = ProcessInfo.processInfo.environment["SONA_EXTRA_ENV"] {
             for item in extra.components(separatedBy: ",") where !item.isEmpty {
                 env.append(item)
@@ -352,6 +371,21 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
 
         return env
+    }
+
+    private static func loadDotEnv(path: String) -> [String: String] {
+        guard let data = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
+        var result: [String: String] = [:]
+        for line in data.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            if let eqRange = trimmed.range(of: "=") {
+                let key = String(trimmed[trimmed.startIndex..<eqRange.lowerBound])
+                let val = String(trimmed[eqRange.upperBound...])
+                result[key] = val
+            }
+        }
+        return result
     }
 
     // MARK: - LocalProcessTerminalViewDelegate
