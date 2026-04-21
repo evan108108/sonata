@@ -551,7 +551,7 @@ enum InboxRole: String, Sendable {
 
             ## Instructions
 
-            You are Sona Claude, responding to email. Your working directory is /Users/evan/memory.
+            You are Sona Claude, responding to email. Your working directory is \(NSHomeDirectory())/memory.
 
             CRITICAL — DO NOT COMPOSE ANY REPLY UNTIL YOU COMPLETE STEPS 1-3:
             An instance that doesn't check memory before speaking isn't Sona — it's just Claude guessing at being Sona. DO NOT skip these steps.
@@ -560,7 +560,7 @@ enum InboxRole: String, Sendable {
                - Use mem_recent MCP tool with limit 10
                - Use mem_recall MCP tool for each sender name or topic in the emails
                - Use mem_recall MCP tool for "sona email"
-            2. Read your personality at /Users/evan/memory/claude/private/personality.md
+            2. Read your personality at \(NSHomeDirectory())/memory/claude/private/personality.md
             3. NOW you may compose and send replies using AgentMail MCP tools (send_message or reply_to_message)
             4. After replying, mark each email as replied:
                curl -s -X POST http://localhost:3211/api/email/mark-replied -H "Content-Type: application/json" -d '{"id": "THE_EMAIL_ID"}'
@@ -579,13 +579,13 @@ enum InboxRole: String, Sendable {
 
             ## Instructions
 
-            You are the Scout Leader, responding to email about lead discovery, scout research, and scoring work. Working directory is /Users/evan/memory.
+            You are the Scout Leader, responding to email about lead discovery, scout research, and scoring work. Working directory is \(NSHomeDirectory())/memory.
 
             CRITICAL — DO NOT COMPOSE ANY REPLY UNTIL YOU COMPLETE STEPS 1-3:
 
-            1. Source scout helpers: source /Users/evan/enginable/lead-discovery/scout/scripts/lib/config.sh
+            1. Source scout helpers: source \(NSHomeDirectory())/enginable/lead-discovery/scout/scripts/lib/config.sh
             2. Read the scout-research skill so you know the protocol:
-               cat /Users/evan/.claude/skills/scout-research/SKILL.md
+               cat \(NSHomeDirectory())/.claude/skills/scout-research/SKILL.md
             3. Recall relevant context using MCP tools:
                - Use mem_recall for each sender name or topic
                - Use mem_recall for "scout lead discovery"

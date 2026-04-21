@@ -100,7 +100,7 @@ enum WikiCompilationJob {
                 taskId,
                 title,
                 prompt,
-                "/Users/evan/memory",
+                "\(NSHomeDirectory())/memory",
                 "claude-sonnet-4-6",
                 50,
                 now,
@@ -131,8 +131,8 @@ enum WikiCompilationJob {
 
         The script is PAGINATED. First get the count, then fetch in batches of 20:
         ```bash
-        /Users/evan/memory/claude/scripts/wiki-memories.sh <namespace> <topic> --count
-        /Users/evan/memory/claude/scripts/wiki-memories.sh <namespace> <topic> --limit 20 --offset 0
+        \(NSHomeDirectory())/memory/claude/scripts/wiki-memories.sh <namespace> <topic> --count
+        \(NSHomeDirectory())/memory/claude/scripts/wiki-memories.sh <namespace> <topic> --limit 20 --offset 0
         ```
 
         **For CATEGORY pages** (index format):

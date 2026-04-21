@@ -286,7 +286,7 @@ struct SonataApp: App {
 
                 // Serve web dashboard files (HTML/CSS/JS)
                 let webPaths = [
-                    "/Users/evan/memory/Sonata/Sources/Sonata/Resources/web",
+                    "\(NSHomeDirectory())/memory/Sonata/Sources/Sonata/Resources/web",
                     Bundle.main.resourcePath.map { "\($0)/web" },
                     Bundle.main.resourcePath.map { "\($0)/Resources/web" },
                 ].compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0) }

@@ -184,7 +184,8 @@ let systemActions: [SonataAction] = [
         method: .post,
         params: [],
         handler: { _ in
-            let sourceDir = "/Users/evan/memory/Sonata"
+            let home = NSHomeDirectory()
+            let sourceDir = "\(home)/memory/Sonata"
             let binarySrc = "\(sourceDir)/.build/arm64-apple-macosx/debug/Sonata"
             let binaryDst = "/Applications/Sonata.app/Contents/MacOS/Sonata"
             let appPath = "/Applications/Sonata.app"

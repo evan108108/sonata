@@ -709,13 +709,13 @@ let compositeActions: [SonataAction] = [
         params: [
             ActionParam("task", .string, required: true, description: "Task prompt"),
             ActionParam("model", .string, description: "Model: opus, sonnet (default sonnet)"),
-            ActionParam("dir", .string, description: "Working directory (default /Users/evan/memory)"),
+            ActionParam("dir", .string, description: "Working directory (default ~/memory)"),
         ],
         mcpOnly: true,
         handler: { ctx in
             let task = try ctx.params.require("task")
             let model = ctx.params.string("model") ?? "sonnet"
-            let dir = ctx.params.string("dir") ?? "/Users/evan/memory"
+            let dir = ctx.params.string("dir") ?? "\(NSHomeDirectory())/memory"
             let id = newUUID()
             let now = nowMs()
             do {

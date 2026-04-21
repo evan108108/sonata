@@ -50,11 +50,12 @@ enum ClaudeProcessManager {
         model: String? = nil,
         maxTurns: Int = 15,
         label: String = "sonata",
-        cwd: String = "/Users/evan/memory",
+        cwd: String? = nil,
         timeoutMs: Int? = nil,
         sessionId: String? = nil
     ) async throws -> ClaudeResult {
         let timeout = timeoutMs ?? defaultTimeoutMs
+        let cwd = cwd ?? "\(NSHomeDirectory())/memory"
         let startTime = ContinuousClock.now
 
         // Build arguments
