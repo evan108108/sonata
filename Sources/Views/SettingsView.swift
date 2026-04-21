@@ -169,6 +169,12 @@ struct SettingsView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
 
+                    // MARK: - Worker Cycling Section
+                    WorkerCyclingSettingsView()
+                        .background(.background)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+
                     // MARK: - Supervisor Schedule Section
                     SupervisorConfigView()
                         .background(.background)
@@ -302,6 +308,101 @@ struct SecretEntry: Identifiable, Codable {
     let name: String
     let value: String
     let description: String
+}
+
+// MARK: - Worker Cycling Settings
+
+struct WorkerCyclingSettingsView: View {
+    @State private var cycleTasks: Int = {
+        let val = UserDefaults.standard.integer(forKey: "sonata.cycleTasks")
+        return val > 0 ? val : 4
+    }()
+    @State private var spawnTimeout: Int = {
+        let val = UserDefaults.standard.integer(forKey: "sonata.spawnTimeout")
+        return val > 0 ? val : 30
+    }()
+    @State private var sigtermGrace: Int = {
+        let val = UserDefaults.standard.integer(forKey: "sonata.sigtermGrace")
+        return val > 0 ? val : 10
+    }()
+    @State private var cycleFailAlert: Int = {
+        let val = UserDefaults.standard.integer(forKey: "sonata.cycleFailAlert")
+        return val > 0 ? val : 3
+    }()
+    @State private var pauseCycling: Bool = UserDefaults.standard.bool(forKey: "sonata.pauseCycling")
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Worker Cycling")
+                    .font(.headline)
+                Spacer()
+                if pauseCycling {
+                    Text("PAUSED")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.yellow.opacity(0.2), in: Capsule())
+                        .foregroundStyle(.yellow)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            VStack(spacing: 12) {
+                settingRow(label: "Cycle after N tasks", description: "Replace worker process after this many completed tasks. 0 = disabled.", value: $cycleTasks, range: 0...50, key: "sonata.cycleTasks")
+
+                settingRow(label: "Spawn timeout", description: "Seconds to wait for replacement to register.", value: $spawnTimeout, range: 5...300, key: "sonata.spawnTimeout")
+
+                settingRow(label: "SIGTERM grace", description: "Seconds after SIGTERM before SIGKILL.", value: $sigtermGrace, range: 1...60, key: "sonata.sigtermGrace")
+
+                settingRow(label: "Failure alert threshold", description: "Consecutive spawn failures before supervisor alert.", value: $cycleFailAlert, range: 1...20, key: "sonata.cycleFailAlert")
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Pause cycling")
+                            .font(.body)
+                        Text("Temporarily disable cycling without changing threshold")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $pauseCycling)
+                        .toggleStyle(.switch)
+                        .onChange(of: pauseCycling) { _, newValue in
+                            UserDefaults.standard.set(newValue, forKey: "sonata.pauseCycling")
+                            WorkerManager.shared.isCyclingPaused = newValue
+                        }
+                }
+                .padding(.horizontal)
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private func settingRow(label: String, description: String, value: Binding<Int>, range: ClosedRange<Int>, key: String) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.body)
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Stepper(value: value, in: range) {
+                Text("\(value.wrappedValue)")
+                    .font(.body.monospacedDigit())
+                    .frame(minWidth: 30, alignment: .trailing)
+            }
+            .onChange(of: value.wrappedValue) { _, newValue in
+                UserDefaults.standard.set(newValue, forKey: key)
+            }
+        }
+        .padding(.horizontal)
+    }
 }
 
 // MARK: - Add Secret Sheet

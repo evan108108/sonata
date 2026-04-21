@@ -96,11 +96,16 @@ actor SonataChannelServer {
 
         do {
             try await dbPool.write { db in
-                // Create the worker event
+                // Look up worker's sessionId for cycling/resume
+                let workerSessionId = try String.fetchOne(db, sql: """
+                    SELECT sessionId FROM workers WHERE workerId = ?
+                """, arguments: [workerId])
+
+                // Create the worker event (copy sessionId from worker)
                 try db.execute(sql: """
-                    INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt)
-                    VALUES (?, 'task', ?, ?, ?, 'assigned', ?, ?)
-                """, arguments: [eventId, payloadJSON, priority, workerId, now, now])
+                    INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, sessionId)
+                    VALUES (?, 'task', ?, ?, ?, 'assigned', ?, ?, ?)
+                """, arguments: [eventId, payloadJSON, priority, workerId, now, now, workerSessionId])
 
                 // Mark worker as busy
                 try db.execute(sql: """

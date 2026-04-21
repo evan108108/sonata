@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <title>Tasks — Sonata</title>
 <link rel="stylesheet" href="shared.css">
+<style>
+.resume-btn {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid #a855f7;
+  color: #a855f7;
+  background: transparent;
+  cursor: pointer;
+}
+.resume-btn:hover { background: rgba(168, 85, 247, 0.15); }
+</style>
 </head>
 <body>
 <div class="app">
@@ -155,9 +167,63 @@ function selectItem(id) {
     ${t.prompt ? `<div class="section-header">Prompt</div><pre>${escapeHtml(t.prompt)}</pre>` : ''}
     ${t.result ? `<div class="section-header">Result</div><pre>${escapeHtml(typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2))}</pre>` : ''}
     ${t.error ? `<div class="section-header">Error</div><pre style="color:var(--red);">${escapeHtml(t.error)}</pre>` : ''}
+    <div id="attempts-section"></div>
     <div class="section-header">Raw</div>
     <pre style="font-size:10px;color:var(--text-dim);">${escapeHtml(JSON.stringify(t, null, 2))}</pre>
   `;
+
+  // Load worker event attempts for this task
+  if (status === 'completed' || status === 'failed') {
+    loadAttempts(id, t.title);
+  }
+}
+
+async function loadAttempts(taskId, taskTitle) {
+  const section = document.getElementById('attempts-section');
+  if (!section) return;
+  try {
+    const events = await apiGet('/api/worker/events/recent', { limit: 200 });
+    const arr = Array.isArray(events) ? events : (events.items || []);
+    const attempts = arr.filter(e => {
+      try { return e.payload && e.payload.includes(taskId); } catch { return false; }
+    });
+    if (!attempts.length) return;
+
+    const rows = attempts.map((a, i) => {
+      const statusColor = a.status === 'completed' ? 'green' : a.status === 'failed' ? 'red' : 'blue';
+      const duration = a.assignedAt && a.completedAt
+        ? `${Math.round((a.completedAt - a.assignedAt) / 1000)}s`
+        : '';
+      const resumeBtn = a.sessionId && a.status !== 'assigned'
+        ? `<button class="resume-btn" onclick="openInspector('${escapeHtml(a.sessionId)}', '${escapeHtml(taskTitle || '')}')">Resume</button>`
+        : a.status === 'assigned'
+        ? '<span style="color:var(--blue);font-size:11px;font-style:italic;">(in progress)</span>'
+        : '';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+        <span class="badge ${statusColor}">${escapeHtml(a.status)}</span>
+        ${a.assignedTo ? `<span style="font-size:11px;color:var(--text-dim);font-family:monospace;">${escapeHtml(a.assignedTo)}</span>` : ''}
+        ${duration ? `<span style="font-size:11px;color:var(--text-dim);">${duration}</span>` : ''}
+        <span style="flex:1;"></span>
+        ${resumeBtn}
+      </div>`;
+    }).join('');
+
+    section.innerHTML = `<div class="section-header">Worker Attempts (${attempts.length})</div>${rows}`;
+  } catch (e) {
+    // silently fail — attempts are optional
+  }
+}
+
+async function openInspector(sessionId, title) {
+  try {
+    await fetch('/api/worker/inspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, title }),
+    });
+  } catch (e) {
+    console.error('Failed to open inspector:', e);
+  }
 }
 
 document.getElementById('q').addEventListener('input', debounce(e => { filter = e.target.value.trim(); renderList(); }, 150));

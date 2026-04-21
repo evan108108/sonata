@@ -19,6 +19,7 @@ import {
 const SONATA_API = process.env.SONATA_API || "http://localhost:3211";
 const WORKER_ID = process.env.WORKER_ID || `worker-${Date.now().toString(36)}`;
 const SESSION_LABEL = process.env.SESSION_LABEL || "worker";
+const SONA_SESSION_ID = process.env.SONA_SESSION_ID || undefined;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
@@ -27,6 +28,7 @@ let lastProgressMs = Date.now();
 const IS_WORKER = process.env.SONA_WORKER === "1";
 const SONATA_ROLE = process.env.SONATA_ROLE || "worker";
 const IS_SUPERVISOR = SONATA_ROLE === "supervisor";
+const IS_INSPECTOR = SONATA_ROLE === "inspector";
 
 // --- MCP Server ---
 
@@ -91,7 +93,7 @@ Read and acknowledge the alert. Call complete_event.`,
 // --- Tools ---
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+  tools: IS_INSPECTOR ? [] : [
     {
       name: "complete_event",
       description: "Mark a worker event as completed.",
@@ -162,7 +164,9 @@ console.error(`[sonata-bridge] Connected. Worker: ${WORKER_ID}`);
 
 // --- Worker mode ---
 
-if (IS_WORKER || IS_SUPERVISOR) {
+if (IS_INSPECTOR) {
+  console.error(`[sonata-bridge] Inspector mode — no registration, no claim, no heartbeat. MCP tools available.`);
+} else if (IS_WORKER || IS_SUPERVISOR) {
   // Register
   if (IS_SUPERVISOR) {
     try {
@@ -183,6 +187,7 @@ if (IS_WORKER || IS_SUPERVISOR) {
         body: JSON.stringify({
           workerId: WORKER_ID,
           sessionLabel: SESSION_LABEL,
+          sessionId: SONA_SESSION_ID,
           capabilities: ["email", "task", "alert"],
         }),
       });

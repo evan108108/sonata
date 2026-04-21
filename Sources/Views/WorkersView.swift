@@ -7,12 +7,14 @@ import AppKit
 class Worker: ObservableObject, Identifiable {
     let id: String
     let label: String
+    let sessionId: String  // Claude --session-id UUID for cycling/resume
 
     @Published var status: WorkerStatus = .starting
     @Published var currentTask: String = ""
     @Published var currentEventId: String = ""
     @Published var taskStartedAt: Int64 = 0
     @Published var eventsHandled: Int = 0
+    @Published var tasksSinceSpawn: Int = 0
 
     let terminalView: LocalProcessTerminalView
     var coordinator: WorkerCoordinator?
@@ -20,6 +22,7 @@ class Worker: ObservableObject, Identifiable {
     init(label: String) {
         self.id = "worker-\(Date().timeIntervalSince1970.description.replacingOccurrences(of: ".", with: "").suffix(10))"
         self.label = label
+        self.sessionId = UUID().uuidString.lowercased()
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     }
 
@@ -37,6 +40,7 @@ class Worker: ObservableObject, Identifiable {
         case busy = "Busy"
         case offline = "Offline"
         case restarting = "Restarting"
+        case draining = "Draining"
 
         var color: SwiftUI.Color {
             switch self {
@@ -44,6 +48,7 @@ class Worker: ObservableObject, Identifiable {
             case .idle: return .green
             case .busy: return .orange
             case .offline: return .red
+            case .draining: return .purple
             }
         }
 
@@ -54,6 +59,7 @@ class Worker: ObservableObject, Identifiable {
             case .busy: return "bolt.circle.fill"
             case .offline: return "xmark.circle"
             case .restarting: return "arrow.clockwise"
+            case .draining: return "arrow.triangle.2.circlepath"
             }
         }
     }
@@ -66,8 +72,11 @@ class WorkerManager: ObservableObject {
 
     @Published var workers: [Worker] = []
     @Published var selectedWorkerId: String?
+    @Published var isCyclingPaused: Bool = CycleSettings.shared.pauseCycling
 
     private var healthTimer: Timer?
+    private let cycleStrategy: CycleStrategy = TaskCountStrategy()
+    private var cycleFailureCount: [String: Int] = [:]  // worker label → consecutive failures
 
     /// Default number of workers to spawn on launch — stored in UserDefaults.
     static var defaultWorkerCount: Int {
@@ -155,6 +164,145 @@ class WorkerManager: ObservableObject {
         worker.coordinator?.restart()
     }
 
+    // MARK: - Worker Cycling
+
+    /// Called by the HTTP complete/fail handlers via NotificationCenter.
+    /// Evaluates whether the worker should be cycled.
+    func onEventCompleted(workerId: String) {
+        guard let worker = workers.first(where: { $0.id == workerId }) else { return }
+        worker.tasksSinceSpawn += 1
+        worker.eventsHandled += 1
+
+        let settings = CycleSettings.shared
+
+        // Refresh pause state for UI
+        isCyclingPaused = settings.pauseCycling
+
+        if settings.pauseCycling {
+            print("[cycle] Cycling paused — skipping evaluation for \(worker.label)")
+            return
+        }
+
+        if cycleStrategy.shouldCycle(tasksSinceSpawn: worker.tasksSinceSpawn, settings: settings) {
+            print("[cycle] threshold-reached: \(worker.label) tasks=\(worker.tasksSinceSpawn)")
+            cycleWorker(worker)
+        }
+    }
+
+    /// Spawn replacement → drain old → SIGTERM → SIGKILL if needed.
+    private func cycleWorker(_ oldWorker: Worker) {
+        let slotLabel = oldWorker.label
+        let settings = CycleSettings.shared
+
+        // Mark old worker draining in DB
+        oldWorker.status = .draining
+        let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+        Task {
+            var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/drain?workerId=\(oldWorker.id)")!)
+            req.httpMethod = "POST"
+            _ = try? await URLSession.shared.data(for: req)
+        }
+
+        print("[cycle] spawn-started: \(slotLabel)")
+
+        // Spawn replacement with same label
+        let newWorker = Worker(label: slotLabel)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.workers.append(newWorker)
+            newWorker.startProcess()
+        }
+
+        // Wait for registration, then teardown old
+        let spawnTimeout = settings.spawnTimeout
+        let sigtermGrace = settings.sigtermGrace
+        DispatchQueue.global().asyncAfter(deadline: .now() + spawnTimeout) { [weak self] in
+            guard let self else { return }
+
+            // Check if new worker registered (status != .starting)
+            DispatchQueue.main.async {
+                if newWorker.status == .starting || newWorker.status == .offline {
+                    // Spawn failed
+                    print("[cycle] spawn-failed: \(slotLabel)")
+                    self.handleSpawnFailure(oldWorker: oldWorker, newWorker: newWorker, slotLabel: slotLabel)
+                    return
+                }
+
+                print("[cycle] spawn-succeeded: \(slotLabel) newSessionId=\(newWorker.sessionId)")
+
+                // Teardown old worker
+                self.teardownWorker(oldWorker, sigtermGrace: sigtermGrace, slotLabel: slotLabel)
+
+                // Reset failure counter on success
+                self.cycleFailureCount[slotLabel] = 0
+            }
+        }
+    }
+
+    private func handleSpawnFailure(oldWorker: Worker, newWorker: Worker, slotLabel: String) {
+        // Kill the nascent replacement
+        newWorker.coordinator?.stop()
+        workers.removeAll { $0.id == newWorker.id }
+
+        // Un-drain the old worker
+        oldWorker.status = .idle
+        let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+        Task {
+            var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/undrain?workerId=\(oldWorker.id)")!)
+            req.httpMethod = "POST"
+            _ = try? await URLSession.shared.data(for: req)
+        }
+
+        // Track consecutive failures
+        let count = (cycleFailureCount[slotLabel] ?? 0) + 1
+        cycleFailureCount[slotLabel] = count
+        print("[cycle] cycle-aborted: \(slotLabel) consecutiveFailures=\(count)")
+
+        if count >= CycleSettings.shared.cycleFailAlert {
+            alertSupervisor(message: "Worker cycling failed \(count) times for slot \(slotLabel). Old worker continues serving.")
+        }
+    }
+
+    private func teardownWorker(_ worker: Worker, sigtermGrace: TimeInterval, slotLabel: String) {
+        print("[cycle] term-sent: \(slotLabel) pid=\(worker.coordinator?.terminalView?.process?.shellPid ?? 0)")
+        worker.coordinator?.autoRestartEnabled = false
+        worker.coordinator?.terminalView?.terminate()  // SIGTERM
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + sigtermGrace) { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                if worker.status != .offline {
+                    // Still alive after grace — SIGKILL
+                    print("[cycle] kill-required: \(slotLabel)")
+                    if let view = worker.coordinator?.terminalView, view.process?.shellPid ?? 0 > 0 {
+                        kill(view.process.shellPid, SIGKILL)
+                    }
+                    self.alertSupervisor(message: "Worker \(slotLabel) required SIGKILL — idle worker refused to exit after SIGTERM.")
+                }
+                print("[cycle] exit-observed: \(slotLabel)")
+                self.workers.removeAll { $0.id == worker.id }
+                // Select the replacement if nothing selected
+                if self.selectedWorkerId == worker.id {
+                    self.selectedWorkerId = self.workers.first?.id
+                }
+            }
+        }
+    }
+
+    private func alertSupervisor(message: String) {
+        let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+        Task {
+            var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/supervisor/alert")!)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "type": "cycle-failure",
+                "message": message
+            ])
+            _ = try? await URLSession.shared.data(for: req)
+        }
+    }
+
     private func startHealthPolling() {
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.pollHealth()
@@ -185,6 +333,7 @@ class WorkerManager: ObservableObject {
                         case "idle": worker.status = .idle
                         case "busy": worker.status = .busy
                         case "offline": worker.status = .offline
+                        case "draining": worker.status = .draining
                         default: break
                         }
                         if let eventId = info["currentEventId"] as? String, !eventId.isEmpty {
@@ -218,7 +367,7 @@ class WorkerManager: ObservableObject {
 class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     weak var terminalView: LocalProcessTerminalView?
     let worker: Worker
-    private var autoRestartEnabled = true
+    var autoRestartEnabled = true
     private var contextWatchTimer: Timer?
 
     init(worker: Worker) {
@@ -228,7 +377,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     func startProcess() {
         guard let view = terminalView else { return }
 
-        let env = WorkerCoordinator.buildEnvironment(workerId: worker.id)
+        let env = WorkerCoordinator.buildEnvironment(workerId: worker.id, sessionId: worker.sessionId)
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -238,6 +387,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             terminal.resetToInitialState()
 
             var args: [String] = []
+            args.append(contentsOf: ["--session-id", self.worker.sessionId])
             if WorkerManager.skipPermissions {
                 args.append("--dangerously-skip-permissions")
             }
@@ -258,6 +408,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             // Register worker with Sonata HTTP API and set status to idle after startup
             let workerId = worker.id
             let label = worker.label
+            let workerSessionId = worker.sessionId
             let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
             DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
                 // Register
@@ -267,6 +418,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 req.httpBody = try? JSONSerialization.data(withJSONObject: [
                     "workerId": workerId,
                     "sessionLabel": label,
+                    "sessionId": workerSessionId,
                     "capabilities": ["task", "email"]
                 ])
                 URLSession.shared.dataTask(with: req) { _, _, _ in
@@ -324,7 +476,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
     }
 
-    static func buildEnvironment(workerId: String) -> [String] {
+    static func buildEnvironment(workerId: String, sessionId: String? = nil) -> [String] {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
@@ -346,6 +498,9 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("HOME=\(home)")
         env.append("WORKER_ID=\(workerId)")
         env.append("SONA_WORKER=1")
+        if let sessionId {
+            env.append("SONA_SESSION_ID=\(sessionId)")
+        }
 
         // Pass through auth and API keys from parent environment or .env file
         let passthrough = [
@@ -373,7 +528,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         return env
     }
 
-    private static func loadDotEnv(path: String) -> [String: String] {
+    static func loadDotEnv(path: String) -> [String: String] {
         guard let data = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
         var result: [String: String] = [:]
         for line in data.components(separatedBy: .newlines) {
@@ -419,14 +574,36 @@ struct WorkersView: View {
     @ObservedObject private var manager = WorkerManager.shared
 
     var body: some View {
-        NavigationSplitView {
-            workerSidebar
-        } detail: {
-            if manager.workers.isEmpty {
-                emptyState
-            } else {
-                TerminalContainerView()
-                    .environmentObject(manager)
+        VStack(spacing: 0) {
+            // Cycling pause banner
+            if manager.isCyclingPaused {
+                HStack(spacing: 8) {
+                    Image(systemName: "pause.circle.fill")
+                        .foregroundStyle(.yellow)
+                    Text("Worker cycling is paused")
+                        .font(.caption.bold())
+                    Spacer()
+                    Button("Unpause") {
+                        UserDefaults.standard.set(false, forKey: "sonata.pauseCycling")
+                        manager.isCyclingPaused = false
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.yellow.opacity(0.1))
+            }
+
+            NavigationSplitView {
+                workerSidebar
+            } detail: {
+                if manager.workers.isEmpty {
+                    emptyState
+                } else {
+                    TerminalContainerView()
+                        .environmentObject(manager)
+                }
             }
         }
     }

@@ -116,10 +116,12 @@ let workerActions: [SonataAction] = [
             ActionParam("workerId", .string, required: true, description: "Worker identifier"),
             ActionParam("sessionLabel", .string, required: true, description: "Human-readable session label"),
             ActionParam("capabilities", .stringArray, description: "Capabilities (comma-separated or array)"),
+            ActionParam("sessionId", .string, description: "Claude session UUID for cycling/resume"),
         ],
         handler: { ctx in
             let workerId = try ctx.params.require("workerId")
             let sessionLabel = ctx.params.string("sessionLabel") ?? ""
+            let sessionId = ctx.params.string("sessionId")
 
             let now = nowMs()
             let capsJSON = encodeTags(ctx.params.stringArray("capabilities") ?? [])
@@ -128,15 +130,16 @@ let workerActions: [SonataAction] = [
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt)
-                        VALUES (?, ?, ?, 'idle', ?, ?, ?)
+                        INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt, sessionId)
+                        VALUES (?, ?, ?, 'idle', ?, ?, ?, ?)
                         ON CONFLICT(workerId) DO UPDATE SET
                             sessionLabel = excluded.sessionLabel,
                             capabilities = excluded.capabilities,
                             lastHeartbeat = excluded.lastHeartbeat,
+                            sessionId = excluded.sessionId,
                             status = 'idle'
                         """,
-                        arguments: [newUUID(), workerId, sessionLabel, capsJSON, now, now]
+                        arguments: [newUUID(), workerId, sessionLabel, capsJSON, now, now, sessionId]
                     )
                     try sweepStaleWorkersForActions(in: db)
                 }
@@ -286,6 +289,54 @@ let workerActions: [SonataAction] = [
         }
     ),
 
+    // POST /api/worker/drain — mark worker as draining (cycling)
+    SonataAction(
+        name: "worker_drain",
+        description: "Mark a worker as draining so it won't receive new events.",
+        group: "/api/worker",
+        path: "/drain",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier", source: .query),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(sql: "UPDATE workers SET status = 'draining' WHERE workerId = ?",
+                                   arguments: [workerId])
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // POST /api/worker/undrain — un-drain a worker (cycle abort)
+    SonataAction(
+        name: "worker_undrain",
+        description: "Un-drain a worker, setting it back to idle.",
+        group: "/api/worker",
+        path: "/undrain",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier", source: .query),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(sql: "UPDATE workers SET status = 'idle' WHERE workerId = ?",
+                                   arguments: [workerId])
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
     // GET /api/worker/status — summary
     SonataAction(
         name: "worker_status",
@@ -318,6 +369,32 @@ let workerActions: [SonataAction] = [
     ),
 ]
 
+// MARK: - Inspector Action
+
+let inspectorAction: [SonataAction] = [
+    SonataAction(
+        name: "worker_inspect",
+        description: "Open an inspector window to resume a past worker session.",
+        group: "/api/worker",
+        path: "/inspect",
+        method: .post,
+        params: [
+            ActionParam("sessionId", .string, required: true, description: "Claude session UUID to resume"),
+            ActionParam("title", .string, description: "Task title for window label"),
+        ],
+        handler: { ctx in
+            let sessionId = try ctx.params.require("sessionId")
+            let title = ctx.params.string("title") ?? "Inspector"
+            DispatchQueue.main.async {
+                let controller = InspectorWindowController(sessionId: sessionId, taskTitle: title)
+                controller.open()
+                InspectorWindowStore.shared.add(controller)
+            }
+            return SuccessResponse()
+        }
+    ),
+]
+
 // MARK: - Worker Event Actions (claim, complete, fail, recent, enqueue)
 
 private func eventToResponse(_ row: WorkerEventRow) -> WorkerEventResponse {
@@ -331,7 +408,8 @@ private func eventToResponse(_ row: WorkerEventRow) -> WorkerEventResponse {
         result: row.result,
         createdAt: row.createdAt,
         assignedAt: row.assignedAt,
-        completedAt: row.completedAt
+        completedAt: row.completedAt,
+        sessionId: row.sessionId
     )
 }
 
@@ -388,11 +466,15 @@ let workerEventActions: [SonataAction] = [
             let now = nowMs()
             do {
                 let event = try await ctx.dbPool.write { db -> WorkerEventRow? in
-                    // Don't let a busy worker claim a second event
-                    let currentEvent = try String.fetchOne(db, sql: """
-                        SELECT currentEventId FROM workers WHERE workerId = ? AND currentEventId IS NOT NULL
+                    // Don't let a busy or draining worker claim events
+                    let workerRow = try Row.fetchOne(db, sql: """
+                        SELECT currentEventId, status FROM workers WHERE workerId = ?
                     """, arguments: [workerId])
-                    if currentEvent != nil { return nil }
+                    if let workerRow {
+                        let status = workerRow["status"] as? String ?? ""
+                        let currentEvent = workerRow["currentEventId"] as? String
+                        if currentEvent != nil || status == "draining" { return nil }
+                    }
 
                     // Find event: pre-assigned to this worker first, then any pending
                     guard let row = try WorkerEventRow.fetchOne(db, sql: """
@@ -406,11 +488,16 @@ let workerEventActions: [SonataAction] = [
                         return nil
                     }
 
-                    // Assign it
+                    // Look up worker's sessionId for cycling/resume
+                    let workerSessionId = try String.fetchOne(db, sql: """
+                        SELECT sessionId FROM workers WHERE workerId = ?
+                    """, arguments: [workerId])
+
+                    // Assign it (copy sessionId from worker to event)
                     try db.execute(sql: """
-                        UPDATE workerEvents SET assignedTo = ?, status = 'assigned', assignedAt = ?
+                        UPDATE workerEvents SET assignedTo = ?, status = 'assigned', assignedAt = ?, sessionId = ?
                         WHERE id = ?
-                    """, arguments: [workerId, now, row.id])
+                    """, arguments: [workerId, now, workerSessionId, row.id])
 
                     // Mark worker busy
                     try db.execute(sql: """
@@ -448,6 +535,7 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let resultText = ctx.params.string("result")
             let now = nowMs()
+            var completedWorkerId: String?
             do {
                 try await ctx.dbPool.write { db in
                     let row = try WorkerEventRow.fetchOne(db,
@@ -458,11 +546,16 @@ let workerEventActions: [SonataAction] = [
                         UPDATE workerEvents SET status = 'completed', result = ?, completedAt = ? WHERE id = ?
                     """, arguments: [resultText, now, eventId])
 
-                    // Set worker back to idle
+                    // Set worker back to idle (unless draining — keep draining status)
                     if let workerId = row?.assignedTo {
-                        try db.execute(sql: """
-                            UPDATE workers SET status = 'idle', currentEventId = NULL WHERE workerId = ?
+                        completedWorkerId = workerId
+                        let workerStatus = try String.fetchOne(db, sql: """
+                            SELECT status FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
+                        let newStatus = workerStatus == "draining" ? "draining" : "idle"
+                        try db.execute(sql: """
+                            UPDATE workers SET status = ?, currentEventId = NULL WHERE workerId = ?
+                        """, arguments: [newStatus, workerId])
                     }
 
                     // Complete associated task + unblock dependents + parent rollup
@@ -481,6 +574,14 @@ let workerEventActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+
+            // Notify WorkerManager for cycling evaluation
+            if let wid = completedWorkerId {
+                DispatchQueue.main.async {
+                    WorkerManager.shared.onEventCompleted(workerId: wid)
+                }
+            }
+
             return SuccessResponse()
         }
     ),
@@ -501,6 +602,7 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let errorText = ctx.params.string("error")
             let now = nowMs()
+            var completedWorkerId: String?
             do {
                 try await ctx.dbPool.write { db in
                     let row = try WorkerEventRow.fetchOne(db,
@@ -512,9 +614,14 @@ let workerEventActions: [SonataAction] = [
                     """, arguments: [errorText, now, eventId])
 
                     if let workerId = row?.assignedTo {
-                        try db.execute(sql: """
-                            UPDATE workers SET status = 'idle', currentEventId = NULL WHERE workerId = ?
+                        completedWorkerId = workerId
+                        let workerStatus = try String.fetchOne(db, sql: """
+                            SELECT status FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
+                        let newStatus = workerStatus == "draining" ? "draining" : "idle"
+                        try db.execute(sql: """
+                            UPDATE workers SET status = ?, currentEventId = NULL WHERE workerId = ?
+                        """, arguments: [newStatus, workerId])
                     }
 
                     // Fail associated task + unblock dependents + parent rollup
@@ -533,6 +640,14 @@ let workerEventActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+
+            // Notify WorkerManager for cycling evaluation
+            if let wid = completedWorkerId {
+                DispatchQueue.main.async {
+                    WorkerManager.shared.onEventCompleted(workerId: wid)
+                }
+            }
+
             return SuccessResponse()
         }
     ),

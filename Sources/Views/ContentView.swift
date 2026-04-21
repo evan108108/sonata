@@ -27,6 +27,7 @@ extension FocusedValues {
 
 struct ContentView: View {
     @State private var selectedTab: SonataTab = .workers
+    @ObservedObject private var workerManager = WorkerManager.shared
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -72,5 +73,26 @@ struct ContentView: View {
         }
         .padding(.top, 8)
         .focusedSceneValue(\.selectedTab, $selectedTab)
+        .overlay(alignment: .topTrailing) {
+            if workerManager.isCyclingPaused && selectedTab != .workers {
+                Button {
+                    selectedTab = .workers
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "pause.circle.fill")
+                            .font(.caption2)
+                        Text("Cycling Paused")
+                            .font(.caption2.bold())
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.yellow.opacity(0.2), in: Capsule())
+                    .foregroundStyle(.yellow)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+                .padding(.top, 4)
+            }
+        }
     }
 }

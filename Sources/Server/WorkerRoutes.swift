@@ -15,10 +15,11 @@ struct WorkerRow: FetchableRecord, PersistableRecord, Codable {
     var lastHeartbeat: Int64
     var currentEventId: String?
     var registeredAt: Int64
+    var sessionId: String?
 
     enum CodingKeys: String, CodingKey {
         case id, workerId, sessionLabel, status, capabilities
-        case lastHeartbeat, currentEventId, registeredAt
+        case lastHeartbeat, currentEventId, registeredAt, sessionId
     }
 }
 
@@ -35,10 +36,11 @@ struct WorkerEventRow: FetchableRecord, PersistableRecord, Codable {
     var createdAt: Int64
     var assignedAt: Int64?
     var completedAt: Int64?
+    var sessionId: String?
 
     enum CodingKeys: String, CodingKey {
         case id, type, payload, priority, assignedTo, status
-        case result, createdAt, assignedAt, completedAt
+        case result, createdAt, assignedAt, completedAt, sessionId
     }
 }
 
@@ -53,6 +55,7 @@ struct RegisterWorkerRequest: Decodable {
     let workerId: String
     let sessionLabel: String
     let capabilities: [String]?
+    let sessionId: String?
 }
 
 struct CompleteEventBody: Decodable {
@@ -97,6 +100,7 @@ struct WorkerEventResponse: Encodable {
     let createdAt: Int64
     let assignedAt: Int64?
     let completedAt: Int64?
+    let sessionId: String?
 }
 
 struct WorkerStatusResponse: Encodable {

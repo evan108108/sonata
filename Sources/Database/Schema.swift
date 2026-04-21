@@ -418,6 +418,9 @@ func createSchema(in db: Database) throws {
     // Migration: add lastProgressAt column (idempotent — silently fails if already exists)
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN lastProgressAt INTEGER") } catch { /* column exists */ }
 
+    // Migration: add sessionId for worker cycling (idempotent)
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
+
     // MARK: workerEvents
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS workerEvents (
@@ -437,6 +440,9 @@ func createSchema(in db: Database) throws {
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_status     ON workerEvents(status)")
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_assignedTo ON workerEvents(assignedTo)")
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_createdAt  ON workerEvents(createdAt)")
+
+    // Migration: add sessionId for worker cycling (idempotent)
+    do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
 
     // MARK: supervisorMessages
     try db.execute(sql: """
@@ -617,6 +623,12 @@ extension DatabaseMigrator {
                 )
             """)
             try seedSupervisorConfigIfEmpty(in: db)
+        }
+
+        // v4: add sessionId columns for worker cycling/resume.
+        registerMigration("v4_worker_session_id") { db in
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
         }
     }
 }
