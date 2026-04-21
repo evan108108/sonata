@@ -31,6 +31,13 @@ struct BackupResponse: Encodable {
     let sizeMB: String
 }
 
+struct DeployResponse: Encodable {
+    let success: Bool
+    let step: String          // "build" | "copy" | "codesign" | "done"
+    let error: String?
+    let message: String?
+}
+
 struct BackgroundJobSummary: Encodable {
     let pending: Int
     let running: Int

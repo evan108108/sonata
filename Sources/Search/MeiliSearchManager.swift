@@ -22,6 +22,14 @@ actor MeiliSearchManager: SearchService {
         NSHomeDirectory() + "/.sonata/meili-key"
     }
 
+    private var docsDir: String {
+        NSHomeDirectory() + "/.sonata/documents"
+    }
+
+    private var privateDir: String {
+        NSHomeDirectory() + "/.sonata/private"
+    }
+
     init() {
         var log = Logger(label: "sonata.meilisearch")
         log.logLevel = .info
@@ -129,6 +137,8 @@ actor MeiliSearchManager: SearchService {
     func ensureIndexes() async {
         await createIndex(uid: "wiki", primaryKey: "slug")
         await createIndex(uid: "archive", primaryKey: "id")
+        await createIndex(uid: "docs", primaryKey: "id")
+        await createIndex(uid: "private", primaryKey: "id")
 
         // Configure searchable attributes
         await updateSettings(index: "wiki", settings: [
@@ -138,6 +148,14 @@ actor MeiliSearchManager: SearchService {
         await updateSettings(index: "archive", settings: [
             "searchableAttributes": ["content", "type", "tags", "source", "project"],
             "displayedAttributes": ["id", "content", "type", "tags", "source", "importance", "project", "status", "created"]
+        ])
+        await updateSettings(index: "docs", settings: [
+            "searchableAttributes": ["content", "title", "filename"],
+            "displayedAttributes": ["id", "filename", "title", "filePath", "content"]
+        ])
+        await updateSettings(index: "private", settings: [
+            "searchableAttributes": ["content", "title", "filename"],
+            "displayedAttributes": ["id", "filename", "title", "filePath", "content"]
         ])
     }
 
@@ -157,6 +175,15 @@ actor MeiliSearchManager: SearchService {
         slug.replacingOccurrences(of: "/", with: "--")
     }
 
+    /// Encode a relative filename for use as a MeiliSearch document ID.
+    /// MeiliSearch IDs allow only [A-Za-z0-9_-]; encode `/` and `.` separately so
+    /// they round-trip distinctly.
+    private func encodeFilename(_ name: String) -> String {
+        name
+            .replacingOccurrences(of: "/", with: "--")
+            .replacingOccurrences(of: ".", with: "__")
+    }
+
     func indexWikiPage(slug: String, title: String, content: String, namespace: String?, filePath: String) async {
         var doc: [String: String] = [
             "slug": encodeSlug(slug),
@@ -171,6 +198,36 @@ actor MeiliSearchManager: SearchService {
 
     func removeWikiPage(slug: String) async {
         let _ = await delete(path: "/indexes/wiki/documents/\(encodeSlug(slug))")
+    }
+
+    func indexDocFile(filename: String, title: String, content: String, filePath: String) async {
+        let doc: [String: String] = [
+            "id": encodeFilename(filename),
+            "filename": filename,
+            "title": title,
+            "content": content,
+            "filePath": filePath
+        ]
+        let _ = await post(path: "/indexes/docs/documents", body: [doc])
+    }
+
+    func removeDocFile(filename: String) async {
+        let _ = await delete(path: "/indexes/docs/documents/\(encodeFilename(filename))")
+    }
+
+    func indexPrivateFile(filename: String, title: String, content: String, filePath: String) async {
+        let doc: [String: String] = [
+            "id": encodeFilename(filename),
+            "filename": filename,
+            "title": title,
+            "content": content,
+            "filePath": filePath
+        ]
+        let _ = await post(path: "/indexes/private/documents", body: [doc])
+    }
+
+    func removePrivateFile(filename: String) async {
+        let _ = await delete(path: "/indexes/private/documents/\(encodeFilename(filename))")
     }
 
     func indexArchivedMemory(_ row: MemoryRow) async {
@@ -202,10 +259,20 @@ actor MeiliSearchManager: SearchService {
         return await searchIndex("archive", query: query, limit: limit)
     }
 
+    func searchDocs(query: String, limit: Int = 5) async -> [SearchResult] {
+        return await searchIndex("docs", query: query, limit: limit)
+    }
+
+    func searchPrivate(query: String, limit: Int = 5) async -> [SearchResult] {
+        return await searchIndex("private", query: query, limit: limit)
+    }
+
     func search(query: String, limit: Int = 5) async -> [SearchResult] {
         async let wiki = searchWiki(query: query, limit: limit)
         async let archive = searchArchive(query: query, limit: limit)
-        return await wiki + archive
+        async let docs = searchDocs(query: query, limit: limit)
+        async let privateIdx = searchPrivate(query: query, limit: limit)
+        return await wiki + archive + docs + privateIdx
     }
 
     private func searchIndex(_ index: String, query: String, limit: Int) async -> [SearchResult] {
@@ -221,7 +288,7 @@ actor MeiliSearchManager: SearchService {
                 if let str = value as? String { fields[key] = str }
                 else { fields[key] = "\(value)" }
             }
-            let id = fields["originalSlug"] ?? fields["slug"] ?? fields["id"] ?? ""
+            let id = fields["originalSlug"] ?? fields["slug"] ?? fields["filename"] ?? fields["id"] ?? ""
             let title = fields["title"] ?? id
             let snippet = String((fields["content"] ?? "").prefix(300))
             return SearchResult(id: id, title: title, snippet: snippet, index: index, fields: fields)
@@ -306,6 +373,88 @@ actor MeiliSearchManager: SearchService {
         } catch {
             logger.error("Archive backfill failed: \(error)")
         }
+    }
+
+    func backfillDocs() async {
+        await backfillDirectory(
+            root: docsDir,
+            indexName: "docs",
+            description: "docs"
+        )
+    }
+
+    func backfillPrivate() async {
+        await backfillDirectory(
+            root: privateDir,
+            indexName: "private",
+            description: "private"
+        )
+    }
+
+    /// Scan `root` recursively for .md/.txt files and bulk-index each one into MeiliSearch.
+    /// Primary key is the encoded relative path; `filename` preserves the readable path.
+    private func backfillDirectory(root: String, indexName: String, description: String) async {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else {
+            logger.info("\(description) directory missing, skipping backfill: \(root)")
+            return
+        }
+
+        guard let enumerator = fm.enumerator(atPath: root) else {
+            logger.error("\(description) backfill: failed to enumerate \(root)")
+            return
+        }
+
+        var batch: [[String: String]] = []
+        var indexed = 0
+        let batchSize = 50
+
+        while let relativePath = enumerator.nextObject() as? String {
+            guard relativePath.hasSuffix(".md") || relativePath.hasSuffix(".txt") else { continue }
+            let fullPath = root + "/" + relativePath
+            guard let content = try? String(contentsOfFile: fullPath, encoding: .utf8),
+                  !content.isEmpty else { continue }
+
+            let title = firstHeadingOrFilename(content: content, filename: relativePath)
+            batch.append([
+                "id": encodeFilename(relativePath),
+                "filename": relativePath,
+                "title": title,
+                "content": content,
+                "filePath": fullPath
+            ])
+
+            if batch.count >= batchSize {
+                let _ = await post(path: "/indexes/\(indexName)/documents", body: batch)
+                indexed += batch.count
+                batch.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !batch.isEmpty {
+            let _ = await post(path: "/indexes/\(indexName)/documents", body: batch)
+            indexed += batch.count
+        }
+
+        logger.info("Backfilled \(indexed) \(description) files into MeiliSearch")
+    }
+
+    /// Extract the first markdown heading as a title, else use the filename stem.
+    private func firstHeadingOrFilename(content: String, filename: String) -> String {
+        for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("# ") {
+                return String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            }
+            if trimmed.hasPrefix("#") {
+                return String(trimmed.dropFirst(1)).trimmingCharacters(in: .whitespaces)
+            }
+            if !trimmed.isEmpty { break }
+        }
+        let base = (filename as NSString).lastPathComponent
+        let stem = (base as NSString).deletingPathExtension
+        return stem.isEmpty ? filename : stem
     }
 
     // MARK: - Binary Discovery

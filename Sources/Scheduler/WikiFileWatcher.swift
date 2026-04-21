@@ -114,11 +114,13 @@ actor WikiFileWatcher {
     fileprivate func handleEvents(paths: [String], flags: [UInt32]) async {
         for (idx, path) in paths.enumerated() {
             let f = idx < flags.count ? flags[idx] : 0
-            guard path.hasSuffix(".md") else { continue }
 
             if isUnderWikiDir(path) {
+                guard path.hasSuffix(".md") else { continue }
                 await processWikiEvent(path: path, flags: f)
             } else if isUnderPrivateDir(path) {
+                guard path.hasSuffix(".md") || path.hasSuffix(".txt") else { continue }
+                await processPrivateEvent(path: path)
                 postPrivateFilesChangedNotification()
             }
         }
@@ -244,6 +246,24 @@ actor WikiFileWatcher {
     }
 
     // MARK: - Private Files
+
+    private func processPrivateEvent(path: String) async {
+        guard let search = search else { return }
+        let prefix = privateDir + "/"
+        guard path.hasPrefix(prefix) else { return }
+        let relativePath = String(path.dropFirst(prefix.count))
+        guard !relativePath.isEmpty else { return }
+
+        if !FileManager.default.fileExists(atPath: path) {
+            await search.removePrivateFile(filename: relativePath)
+            return
+        }
+
+        let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        let title = readFirstLineTitle(path: path)
+            ?? ((relativePath as NSString).lastPathComponent as NSString).deletingPathExtension
+        await search.indexPrivateFile(filename: relativePath, title: title, content: content, filePath: path)
+    }
 
     private nonisolated func postPrivateFilesChangedNotification() {
         NotificationCenter.default.post(

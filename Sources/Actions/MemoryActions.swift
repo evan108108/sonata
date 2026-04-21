@@ -53,6 +53,104 @@ private let validMemoryTypesForActions: Set<String> = [
     "reflection", "feeling", "fact"
 ]
 
+// Common learning-tag → wiki-slug mapping. Tags written on learning memories
+// frequently describe implementation surface (swift, macos, subprocess) rather
+// than a wiki topic name, so we route them to the right page(s) explicitly.
+private let learningTagSlugMap: [String: [String]] = [
+    "swift": ["sonata"],
+    "macos": ["sonata"],
+    "app-bundle": ["sonata"],
+    "process": ["sonata"],
+    "subprocess": ["sonata"],
+    "launchd": ["sonata"],
+    "grdb": ["sonata/database"],
+    "sqlite": ["sonata/database"],
+    "hummingbird": ["sonata/http-api"],
+    "meilisearch": ["sonata/learnings", "sonata"],
+    "search": ["sonata/learnings", "sonata"],
+    "recall": ["sonata/recall", "memory-system/recall"],
+    "wiki": ["memory-system/wiki"],
+    "scheduler": ["sonata/scheduler"],
+    "worker": ["sonata/workers"],
+    "sonaworker": ["sonata/workers"],
+    "backup": ["sonata/backup"],
+    "dashboard": ["sonata/dashboard"],
+    "scout": ["scout-pipeline"],
+    "evenflow": ["evenflow"],
+    "agentmail": ["agentmail"],
+    "prstar": ["prstar"],
+]
+
+// Flag wiki pages dirty based on a just-stored memory's namespace and tags.
+// Mirrors the Convex flagDirtyFromMemory logic with an extra tag→slug map
+// for learning memories. Silently no-ops on any DB error so we never break a
+// successful memory store.
+private func flagDirtyFromMemory(
+    db: Database,
+    type: String,
+    source: String?,
+    project: String?,
+    topic: String?,
+    tags: [String]
+) {
+    let now = nowMs()
+    var flagged = Set<String>()
+
+    func markDirty(slug: String) {
+        if flagged.contains(slug) { return }
+        flagged.insert(slug)
+        try? db.execute(
+            sql: "UPDATE wikiPages SET dirty = 1, updatedAt = ? WHERE slug = ? AND dirty = 0",
+            arguments: [now, slug]
+        )
+    }
+
+    func markDirtyByNamespace(_ ns: String) {
+        if let slug = try? String.fetchOne(db,
+            sql: "SELECT slug FROM wikiPages WHERE namespace = ? LIMIT 1",
+            arguments: [ns]) {
+            markDirty(slug: slug)
+        }
+    }
+
+    // Strategy 1: namespace from project or source
+    if let namespace = (project ?? source)?.lowercased(), !namespace.isEmpty {
+        markDirtyByNamespace(namespace)
+
+        // Topic page within that namespace
+        if let topicLower = topic?.lowercased(), !topicLower.isEmpty {
+            if let slug = try? String.fetchOne(db,
+                sql: "SELECT slug FROM wikiPages WHERE namespace = ? AND topic = ? LIMIT 1",
+                arguments: [namespace, topicLower]) {
+                markDirty(slug: slug)
+            }
+        }
+    }
+
+    // Strategy 2: match tags against wiki page topics in common knowledge
+    // namespaces. Keeps existing non-learning behavior intact.
+    let topicNamespaces = ["memory-system", "memory", "sonata", "sona"]
+    for tag in tags.prefix(5) {
+        let tagLower = tag.lowercased()
+        for ns in topicNamespaces {
+            if let slugs = try? String.fetchAll(db,
+                sql: "SELECT slug FROM wikiPages WHERE namespace = ? AND topic = ?",
+                arguments: [ns, tagLower]) {
+                for slug in slugs { markDirty(slug: slug) }
+            }
+        }
+    }
+
+    // Strategy 3: learning-only tag→slug map. Learnings tend to tag by
+    // implementation surface, which rarely matches a wiki topic directly.
+    if type == "learning" {
+        for tag in tags {
+            guard let slugs = learningTagSlugMap[tag.lowercased()] else { continue }
+            for slug in slugs { markDirty(slug: slug) }
+        }
+    }
+}
+
 private func memRowToResponse(_ row: MemoryRow) -> MemoryResponse {
     MemoryResponse(
         _id: row.id,
@@ -124,7 +222,8 @@ let memoryActions: [SonataAction] = [
             let now = nowMs()
             let createdAt = ctx.params.int("createdAt").map { Int64($0) } ?? now
             let id = newUUID()
-            let tagsJSON = encodeTags(ctx.params.stringArray("tags") ?? [])
+            let tags = ctx.params.stringArray("tags") ?? []
+            let tagsJSON = encodeTags(tags)
             let source = ctx.params.string("source")
             let importance = ctx.params.double("importance") ?? 5.0
             let validFrom = ctx.params.int("validFrom").map { Int64($0) } ?? createdAt
@@ -149,6 +248,14 @@ let memoryActions: [SonataAction] = [
                             project, topic,
                             createdAt, createdAt
                         ]
+                    )
+                    flagDirtyFromMemory(
+                        db: db,
+                        type: type,
+                        source: source,
+                        project: project,
+                        topic: topic,
+                        tags: tags
                     )
                 }
             } catch {

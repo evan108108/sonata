@@ -364,6 +364,7 @@ struct WikiView: View {
             "priority": "normal",
             "project": "memory",
             "assignedTo": "scheduler",
+            "maxTurns": 30,
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         _ = try? await URLSession.shared.data(for: request)

@@ -408,6 +408,8 @@ struct SonataApp: App {
                 Task {
                     await meili.backfillWiki(dbPool: pool)
                     await meili.backfillArchive(dbPool: pool)
+                    await meili.backfillDocs()
+                    await meili.backfillPrivate()
                 }
 
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")

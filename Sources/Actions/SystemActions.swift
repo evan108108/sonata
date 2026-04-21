@@ -5,6 +5,66 @@ import Hummingbird
 // Phase 2 migration: action definitions for bare /api system routes.
 // Handler logic duplicated from SystemRoutes.swift.
 
+private struct DeployProcessResult {
+    let status: Int32
+    let stdout: String
+    let stderr: String
+    let timedOut: Bool
+}
+
+private func runDeployProcess(
+    executable: String,
+    arguments: [String],
+    cwd: String?,
+    timeoutSeconds: Int
+) -> DeployProcessResult {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: executable)
+    p.arguments = arguments
+    if let cwd = cwd {
+        p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    }
+    let outPipe = Pipe()
+    let errPipe = Pipe()
+    p.standardOutput = outPipe
+    p.standardError = errPipe
+
+    do {
+        try p.run()
+    } catch {
+        return DeployProcessResult(
+            status: -1, stdout: "",
+            stderr: "spawn failed: \(error.localizedDescription)",
+            timedOut: false
+        )
+    }
+
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    while p.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+
+    var timedOut = false
+    if p.isRunning {
+        timedOut = true
+        p.terminate()
+        Thread.sleep(forTimeInterval: 0.5)
+        if p.isRunning { p.interrupt() }
+    }
+
+    let outData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+    let errData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+    let outStr = String(data: outData, encoding: .utf8) ?? ""
+    let errStr = String(data: errData, encoding: .utf8) ?? ""
+
+    return DeployProcessResult(
+        status: p.terminationStatus,
+        stdout: outStr,
+        stderr: errStr,
+        timedOut: timedOut
+    )
+}
+
 let systemActions: [SonataAction] = [
 
     // GET /api/ping
@@ -112,6 +172,85 @@ let systemActions: [SonataAction] = [
             let size = (try? FileManager.default.attributesOfItem(atPath: backupPath)[.size] as? Int64) ?? 0
             let sizeMB = String(format: "%.1f", Double(size) / 1_048_576)
             return BackupResponse(success: true, path: backupPath, sizeMB: sizeMB)
+        }
+    ),
+
+    // POST /api/system/deploy — build, copy binary, codesign Sonata app (does not restart)
+    SonataAction(
+        name: "system_deploy",
+        description: "Build Sonata from source, copy the binary to /Applications/Sonata.app, and codesign. Does not restart the app — user restarts manually.",
+        group: "/api",
+        path: "/system/deploy",
+        method: .post,
+        params: [],
+        handler: { _ in
+            let sourceDir = "/Users/evan/memory/Sonata"
+            let binarySrc = "\(sourceDir)/.build/arm64-apple-macosx/debug/Sonata"
+            let binaryDst = "/Applications/Sonata.app/Contents/MacOS/Sonata"
+            let appPath = "/Applications/Sonata.app"
+
+            // 1. swift build (120s timeout)
+            let build = await Task.detached {
+                runDeployProcess(
+                    executable: "/usr/bin/env",
+                    arguments: ["swift", "build"],
+                    cwd: sourceDir,
+                    timeoutSeconds: 120
+                )
+            }.value
+
+            if build.timedOut {
+                return DeployResponse(
+                    success: false, step: "build",
+                    error: "swift build timed out after 120s",
+                    message: nil
+                )
+            }
+            if build.status != 0 {
+                return DeployResponse(
+                    success: false, step: "build",
+                    error: "swift build failed (exit \(build.status))\nstdout:\n\(build.stdout)\nstderr:\n\(build.stderr)",
+                    message: nil
+                )
+            }
+
+            // 2. Copy binary
+            do {
+                if FileManager.default.fileExists(atPath: binaryDst) {
+                    try FileManager.default.removeItem(atPath: binaryDst)
+                }
+                try FileManager.default.copyItem(atPath: binarySrc, toPath: binaryDst)
+            } catch {
+                return DeployResponse(
+                    success: false, step: "copy",
+                    error: "copy failed: \(error.localizedDescription)",
+                    message: nil
+                )
+            }
+
+            // 3. codesign (30s timeout)
+            let sign = await Task.detached {
+                runDeployProcess(
+                    executable: "/usr/bin/codesign",
+                    arguments: ["--force", "--no-strict", "--sign", "-", appPath],
+                    cwd: nil,
+                    timeoutSeconds: 30
+                )
+            }.value
+
+            if sign.status != 0 {
+                return DeployResponse(
+                    success: false, step: "codesign",
+                    error: "codesign failed (exit \(sign.status))\n\(sign.stderr)",
+                    message: nil
+                )
+            }
+
+            return DeployResponse(
+                success: true, step: "done",
+                error: nil,
+                message: "Deployment complete. Restart Sonata to pick up the new binary — e.g. osascript -e 'tell application \"Sonata\" to quit' && open /Applications/Sonata.app"
+            )
         }
     ),
 ]

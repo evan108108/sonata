@@ -817,7 +817,22 @@ let recallActions: [SonataAction] = [
                 timings["memoryCount"] = phase1Result.memories.count
                 timings["vectorOnlyCount"] = vectorOnlyMemories.count
 
-                // Budget-aware LOD packing
+                // Reserve a slice of the budget for wiki pages (curated knowledge gets priority).
+                // Pack wiki pages first up to wikiBudget; memories/entities/relations/docs then pack
+                // into the remainder so high-volume memory hits can't push wiki results out.
+                let wikiBudget = min(2000, budget / 4)
+                var finalWiki: [WikiPageResultAction] = []
+                var wikiTokens = 0
+                for page in wikiResults {
+                    let pageJSON = (try? JSONEncoder().encode([page])) ?? Data()
+                    let pageTokens = recallEstimateTokens(String(data: pageJSON, encoding: .utf8) ?? "")
+                    if wikiTokens + pageTokens > wikiBudget { break }
+                    finalWiki.append(page)
+                    wikiTokens += pageTokens
+                }
+                let memoryBudget = budget - wikiTokens
+
+                // Budget-aware LOD packing (capped at memoryBudget so wiki's reserve is preserved)
                 var used = 0
                 var included: [RecallMemoryAction] = []
 
@@ -829,12 +844,12 @@ let recallActions: [SonataAction] = [
                     let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
                     let l0Tokens = recallEstimateTokens(l0Repr)
 
-                    if used + l0Tokens > budget { break }
+                    if used + l0Tokens > memoryBudget { break }
 
                     let fullJSON = recallEncodeMemoryForBudget(mem, tags: tags)
                     let fullTokens = recallEstimateTokens(fullJSON)
 
-                    if used + fullTokens <= budget {
+                    if used + fullTokens <= memoryBudget {
                         included.append(recallMakeRecallMemory(
                             mem, tags: tags, searchRank: scored.searchRank,
                             rankScore: scored.rankScore, tier: "full", includeContent: true
@@ -847,7 +862,7 @@ let recallActions: [SonataAction] = [
                     let l1Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"l1\":\"\(l1Text)\",\"importance\":\(mem.importance),\"source\":\"\(mem.source ?? "")\"}"
                     let l1Tokens = recallEstimateTokens(l1Repr)
 
-                    if used + l1Tokens <= budget {
+                    if used + l1Tokens <= memoryBudget {
                         included.append(recallMakeRecallMemory(
                             mem, tags: tags, searchRank: scored.searchRank,
                             rankScore: scored.rankScore, tier: "l1", includeContent: false,
@@ -865,21 +880,21 @@ let recallActions: [SonataAction] = [
                     used += l0Tokens
                 }
 
-                // Entities within budget
+                // Entities within memory budget
                 let entityResponses = entities.map(entityRowToResponse)
                 let entityJSON = (try? JSONEncoder().encode(entityResponses)) ?? Data()
                 let entityTokens = recallEstimateTokens(String(data: entityJSON, encoding: .utf8) ?? "")
-                let finalEntities = (used + entityTokens <= budget) ? entityResponses : []
+                let finalEntities = (used + entityTokens <= memoryBudget) ? entityResponses : []
                 if !finalEntities.isEmpty { used += entityTokens }
 
-                // Relations within budget
+                // Relations within memory budget
                 let relationResponses = allRelations.map(relationRowToResponse)
                 let relationJSON = (try? JSONEncoder().encode(relationResponses)) ?? Data()
                 let relationTokens = recallEstimateTokens(String(data: relationJSON, encoding: .utf8) ?? "")
-                let finalRelations = (used + relationTokens <= budget) ? relationResponses : []
+                let finalRelations = (used + relationTokens <= memoryBudget) ? relationResponses : []
                 if !finalRelations.isEmpty { used += relationTokens }
 
-                // Documents within budget
+                // Documents within memory budget
                 let docSummaries = phase1Result.documents.map { d in
                     DocumentSummaryAction(
                         _id: d.id, title: d.title, path: d.path,
@@ -890,14 +905,11 @@ let recallActions: [SonataAction] = [
                 }
                 let docJSON = (try? JSONEncoder().encode(docSummaries)) ?? Data()
                 let docTokens = recallEstimateTokens(String(data: docJSON, encoding: .utf8) ?? "")
-                let finalDocs = (used + docTokens <= budget) ? docSummaries : []
+                let finalDocs = (used + docTokens <= memoryBudget) ? docSummaries : []
                 if !finalDocs.isEmpty { used += docTokens }
 
-                // Wiki within budget
-                let wikiJSON = (try? JSONEncoder().encode(wikiResults)) ?? Data()
-                let wikiTokens = recallEstimateTokens(String(data: wikiJSON, encoding: .utf8) ?? "")
-                let finalWiki = (used + wikiTokens <= budget) ? wikiResults : []
-                if !finalWiki.isEmpty { used += wikiTokens }
+                // Wiki was pre-packed into finalWiki above; account for its tokens against the total.
+                used += wikiTokens
 
                 // Wander (separate from main budget)
                 let twander = DispatchTime.now()
@@ -975,7 +987,7 @@ let recallActions: [SonataAction] = [
         method: .get,
         params: [
             ActionParam("q", .string, required: true, description: "Search query"),
-            ActionParam("index", .string, description: "Index: wiki, archive, or all (default: all)"),
+            ActionParam("index", .string, description: "Index: wiki, archive, docs, private, or all (default: all)"),
             ActionParam("limit", .integer, description: "Max results (default 5)"),
         ],
         handler: { ctx in
@@ -992,6 +1004,10 @@ let recallActions: [SonataAction] = [
                 results = await search.searchWiki(query: q, limit: limit)
             case "archive":
                 results = await search.searchArchive(query: q, limit: limit)
+            case "docs":
+                results = await search.searchDocs(query: q, limit: limit)
+            case "private":
+                results = await search.searchPrivate(query: q, limit: limit)
             default:
                 results = await search.search(query: q, limit: limit)
             }
