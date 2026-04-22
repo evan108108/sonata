@@ -822,8 +822,15 @@ final class PluginManager: @unchecked Sendable {
 
         do {
             try proc.run()
-            proc.waitUntilExit()
-            if proc.terminationStatus == 0 {
+            // Timeout: don't hang forever if the stop command doesn't exit
+            let deadline = Date().addingTimeInterval(5)
+            while proc.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if proc.isRunning {
+                proc.terminate()
+                sonataFileLog("Plugin stop: timed out after 5s, force terminated")
+            } else if proc.terminationStatus == 0 {
                 sonataFileLog("Plugin stop: daemon stopped cleanly")
             }
             // Give the port a moment to release
