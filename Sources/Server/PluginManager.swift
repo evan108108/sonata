@@ -347,7 +347,7 @@ final class PluginManager: @unchecked Sendable {
             )
         }
 
-        let targetURL = "\(baseURL)\(action.path)"
+        let targetURLTemplate = "\(baseURL)\(action.path)"
 
         return SonataAction(
             name: toolName,
@@ -357,6 +357,12 @@ final class PluginManager: @unchecked Sendable {
             method: method,
             params: params,
             handler: { ctx in
+                // Substitute path parameters (e.g., :message_id → actual value)
+                var targetURL = targetURLTemplate
+                for (key, value) in ctx.params.all {
+                    targetURL = targetURL.replacingOccurrences(of: ":\(key)", with: "\(value)")
+                }
+
                 var request = URLRequest(url: URL(string: targetURL)!)
                 request.httpMethod = action.method.uppercased()
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -837,17 +843,21 @@ final class PluginManager: @unchecked Sendable {
             return
         }
 
+        // Phoenix Channel WebSocket uses vsn=2.0.0 with array framing:
+        // [join_ref, ref, topic, event, payload]
+        let wsURLWithParams = wsURL + "?vsn=2.0.0"
+        guard let finalURL = URL(string: wsURLWithParams) else {
+            sonataFileLog("Plugin \(runtime.name): invalid WebSocket URL \(wsURLWithParams)")
+            return
+        }
+
         let session = URLSession(configuration: .default)
-        let wsTask = session.webSocketTask(with: url)
+        let wsTask = session.webSocketTask(with: finalURL)
         wsTask.resume()
 
-        let joinPayload: [String: Any] = [
-            "topic": topic,
-            "event": "phx_join",
-            "payload": [:],
-            "ref": "1"
-        ]
-        if let joinData = try? JSONSerialization.data(withJSONObject: joinPayload),
+        // Join the channel: [join_ref, ref, topic, "phx_join", {}]
+        let joinMsg: [Any] = ["1", "1", topic, "phx_join", [String: Any]()]
+        if let joinData = try? JSONSerialization.data(withJSONObject: joinMsg),
            let joinStr = String(data: joinData, encoding: .utf8) {
             wsTask.send(.string(joinStr)) { error in
                 if let error {
@@ -856,16 +866,32 @@ final class PluginManager: @unchecked Sendable {
             }
         }
 
+        // Start heartbeat (Phoenix requires heartbeat every 30s or it disconnects)
+        let heartbeatTask = Task.detached {
+            var ref = 100
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(25))
+                let hb: [Any] = [NSNull(), "\(ref)", "phoenix", "heartbeat", [String: Any]()]
+                if let data = try? JSONSerialization.data(withJSONObject: hb),
+                   let str = String(data: data, encoding: .utf8) {
+                    wsTask.send(.string(str)) { _ in }
+                }
+                ref += 1
+            }
+        }
+
         let pluginName = runtime.name
         let mgr = self
         Task.detached {
             await mgr.listenForEvents(wsTask: wsTask, pluginName: pluginName, topic: topic)
+            heartbeatTask.cancel()
         }
 
         sonataFileLog("Plugin \(runtime.name): subscribed to events channel \(topic)")
     }
 
     /// Continuously read WebSocket messages and route them.
+    /// Phoenix v2 format: [join_ref, ref, topic, event, payload]
     private func listenForEvents(wsTask: URLSessionWebSocketTask, pluginName: String, topic: String) async {
         while wsTask.state == .running {
             do {
@@ -873,12 +899,17 @@ final class PluginManager: @unchecked Sendable {
                 switch message {
                 case .string(let text):
                     guard let data = text.data(using: .utf8),
-                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let event = json["event"] as? String,
-                          let payload = json["payload"] as? [String: Any] else { continue }
+                          let arr = try? JSONSerialization.jsonObject(with: data) as? [Any],
+                          arr.count >= 5 else { continue }
 
+                    // [join_ref, ref, topic, event, payload]
+                    let event = arr[3] as? String ?? ""
+                    let payload = arr[4] as? [String: Any] ?? [:]
+
+                    // Skip Phoenix internal events
                     guard !event.hasPrefix("phx_") else { continue }
 
+                    sonataFileLog("Plugin \(pluginName): channel event '\(event)'")
                     await handlePluginEvent(pluginName: pluginName, event: event, payload: payload)
 
                 case .data:
