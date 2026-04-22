@@ -227,6 +227,9 @@ final class PluginManager: @unchecked Sendable {
 
         process.environment = env
 
+        // Kill any stale daemon from a previous run before starting
+        stopPluginDaemon(pluginPath: pluginPath, executable: executable)
+
         let outPipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = outPipe
@@ -511,8 +514,15 @@ final class PluginManager: @unchecked Sendable {
             throw ActionError.custom("Failed to extract tarball", .badRequest)
         }
 
-        let manifest = loadManifest(pluginDir: tempDir)
-            ?? findManifestInSubdirs(tempDir)
+        // Look for manifest at root, then in subdirectories (tarballs often have a wrapper dir)
+        var sourceDir = tempDir
+        if let m = loadManifest(pluginDir: tempDir) {
+            _ = m  // manifest at root, sourceDir is tempDir
+        } else if let (subdir, _) = findManifestInSubdirs(tempDir) {
+            sourceDir = subdir  // manifest in a subdirectory — use that as the source
+        }
+
+        let manifest = loadManifest(pluginDir: sourceDir)
 
         guard let manifest else {
             try? FileManager.default.removeItem(atPath: tempDir)
@@ -537,7 +547,11 @@ final class PluginManager: @unchecked Sendable {
         if FileManager.default.fileExists(atPath: finalDir) {
             try FileManager.default.removeItem(atPath: finalDir)
         }
-        try FileManager.default.moveItem(atPath: tempDir, toPath: finalDir)
+        try FileManager.default.moveItem(atPath: sourceDir, toPath: finalDir)
+        // Clean up temp dir if sourceDir was a subdirectory
+        if sourceDir != tempDir {
+            try? FileManager.default.removeItem(atPath: tempDir)
+        }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         try await dbPool.write { db in
@@ -552,13 +566,14 @@ final class PluginManager: @unchecked Sendable {
     }
 
     /// Find manifest in first-level subdirectories (tarball may have a wrapper dir)
-    private func findManifestInSubdirs(_ dir: String) -> PluginManifest? {
+    /// Returns (subdirectory path, manifest) if found.
+    private func findManifestInSubdirs(_ dir: String) -> (String, PluginManifest)? {
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return nil }
         for entry in entries {
             let subdir = (dir as NSString).appendingPathComponent(entry)
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: subdir, isDirectory: &isDir), isDir.boolValue {
-                if let m = loadManifest(pluginDir: subdir) { return m }
+                if let m = loadManifest(pluginDir: subdir) { return (subdir, m) }
             }
         }
         return nil
@@ -685,19 +700,54 @@ final class PluginManager: @unchecked Sendable {
             registry.unregister(actionNames)
             runtime.discoveredActions = []
 
-            if runtime.mode == "managed", let proc = runtime.process, proc.isRunning {
-                proc.terminate()
-                let deadline = Date().addingTimeInterval(5)
-                while proc.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.1)
+            if runtime.mode == "managed" {
+                // Use the release's stop command to cleanly shut down the BEAM daemon
+                let pluginPath: String? = try? await dbPool.read { db in
+                    try String.fetchOne(db, sql: "SELECT path FROM plugins WHERE name = ?", arguments: [name])
                 }
-                if proc.isRunning { proc.interrupt() }
+                if let pluginPath {
+                    let parts = runtime.manifest.startCommand.split(separator: " ").map(String.init)
+                    if let executable = parts.first {
+                        stopPluginDaemon(pluginPath: pluginPath, executable: executable)
+                    }
+                }
+
+                // Also terminate the wrapper process if still running
+                if let proc = runtime.process, proc.isRunning {
+                    proc.terminate()
+                }
             }
             runtime.process = nil
             runtime.status = "disabled"
         }
 
         await updateStatus(name: name, status: "disabled")
+    }
+
+    /// Run the plugin's stop command to cleanly shut down any daemon process.
+    /// For Elixir releases: `bin/sonar stop` kills the BEAM daemon.
+    private func stopPluginDaemon(pluginPath: String, executable: String) {
+        let stopPath = (pluginPath as NSString).appendingPathComponent(executable)
+        guard FileManager.default.fileExists(atPath: stopPath) else { return }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: stopPath)
+        proc.arguments = ["stop"]
+        proc.currentDirectoryURL = URL(fileURLWithPath: pluginPath)
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            if proc.terminationStatus == 0 {
+                sonataFileLog("Plugin stop: daemon stopped cleanly")
+            }
+            // Give the port a moment to release
+            Thread.sleep(forTimeInterval: 1)
+        } catch {
+            // Stop command may fail if no daemon is running — that's fine
+        }
     }
 
     /// Uninstall a plugin — stop it, remove from DB, delete files.
@@ -920,10 +970,21 @@ final class PluginManager: @unchecked Sendable {
         lock.unlock()
 
         for runtime in allPlugins where runtime.mode == "managed" {
+            // Use stop command to cleanly shut down the BEAM daemon
+            let pluginPath: String? = try? await dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT path FROM plugins WHERE name = ?", arguments: [runtime.name])
+            }
+            if let pluginPath {
+                let parts = runtime.manifest.startCommand.split(separator: " ").map(String.init)
+                if let executable = parts.first {
+                    stopPluginDaemon(pluginPath: pluginPath, executable: executable)
+                }
+            }
+            // Also terminate the wrapper
             if let proc = runtime.process, proc.isRunning {
                 proc.terminate()
-                sonataFileLog("Plugin \(runtime.name): terminated for shutdown")
             }
+            sonataFileLog("Plugin \(runtime.name): stopped for shutdown")
         }
     }
 }
