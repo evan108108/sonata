@@ -9,24 +9,42 @@ import HTTPTypes
 final class ActionRegistry: @unchecked Sendable {
     private var actions: [SonataAction] = []
     private var byName: [String: SonataAction] = [:]
+    private let lock = NSLock()
     var scheduler: SchedulerActor?
     var search: (any SearchService)?
 
     /// Register a batch of actions
     func register(_ newActions: [SonataAction]) {
+        lock.lock()
+        defer { lock.unlock() }
         for action in newActions {
             actions.append(action)
             byName[action.name] = action
         }
     }
 
+    /// Unregister actions by name (used when plugins are disabled/uninstalled)
+    func unregister(_ names: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        let nameSet = Set(names)
+        actions.removeAll { nameSet.contains($0.name) }
+        for name in names { byName.removeValue(forKey: name) }
+    }
+
     /// Get action by name
     func action(named name: String) -> SonataAction? {
-        byName[name]
+        lock.lock()
+        defer { lock.unlock() }
+        return byName[name]
     }
 
     /// All registered actions
-    var allActions: [SonataAction] { actions }
+    var allActions: [SonataAction] {
+        lock.lock()
+        defer { lock.unlock() }
+        return actions
+    }
 
     // MARK: - Mount HTTP Routes
 
