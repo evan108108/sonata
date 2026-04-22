@@ -13,10 +13,16 @@ final class ActionRegistry: @unchecked Sendable {
     var scheduler: SchedulerActor?
     var search: (any SearchService)?
 
-    /// Register a batch of actions
+    /// Register a batch of actions. Re-registering an action with the same
+    /// name replaces the existing entry (used when plugins re-discover on
+    /// enable after connect).
     func register(_ newActions: [SonataAction]) {
         lock.lock()
         defer { lock.unlock() }
+        let incomingNames = Set(newActions.map { $0.name })
+        if !incomingNames.isEmpty {
+            actions.removeAll { incomingNames.contains($0.name) }
+        }
         for action in newActions {
             actions.append(action)
             byName[action.name] = action

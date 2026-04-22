@@ -931,21 +931,148 @@ final class PluginManager: @unchecked Sendable {
 // MARK: - JSON Passthrough
 
 /// Wraps raw JSON data so it can be returned from a SonataAction handler
-/// as a pass-through. The plugin's response bytes are forwarded as-is.
+/// as a pass-through. The plugin's response bytes are forwarded as-is —
+/// the wrapped value is walked and re-emitted via Codable containers so the
+/// outer JSONEncoder produces real JSON structure (not a JSON-escaped string).
 struct JSONPassthrough: Encodable {
-    let rawData: Data
+    let value: Any
 
     /// Init from already-serialized JSON data (preferred — zero re-encoding)
-    init(data: Data) { self.rawData = data }
+    init(data: Data) {
+        if let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            self.value = parsed
+        } else {
+            self.value = [String: Any]()
+        }
+    }
 
     /// Init from a JSONSerialization-compatible value (e.g., [[String: Any]])
     init(_ value: Any) {
-        self.rawData = (try? JSONSerialization.data(withJSONObject: value)) ?? Data("{}".utf8)
+        self.value = value
     }
 
     func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(String(data: rawData, encoding: .utf8) ?? "{}")
+        try Self.encodeAny(value, to: encoder)
+    }
+
+    private static func encodeAny(_ value: Any, to encoder: Encoder) throws {
+        if let dict = value as? [String: Any] {
+            var c = encoder.container(keyedBy: DynamicKey.self)
+            for (k, v) in dict {
+                let key = DynamicKey(stringValue: k)!
+                try encodeAny(v, in: &c, key: key)
+            }
+        } else if let arr = value as? [Any] {
+            var c = encoder.unkeyedContainer()
+            for v in arr {
+                try encodeAny(v, in: &c)
+            }
+        } else {
+            var c = encoder.singleValueContainer()
+            try encodeScalar(value, in: &c)
+        }
+    }
+
+    private static func encodeAny(_ value: Any, in c: inout KeyedEncodingContainer<DynamicKey>, key: DynamicKey) throws {
+        if let dict = value as? [String: Any] {
+            var nested = c.nestedContainer(keyedBy: DynamicKey.self, forKey: key)
+            for (k, v) in dict {
+                let nk = DynamicKey(stringValue: k)!
+                try encodeAny(v, in: &nested, key: nk)
+            }
+        } else if let arr = value as? [Any] {
+            var nested = c.nestedUnkeyedContainer(forKey: key)
+            for v in arr {
+                try encodeAny(v, in: &nested)
+            }
+        } else if value is NSNull {
+            try c.encodeNil(forKey: key)
+        } else if let b = value as? Bool {
+            try c.encode(b, forKey: key)
+        } else if let i = value as? Int64 {
+            try c.encode(i, forKey: key)
+        } else if let i = value as? Int {
+            try c.encode(i, forKey: key)
+        } else if let d = value as? Double {
+            try c.encode(d, forKey: key)
+        } else if let s = value as? String {
+            try c.encode(s, forKey: key)
+        } else if let n = value as? NSNumber {
+            // Disambiguate NSNumber for bool vs numeric
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try c.encode(n.boolValue, forKey: key)
+            } else {
+                try c.encode(n.doubleValue, forKey: key)
+            }
+        } else {
+            try c.encodeNil(forKey: key)
+        }
+    }
+
+    private static func encodeAny(_ value: Any, in c: inout UnkeyedEncodingContainer) throws {
+        if let dict = value as? [String: Any] {
+            var nested = c.nestedContainer(keyedBy: DynamicKey.self)
+            for (k, v) in dict {
+                let nk = DynamicKey(stringValue: k)!
+                try encodeAny(v, in: &nested, key: nk)
+            }
+        } else if let arr = value as? [Any] {
+            var nested = c.nestedUnkeyedContainer()
+            for v in arr {
+                try encodeAny(v, in: &nested)
+            }
+        } else if value is NSNull {
+            try c.encodeNil()
+        } else if let b = value as? Bool {
+            try c.encode(b)
+        } else if let i = value as? Int64 {
+            try c.encode(i)
+        } else if let i = value as? Int {
+            try c.encode(i)
+        } else if let d = value as? Double {
+            try c.encode(d)
+        } else if let s = value as? String {
+            try c.encode(s)
+        } else if let n = value as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try c.encode(n.boolValue)
+            } else {
+                try c.encode(n.doubleValue)
+            }
+        } else {
+            try c.encodeNil()
+        }
+    }
+
+    private static func encodeScalar(_ value: Any, in c: inout SingleValueEncodingContainer) throws {
+        if value is NSNull {
+            try c.encodeNil()
+        } else if let b = value as? Bool {
+            try c.encode(b)
+        } else if let i = value as? Int64 {
+            try c.encode(i)
+        } else if let i = value as? Int {
+            try c.encode(i)
+        } else if let d = value as? Double {
+            try c.encode(d)
+        } else if let s = value as? String {
+            try c.encode(s)
+        } else if let n = value as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try c.encode(n.boolValue)
+            } else {
+                try c.encode(n.doubleValue)
+            }
+        } else {
+            try c.encodeNil()
+        }
+    }
+
+    private struct DynamicKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
     }
 }
 
