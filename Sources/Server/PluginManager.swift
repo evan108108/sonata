@@ -551,9 +551,35 @@ final class PluginManager: @unchecked Sendable {
 
         let finalDir = "\(home)/.sonata/plugins/\(manifest.name)"
         if FileManager.default.fileExists(atPath: finalDir) {
+            // Preserve plugin data (DB files, data dir) across reinstalls
+            let dataBackup = "\(home)/.sonata/plugins/_data_backup_\(manifest.name)"
+            try? FileManager.default.removeItem(atPath: dataBackup)
+            try? FileManager.default.createDirectory(atPath: dataBackup, withIntermediateDirectories: true)
+            // Save all .db files and WAL/SHM files
+            if let files = try? FileManager.default.contentsOfDirectory(atPath: finalDir) {
+                for file in files where file.hasSuffix(".db") || file.hasSuffix(".db-wal") || file.hasSuffix(".db-shm") {
+                    try? FileManager.default.moveItem(
+                        atPath: (finalDir as NSString).appendingPathComponent(file),
+                        toPath: (dataBackup as NSString).appendingPathComponent(file)
+                    )
+                }
+            }
             try FileManager.default.removeItem(atPath: finalDir)
         }
         try FileManager.default.moveItem(atPath: sourceDir, toPath: finalDir)
+        // Restore preserved data files
+        let dataBackup = "\(home)/.sonata/plugins/_data_backup_\(manifest.name)"
+        if FileManager.default.fileExists(atPath: dataBackup) {
+            if let files = try? FileManager.default.contentsOfDirectory(atPath: dataBackup) {
+                for file in files {
+                    try? FileManager.default.moveItem(
+                        atPath: (dataBackup as NSString).appendingPathComponent(file),
+                        toPath: (finalDir as NSString).appendingPathComponent(file)
+                    )
+                }
+            }
+            try? FileManager.default.removeItem(atPath: dataBackup)
+        }
         // Clean up temp dir if sourceDir was a subdirectory
         if sourceDir != tempDir {
             try? FileManager.default.removeItem(atPath: tempDir)
