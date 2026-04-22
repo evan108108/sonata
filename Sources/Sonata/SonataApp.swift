@@ -514,6 +514,8 @@ struct SonataApp: App {
                         .keyboardShortcut("9", modifiers: .command)
                     Button("Settings") { selectedTab?.wrappedValue = .settings }
                         .keyboardShortcut("0", modifiers: .command)
+                    Button("Plugins") { selectedTab?.wrappedValue = .plugins }
+                        .keyboardShortcut("p", modifiers: [.command, .shift])
                 }
             }
 

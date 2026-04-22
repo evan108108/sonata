@@ -11,6 +11,7 @@ enum SonataTab: Int, CaseIterable {
     case files = 8
     case health = 9
     case settings = 0
+    case plugins = 11
 }
 
 // FocusedValue key so .commands{} in SonataApp can switch tabs
@@ -62,6 +63,10 @@ struct ContentView: View {
             PrivateFilesView()
                 .tabItem { Label("Files", systemImage: "person.text.rectangle") }
                 .tag(SonataTab.files)
+
+            PluginsView()
+                .tabItem { Label("Plugins", systemImage: "puzzlepiece.extension.fill") }
+                .tag(SonataTab.plugins)
 
             HealthView()
                 .tabItem { Label("Health", systemImage: "heart.text.square.fill") }
