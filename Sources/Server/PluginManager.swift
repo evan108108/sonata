@@ -490,6 +490,7 @@ final class PluginManager: @unchecked Sendable {
         let healthy = await waitForHealthy(runtime)
         if healthy {
             await discoverAndRegisterActions(runtime)
+            subscribeToEventsChannel(runtime)
             runtime.status = "running"
             runtime.crashCount = 0
             await updateStatus(name: pluginName, status: "running", pid: runtime.process.map { Int($0.processIdentifier) })
@@ -708,6 +709,7 @@ final class PluginManager: @unchecked Sendable {
         let healthy = await waitForHealthy(runtime)
         if healthy {
             await discoverAndRegisterActions(runtime)
+            subscribeToEventsChannel(runtime)
             runtime.status = "running"
             runtime.crashCount = 0
             await updateStatus(name: name, status: "running", pid: runtime.process.map { Int($0.processIdentifier) })
