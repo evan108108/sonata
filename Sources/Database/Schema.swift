@@ -543,6 +543,26 @@ func createSchema(in db: Database) throws {
             updatedAt        INTEGER NOT NULL
         )
     """)
+
+    // MARK: plugins
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS plugins (
+            name        TEXT PRIMARY KEY,
+            version     TEXT NOT NULL,
+            description TEXT,
+            port        INTEGER NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'installed',
+            mode        TEXT NOT NULL DEFAULT 'managed',
+            url         TEXT,
+            config_json TEXT DEFAULT '{}',
+            path        TEXT NOT NULL,
+            pid         INTEGER,
+            installedAt INTEGER NOT NULL,
+            updatedAt   INTEGER NOT NULL
+        )
+    """)
+
+    try db.execute(sql: "CREATE INDEX IF NOT EXISTS plugins_by_status ON plugins(status)")
 }
 
 /// Seed the supervisorConfig singleton row with defaults if not present.
@@ -629,6 +649,26 @@ extension DatabaseMigrator {
         registerMigration("v4_worker_session_id") { db in
             do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
             do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
+        }
+
+        registerMigration("v5_plugins") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS plugins (
+                    name        TEXT PRIMARY KEY,
+                    version     TEXT NOT NULL,
+                    description TEXT,
+                    port        INTEGER NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'installed',
+                    mode        TEXT NOT NULL DEFAULT 'managed',
+                    url         TEXT,
+                    config_json TEXT DEFAULT '{}',
+                    path        TEXT NOT NULL,
+                    pid         INTEGER,
+                    installedAt INTEGER NOT NULL,
+                    updatedAt   INTEGER NOT NULL
+                )
+            """)
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS plugins_by_status ON plugins(status)")
         }
     }
 }
