@@ -106,6 +106,61 @@ final class PluginManager: @unchecked Sendable {
         self.registry = registry
     }
 
+    // MARK: - Locking helpers
+    //
+    // NSLock's lock()/unlock() are unavailable from async contexts under the
+    // Swift 6 language mode. These helpers wrap the lock in a synchronous
+    // closure so callers in async contexts can still mutate shared state.
+
+    @discardableResult
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    @discardableResult
+    private func withReplyLock<T>(_ body: () -> T) -> T {
+        replyLock.lock()
+        defer { replyLock.unlock() }
+        return body()
+    }
+
+    // MARK: - Plugin Stdio Logging
+
+    /// Tail a spawned plugin's stdout/stderr pipe into `plugin.log` in the plugin
+    /// directory, prefixing each line with an ISO8601 timestamp and `[name/stream]`.
+    /// Runs as a detached task; exits when the pipe hits EOF (process exited).
+    private func tailPluginPipe(_ pipe: Pipe, pluginName: String, stream: String, logPath: String) {
+        let handle = pipe.fileHandleForReading
+        Task.detached {
+            while true {
+                let data = handle.availableData
+                if data.isEmpty { break }
+                guard let text = String(data: data, encoding: .utf8) else { continue }
+
+                let iso = ISO8601DateFormatter()
+                iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+                var out = ""
+                for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                    if line.isEmpty { continue }
+                    out += "[\(iso.string(from: Date()))] [\(pluginName)/\(stream)] \(line)\n"
+                }
+                guard !out.isEmpty, let outData = out.data(using: .utf8) else { continue }
+
+                if !FileManager.default.fileExists(atPath: logPath) {
+                    FileManager.default.createFile(atPath: logPath, contents: nil)
+                }
+                if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+                    defer { try? fh.close() }
+                    _ = try? fh.seekToEnd()
+                    try? fh.write(contentsOf: outData)
+                }
+            }
+        }
+    }
+
     // MARK: - Startup (called during boot, before workers)
 
     /// Load and start all enabled plugins. Returns when all plugins are either
@@ -148,9 +203,7 @@ final class PluginManager: @unchecked Sendable {
                 status: "starting"
             )
 
-            lock.lock()
-            plugins[row.name] = runtime
-            lock.unlock()
+            withLock { plugins[row.name] = runtime }
 
             await updateStatus(name: row.name, status: "starting")
 
@@ -239,6 +292,10 @@ final class PluginManager: @unchecked Sendable {
             try process.run()
             runtime.process = process
             sonataFileLog("Plugin \(runtime.name): spawned PID \(process.processIdentifier)")
+
+            let logPath = (pluginPath as NSString).appendingPathComponent("plugin.log")
+            tailPluginPipe(outPipe, pluginName: runtime.name, stream: "stdout", logPath: logPath)
+            tailPluginPipe(errPipe, pluginName: runtime.name, stream: "stderr", logPath: logPath)
 
             let name = runtime.name
             let mgr = self
@@ -454,9 +511,7 @@ final class PluginManager: @unchecked Sendable {
     // MARK: - Crash Recovery
 
     func handleCrash(pluginName: String, exitCode: Int32) async {
-        lock.lock()
-        guard let runtime = plugins[pluginName] else { lock.unlock(); return }
-        lock.unlock()
+        guard let runtime = withLock({ plugins[pluginName] }) else { return }
 
         // Skip recovery if plugin was intentionally stopped (disable/uninstall)
         guard runtime.mode == "managed" && runtime.status == "running" else { return }
@@ -646,9 +701,7 @@ final class PluginManager: @unchecked Sendable {
             status: "starting"
         )
 
-        lock.lock()
-        plugins[name] = runtime
-        lock.unlock()
+        withLock { plugins[name] = runtime }
 
         let healthy = await waitForHealthy(runtime)
         if healthy {
@@ -696,9 +749,7 @@ final class PluginManager: @unchecked Sendable {
             status: "starting"
         )
 
-        lock.lock()
-        plugins[name] = runtime
-        lock.unlock()
+        withLock { plugins[name] = runtime }
 
         await updateStatus(name: name, status: "starting")
 
@@ -722,9 +773,7 @@ final class PluginManager: @unchecked Sendable {
 
     /// Disable and stop a plugin.
     func disable(name: String) async throws {
-        lock.lock()
-        let runtime = plugins[name]
-        lock.unlock()
+        let runtime = withLock { plugins[name] }
 
         if let runtime {
             // Set status BEFORE terminating so terminationHandler skips crash recovery
@@ -800,9 +849,7 @@ final class PluginManager: @unchecked Sendable {
             try FileManager.default.removeItem(atPath: path)
         }
 
-        lock.lock()
-        plugins.removeValue(forKey: name)
-        lock.unlock()
+        withLock { plugins.removeValue(forKey: name) }
 
         sonataFileLog("Plugin \(name): uninstalled")
     }
@@ -1000,15 +1047,11 @@ final class PluginManager: @unchecked Sendable {
     /// Register a continuation for a sonar_send call. Returns the reply or nil on timeout.
     func awaitReply(messageId: String, timeout: TimeInterval = 60) async -> String? {
         await withCheckedContinuation { continuation in
-            replyLock.lock()
-            pendingReplies[messageId] = continuation
-            replyLock.unlock()
+            withReplyLock { pendingReplies[messageId] = continuation }
 
             Task {
                 try? await Task.sleep(for: .seconds(timeout))
-                self.replyLock.lock()
-                let pending = self.pendingReplies.removeValue(forKey: messageId)
-                self.replyLock.unlock()
+                let pending = self.withReplyLock { self.pendingReplies.removeValue(forKey: messageId) }
                 pending?.resume(returning: nil)
             }
         }
@@ -1016,17 +1059,13 @@ final class PluginManager: @unchecked Sendable {
 
     /// Resume a pending sonar_send continuation with the reply.
     private func resumeSendContinuation(messageId: String, answer: String) {
-        replyLock.lock()
-        let continuation = pendingReplies.removeValue(forKey: messageId)
-        replyLock.unlock()
+        let continuation = withReplyLock { pendingReplies.removeValue(forKey: messageId) }
         continuation?.resume(returning: answer)
     }
 
     /// Shutdown all managed plugins (called during app termination).
     func shutdown() async {
-        lock.lock()
-        let allPlugins = Array(plugins.values)
-        lock.unlock()
+        let allPlugins = withLock { Array(plugins.values) }
 
         for runtime in allPlugins where runtime.mode == "managed" {
             // Use stop command to cleanly shut down the BEAM daemon
