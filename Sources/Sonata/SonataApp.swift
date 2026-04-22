@@ -267,6 +267,13 @@ struct SonataApp: App {
                 registry.register(pithActions)
                 registry.register(statsActions)
                 registry.register(compositeActions)
+
+                // Create PluginManager (before mountHTTP so plugin management routes are included)
+                let pluginManager = PluginManager(dbPool: pool, registry: registry)
+
+                // Register plugin management actions BEFORE mountHTTP
+                registry.register(makePluginActions(pluginManager: pluginManager))
+
                 registry.mountHTTP(on: router, dbPool: pool)
                 registry.mountMetaRoutes(on: router, dbPool: pool)
 
@@ -354,6 +361,11 @@ struct SonataApp: App {
                 try? await Task.sleep(for: .milliseconds(500))
                 sonataFileLog("HTTP server: binding complete, starting services")
 
+                // Start all enabled plugins — blocks until all are running or failed.
+                // Must complete before workers spawn so plugin MCP tools are available.
+                await pluginManager.startEnabledPlugins()
+                sonataFileLog("Plugin system: initialization complete")
+
                 // --- Phase 3: Initialize all scheduler services ---
 
                 // 1. Scheduler Actor (created earlier, before routes)
@@ -440,6 +452,7 @@ struct SonataApp: App {
                     await healthMonitor.shutdown()
                     await backupManager.shutdown()
                     await wikiWatcher.shutdown()
+                    await pluginManager.shutdown()
                     await meili.shutdown()
                     logger.info("Sonata shutdown complete")
                 }
