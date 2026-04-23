@@ -9,6 +9,8 @@ struct SettingsView: View {
     @State private var showingPathInput = false
     @State private var importPath = "~/memory/.env"
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var ownerEmail = ""
+    @State private var ownerEmailSaved = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,6 +60,30 @@ struct SettingsView: View {
                                         launchAtLogin = SMAppService.mainApp.status == .enabled
                                     }
                                 }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+
+                        Divider()
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Owner Email")
+                                    .font(.body)
+                                Text("Health alerts and failure notifications are sent here")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            TextField("you@example.com", text: $ownerEmail)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 250)
+                                .onSubmit { saveOwnerEmail() }
+                            if ownerEmailSaved {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                    .transition(.opacity)
+                            }
                         }
                         .padding(.horizontal)
                         .padding(.vertical, 8)
@@ -208,6 +234,7 @@ struct SettingsView: View {
         }
         .onAppear {
             loadSecrets()
+            loadOwnerEmail()
         }
         .sheet(isPresented: $showingPathInput) {
             VStack(spacing: 16) {
@@ -290,6 +317,40 @@ struct SettingsView: View {
             }
 
             addSecret(name: key, value: val, description: "Imported from .env")
+        }
+    }
+
+    private func loadOwnerEmail() {
+        Task {
+            guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/core/owner_email") else { return }
+            if let (data, response) = try? await URLSession.shared.data(from: url),
+               let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let value = json["value"] as? String {
+                await MainActor.run { ownerEmail = value }
+            }
+        }
+    }
+
+    private func saveOwnerEmail() {
+        guard !ownerEmail.isEmpty else { return }
+        Task {
+            guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/core") else { return }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body: [String: Any] = ["key": "owner_email", "category": "config", "content": ownerEmail]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            if let (_, response) = try? await URLSession.shared.data(for: request),
+               let http = response as? HTTPURLResponse, http.statusCode < 300 {
+                await MainActor.run {
+                    ownerEmailSaved = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(2))
+                        await MainActor.run { ownerEmailSaved = false }
+                    }
+                }
+            }
         }
     }
 
