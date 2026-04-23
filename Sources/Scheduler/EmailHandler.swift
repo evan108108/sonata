@@ -418,19 +418,24 @@ actor EmailHandler {
         }
     }
 
-    /// Send a failure alert to Evan.
+    /// Send a failure alert to the owner (resolved from core config or inbox address).
     private func sendFailureAlert(emails: [EmailRecord], inbox: InboxConfig, apiKey: String) async throws {
+        // Resolve recipient: owner_email from core config, or fall back to the inbox itself
+        let ownerEmail: String = (try? await dbPool.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM coreMemory WHERE key = 'owner_email'")
+        }) ?? inbox.address
+
         let subjects = emails.map { "\"\($0.subject)\" from \($0.from)" }.joined(separator: ", ")
         try await sendMessage(
             inboxId: inbox.address,
-            to: ["evan108108@gmail.com"],
-            subject: "[Sona] Failed to dispatch email at \(inbox.address)",
+            to: [ownerEmail],
+            subject: "[Sonata] Failed to dispatch email at \(inbox.address)",
             text: """
-            I failed to enqueue worker dispatch for: \(subjects)
+            Failed to enqueue worker dispatch for: \(subjects)
 
             The emails are still in the inbox — you may want to check on this.
 
-            — Sona
+            — Sonata EmailHandler
             """,
             apiKey: apiKey
         )

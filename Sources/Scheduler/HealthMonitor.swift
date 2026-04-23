@@ -25,9 +25,9 @@ actor HealthMonitor {
     /// Consecutive failures before sending an alert.
     private let alertThreshold: Int = 3
 
-    /// AgentMail configuration for alerts.
-    private let alertFromEmail = "sona@agentmail.to"
-    private let alertToEmail = "evan108108@gmail.com"
+    /// AgentMail configuration for alerts — resolved from DB at send time.
+    private var alertFromEmail: String?
+    private var alertToEmail: String?
 
     /// HTTP server URL to check.
     private let serverURL: String
@@ -417,6 +417,30 @@ actor HealthMonitor {
 
     // MARK: - Alerts
 
+    /// Resolve alert email addresses from the first enabled inbox in the DB.
+    private func resolveAlertEmails() async {
+        if alertFromEmail != nil { return }
+        do {
+            let inbox: (address: String, role: String)? = try await dbPool.read { db in
+                try Row.fetchOne(db, sql: """
+                    SELECT address, role FROM emailInboxes
+                    WHERE enabled = 1 ORDER BY createdAt ASC LIMIT 1
+                """).map { (address: $0["address"] as String, role: $0["role"] as String) }
+            }
+            if let inbox {
+                alertFromEmail = inbox.address
+                // Alert recipient: look for owner_email in core config, fall back to sender
+                let ownerEmail: String? = try? await dbPool.read { db in
+                    try String.fetchOne(db, sql: "SELECT value FROM coreMemory WHERE key = 'owner_email'")
+                }
+                alertToEmail = ownerEmail ?? inbox.address
+                logger.info("Health alerts: from=\(inbox.address), to=\(alertToEmail ?? inbox.address)")
+            }
+        } catch {
+            logger.warning("Could not resolve alert emails: \(error)")
+        }
+    }
+
     /// Send an alert email via AgentMail HTTP API.
     private func sendAlert(check: String, message: String) async {
         // Cooldown check — don't spam alerts
@@ -428,14 +452,21 @@ actor HealthMonitor {
 
         logger.error("ALERT [\(check)]: \(message)")
 
+        // Resolve sender/recipient from DB on first use
+        await resolveAlertEmails()
+        guard let fromEmail = alertFromEmail else {
+            logger.warning("No email inbox configured — alert logged only")
+            return
+        }
+
         // Send via AgentMail API
-        guard let url = URL(string: "https://api.agentmail.to/v0/inboxes/\(alertFromEmail)/messages") else {
+        guard let url = URL(string: "https://api.agentmail.to/v0/inboxes/\(fromEmail)/messages") else {
             logger.error("Failed to build AgentMail URL")
             return
         }
 
         let emailBody: [String: Any] = [
-            "to": alertToEmail,
+            "to": alertToEmail ?? fromEmail,
             "subject": "🚨 Sonata Health Alert: \(check)",
             "body": """
             Sonata Health Monitor Alert

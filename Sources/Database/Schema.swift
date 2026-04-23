@@ -583,17 +583,8 @@ func seedSupervisorConfigIfEmpty(in db: Database) throws {
 /// Seed the emailInboxes table with the two historically hardcoded inboxes
 /// if the table is empty. Idempotent — safe to call at startup or from a migration.
 func seedEmailInboxesIfEmpty(in db: Database) throws {
-    let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emailInboxes") ?? 0
-    guard count == 0 else { return }
-
-    let now = Int64(Date().timeIntervalSince1970 * 1000)
-    try db.execute(sql: """
-        INSERT INTO emailInboxes
-            (id, address, role, displayName, enabled, autoReply, dispatchTo, createdAt, updatedAt)
-        VALUES
-            (lower(hex(randomblob(16))), 'sona@agentmail.to',        'sona',        'Sona (Primary)', 1, 1, 'worker', ?, ?),
-            (lower(hex(randomblob(16))), 'scoutleader@agentmail.to', 'scoutleader', 'Scout Leader',    1, 1, 'worker', ?, ?)
-    """, arguments: [now, now, now, now])
+    // No default inboxes — users configure via the dashboard (Email Config tab).
+    // Existing installs already have their inboxes in the DB.
 }
 
 // MARK: - Migrator Registration

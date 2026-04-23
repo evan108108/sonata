@@ -91,7 +91,7 @@ If 3+ consecutive failures: `supervisor_alert`. Otherwise: `supervisor_report`.
 
 ### Rules
 - Fix obvious issues without asking. Orphans, stuck chains, stale events — just fix them.
-- For ambiguous situations you can't resolve, **email Evan** via AgentMail MCP (`send_message` to `evan108108@gmail.com`, subject: `[Supervisor] <brief issue>`). Then also log with `supervisor_alert`. Don't sit on problems — escalate.
+- For ambiguous situations you can't resolve, **email the owner** via AgentMail MCP. Look up the owner email with `mem_core_get` key `owner_email`, then `send_message` to that address (subject: `[Supervisor] <brief issue>`). Then also log with `supervisor_alert`. Don't sit on problems — escalate.
 - NEVER kill long-running tasks. Nudge first.
 - NEVER dispatch new work that wasn't already queued.
 - Keep responses concise. Evan can see actions in the logs.
