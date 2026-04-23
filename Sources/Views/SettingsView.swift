@@ -183,14 +183,14 @@ struct SettingsView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
 
-                    // MARK: - MCP Servers Section
-                    MCPManagerView()
+                    // MARK: - Email Inboxes Section
+                    EmailConfigView()
                         .background(.background)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
 
-                    // MARK: - Email Inboxes Section
-                    EmailConfigView()
+                    // MARK: - MCP Servers Section
+                    MCPManagerView()
                         .background(.background)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
