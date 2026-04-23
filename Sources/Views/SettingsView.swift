@@ -7,10 +7,15 @@ struct SettingsView: View {
     @State private var showingAddSheet = false
     @State private var showingImportPicker = false
     @State private var showingPathInput = false
-    @State private var importPath = "~/memory/.env"
+    @State private var importPath = ""
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var ownerEmail = ""
     @State private var ownerEmailSaved = false
+    @State private var secretsExpanded = false
+    @State private var emailExpanded = true
+    @State private var mcpExpanded = false
+    @State private var workerExpanded = false
+    @State private var supervisorExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,87 +99,100 @@ struct SettingsView: View {
 
                     // MARK: - Secrets Section
                     VStack(spacing: 0) {
-                        HStack {
-                            Text("Secrets")
-                                .font(.headline)
-                            Spacer()
-
-                            Button {
-                                showingImportPicker = true
-                            } label: {
-                                Label("Import .env", systemImage: "doc.badge.plus")
-                            }
-                            .buttonStyle(.bordered)
-
-                            Button {
-                                showingAddSheet = true
-                            } label: {
-                                Label("Add Secret", systemImage: "plus")
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-
-                        // Inline path import (fallback)
-                        HStack {
-                            TextField("Path to .env file", text: $importPath)
-                                .textFieldStyle(.roundedBorder)
-                            Button("Import") {
-                                let expanded = NSString(string: importPath).expandingTildeInPath
-                                let url = URL(fileURLWithPath: expanded)
-                                importEnvFile(url)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(importPath.isEmpty)
-                        }
-                        .padding(.horizontal)
-                        .padding(.bottom, 8)
-
-                        Divider()
-
-                        if secrets.isEmpty {
-                            VStack(spacing: 12) {
-                                Image(systemName: "key.fill")
-                                    .font(.system(size: 36))
+                        Button { withAnimation(.easeInOut(duration: 0.2)) { secretsExpanded.toggle() } } label: {
+                            HStack {
+                                Image(systemName: secretsExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.caption.bold())
                                     .foregroundStyle(.secondary)
-                                Text("No secrets stored")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                Text("Add API keys and other secrets here.\nKeychain in Phase 5.")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
-                                    .multilineTextAlignment(.center)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 24)
-                        } else {
-                            VStack(spacing: 0) {
-                                ForEach(secrets) { secret in
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(secret.name)
-                                                .font(.headline.monospaced())
-                                            if !secret.description.isEmpty {
-                                                Text(secret.description)
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            Text(maskedValue(secret.value))
-                                                .font(.caption.monospaced())
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                        Spacer()
-                                        Button(role: .destructive) {
-                                            deleteSecret(secret)
-                                        } label: {
-                                            Image(systemName: "trash")
-                                        }
-                                        .buttonStyle(.borderless)
+                                    .frame(width: 16)
+                                Text("Secrets")
+                                    .font(.headline)
+                                if !secretsExpanded && !secrets.isEmpty {
+                                    Text("\(secrets.count)")
+                                        .font(.caption)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.quaternary, in: Capsule())
+                                }
+                                Spacer()
+                                if secretsExpanded {
+                                    Button {
+                                        showingImportPicker = true
+                                    } label: {
+                                        Label("Import .env", systemImage: "doc.badge.plus")
                                     }
-                                    .padding(.horizontal)
-                                    .padding(.vertical, 6)
-                                    Divider()
+                                    .buttonStyle(.bordered)
+
+                                    Button {
+                                        showingAddSheet = true
+                                    } label: {
+                                        Label("Add Secret", systemImage: "plus")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+
+                        if secretsExpanded {
+                            // Inline path import (fallback)
+                            HStack {
+                                TextField("Path to .env file", text: $importPath)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("Import") {
+                                    let expanded = NSString(string: importPath).expandingTildeInPath
+                                    let url = URL(fileURLWithPath: expanded)
+                                    importEnvFile(url)
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(importPath.isEmpty)
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 8)
+
+                            Divider()
+
+                            if secrets.isEmpty {
+                                VStack(spacing: 12) {
+                                    Image(systemName: "key.fill")
+                                        .font(.system(size: 36))
+                                        .foregroundStyle(.secondary)
+                                    Text("No secrets stored")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 24)
+                            } else {
+                                VStack(spacing: 0) {
+                                    ForEach(secrets) { secret in
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(secret.name)
+                                                    .font(.headline.monospaced())
+                                                if !secret.description.isEmpty {
+                                                    Text(secret.description)
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                                Text(maskedValue(secret.value))
+                                                    .font(.caption.monospaced())
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                            Spacer()
+                                            Button(role: .destructive) {
+                                                deleteSecret(secret)
+                                            } label: {
+                                                Image(systemName: "trash")
+                                            }
+                                            .buttonStyle(.borderless)
+                                        }
+                                        .padding(.horizontal)
+                                        .padding(.vertical, 6)
+                                        Divider()
+                                    }
                                 }
                             }
                         }
@@ -184,28 +202,24 @@ struct SettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
 
                     // MARK: - Email Inboxes Section
-                    EmailConfigView()
-                        .background(.background)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+                    collapsibleSection("Email Inboxes", icon: "envelope.fill", expanded: $emailExpanded) {
+                        EmailConfigView()
+                    }
 
                     // MARK: - MCP Servers Section
-                    MCPManagerView()
-                        .background(.background)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+                    collapsibleSection("MCP Servers", icon: "server.rack", expanded: $mcpExpanded) {
+                        MCPManagerView()
+                    }
 
                     // MARK: - Worker Cycling Section
-                    WorkerCyclingSettingsView()
-                        .background(.background)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+                    collapsibleSection("Worker Cycling", icon: "arrow.triangle.2.circlepath", expanded: $workerExpanded) {
+                        WorkerCyclingSettingsView()
+                    }
 
                     // MARK: - Supervisor Schedule Section
-                    SupervisorConfigView()
-                        .background(.background)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+                    collapsibleSection("Supervisor", icon: "eye.fill", expanded: $supervisorExpanded) {
+                        SupervisorConfigView()
+                    }
                 }
                 .padding()
             }
@@ -318,6 +332,33 @@ struct SettingsView: View {
 
             addSecret(name: key, value: val, description: "Imported from .env")
         }
+    }
+
+    @ViewBuilder
+    private func collapsibleSection<Content: View>(_ title: String, icon: String, expanded: Binding<Bool>, @ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            Button { withAnimation(.easeInOut(duration: 0.2)) { expanded.wrappedValue.toggle() } } label: {
+                HStack {
+                    Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                    Label(title, systemImage: icon)
+                        .font(.headline)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+
+            if expanded.wrappedValue {
+                content()
+            }
+        }
+        .background(.background)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
     }
 
     private func loadOwnerEmail() {
