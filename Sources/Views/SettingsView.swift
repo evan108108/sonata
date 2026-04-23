@@ -249,6 +249,7 @@ struct SettingsView: View {
         .onAppear {
             loadSecrets()
             loadOwnerEmail()
+            launchAtLogin = SMAppService.mainApp.status == .enabled
         }
         .sheet(isPresented: $showingPathInput) {
             VStack(spacing: 16) {
@@ -367,7 +368,7 @@ struct SettingsView: View {
             if let (data, response) = try? await URLSession.shared.data(from: url),
                let http = response as? HTTPURLResponse, http.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let value = json["value"] as? String {
+               let value = json["content"] as? String {
                 await MainActor.run { ownerEmail = value }
             }
         }
