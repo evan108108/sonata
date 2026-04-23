@@ -363,7 +363,7 @@ struct SettingsView: View {
 
     private func loadOwnerEmail() {
         Task {
-            guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/core/owner_email") else { return }
+            guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/core/get?key=owner_email") else { return }
             if let (data, response) = try? await URLSession.shared.data(from: url),
                let http = response as? HTTPURLResponse, http.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
