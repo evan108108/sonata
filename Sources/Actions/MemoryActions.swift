@@ -151,7 +151,7 @@ private func flagDirtyFromMemory(
     }
 }
 
-private func memRowToResponse(_ row: MemoryRow) -> MemoryResponse {
+func memRowToResponse(_ row: MemoryRow) -> MemoryResponse {
     MemoryResponse(
         _id: row.id,
         _creationTime: row.createdAt,

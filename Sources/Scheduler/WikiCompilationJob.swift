@@ -127,32 +127,30 @@ enum WikiCompilationJob {
 
         ### How to Compile Each Page
 
-        **IMPORTANT**: Use the wiki-memories script for fetching memories (it enriches transcript memories with actual conversation content).
+        Use Sonata MCP tools directly — no shell scripts needed.
 
-        The script is PAGINATED. First get the count, then fetch in batches of 20:
-        ```bash
-        \(NSHomeDirectory())/memory/claude/scripts/wiki-memories.sh <namespace> <topic> --count
-        \(NSHomeDirectory())/memory/claude/scripts/wiki-memories.sh <namespace> <topic> --limit 20 --offset 0
-        ```
+        **Fetch memories for a page** (namespace is the page's `namespace`, topic is the page's `topic` if set):
+        - `wiki_memories_all` with `{namespace, topic?, limit?}` — returns every memory for the page
+        - `mem_recall` with `{topic, filterTopic?, limit?, budget?}` — for richer synthesis with entities, relations, and related wiki pages
 
         **For CATEGORY pages** (index format):
-        1. Get memories using the wiki-memories script
-        2. Get children: use mem_wiki_read or query /api/wiki/children?parentSlug=<slug>
+        1. Fetch memories via `wiki_memories_all` (namespace only — no topic filter)
+        2. Fetch children via `wiki_children` with `{parentSlug: <slug>}`
         3. Write the page at filePath with: Title, Overview, Subpages table, Key Highlights, Related Categories
 
         **For TOPIC pages** (deep content):
-        1. Get memories using the wiki-memories script
+        1. Fetch memories via `wiki_memories_all` with `{namespace, topic}`
         2. Write the page with: Breadcrumb, Title, Synthesized prose organized by theme, Sibling/See Also links
 
         ### Dynamic Sub-Topic Pages
-        When a topic naturally splits into 3+ distinct sub-themes, create sub-topic pages via POST /api/wiki/create-page.
+        When a topic naturally splits into 3+ distinct sub-themes, create sub-topic pages via `wiki_create` MCP tool with `{slug, title, filePath, namespace, pageType:"topic", parentSlug, topic}`.
 
         ### General Rules
         - Tone: factual, structured, comprehensive
         - No fluff — every sentence should carry information
         - Preserve manually-added content
-        - After writing each page, mark compiled via POST /api/wiki/compiled with slug and memoryCount
-        - Log using mem_store: "Cron: compileWiki ran. Recompiled N pages: <slugs>." with type="observation", tags="cron-log,wiki", source="background-thinking", importance=3
+        - After writing each page, mark it compiled via `wiki_patch` MCP tool with `{slug, dirty: false, lastCompiled: <now-ms>, memoryCount: <count>}`
+        - Log using `mem_store`: "Cron: compileWiki ran. Recompiled N pages: <slugs>." with type="observation", tags="cron-log,wiki", source="background-thinking", importance=3
         """
     }
 }

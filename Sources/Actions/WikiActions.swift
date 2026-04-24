@@ -217,6 +217,72 @@ let wikiActions: [SonataAction] = [
         }
     ),
 
+    // GET /api/wiki/children?parentSlug=<slug>
+    SonataAction(
+        name: "wiki_children",
+        description: "List wiki pages whose parentSlug matches the given slug.",
+        group: "/api/wiki",
+        path: "/children",
+        method: .get,
+        params: [
+            ActionParam("parentSlug", .string, required: true, description: "Parent page slug"),
+        ],
+        handler: { ctx in
+            let parentSlug = try ctx.params.require("parentSlug")
+            do {
+                let rows = try await ctx.dbPool.read { db in
+                    try WikiPageRow.fetchAll(db,
+                        sql: "SELECT * FROM wikiPages WHERE parentSlug = ? ORDER BY slug ASC",
+                        arguments: [parentSlug]
+                    )
+                }
+                return rows.map(pageRowToResponseForAction)
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // GET /api/wiki/memories/all?namespace=<ns>&topic=<topic>
+    //
+    // Returns all memories in the given project namespace, optionally filtered
+    // by topic. Used by wiki compilation to fetch memories per page.
+    SonataAction(
+        name: "wiki_memories_all",
+        description: "List all memories for a wiki page's namespace (project) and optional topic.",
+        group: "/api/wiki",
+        path: "/memories/all",
+        method: .get,
+        params: [
+            ActionParam("namespace", .string, required: true, description: "Memory project namespace"),
+            ActionParam("topic", .string, description: "Optional topic filter"),
+            ActionParam("limit", .integer, description: "Max results (default 500)"),
+        ],
+        handler: { ctx in
+            let namespace = try ctx.params.require("namespace")
+            let topic = ctx.params.string("topic")
+            let limit = ctx.params.int("limit") ?? 500
+
+            var sql = "SELECT * FROM memories WHERE project = ?"
+            var args: [any DatabaseValueConvertible] = [namespace]
+            if let t = topic {
+                sql += " AND topic = ?"
+                args.append(t)
+            }
+            sql += " ORDER BY createdAt DESC LIMIT ?"
+            args.append(limit)
+
+            do {
+                let rows = try await ctx.dbPool.read { db in
+                    try MemoryRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+                }
+                return rows.map(memRowToResponse)
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
     // PATCH /api/wiki/page
     SonataAction(
         name: "wiki_patch",
