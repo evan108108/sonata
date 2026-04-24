@@ -78,6 +78,15 @@ enum CronParser {
             return nil
         }
 
+        // Bare aliases: "daily", "weekly", "monthly", "hourly"
+        switch s {
+        case "hourly":  return .interval(3600)
+        case "daily":   return .interval(86400)
+        case "weekly":  return .interval(604800)
+        case "monthly": return .interval(86400 * 30)
+        default: break
+        }
+
         // Shorthand intervals: "1w", "24h", "30m"
         if s.hasSuffix("w"), let n = Int(s.dropLast()) {
             return .interval(Double(n) * 604800)
