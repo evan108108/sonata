@@ -17,18 +17,30 @@ import {
 // --- Config ---
 
 const SONATA_API = process.env.SONATA_API || "http://localhost:3211";
-const WORKER_ID = process.env.WORKER_ID || `worker-${Date.now().toString(36)}`;
-const SESSION_LABEL = process.env.SESSION_LABEL || "worker";
+const WORKER_ID = process.env.WORKER_ID;
+const SESSION_LABEL = process.env.SESSION_LABEL;
 const SONA_SESSION_ID = process.env.SONA_SESSION_ID || undefined;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
 
-// Only act as a worker when SONA_WORKER=1 is set.
-const IS_WORKER = process.env.SONA_WORKER === "1";
 const SONATA_ROLE = process.env.SONATA_ROLE || "worker";
 const IS_SUPERVISOR = SONATA_ROLE === "supervisor";
 const IS_INSPECTOR = SONATA_ROLE === "inspector";
+
+// Only act as a worker when SONA_WORKER=1 is set AND both WORKER_ID and
+// SESSION_LABEL are explicitly provided. Supervisor/inspector roles use
+// SONATA_ROLE and don't need the worker-mode env vars. Without this guard,
+// sessions started outside the Sonata-spawned pool used to silently
+// auto-register with bogus IDs and label="worker", polluting the table.
+const IS_WORKER = process.env.SONA_WORKER === "1"
+  && !IS_SUPERVISOR
+  && !IS_INSPECTOR
+  && !!WORKER_ID
+  && !!SESSION_LABEL;
+if (process.env.SONA_WORKER === "1" && !IS_WORKER && !IS_SUPERVISOR && !IS_INSPECTOR) {
+  console.error("[sonata-bridge] SONA_WORKER=1 but WORKER_ID/SESSION_LABEL missing — not registering as worker");
+}
 
 // --- MCP Server ---
 

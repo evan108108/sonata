@@ -377,7 +377,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     func startProcess() {
         guard let view = terminalView else { return }
 
-        let env = WorkerCoordinator.buildEnvironment(workerId: worker.id, sessionId: worker.sessionId)
+        let env = WorkerCoordinator.buildEnvironment(workerId: worker.id, sessionId: worker.sessionId, sessionLabel: worker.label)
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -476,7 +476,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
     }
 
-    static func buildEnvironment(workerId: String, sessionId: String? = nil) -> [String] {
+    static func buildEnvironment(workerId: String, sessionId: String? = nil, sessionLabel: String? = nil) -> [String] {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
@@ -498,6 +498,9 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("HOME=\(home)")
         env.append("WORKER_ID=\(workerId)")
         env.append("SONA_WORKER=1")
+        if let sessionLabel {
+            env.append("SESSION_LABEL=\(sessionLabel)")
+        }
         if let sessionId {
             env.append("SONA_SESSION_ID=\(sessionId)")
         }

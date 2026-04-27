@@ -17,14 +17,20 @@ import {
 // --- Config ---
 
 const SONATA_API = process.env.SONATA_API || "http://localhost:3211";
-const WORKER_ID = process.env.WORKER_ID || `worker-${Date.now().toString(36)}`;
-const SESSION_LABEL = process.env.SESSION_LABEL || "worker";
+const WORKER_ID = process.env.WORKER_ID;
+const SESSION_LABEL = process.env.SESSION_LABEL;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
 
-// Only act as a worker when SONA_WORKER=1 is set.
-const IS_WORKER = process.env.SONA_WORKER === "1";
+// Only act as a worker when SONA_WORKER=1 is set AND both WORKER_ID and
+// SESSION_LABEL are explicitly provided. Without them, sessions started
+// outside the Sonata-spawned pool used to silently auto-register with
+// bogus IDs and label="worker", polluting the workers table.
+const IS_WORKER = process.env.SONA_WORKER === "1" && !!WORKER_ID && !!SESSION_LABEL;
+if (process.env.SONA_WORKER === "1" && !IS_WORKER) {
+  console.error("[sonata-bridge] SONA_WORKER=1 but WORKER_ID/SESSION_LABEL missing — not registering as worker");
+}
 const SONATA_ROLE = process.env.SONATA_ROLE || "worker";
 const IS_SUPERVISOR = SONATA_ROLE === "supervisor";
 
