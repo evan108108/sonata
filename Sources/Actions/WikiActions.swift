@@ -128,6 +128,22 @@ let wikiActions: [SonataAction] = [
             let title = try ctx.params.require("title")
             let filePath = try ctx.params.require("filePath")
 
+            // Derive structural fields from slug if caller omitted them.
+            // Slug shape is the source of truth for hierarchy — namespace
+            // and parentSlug must agree with it or the wiki UI splits.
+            let segments = slug.split(separator: "/").map(String.init)
+            let firstSeg = segments.first ?? slug
+            let lastSeg = segments.last ?? slug
+            let derivedParent: String? = segments.count > 1
+                ? segments.dropLast().joined(separator: "/")
+                : nil
+            let derivedPageType = segments.count > 1 ? "topic" : "category"
+
+            let namespace = ctx.params.string("namespace") ?? firstSeg
+            let pageType = ctx.params.string("pageType") ?? derivedPageType
+            let parentSlug = ctx.params.string("parentSlug") ?? derivedParent
+            let topic = ctx.params.string("topic") ?? lastSeg
+
             let now = nowMs()
             do {
                 try await ctx.dbPool.write { db in
@@ -152,8 +168,8 @@ let wikiActions: [SonataAction] = [
                         """,
                         arguments: [
                             newUUID(), slug, title,
-                            ctx.params.string("namespace"), ctx.params.string("pageType"),
-                            ctx.params.string("parentSlug"), ctx.params.string("topic"),
+                            namespace, pageType,
+                            parentSlug, topic,
                             now, ctx.params.int("memoryCount") ?? 0,
                             ctx.params.string("documentId"), filePath, ctx.params.string("abstract"),
                             now, now
