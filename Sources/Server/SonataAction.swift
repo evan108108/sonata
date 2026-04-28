@@ -231,7 +231,9 @@ struct SonataAction: Sendable {
             case .number:      prop["type"] = "number"
             case .integer:     prop["type"] = "integer"
             case .boolean:     prop["type"] = "boolean"
-            case .stringArray: prop["type"] = "string"  // Comma-separated in MCP
+            case .stringArray:
+                prop["type"] = "array"
+                prop["items"] = ["type": "string"]
             case .object:      prop["type"] = "object"
             }
             properties[p.name] = prop

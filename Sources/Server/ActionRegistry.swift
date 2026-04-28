@@ -193,12 +193,35 @@ final class ActionRegistry: @unchecked Sendable {
         case .integer:     return (value as? Int) ?? (value as? Double).map(Int.init) ?? 0
         case .boolean:     return (value as? Bool) ?? false
         case .stringArray:
-            if let arr = value as? [String] { return arr }
-            if let s = value as? String { return s }
+            if let arr = value as? [String] { return normalizeStringArray(arr) }
+            if let arr = value as? [Any] {
+                return normalizeStringArray(arr.compactMap { $0 as? String })
+            }
+            if let s = value as? String { return s }  // stringArray() will parse it
             return ""
         case .object:
             return value as? [String: Any] ?? [:]
         }
+    }
+
+    /// Flatten string-array elements that are themselves JSON-encoded arrays.
+    /// Why: callers occasionally pass `["[\"id1\"]"]` (an array containing a
+    /// JSON-encoded array string) instead of `["id1"]`. Without flattening,
+    /// equality comparisons against the inner ids never match (e.g. blockedBy
+    /// auto-unblock).
+    private static func normalizeStringArray(_ arr: [String]) -> [String] {
+        var result: [String] = []
+        for s in arr {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("["),
+               let data = trimmed.data(using: .utf8),
+               let inner = try? JSONDecoder().decode([String].self, from: data) {
+                result.append(contentsOf: inner)
+            } else if !trimmed.isEmpty {
+                result.append(trimmed)
+            }
+        }
+        return result
     }
 
     // MARK: - MCP Tool Schemas

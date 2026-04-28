@@ -85,6 +85,15 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
                     let blockedByJSON = dep["blockedBy"] as? String ?? "[]"
                     if let data = blockedByJSON.data(using: .utf8),
                        var arr = try? JSONDecoder().decode([String].self, from: data) {
+                        arr = arr.flatMap { s -> [String] in
+                            let t = s.trimmingCharacters(in: .whitespaces)
+                            if t.hasPrefix("["),
+                               let d = t.data(using: .utf8),
+                               let inner = try? JSONDecoder().decode([String].self, from: d) {
+                                return inner
+                            }
+                            return [s]
+                        }
                         arr.removeAll { $0 == taskId }
                         if let newJSON = try? JSONEncoder().encode(arr),
                            let newStr = String(data: newJSON, encoding: .utf8) {
