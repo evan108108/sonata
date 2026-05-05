@@ -9,7 +9,7 @@ enum SonataTab: Int, CaseIterable {
     case people = 6
     case wiki = 7
     case files = 8
-    case health = 9
+    case dashboard = 9
     case settings = 0
     case plugins = 11
 }
@@ -30,74 +30,76 @@ struct ContentView: View {
     @State private var selectedTab: SonataTab = .workers
     @ObservedObject private var workerManager = WorkerManager.shared
 
+    private static let navItems: [NavRailItem] = [
+        NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
+        NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
+        NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist"),
+        NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
+        NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
+        NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
+        NavRailItem(tab: .wiki, label: "Wiki", systemImage: "book.fill"),
+        NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
+        NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill"),
+        NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
+        NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
+    ]
+
     var body: some View {
-        TabView(selection: $selectedTab) {
-            WorkersView()
-                .tabItem { Label("Workers", systemImage: "terminal.fill") }
-                .tag(SonataTab.workers)
-
-            WebDashboardView(filename: "memory.html")
-                .tabItem { Label("Memory", systemImage: "brain.head.profile") }
-                .tag(SonataTab.memory)
-
-            WebDashboardView(filename: "tasks.html")
-                .tabItem { Label("Tasks", systemImage: "checklist") }
-                .tag(SonataTab.tasks)
-
-            ScheduleView()
-                .tabItem { Label("Schedule", systemImage: "calendar") }
-                .tag(SonataTab.schedule)
-
-            EmailView()
-                .tabItem { Label("Email", systemImage: "envelope.fill") }
-                .tag(SonataTab.email)
-
-            ContactsView()
-                .tabItem { Label("People", systemImage: "person.2.fill") }
-                .tag(SonataTab.people)
-
-            WikiView()
-                .tabItem { Label("Wiki", systemImage: "book.fill") }
-                .tag(SonataTab.wiki)
-
-            PrivateFilesView()
-                .tabItem { Label("Files", systemImage: "person.text.rectangle") }
-                .tag(SonataTab.files)
-
-            PluginsView()
-                .tabItem { Label("Plugins", systemImage: "puzzlepiece.extension.fill") }
-                .tag(SonataTab.plugins)
-
-            HealthView()
-                .tabItem { Label("Health", systemImage: "heart.text.square.fill") }
-                .tag(SonataTab.health)
-
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gear") }
-                .tag(SonataTab.settings)
-        }
-        .padding(.top, 8)
-        .focusedSceneValue(\.selectedTab, $selectedTab)
-        .overlay(alignment: .topTrailing) {
-            if workerManager.isCyclingPaused && selectedTab != .workers {
-                Button {
-                    selectedTab = .workers
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "pause.circle.fill")
-                            .font(.caption2)
-                        Text("Cycling Paused")
-                            .font(.caption2.bold())
+        HStack(spacing: 0) {
+            NavRail(selected: $selectedTab, items: Self.navItems)
+            Divider()
+            destinationView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .topTrailing) {
+                    if workerManager.isCyclingPaused && selectedTab != .workers {
+                        Button {
+                            selectedTab = .workers
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "pause.circle.fill")
+                                    .font(.caption2)
+                                Text("Cycling Paused")
+                                    .font(.caption2.bold())
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.yellow.opacity(0.2), in: Capsule())
+                            .foregroundStyle(.yellow)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 12)
+                        .padding(.top, 4)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.yellow.opacity(0.2), in: Capsule())
-                    .foregroundStyle(.yellow)
                 }
-                .buttonStyle(.plain)
-                .padding(.trailing, 12)
-                .padding(.top, 4)
-            }
+        }
+        .focusedSceneValue(\.selectedTab, $selectedTab)
+    }
+
+    @ViewBuilder
+    private var destinationView: some View {
+        switch selectedTab {
+        case .workers:
+            WorkersView()
+        case .memory:
+            WebDashboardView(filename: "memory.html")
+        case .tasks:
+            WebDashboardView(filename: "tasks.html")
+        case .schedule:
+            ScheduleView()
+        case .email:
+            EmailView()
+        case .people:
+            ContactsView()
+        case .wiki:
+            WikiView()
+        case .files:
+            PrivateFilesView()
+        case .plugins:
+            PluginsView()
+        case .dashboard:
+            DashboardView()
+        case .settings:
+            SettingsView()
         }
     }
 }

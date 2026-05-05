@@ -282,6 +282,7 @@ final class PluginManager: @unchecked Sendable {
 
         // Kill any stale daemon from a previous run before starting
         stopPluginDaemon(pluginPath: pluginPath, executable: executable)
+        killProcessOnPort(manifest.port)
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -805,6 +806,27 @@ final class PluginManager: @unchecked Sendable {
         }
 
         await updateStatus(name: name, status: "disabled")
+    }
+
+    /// Kill any process listening on the given port. Needed for compiled Bun
+    /// binaries where `bin/<name> stop` is a no-op — without this, the old
+    /// process keeps holding the port and the new spawn crashes immediately.
+    private func killProcessOnPort(_ port: Int) {
+        let lsof = Process()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-ti", ":\(port)"]
+        let pipe = Pipe()
+        lsof.standardOutput = pipe
+        lsof.standardError = Pipe()
+        try? lsof.run()
+        lsof.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        for pidStr in output.split(separator: "\n") {
+            if let pid = Int32(pidStr.trimmingCharacters(in: .whitespaces)) {
+                kill(pid, SIGTERM)
+            }
+        }
+        Thread.sleep(forTimeInterval: 1.0)
     }
 
     /// Run the plugin's stop command to cleanly shut down any daemon process.

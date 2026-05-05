@@ -510,7 +510,7 @@ struct SonataApp: App {
                         .keyboardShortcut("7", modifiers: .command)
                     Button("Files") { selectedTab?.wrappedValue = .files }
                         .keyboardShortcut("8", modifiers: .command)
-                    Button("Health") { selectedTab?.wrappedValue = .health }
+                    Button("Dashboard") { selectedTab?.wrappedValue = .dashboard }
                         .keyboardShortcut("9", modifiers: .command)
                     Button("Settings") { selectedTab?.wrappedValue = .settings }
                         .keyboardShortcut("0", modifiers: .command)

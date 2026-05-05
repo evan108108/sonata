@@ -231,10 +231,11 @@ public actor SchedulerActor {
         let staleThreshold = now.addingTimeInterval(-Self.staleThresholdSeconds)
 
         // Load calendar events
+        let logger = self.logger
         let calendarEntries: [(ScheduledEntry, JobSource)] = try await dbPool.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT id, title, prompt, scheduledAt, recurrence, taskType,
-                       workingDir, model, maxTurns
+                       workingDir, model, maxTurns, createdAt
                 FROM calendarEvents
                 WHERE enabled = 1
             """)
@@ -251,6 +252,8 @@ public actor SchedulerActor {
                 let workingDir = row["workingDir"] as? String
                 let model = row["model"] as? String
                 let maxTurns = row["maxTurns"] as? Int
+                let createdAt = (row["createdAt"] as? Int64).map { Date(timeIntervalSince1970: Double($0) / 1000.0) }
+                let title = row["title"] as? String ?? id
 
                 // Determine job type
                 let jobType: ScheduledEntry.JobType
@@ -261,16 +264,20 @@ public actor SchedulerActor {
                 default: jobType = .spawnClaude // default to claude for background jobs
                 }
 
-                // Determine next fire time with stale job detection
+                // Determine next fire time with stale job detection.
+                // A one-shot is only "stale" if BOTH its scheduledAt is >1h past
+                // AND it was created >1h ago. A freshly-created event with a past
+                // scheduledAt should still fire — it just hasn't been seen yet.
                 var nextFire = scheduledAt
                 if nextFire <= now, let rec = recurrence, let schedule = CronParser.parse(rec) {
                     // Recurring: compute next fire directly
                     nextFire = CronParser.nextFire(for: schedule, after: now)
-                } else if nextFire < staleThreshold {
-                    // One-shot and stale (>1 hour overdue) — skip it
+                } else if nextFire < staleThreshold && (createdAt.map { $0 < staleThreshold } ?? true) {
+                    // One-shot, fire time AND creation both >1h past — drop as stale
+                    logger.warning("Skipping stale calendar event \(id) (\"\(title)\"): scheduledAt=\(scheduledAt), createdAt=\(createdAt.map { "\($0)" } ?? "nil")")
                     return nil
                 } else if nextFire <= now {
-                    // Recently due (within 1 hour) — fire normally
+                    // Recently due (within 1h) OR freshly created with past scheduledAt — fire soon
                     nextFire = now.addingTimeInterval(1)
                 }
 
@@ -289,7 +296,6 @@ public actor SchedulerActor {
                     payload = .internalFunc(name: prompt ?? taskTypeStr)
                 }
 
-                let title = row["title"] as? String ?? id
                 return (ScheduledEntry(id: id, name: title, jobType: jobType, nextFireTime: nextFire, payload: payload), .calendarEvent)
             }
         }

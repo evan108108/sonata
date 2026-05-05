@@ -125,6 +125,8 @@ let taskActions: [SonataAction] = [
             let maxRetries = ctx.params.int("maxRetries")
             let metadata = ctx.params.string("metadata")
 
+            let initialBlockers = ctx.params.stringArray("blockedBy") ?? []
+
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -154,6 +156,35 @@ let taskActions: [SonataAction] = [
                             now, now
                         ]
                     )
+
+                    // Race fix: if blockers already finished (terminal status)
+                    // before this task was created, unblockDependents will never
+                    // fire for them. Drop them now so the task can dispatch.
+                    if !initialBlockers.isEmpty {
+                        let placeholders = Array(repeating: "?", count: initialBlockers.count).joined(separator: ",")
+                        let rows = try Row.fetchAll(
+                            db,
+                            sql: "SELECT id, status FROM tasks WHERE id IN (\(placeholders))",
+                            arguments: StatementArguments(initialBlockers)
+                        )
+                        let terminal: Set<String> = ["completed", "failed", "cancelled"]
+                        var terminalBlockers = Set<String>()
+                        for row in rows {
+                            if let bid = row["id"] as? String,
+                               let status = row["status"] as? String,
+                               terminal.contains(status) {
+                                terminalBlockers.insert(bid)
+                            }
+                        }
+                        if !terminalBlockers.isEmpty {
+                            let remaining = initialBlockers.filter { !terminalBlockers.contains($0) }
+                            let remainingJSON = encodeJSONStringArray(remaining)
+                            try db.execute(
+                                sql: "UPDATE tasks SET blockedBy = ?, updatedAt = ? WHERE id = ?",
+                                arguments: [remainingJSON, now, id]
+                            )
+                        }
+                    }
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)

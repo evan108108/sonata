@@ -197,6 +197,7 @@ let calendarActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            await ctx.scheduler?.reload()
             return StoreResponse(id: id)
         }
     ),
@@ -251,6 +252,7 @@ let calendarActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            await ctx.scheduler?.reload()
             return PatchResponse(id: id)
         }
     ),
@@ -274,6 +276,7 @@ let calendarActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            await ctx.scheduler?.reload()
             return SuccessResponse()
         }
     ),
@@ -301,6 +304,7 @@ let calendarActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            await ctx.scheduler?.reload()
             return SuccessResponse()
         }
     ),
@@ -328,6 +332,7 @@ let calendarActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            await ctx.scheduler?.reload()
             return SuccessResponse()
         }
     ),

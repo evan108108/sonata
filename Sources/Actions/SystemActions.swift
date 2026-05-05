@@ -94,18 +94,65 @@ let systemActions: [SonataAction] = [
                     let memRow = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS cnt FROM memories")!
                     let memoryCount: Int = memRow["cnt"]
 
+                    let memoryTypeRows = try Row.fetchAll(db, sql: """
+                        SELECT type, COUNT(*) AS cnt FROM memories
+                        GROUP BY type
+                    """)
+                    var memoriesByType: [String: Int] = [:]
+                    for r in memoryTypeRows {
+                        let t: String = r["type"]
+                        let c: Int = r["cnt"]
+                        memoriesByType[t] = c
+                    }
+
+                    let wikiRow = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS cnt FROM wikiPages")!
+                    let wikiPageCount: Int = wikiRow["cnt"]
+
                     let entRow = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS cnt FROM entities")!
                     let entityCount: Int = entRow["cnt"]
+
+                    let entityTypeRows = try Row.fetchAll(db, sql: """
+                        SELECT type, COUNT(*) AS cnt FROM entities
+                        GROUP BY type
+                    """)
+                    var entitiesByType: [String: Int] = [:]
+                    for r in entityTypeRows {
+                        let t: String = r["type"]
+                        let c: Int = r["cnt"]
+                        entitiesByType[t] = c
+                    }
 
                     let taskRow = try Row.fetchOne(db, sql: """
                         SELECT COUNT(*) AS cnt FROM tasks WHERE status = 'pending'
                     """)!
                     let pendingTasks: Int = taskRow["cnt"]
 
+                    let taskStatusRows = try Row.fetchAll(db, sql: """
+                        SELECT status, COUNT(*) AS cnt FROM tasks
+                        GROUP BY status
+                    """)
+                    var tasksByStatus: [String: Int] = [:]
+                    for r in taskStatusRows {
+                        let s: String = r["status"]
+                        let c: Int = r["cnt"]
+                        tasksByStatus[s] = c
+                    }
+
                     let emailRow = try Row.fetchOne(db, sql: """
                         SELECT COUNT(*) AS cnt FROM emails WHERE status = 'unread'
                     """)!
                     let unreadEmails: Int = emailRow["cnt"]
+
+                    let emailStatusRows = try Row.fetchAll(db, sql: """
+                        SELECT status, COUNT(*) AS cnt FROM emails
+                        GROUP BY status
+                    """)
+                    var emailsByStatus: [String: Int] = [:]
+                    for r in emailStatusRows {
+                        let s: String = r["status"]
+                        let c: Int = r["cnt"]
+                        emailsByStatus[s] = c
+                    }
 
                     // Next upcoming calendar event
                     let now = nowMs()
@@ -121,8 +168,34 @@ let systemActions: [SonataAction] = [
                         )
                     }
 
-                    let workerRow = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS cnt FROM workers")!
-                    let workerCount: Int = workerRow["cnt"]
+                    // Worker liveness: a row is "alive" only with fresh heartbeat (<90s)
+                    // and a non-offline status. A row with status='idle' but a stale
+                    // heartbeat is treated as 'stale' (zombie).
+                    let staleCutoff = nowMs() - 90_000
+
+                    // Effective-status breakdown: idle/busy/starting/draining/stale/offline.
+                    let workerStatusRows = try Row.fetchAll(db, sql: """
+                        SELECT
+                            CASE
+                                WHEN status = 'offline' THEN 'offline'
+                                WHEN lastHeartbeat < ? THEN 'stale'
+                                ELSE status
+                            END AS effectiveStatus,
+                            COUNT(*) AS cnt
+                        FROM workers
+                        GROUP BY effectiveStatus
+                    """, arguments: [staleCutoff])
+                    var workersByStatus: [String: Int] = [:]
+                    for r in workerStatusRows {
+                        let s: String = r["effectiveStatus"]
+                        let c: Int = r["cnt"]
+                        workersByStatus[s] = c
+                    }
+
+                    // Alive = everything except offline and stale.
+                    let workerCount = workersByStatus
+                        .filter { $0.key != "offline" && $0.key != "stale" }
+                        .values.reduce(0, +)
 
                     // Background job summary by status
                     let bgRows = try Row.fetchAll(db, sql: """
@@ -143,11 +216,17 @@ let systemActions: [SonataAction] = [
 
                     return SystemStatusResponse(
                         memoryCount: memoryCount,
+                        memoriesByType: memoriesByType,
+                        wikiPageCount: wikiPageCount,
                         entityCount: entityCount,
+                        entitiesByType: entitiesByType,
                         pendingTasks: pendingTasks,
+                        tasksByStatus: tasksByStatus,
                         unreadEmails: unreadEmails,
+                        emailsByStatus: emailsByStatus,
                         nextCalendarEvent: nextEvent,
                         workerCount: workerCount,
+                        workersByStatus: workersByStatus,
                         backgroundJobs: bgSummary
                     )
                 }

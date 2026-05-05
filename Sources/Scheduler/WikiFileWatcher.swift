@@ -155,15 +155,16 @@ actor WikiFileWatcher {
             return
         }
 
+        let title = readFirstLineTitle(path: path) ?? slug
+
         if existingId != nil {
-            await markDirty(slug: slug)
+            await markDirty(slug: slug, title: title)
         } else {
-            await registerNewPage(path: path, slug: slug)
+            await registerNewPage(path: path, slug: slug, title: title)
         }
 
         // Update MeiliSearch index
         if let search = search {
-            let title = readFirstLineTitle(path: path) ?? slug
             let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
             let components = slug.split(separator: "/").map(String.init)
             let namespace = components.first
@@ -171,17 +172,17 @@ actor WikiFileWatcher {
         }
     }
 
-    private func markDirty(slug: String) async {
+    private func markDirty(slug: String, title: String) async {
         let now = nowMs()
         do {
             let changes = try await dbPool.write { db -> Int in
                 try db.execute(
                     sql: """
                     UPDATE wikiPages
-                    SET dirty = 1, updatedAt = ?
-                    WHERE slug = ? AND dirty = 0
+                    SET title = ?, dirty = 1, updatedAt = ?
+                    WHERE slug = ?
                     """,
-                    arguments: [now, slug]
+                    arguments: [title, now, slug]
                 )
                 return db.changesCount
             }
@@ -215,8 +216,7 @@ actor WikiFileWatcher {
         }
     }
 
-    private func registerNewPage(path: String, slug: String) async {
-        let title = readFirstLineTitle(path: path) ?? slug
+    private func registerNewPage(path: String, slug: String, title: String) async {
         let components = slug.split(separator: "/").map(String.init)
         let namespace = components.first
         let topic = components.last
@@ -294,19 +294,47 @@ actor WikiFileWatcher {
         guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
             return nil
         }
-        let firstLine = content.split(
-            separator: "\n",
-            maxSplits: 1,
-            omittingEmptySubsequences: false
-        ).first.map(String.init) ?? ""
-        var title = firstLine.trimmingCharacters(in: .whitespaces)
-        if title.hasPrefix("# ") {
-            title = String(title.dropFirst(2))
-        } else if title.hasPrefix("#") {
-            title = String(title.dropFirst(1))
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var idx = 0
+
+        // YAML frontmatter: starts with --- on first line, ends with --- on a later line.
+        if idx < lines.count, lines[idx].trimmingCharacters(in: .whitespaces) == "---" {
+            idx += 1
+            var fmTitle: String? = nil
+            var fmName: String? = nil
+            while idx < lines.count {
+                let line = lines[idx]
+                if line.trimmingCharacters(in: .whitespaces) == "---" {
+                    idx += 1
+                    break
+                }
+                if let colon = line.firstIndex(of: ":") {
+                    let key = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                    let val = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                    if key == "title", !val.isEmpty { fmTitle = val }
+                    else if key == "name", !val.isEmpty { fmName = val }
+                }
+                idx += 1
+            }
+            if let t = fmTitle { return t }
+            if let n = fmName { return n }
         }
-        title = title.trimmingCharacters(in: .whitespaces)
-        return title.isEmpty ? nil : title
+
+        // Look past frontmatter for first non-empty line (preferring an H1).
+        while idx < lines.count {
+            var line = lines[idx].trimmingCharacters(in: .whitespaces)
+            idx += 1
+            if line.isEmpty { continue }
+            if line.hasPrefix("# ") {
+                line = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("#") {
+                line = String(line.dropFirst(1)).trimmingCharacters(in: .whitespaces)
+            }
+            if line == "---" { continue }
+            return line.isEmpty ? nil : line
+        }
+        return nil
     }
 }
 

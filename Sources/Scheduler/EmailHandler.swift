@@ -325,6 +325,7 @@ actor EmailHandler {
                 "emailCount": emails.count,
                 "inbox": inbox.address,
                 "role": inbox.role.rawValue,
+                "messageIds": emails.map { $0.messageId },
             ]
             let payloadJSON = try JSONSerialization.data(withJSONObject: eventPayload)
             let payloadStr = String(data: payloadJSON, encoding: .utf8) ?? "{}"

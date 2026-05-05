@@ -141,7 +141,12 @@ class WorkerManager: ObservableObject {
     }
 
     func addWorker(label: String? = nil) {
-        let index = workers.count + 1
+        let usedIndices = workers.compactMap { w -> Int? in
+            let prefix = "sona-worker-"
+            guard w.label.hasPrefix(prefix) else { return nil }
+            return Int(w.label.dropFirst(prefix.count))
+        }
+        let index = (usedIndices.max() ?? 0) + 1
         let workerLabel = label ?? "sona-worker-\(index)"
         let worker = Worker(label: workerLabel)
         workers.append(worker)

@@ -11,11 +11,17 @@ struct PingResponse: Encodable {
 struct SystemStatusResponse: Encodable {
     let status = "ok"
     let memoryCount: Int
+    let memoriesByType: [String: Int]  // breakdown by memory type (observation, decision, fact, ...)
+    let wikiPageCount: Int             // wiki pages live in their own table; surfaced for context
     let entityCount: Int
+    let entitiesByType: [String: Int] // breakdown by entity type (concept, tool, project, ...)
     let pendingTasks: Int
+    let tasksByStatus: [String: Int]   // breakdown by task status (pending/completed/cancelled/failed/...)
     let unreadEmails: Int
+    let emailsByStatus: [String: Int]  // breakdown by email status (unread/read/replied/error/...)
     let nextCalendarEvent: NextEventInfo?
-    let workerCount: Int
+    let workerCount: Int               // alive: not offline, fresh heartbeat
+    let workersByStatus: [String: Int] // breakdown by effective status (idle/busy/starting/.../stale/offline)
     let backgroundJobs: BackgroundJobSummary
 }
 

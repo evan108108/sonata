@@ -137,6 +137,14 @@ let workerActions: [SonataAction] = [
 
             do {
                 try await ctx.dbPool.write { db in
+                    // sessionLabel is the "slot"; workerId is the running instance.
+                    // When a fresh process registers, drop any predecessors that occupied the same slot.
+                    if !sessionLabel.isEmpty {
+                        try db.execute(
+                            sql: "DELETE FROM workers WHERE sessionLabel = ? AND workerId != ?",
+                            arguments: [sessionLabel, workerId]
+                        )
+                    }
                     try db.execute(
                         sql: """
                         INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt, sessionId)
@@ -475,14 +483,21 @@ let workerEventActions: [SonataAction] = [
             let now = nowMs()
             do {
                 let event = try await ctx.dbPool.write { db -> WorkerEventRow? in
-                    // Don't let a busy or draining worker claim events
+                    // Don't let a busy or draining worker claim events.
+                    // Also refuse workers whose sessionLabel doesn't match the
+                    // expected shape — bridge launched outside SonataApp produced
+                    // sessionLabel="worker" stragglers (2026-04-28 incident).
                     let workerRow = try Row.fetchOne(db, sql: """
-                        SELECT currentEventId, status FROM workers WHERE workerId = ?
+                        SELECT currentEventId, status, sessionLabel FROM workers WHERE workerId = ?
                     """, arguments: [workerId])
                     if let workerRow {
                         let status = workerRow["status"] as? String ?? ""
                         let currentEvent = workerRow["currentEventId"] as? String
                         if currentEvent != nil || status == "draining" { return nil }
+                        let label = workerRow["sessionLabel"] as? String ?? ""
+                        let isValidLabel = label == "supervisor"
+                            || label.range(of: #"^sona-worker-\d+$"#, options: .regularExpression) != nil
+                        if !isValidLabel { return nil }
                     }
 
                     // Find event: pre-assigned to this worker first, then any pending
@@ -570,14 +585,27 @@ let workerEventActions: [SonataAction] = [
                     // Complete associated task + unblock dependents + parent rollup
                     if let payload = row?.payload,
                        let payloadData = payload.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-                       let taskId = json["task_id"] as? String {
-                        try db.execute(sql: """
-                            UPDATE tasks SET status = 'completed', result = ?, completedAt = ?, updatedAt = ?
-                            WHERE id = ? AND status = 'active'
-                        """, arguments: [resultText ?? "Completed via channel", now, now, taskId])
-                        try unblockDependents(taskId: taskId, in: db, now: now)
-                        try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
+                        if let taskId = json["task_id"] as? String {
+                            try db.execute(sql: """
+                                UPDATE tasks SET status = 'completed', result = ?, completedAt = ?, updatedAt = ?
+                                WHERE id = ? AND status = 'active'
+                            """, arguments: [resultText ?? "Completed via channel", now, now, taskId])
+                            try unblockDependents(taskId: taskId, in: db, now: now)
+                            try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
+                        }
+
+                        // For email events, mark the dispatched emails as replied so they
+                        // don't get re-fired by EmailHandler.dispatchPendingUnreadEmails on restart.
+                        if row?.type == "email", let messageIds = json["messageIds"] as? [String], !messageIds.isEmpty {
+                            let placeholders = messageIds.map { _ in "?" }.joined(separator: ",")
+                            var args: [DatabaseValueConvertible] = ["replied", now]
+                            args.append(contentsOf: messageIds)
+                            try db.execute(sql: """
+                                UPDATE emails SET status = ?, repliedAt = ?
+                                WHERE messageId IN (\(placeholders)) AND status = 'unread'
+                            """, arguments: StatementArguments(args))
+                        }
                     }
                 }
             } catch {

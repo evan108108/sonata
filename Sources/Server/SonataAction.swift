@@ -83,7 +83,24 @@ struct ActionParams: @unchecked Sendable {
 
     func stringArray(_ key: String) -> [String]? {
         if let arr = values[key] as? [String] { return arr }
+        if let arr = values[key] as? [Any] {
+            return arr.compactMap { $0 as? String }
+        }
         if let s = values[key] as? String {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            // Empty string → empty array (callers commonly use "" to clear).
+            if trimmed.isEmpty { return [] }
+            // JSON array form: "[]", "[\"a\",\"b\"]" — decode strictly.
+            if trimmed.hasPrefix("[") {
+                if let data = trimmed.data(using: .utf8),
+                   let decoded = try? JSONDecoder().decode([String].self, from: data) {
+                    return decoded
+                }
+                // Looks like JSON but didn't parse — treat as empty rather than
+                // accidentally storing the literal "[]" as a single element.
+                return []
+            }
+            // Comma-separated fallback for non-JSON strings.
             return s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         }
         return nil
