@@ -701,18 +701,28 @@ let workerEventActions: [SonataAction] = [
     // GET /api/worker/events/recent — list recent worker events
     SonataAction(
         name: "worker_event_recent",
-        description: "List recent worker events ordered by createdAt DESC.",
+        description: "List recent worker events ordered by createdAt DESC. Optional task_id filter narrows to events whose payload references that task.",
         group: "/api/worker/events",
         path: "/recent",
         method: .get,
         params: [
             ActionParam("limit", .integer, description: "Max results (default 20)"),
+            ActionParam("task_id", .string, description: "If set, only return events whose payload contains this task_id"),
         ],
         handler: { ctx in
             let limit = ctx.params.int("limit") ?? 20
+            let taskId = ctx.params.string("task_id")
             do {
-                let rows = try await ctx.dbPool.read { db in
-                    try WorkerEventRow.fetchAll(db,
+                let rows = try await ctx.dbPool.read { db -> [WorkerEventRow] in
+                    if let taskId, !taskId.isEmpty {
+                        // Filter server-side so high-volume inboxes (email events) don't
+                        // push older task events out of the recent window.
+                        let needle = "%\"task_id\":\"\(taskId)\"%"
+                        return try WorkerEventRow.fetchAll(db,
+                            sql: "SELECT * FROM workerEvents WHERE payload LIKE ? ORDER BY createdAt DESC LIMIT ?",
+                            arguments: [needle, limit])
+                    }
+                    return try WorkerEventRow.fetchAll(db,
                         sql: "SELECT * FROM workerEvents ORDER BY createdAt DESC LIMIT ?",
                         arguments: [limit])
                 }

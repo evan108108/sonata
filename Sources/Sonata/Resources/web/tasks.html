@@ -182,11 +182,10 @@ async function loadAttempts(taskId, taskTitle) {
   const section = document.getElementById('attempts-section');
   if (!section) return;
   try {
-    const events = await apiGet('/api/worker/events/recent', { limit: 200 });
-    const arr = Array.isArray(events) ? events : (events.items || []);
-    const attempts = arr.filter(e => {
-      try { return e.payload && e.payload.includes(taskId); } catch { return false; }
-    });
+    // Server-side filter by task_id so older completed tasks aren't pushed out
+    // of a global LIMIT window by recent high-volume events (e.g. email churn).
+    const events = await apiGet('/api/worker/events/recent', { limit: 50, task_id: taskId });
+    const attempts = Array.isArray(events) ? events : (events.items || []);
     if (!attempts.length) return;
 
     const rows = attempts.map((a, i) => {
