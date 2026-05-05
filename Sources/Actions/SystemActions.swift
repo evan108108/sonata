@@ -308,6 +308,34 @@ let systemActions: [SonataAction] = [
                 )
             }
 
+            // 2b. Copy resource bundle (web/, mcp/, supervisor/, worker/) into the
+            // .app's Contents/Resources/ — the path Bundle.main.resourcePath
+            // resolves to at runtime. Without this the binary picks up Swift code
+            // changes but UI/web/static resources stay stale, which silently breaks
+            // features like the Resume button on completed-task views.
+            //
+            // On the dev machine the source path at ~/memory/Sonata/Sources/Sonata/Resources
+            // takes precedence (see SonataApp.swift web-path resolver), so this
+            // copy is mostly defensive locally and load-bearing on machines without
+            // the source tree.
+            let resourcesSrc = "\(sourceDir)/Sources/Sonata/Resources"
+            let resourcesDst = "\(appPath)/Contents/Resources"
+            let resourcesSync = await Task.detached {
+                runDeployProcess(
+                    executable: "/usr/bin/rsync",
+                    arguments: ["-a", "\(resourcesSrc)/", "\(resourcesDst)/"],
+                    cwd: nil,
+                    timeoutSeconds: 60
+                )
+            }.value
+            if resourcesSync.status != 0 {
+                return DeployResponse(
+                    success: false, step: "copy-resources",
+                    error: "resources rsync failed (exit \(resourcesSync.status))\n\(resourcesSync.stderr)",
+                    message: nil
+                )
+            }
+
             // 3. codesign (30s timeout)
             let sign = await Task.detached {
                 runDeployProcess(
