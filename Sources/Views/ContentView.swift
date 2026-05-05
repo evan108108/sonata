@@ -32,11 +32,11 @@ struct ContentView: View {
 
     private static let navItems: [NavRailItem] = [
         NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
-        NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
         NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist"),
         NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
         NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
         NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
+        NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
         NavRailItem(tab: .wiki, label: "Wiki", systemImage: "book.fill"),
         NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
         NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill"),

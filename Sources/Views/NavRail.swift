@@ -76,52 +76,25 @@ struct NavRail: View {
     // MARK: - Cells
 
     private func cell(for item: NavRailItem) -> some View {
-        let isSelected = selected == item.tab
-        return Button {
+        NavRailCell(
+            item: item,
+            isSelected: selected == item.tab,
+            railWidth: railWidth,
+            cellHeight: cellHeight
+        ) {
             selected = item.tab
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: item.systemImage)
-                    .font(.system(size: 20, weight: .regular))
-                Text(item.label)
-                    .font(.system(size: 10, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .frame(width: railWidth, height: cellHeight)
-            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-            .background(
-                isSelected
-                    ? Color.accentColor.opacity(0.15)
-                    : Color.clear
-            )
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
     }
 
     private func moreCell(overflowItems: [NavRailItem]) -> some View {
         let containsSelected = overflowItems.contains(where: { $0.tab == selected })
-        return Button {
+        return NavRailMoreCell(
+            isActive: containsSelected,
+            railWidth: railWidth,
+            cellHeight: moreCellHeight
+        ) {
             showOverflow = true
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 20, weight: .regular))
-                Text("More")
-                    .font(.system(size: 10, weight: .medium))
-                    .lineLimit(1)
-            }
-            .frame(width: railWidth, height: moreCellHeight)
-            .foregroundStyle(containsSelected ? Color.accentColor : Color.secondary)
-            .background(
-                containsSelected
-                    ? Color.accentColor.opacity(0.15)
-                    : Color.clear
-            )
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
         .popover(isPresented: $showOverflow, arrowEdge: .trailing) {
             VStack(spacing: 0) {
                 ForEach(overflowItems) { item in
@@ -148,5 +121,89 @@ struct NavRail: View {
             }
             .padding(.vertical, 4)
         }
+    }
+}
+
+private struct NavRailCell: View {
+    let item: NavRailItem
+    let isSelected: Bool
+    let railWidth: CGFloat
+    let cellHeight: CGFloat
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: item.systemImage)
+                    .font(.system(size: 20, weight: .regular))
+                Text(item.label)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(width: railWidth, height: cellHeight)
+            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            .background(backgroundColor)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.15)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.06)
+        }
+        return Color.clear
+    }
+}
+
+private struct NavRailMoreCell: View {
+    let isActive: Bool
+    let railWidth: CGFloat
+    let cellHeight: CGFloat
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 20, weight: .regular))
+                Text("More")
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .frame(width: railWidth, height: cellHeight)
+            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+            .background(backgroundColor)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isActive {
+            return Color.accentColor.opacity(0.15)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.06)
+        }
+        return Color.clear
     }
 }
