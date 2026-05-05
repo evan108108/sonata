@@ -56,6 +56,15 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
         WHERE lastHeartbeat < ? AND status != 'offline'
     """, arguments: [cutoff])
 
+    // Garbage-collect long-offline rows. A row that's been offline >5 min is a
+    // dead worker process — keeping it around just inflates counts in the UI
+    // (and was the source of two repeat zombie-row complaints today).
+    let gcCutoff = nowMs() - 300_000
+    try db.execute(sql: """
+        DELETE FROM workers
+        WHERE status = 'offline' AND lastHeartbeat < ?
+    """, arguments: [gcCutoff])
+
     let now = nowMs()
     for row in staleWorkers {
         do {
