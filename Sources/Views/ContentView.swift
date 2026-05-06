@@ -27,12 +27,13 @@ extension FocusedValues {
 }
 
 struct ContentView: View {
-    @State private var selectedTab: SonataTab = .workers
+    @State private var selectedTab: SonataTab = .dashboard
     @ObservedObject private var workerManager = WorkerManager.shared
     @StateObject private var searchVM = SearchViewModel()
     @FocusState private var searchFocused: Bool
 
     private static let navItems: [NavRailItem] = [
+        NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
         NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
         NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist"),
         NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
@@ -42,7 +43,6 @@ struct ContentView: View {
         NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
         NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
         NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill"),
-        NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
         NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
     ]
 
