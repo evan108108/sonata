@@ -14,7 +14,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -37,13 +37,49 @@ interface InFlightEvent {
 }
 let inFlight: InFlightEvent | null = null;
 
-/** Resolve the running JSONL transcript path for this worker's session. */
+/** Resolve the running JSONL transcript path for this worker's session.
+ *
+ * Two subtleties caught while bringing this online (2026-05-06):
+ *   1. Claude Code's project-dir encoding replaces BOTH `/` and `.` with `-`,
+ *      not just `/`. e.g. `/Users/evan/.sonata/worker` becomes
+ *      `-Users-evan--sonata-worker`, NOT `-Users-evan-.sonata-worker`.
+ *   2. `--session-id` is intent, not reality — Claude often generates its own
+ *      session id and writes the transcript under that, so the DB-tracked
+ *      sessionId may not match what's on disk.
+ *
+ * Strategy: encode the cwd correctly, then prefer the explicit SONA_SESSION_ID
+ * file if it exists; otherwise fall back to the most-recently-modified .jsonl
+ * in the dir, since each worker's bridge sits inside exactly one live Claude
+ * session and that session is the one being touched. */
 function resolveTranscriptPath(): string | null {
-  if (!SONA_SESSION_ID) return null;
   const cwd = process.cwd();
-  const encoded = cwd.replace(/\//g, "-");
-  const candidate = join(homedir(), ".claude", "projects", encoded, `${SONA_SESSION_ID}.jsonl`);
-  return existsSync(candidate) ? candidate : null;
+  const encoded = cwd.replace(/[\/.]/g, "-");
+  const dir = join(homedir(), ".claude", "projects", encoded);
+
+  if (SONA_SESSION_ID) {
+    const explicit = join(dir, `${SONA_SESSION_ID}.jsonl`);
+    if (existsSync(explicit)) return explicit;
+  }
+
+  try {
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    if (files.length === 0) return null;
+    let bestPath: string | null = null;
+    let bestMtime = 0;
+    for (const f of files) {
+      const p = join(dir, f);
+      try {
+        const s = statSync(p);
+        if (s.mtimeMs > bestMtime) {
+          bestMtime = s.mtimeMs;
+          bestPath = p;
+        }
+      } catch { /* skip unreadable */ }
+    }
+    return bestPath;
+  } catch {
+    return null;
+  }
 }
 
 /** Stable per-(eventType, worker-pool, cwd) prompt-prefix hash. v0 proxy for
