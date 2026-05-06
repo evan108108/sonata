@@ -3,10 +3,8 @@ import SwiftUI
 struct DashboardView: View {
     @Binding var selectedTab: SonataTab
     @State private var status: SystemStatus?
-    @State private var error: String?
     @State private var lastRefresh: Date?
     @State private var hasLoadedOnce = false
-    @State private var gracePeriodElapsed = false
     @State private var showingEntityBreakdown = false
     @State private var showingMemoryBreakdown = false
     @State private var showingTaskBreakdown = false
@@ -15,7 +13,7 @@ struct DashboardView: View {
     @ObservedObject private var sessionsVM = InteractiveSessionsViewModel.shared
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
-    private let bootGracePeriod: TimeInterval = 5
+    private let bootRetryInterval: TimeInterval = 1.5
 
     var body: some View {
         mainContent
@@ -105,19 +103,6 @@ struct DashboardView: View {
                     }
                     .padding(.bottom)
                 }
-            } else if gracePeriodElapsed && error != nil {
-                VStack(spacing: 12) {
-                    Text("Couldn't load dashboard data")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    Button {
-                        Task { await fetchStatus() }
-                    } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 12) {
                     ProgressView()
@@ -130,13 +115,12 @@ struct DashboardView: View {
             }
         }
         .task {
-            // Quiet loader for the first few seconds — local API may still be booting.
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(bootGracePeriod))
-                gracePeriodElapsed = true
+            // Local server may still be booting — retry silently until the first success.
+            while !hasLoadedOnce && !Task.isCancelled {
+                await fetchStatus()
+                if hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
-            try? await Task.sleep(for: .milliseconds(800))
-            await fetchStatus()
         }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
@@ -164,22 +148,14 @@ struct DashboardView: View {
             let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/status")!
             let (data, response) = try await URLSession.shared.data(from: url)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                // Only surface as a hard error if we've never loaded — otherwise
-                // keep last-known state and quietly retry on the next tick.
-                if !hasLoadedOnce {
-                    self.error = "load_failed"
-                }
                 return
             }
             let decoded = try JSONDecoder().decode(StatusResponse.self, from: data)
             self.status = SystemStatus(from: decoded)
             self.hasLoadedOnce = true
-            self.error = nil
             self.lastRefresh = Date()
         } catch {
-            if !hasLoadedOnce {
-                self.error = "load_failed"
-            }
+            // Keep last-known state; the boot loop or 30s timer will retry.
         }
     }
 }
