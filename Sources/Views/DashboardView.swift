@@ -15,6 +15,15 @@ struct DashboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            mainContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            DashboardChatStrip()
+        }
+    }
+
+    private var mainContent: some View {
+        VStack(spacing: 0) {
             // Header
             HStack {
                 Text("System Health")
