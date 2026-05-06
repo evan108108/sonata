@@ -445,16 +445,19 @@ private struct LiveWorkersSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button {
+                    WorkerManager.shared.addWorker()
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Add worker")
             }
 
             VStack(spacing: 2) {
                 ForEach(workers) { worker in
-                    Button {
-                        onTapRow(worker)
-                    } label: {
-                        LiveWorkerRow(worker: worker)
-                    }
-                    .buttonStyle(.plain)
+                    LiveWorkerRow(worker: worker, onTap: onTapRow)
                 }
             }
         }
@@ -466,6 +469,11 @@ private struct LiveWorkersSection: View {
 
 private struct LiveWorkerRow: View {
     @ObservedObject var worker: Worker
+    let onTap: (Worker) -> Void
+
+    @State private var isHovered = false
+    @State private var showRestartAlert = false
+    @State private var showRemoveAlert = false
 
     private static let cacheSampleFloor = 5_000
 
@@ -484,6 +492,26 @@ private struct LiveWorkerRow: View {
     }
 
     var body: some View {
+        Button {
+            onTap(worker)
+        } label: {
+            rowContent
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .alert("Restart \(worker.label)?", isPresented: $showRestartAlert) {
+            Button("Restart") { WorkerManager.shared.cycleWorker(worker) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Remove \(worker.label)?", isPresented: $showRemoveAlert) {
+            Button("Remove", role: .destructive) { WorkerManager.shared.removeWorker(worker) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This won't spawn a replacement.")
+        }
+    }
+
+    private var rowContent: some View {
         HStack(spacing: 10) {
             Circle()
                 .fill(statusDotColor)
@@ -538,6 +566,28 @@ private struct LiveWorkerRow: View {
             }
 
             Spacer()
+
+            HStack(spacing: 6) {
+                Button {
+                    showRestartAlert = true
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Restart (cycle) worker")
+
+                Button {
+                    showRemoveAlert = true
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Remove worker (drain + teardown without replacement)")
+            }
+            .opacity(isHovered ? 1 : 0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
         }
         .frame(height: 28)
         .contentShape(Rectangle())

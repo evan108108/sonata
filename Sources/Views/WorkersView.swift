@@ -166,12 +166,23 @@ class WorkerManager: ObservableObject {
         }
     }
 
+    /// Remove a worker permanently — drain in DB, SIGTERM/SIGKILL the process, do
+    /// NOT spawn a replacement. Shrinks the pool by one. Use cycleWorker if you
+    /// want a replacement.
     func removeWorker(_ worker: Worker) {
-        worker.coordinator?.stop()
-        workers.removeAll { $0.id == worker.id }
-        if selectedWorkerId == worker.id {
-            selectedWorkerId = workers.first?.id
+        let slotLabel = worker.label
+        let sigtermGrace = CycleSettings.shared.sigtermGrace
+
+        // Mark draining in DB so the server stale-sweep treats it correctly.
+        worker.status = .draining
+        let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+        Task {
+            var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/drain?workerId=\(worker.id)")!)
+            req.httpMethod = "POST"
+            _ = try? await URLSession.shared.data(for: req)
         }
+
+        teardownWorker(worker, sigtermGrace: sigtermGrace, slotLabel: slotLabel)
     }
 
     func restartWorker(_ worker: Worker) {
@@ -205,7 +216,7 @@ class WorkerManager: ObservableObject {
     }
 
     /// Spawn replacement → drain old → SIGTERM → SIGKILL if needed.
-    private func cycleWorker(_ oldWorker: Worker) {
+    func cycleWorker(_ oldWorker: Worker) {
         let slotLabel = oldWorker.label
         let settings = CycleSettings.shared
 
