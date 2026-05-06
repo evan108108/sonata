@@ -33,7 +33,8 @@ struct InteractiveSessionsRootView: View {
                             tab: tab,
                             isActive: tab.id == vm.activeTabId,
                             onSelect: { vm.selectTab(id: tab.id) },
-                            onClose: { vm.closeTab(id: tab.id) }
+                            onClose: { vm.closeTab(id: tab.id) },
+                            onRename: { newName in vm.renameTab(id: tab.id, name: newName) }
                         )
                     }
                 }
@@ -101,15 +102,35 @@ private struct TabCellView: View {
     let isActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onRename: (String) -> Void
 
     @State private var isHovered = false
+    @State private var isRenaming = false
+    @State private var editText = ""
+    @FocusState private var isEditingFocused: Bool
 
     var body: some View {
         HStack(spacing: 6) {
             statusDot
-            Text(tab.name)
-                .font(.system(.caption, design: .default))
-                .lineLimit(1)
+            ZStack {
+                Text(tab.name)
+                    .font(.system(.caption, design: .default))
+                    .lineLimit(1)
+                    .opacity(isRenaming ? 0 : 1)
+                if isRenaming {
+                    TextField("", text: $editText)
+                        .textFieldStyle(.plain)
+                        .font(.system(.caption, design: .default))
+                        .focused($isEditingFocused)
+                        .onSubmit { commitRename() }
+                        .onExitCommand { cancelRename() }
+                        .onChange(of: isEditingFocused) { _, focused in
+                            if !focused && isRenaming {
+                                commitRename()
+                            }
+                        }
+                }
+            }
             Button {
                 onClose()
             } label: {
@@ -129,8 +150,39 @@ private struct TabCellView: View {
                 .fill(isActive ? Color.secondary.opacity(0.18) : Color.clear)
         )
         .contentShape(Rectangle())
-        .onTapGesture { onSelect() }
+        .onTapGesture(count: 2) {
+            if !isRenaming { beginRename() }
+        }
+        .onTapGesture {
+            if !isRenaming { onSelect() }
+        }
         .onHover { isHovered = $0 }
+    }
+
+    private func beginRename() {
+        editText = tab.name
+        isRenaming = true
+        DispatchQueue.main.async {
+            isEditingFocused = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                if let editor = NSApp.keyWindow?.firstResponder as? NSText {
+                    editor.selectAll(nil)
+                }
+            }
+        }
+    }
+
+    private func commitRename() {
+        guard isRenaming else { return }
+        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            onRename(trimmed)
+        }
+        isRenaming = false
+    }
+
+    private func cancelRename() {
+        isRenaming = false
     }
 
     private var statusDot: some View {
