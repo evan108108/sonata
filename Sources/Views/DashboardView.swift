@@ -11,6 +11,7 @@ struct DashboardView: View {
     @State private var showingEmailBreakdown = false
     @ObservedObject private var workerManager = WorkerManager.shared
     @ObservedObject private var sessionsVM = InteractiveSessionsViewModel.shared
+    @StateObject private var activityVM = ActivityFeedViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -100,6 +101,18 @@ struct DashboardView: View {
                             selectedTab = .workers
                         }
                         .padding(.horizontal)
+
+                        ActivityFeedSection(vm: activityVM) { item in
+                            switch item.type {
+                            case "worker_completed":          selectedTab = .workers
+                            case "email_replied":             selectedTab = .email
+                            case "scheduled_job_run",
+                                 "calendar_event_fired":      selectedTab = .schedule
+                            case "background_thinking_output": selectedTab = .memory
+                            default:                          break
+                            }
+                        }
+                        .padding(.horizontal)
                     }
                     .padding(.bottom)
                 }
@@ -122,8 +135,17 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            // Same quiet-boot pattern for the activity feed; afterwards it rides the 30s timer.
+            while !activityVM.hasLoadedOnce && !Task.isCancelled {
+                await activityVM.fetch()
+                if activityVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
+            Task { await activityVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)

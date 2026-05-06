@@ -50,3 +50,18 @@ struct BackgroundJobSummary: Encodable {
     let completed: Int
     let failed: Int
 }
+
+struct ActivityItem: Encodable {
+    let id: String
+    let type: String        // worker_completed | email_replied | scheduled_job_run | calendar_event_fired | supervisor_alert | background_thinking_output
+    let title: String
+    let subtitle: String
+    let timestamp: Int64    // epoch ms
+    let icon: String        // SF Symbol
+    let collapsedCount: Int?
+}
+
+struct RecentActivityResponse: Encodable {
+    let items: [ActivityItem]
+    let generatedAt: Int64
+}

@@ -236,6 +236,264 @@ let systemActions: [SonataAction] = [
         }
     ),
 
+    // GET /api/recent_activity — curated cross-table activity feed (last 24h, capped at 20)
+    SonataAction(
+        name: "system_recent_activity",
+        description: "Curated recent activity feed: worker completions, email replies, scheduled-job runs, calendar firings, and background-thinking reflections from the last 24h. Returns up to 20 items, deduped within 5-minute windows.",
+        group: "/api",
+        path: "/recent_activity",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                return try await ctx.dbPool.read { db -> RecentActivityResponse in
+                    let now = nowMs()
+                    let cutoff = now - 24 * 60 * 60 * 1000
+                    var raw: [ActivityItem] = []
+
+                    // Worker events: only completed, only types that represent real work.
+                    // Filter out heartbeat/check noise events defensively even though the
+                    // current bridge doesn't insert them as workerEvents — guard against
+                    // future event types polluting the feed.
+                    let weRows = try Row.fetchAll(db, sql: """
+                        SELECT we.id, we.type, we.payload, we.assignedTo, we.completedAt,
+                               we.createdAt, w.sessionLabel
+                        FROM workerEvents we
+                        LEFT JOIN workers w ON w.workerId = we.assignedTo
+                        WHERE we.status = 'completed'
+                          AND we.completedAt IS NOT NULL
+                          AND we.completedAt >= ?
+                          AND we.type NOT IN ('heartbeat', 'check', 'ping')
+                        ORDER BY we.completedAt DESC
+                        LIMIT 60
+                    """, arguments: [cutoff])
+                    for r in weRows {
+                        let id: String = r["id"]
+                        let type: String = r["type"]
+                        let payloadStr: String = r["payload"]
+                        let assignedTo: String? = r["assignedTo"]
+                        let completedAt: Int64 = r["completedAt"]
+                        let createdAt: Int64 = r["createdAt"]
+                        let label: String? = r["sessionLabel"]
+
+                        // Pull a friendly title out of the payload JSON when present;
+                        // fall back to the event type so the row is never blank.
+                        var title = type
+                        if let data = payloadStr.data(using: .utf8),
+                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            if let t = obj["title"] as? String, !t.isEmpty {
+                                title = t
+                            } else if let s = obj["summary"] as? String, !s.isEmpty {
+                                title = s
+                            }
+                        }
+                        title = String(title.prefix(120))
+
+                        let durSec = max(0, (completedAt - createdAt) / 1000)
+                        let workerLabel = label ?? assignedTo ?? "worker"
+                        let subtitle = "\(workerLabel) · \(durSec)s"
+
+                        raw.append(ActivityItem(
+                            id: id,
+                            type: "worker_completed",
+                            title: title,
+                            subtitle: subtitle,
+                            timestamp: completedAt,
+                            icon: "checkmark.circle.fill",
+                            collapsedCount: nil
+                        ))
+                    }
+
+                    // Email replies sent in the window.
+                    let emailRows = try Row.fetchAll(db, sql: """
+                        SELECT id, subject, fromAddr, repliedAt
+                        FROM emails
+                        WHERE status = 'replied' AND repliedAt IS NOT NULL AND repliedAt >= ?
+                        ORDER BY repliedAt DESC
+                        LIMIT 40
+                    """, arguments: [cutoff])
+                    for r in emailRows {
+                        let id: String = r["id"]
+                        let subject: String = r["subject"]
+                        let fromAddr: String = r["fromAddr"]
+                        let repliedAt: Int64 = r["repliedAt"]
+
+                        // "Allison Formicola <allison@enginable.com>" → "allison"
+                        var handle = fromAddr
+                        if let lt = handle.firstIndex(of: "<"),
+                           let gt = handle.firstIndex(of: ">"),
+                           lt < gt {
+                            handle = String(handle[handle.index(after: lt)..<gt])
+                        }
+                        if let at = handle.firstIndex(of: "@") {
+                            handle = String(handle[..<at])
+                        }
+                        handle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                        raw.append(ActivityItem(
+                            id: id,
+                            type: "email_replied",
+                            title: String(subject.prefix(120)),
+                            subtitle: "Replied to \(handle)",
+                            timestamp: repliedAt,
+                            icon: "envelope.fill",
+                            collapsedCount: nil
+                        ))
+                    }
+
+                    // Scheduled jobs: lastRunAt is REAL (ms epoch as Double).
+                    let jobRows = try Row.fetchAll(db, sql: """
+                        SELECT id, name, lastRunAt, lastResult, lastExitCode
+                        FROM scheduledJobs
+                        WHERE lastRunAt IS NOT NULL AND lastRunAt >= ?
+                        ORDER BY lastRunAt DESC
+                        LIMIT 40
+                    """, arguments: [Double(cutoff)])
+                    for r in jobRows {
+                        let id: String = r["id"]
+                        let name: String = r["name"]
+                        let lastRunAt: Double = r["lastRunAt"]
+                        let lastResult: String? = r["lastResult"]
+                        let lastExitCode: Double? = r["lastExitCode"]
+
+                        let failed = (lastExitCode ?? 0) != 0
+                        let result = lastResult.flatMap { $0.isEmpty ? nil : $0 } ?? "ok"
+                        let resultTrimmed = String(result.prefix(80))
+                        let subtitle = failed
+                            ? "(failed) last result: \(resultTrimmed)"
+                            : "last result: \(resultTrimmed)"
+
+                        raw.append(ActivityItem(
+                            id: id,
+                            type: "scheduled_job_run",
+                            title: name,
+                            subtitle: subtitle,
+                            timestamp: Int64(lastRunAt),
+                            icon: "calendar.circle.fill",
+                            collapsedCount: nil
+                        ))
+                    }
+
+                    // Calendar events that fired.
+                    let calRows = try Row.fetchAll(db, sql: """
+                        SELECT id, title, lastRunAt, lastRunStatus
+                        FROM calendarEvents
+                        WHERE lastRunAt IS NOT NULL AND lastRunAt >= ? AND runCount > 0
+                        ORDER BY lastRunAt DESC
+                        LIMIT 40
+                    """, arguments: [cutoff])
+                    for r in calRows {
+                        let id: String = r["id"]
+                        let title: String = r["title"]
+                        let lastRunAt: Int64 = r["lastRunAt"]
+                        let lastRunStatus: String? = r["lastRunStatus"]
+                        raw.append(ActivityItem(
+                            id: id,
+                            type: "calendar_event_fired",
+                            title: String(title.prefix(120)),
+                            subtitle: "last status: \(lastRunStatus ?? "—")",
+                            timestamp: lastRunAt,
+                            icon: "calendar.badge.checkmark",
+                            collapsedCount: nil
+                        ))
+                    }
+
+                    // Background-thinking reflections.
+                    let memRows = try Row.fetchAll(db, sql: """
+                        SELECT id, l0, content, source, createdAt
+                        FROM memories
+                        WHERE type = 'reflection'
+                          AND source LIKE 'background-thinking%'
+                          AND createdAt >= ?
+                        ORDER BY createdAt DESC
+                        LIMIT 40
+                    """, arguments: [cutoff])
+                    for r in memRows {
+                        let id: String = r["id"]
+                        let l0: String? = r["l0"]
+                        let content: String = r["content"]
+                        let source: String? = r["source"]
+                        let createdAt: Int64 = r["createdAt"]
+
+                        let raw0 = (l0?.isEmpty == false ? l0! : content)
+                        let title = String(raw0.prefix(80))
+                        raw.append(ActivityItem(
+                            id: id,
+                            type: "background_thinking_output",
+                            title: title,
+                            subtitle: source ?? "background-thinking",
+                            timestamp: createdAt,
+                            icon: "brain",
+                            collapsedCount: nil
+                        ))
+                    }
+
+                    // Sort newest first across all sources.
+                    raw.sort { $0.timestamp > $1.timestamp }
+
+                    // Collapse same-(type, source-key) items within 5 min into a single
+                    // entry titled "<original> + N more". The "source key" varies by
+                    // type — for worker rows it's the worker label embedded in the
+                    // subtitle; for emails it's the recipient handle; for jobs and
+                    // calendar events it's the title. Use the subtitle for worker rows
+                    // and the title for the rest as a stable bucket key.
+                    let windowMs: Int64 = 5 * 60 * 1000
+                    var collapsed: [ActivityItem] = []
+                    var lastByBucket: [String: Int] = [:]   // bucket → index in collapsed
+                    var lastTsByBucket: [String: Int64] = [:]
+
+                    for item in raw {
+                        let bucketKey: String
+                        switch item.type {
+                        case "worker_completed":
+                            // Bucket by worker label (everything before " · " in subtitle).
+                            let workerKey = item.subtitle.split(separator: "·", maxSplits: 1).first
+                                .map { $0.trimmingCharacters(in: .whitespaces) } ?? item.subtitle
+                            bucketKey = "\(item.type)|\(workerKey)"
+                        case "email_replied":
+                            bucketKey = "\(item.type)|\(item.subtitle)"
+                        default:
+                            bucketKey = "\(item.type)|\(item.title)"
+                        }
+
+                        if let idx = lastByBucket[bucketKey],
+                           let lastTs = lastTsByBucket[bucketKey],
+                           lastTs - item.timestamp <= windowMs {
+                            // Within window: roll into the existing (newer) entry.
+                            let existing = collapsed[idx]
+                            let newCount = (existing.collapsedCount ?? 1) + 1
+                            // Strip any prior "+ N more" suffix we appended on a previous merge.
+                            var baseTitle = existing.title
+                            if let range = baseTitle.range(of: " + ", options: .backwards),
+                               baseTitle[range.upperBound...].hasSuffix(" more") {
+                                baseTitle = String(baseTitle[..<range.lowerBound])
+                            }
+                            let newTitle = "\(baseTitle) + \(newCount - 1) more"
+                            collapsed[idx] = ActivityItem(
+                                id: existing.id,
+                                type: existing.type,
+                                title: newTitle,
+                                subtitle: existing.subtitle,
+                                timestamp: existing.timestamp,   // already the newest
+                                icon: existing.icon,
+                                collapsedCount: newCount
+                            )
+                        } else {
+                            collapsed.append(item)
+                            lastByBucket[bucketKey] = collapsed.count - 1
+                            lastTsByBucket[bucketKey] = item.timestamp
+                        }
+                    }
+
+                    let capped = Array(collapsed.prefix(20))
+                    return RecentActivityResponse(items: capped, generatedAt: now)
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
     // POST /api/backup — trigger an immediate full backup (local + S3)
     SonataAction(
         name: "system_backup",
