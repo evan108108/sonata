@@ -29,6 +29,8 @@ extension FocusedValues {
 struct ContentView: View {
     @State private var selectedTab: SonataTab = .workers
     @ObservedObject private var workerManager = WorkerManager.shared
+    @StateObject private var searchVM = SearchViewModel()
+    @FocusState private var searchFocused: Bool
 
     private static let navItems: [NavRailItem] = [
         NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
@@ -45,34 +47,58 @@ struct ContentView: View {
     ]
 
     var body: some View {
-        HStack(spacing: 0) {
-            NavRail(selected: $selectedTab, items: Self.navItems)
+        VStack(spacing: 0) {
+            SearchBar(vm: searchVM, focusBinding: $searchFocused)
             Divider()
-            destinationView
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .topTrailing) {
-                    if workerManager.isCyclingPaused && selectedTab != .workers {
-                        Button {
-                            selectedTab = .workers
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "pause.circle.fill")
-                                    .font(.caption2)
-                                Text("Cycling Paused")
-                                    .font(.caption2.bold())
+            HStack(spacing: 0) {
+                NavRail(selected: $selectedTab, items: Self.navItems)
+                Divider()
+                destinationView
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay(alignment: .topTrailing) {
+                        if workerManager.isCyclingPaused && selectedTab != .workers {
+                            Button {
+                                selectedTab = .workers
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "pause.circle.fill")
+                                        .font(.caption2)
+                                    Text("Cycling Paused")
+                                        .font(.caption2.bold())
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.yellow.opacity(0.2), in: Capsule())
+                                .foregroundStyle(.yellow)
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.yellow.opacity(0.2), in: Capsule())
-                            .foregroundStyle(.yellow)
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 12)
+                            .padding(.top, 4)
                         }
-                        .buttonStyle(.plain)
-                        .padding(.trailing, 12)
-                        .padding(.top, 4)
                     }
-                }
+            }
         }
+        .overlay {
+            if searchVM.isShowingResults {
+                SearchOverlay(vm: searchVM, onWiki: { page in
+                    searchVM.dismiss()
+                    selectedTab = .wiki
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        NotificationCenter.default.post(
+                            name: .sonataOpenWikiSlug,
+                            object: nil,
+                            userInfo: ["slug": page.slug]
+                        )
+                    }
+                })
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: searchVM.isShowingResults)
         .focusedSceneValue(\.selectedTab, $selectedTab)
+        .focusedSceneValue(\.focusSearchBar) {
+            searchFocused = true
+        }
     }
 
     @ViewBuilder

@@ -290,6 +290,21 @@ struct WikiView: View {
         .task {
             await fetchPages()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .sonataOpenWikiSlug)) { note in
+            guard let slug = note.userInfo?["slug"] as? String else { return }
+            Task { await openSlug(slug) }
+        }
+    }
+
+    private func openSlug(_ slug: String) async {
+        if pages.isEmpty {
+            await fetchPages()
+        }
+        if let page = pages.first(where: { $0.slug == slug }) {
+            selectedPage = page
+            selectedNodeId = "page-\(slug)"
+            await loadMarkdown(for: page)
+        }
     }
 
     // MARK: - Networking

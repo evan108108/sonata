@@ -484,6 +484,7 @@ struct SonataApp: App {
     }
 
     @FocusedValue(\.selectedTab) var selectedTab
+    @FocusedValue(\.focusSearchBar) var focusSearchBar
 
     var body: some Scene {
         WindowGroup {
@@ -493,6 +494,10 @@ struct SonataApp: App {
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0
             CommandGroup(after: .toolbar) {
+                Section {
+                    Button("Search Sona…") { focusSearchBar?() }
+                        .keyboardShortcut("k", modifiers: .command)
+                }
                 Section {
                     Button("Workers") { selectedTab?.wrappedValue = .workers }
                         .keyboardShortcut("1", modifiers: .command)
