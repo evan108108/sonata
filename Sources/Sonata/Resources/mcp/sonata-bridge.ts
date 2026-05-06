@@ -141,12 +141,10 @@ async function pushLiveHeartbeat(): Promise<void> {
     if (transcriptPath) {
       const usage = readTranscriptUsage(transcriptPath);
       if (usage) {
-        // Lock baseline on first read after claim so the first turn's massive
-        // cache_creation isn't double-counted from prior session traffic.
-        if (!usageBaseline) usageBaseline = usage;
-        body.currentEventTokens = Math.max(0, usage.totalTokens - usageBaseline.totalTokens);
-        body.currentInputTokens = Math.max(0, usage.inputTokens - usageBaseline.inputTokens);
-        body.currentCacheReadTokens = Math.max(0, usage.cacheReadTokens - usageBaseline.cacheReadTokens);
+        const baseline = usageBaseline ?? { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 };
+        body.currentEventTokens = Math.max(0, usage.totalTokens - baseline.totalTokens);
+        body.currentInputTokens = Math.max(0, usage.inputTokens - baseline.inputTokens);
+        body.currentCacheReadTokens = Math.max(0, usage.cacheReadTokens - baseline.cacheReadTokens);
       }
     }
   }
@@ -422,14 +420,20 @@ if (IS_WORKER || IS_SUPERVISOR) {
 
           console.error(`[sonata-bridge] Pushing event: ${evt.type} (${evt._id})`);
 
-          // Track in-flight event for live monitoring heartbeats. Reset
-          // baseline so cumulative usage is captured fresh per event.
+          // Track in-flight event for live monitoring heartbeats. Snapshot
+          // the transcript usage NOW (at claim time) so even short events
+          // that finish before the first heartbeat report a non-zero delta.
           inFlight = {
             eventId: evt._id,
             eventType: evt.type,
             promptHash: computePromptHash(evt.type),
           };
-          usageBaseline = null;
+          {
+            const transcriptPath = resolveTranscriptPath();
+            usageBaseline = transcriptPath
+              ? (readTranscriptUsage(transcriptPath) ?? { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 })
+              : { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 };
+          }
 
           try {
             const payload = JSON.parse(evt.payload);
