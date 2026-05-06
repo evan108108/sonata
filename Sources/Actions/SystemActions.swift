@@ -308,32 +308,45 @@ let systemActions: [SonataAction] = [
                 )
             }
 
-            // 2b. Copy resource bundle (web/, mcp/, supervisor/, worker/) into the
-            // .app's Contents/Resources/ — the path Bundle.main.resourcePath
-            // resolves to at runtime. Without this the binary picks up Swift code
-            // changes but UI/web/static resources stay stale, which silently breaks
-            // features like the Resume button on completed-task views.
+            // 2b. Copy resource bundle (web/, mcp/, supervisor/, worker/) into TWO
+            // paths inside the .app:
             //
-            // On the dev machine the source path at ~/memory/Sonata/Sources/Sonata/Resources
-            // takes precedence (see SonataApp.swift web-path resolver), so this
-            // copy is mostly defensive locally and load-bearing on machines without
-            // the source tree.
+            //   - Contents/Resources/  — what Bundle.main.resourcePath resolves to.
+            //     The web-path resolver in SonataApp.swift falls back here when
+            //     the dev source tree isn't present (e.g. on Scout). Stale
+            //     Contents/Resources caused the Resume button to silently
+            //     disappear on the Tasks tab.
+            //   - Sonata_Sonata.bundle/  — what Bundle.module resolves to.
+            //     ensureGlobalMCPServers() reads sonata-bridge.ts from
+            //     Bundle.module on every Sonata startup and copies it to
+            //     ~/.sonata/mcp/, which is the path workers actually load.
+            //     Stale Sonata_Sonata.bundle made the Live Worker Monitoring v0
+            //     bridge invisible to workers — telemetry never reached the DB,
+            //     promptCacheStats stayed empty.
+            //
+            // Both paths must stay in sync on every deploy. On the dev machine
+            // the source path at ~/memory/Sonata/Sources/Sonata/Resources takes
+            // precedence for web (see resolver), so the Contents/Resources copy
+            // is defensive there but load-bearing on Scout. The Sonata_Sonata.bundle
+            // copy is load-bearing everywhere because Bundle.module has no
+            // source-path fallback.
             let resourcesSrc = "\(sourceDir)/Sources/Sonata/Resources"
-            let resourcesDst = "\(appPath)/Contents/Resources"
-            let resourcesSync = await Task.detached {
-                runDeployProcess(
-                    executable: "/usr/bin/rsync",
-                    arguments: ["-a", "\(resourcesSrc)/", "\(resourcesDst)/"],
-                    cwd: nil,
-                    timeoutSeconds: 60
-                )
-            }.value
-            if resourcesSync.status != 0 {
-                return DeployResponse(
-                    success: false, step: "copy-resources",
-                    error: "resources rsync failed (exit \(resourcesSync.status))\n\(resourcesSync.stderr)",
-                    message: nil
-                )
+            for destPath in ["\(appPath)/Contents/Resources", "\(appPath)/Sonata_Sonata.bundle"] {
+                let sync = await Task.detached {
+                    runDeployProcess(
+                        executable: "/usr/bin/rsync",
+                        arguments: ["-a", "\(resourcesSrc)/", "\(destPath)/"],
+                        cwd: nil,
+                        timeoutSeconds: 60
+                    )
+                }.value
+                if sync.status != 0 {
+                    return DeployResponse(
+                        success: false, step: "copy-resources",
+                        error: "resources rsync to \(destPath) failed (exit \(sync.status))\n\(sync.stderr)",
+                        message: nil
+                    )
+                }
             }
 
             // 3. codesign (30s timeout)
