@@ -10,6 +10,7 @@ struct RecallMemoryDTO: Decodable, Identifiable, Hashable {
     let l0: String?
     let l1: String?
     let source: String?
+    let topic: String?
     let createdAt: Int64
     let importance: Double?
     let tags: [String]?

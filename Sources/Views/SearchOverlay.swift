@@ -318,12 +318,51 @@ private struct MemoryDetailSheet: View {
     let memory: RecallMemoryDTO
     var onClose: () -> Void
 
+    @State private var copiedLabel: String? = nil
+
+    private var fullContent: String {
+        memory.content ?? memory.l1 ?? memory.l0 ?? ""
+    }
+
+    /// Natural-language instruction for a Sona session to fetch THIS memory.
+    private var recallCommand: String {
+        "Recall memory \(memory._id)"
+    }
+
+    private func copy(_ string: String, label: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(string, forType: .string)
+        copiedLabel = label
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            if copiedLabel == label { copiedLabel = nil }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(spacing: 8) {
                 Label(memory.type, systemImage: "brain.head.profile")
                     .font(.headline)
+                if let copiedLabel {
+                    Text("Copied \(copiedLabel)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                }
                 Spacer()
+                Button {
+                    copy(fullContent, label: "memory")
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                .help("Copy memory content")
+                Button {
+                    copy(recallCommand, label: "recall")
+                } label: {
+                    Label("Copy recall", systemImage: "text.viewfinder")
+                }
+                .help("Copy a recall instruction (\"Recall memory <id>\") for pasting into a Sona session")
                 Button("Close", action: onClose)
                     .keyboardShortcut(.cancelAction)
             }
@@ -335,7 +374,7 @@ private struct MemoryDetailSheet: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
-                    Text(memory.content ?? memory.l1 ?? memory.l0 ?? "")
+                    Text(fullContent)
                         .font(.system(size: 13))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -355,6 +394,7 @@ private struct MemoryDetailSheet: View {
         }
         .padding(20)
         .frame(width: 560, height: 480)
+        .animation(.easeInOut(duration: 0.15), value: copiedLabel)
     }
 }
 

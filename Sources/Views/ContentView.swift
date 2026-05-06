@@ -47,35 +47,37 @@ struct ContentView: View {
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            SearchBar(vm: searchVM, focusBinding: $searchFocused)
+        HStack(spacing: 0) {
+            NavRail(selected: $selectedTab, items: Self.navItems)
             Divider()
-            HStack(spacing: 0) {
-                NavRail(selected: $selectedTab, items: Self.navItems)
-                Divider()
-                destinationView
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .overlay(alignment: .topTrailing) {
-                        if workerManager.isCyclingPaused && selectedTab != .workers {
-                            Button {
-                                selectedTab = .workers
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "pause.circle.fill")
-                                        .font(.caption2)
-                                    Text("Cycling Paused")
-                                        .font(.caption2.bold())
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.yellow.opacity(0.2), in: Capsule())
-                                .foregroundStyle(.yellow)
+            destinationView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .topTrailing) {
+                    if workerManager.isCyclingPaused && selectedTab != .workers {
+                        Button {
+                            selectedTab = .workers
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "pause.circle.fill")
+                                    .font(.caption2)
+                                Text("Cycling Paused")
+                                    .font(.caption2.bold())
                             }
-                            .buttonStyle(.plain)
-                            .padding(.trailing, 12)
-                            .padding(.top, 4)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.yellow.opacity(0.2), in: Capsule())
+                            .foregroundStyle(.yellow)
                         }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 12)
+                        .padding(.top, 4)
                     }
+                }
+        }
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                SearchBar(vm: searchVM, focusBinding: $searchFocused)
+                    .frame(minWidth: 280, maxWidth: .infinity)
             }
         }
         .overlay {
