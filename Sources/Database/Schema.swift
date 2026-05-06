@@ -713,5 +713,17 @@ extension DatabaseMigrator {
             """)
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS promptCacheStats_eventType ON promptCacheStats(eventType)")
         }
+
+        // v7: per-event token + model attribution. Lets the Dashboard's token
+        // usage card sum spend by day/model/worker without re-parsing payload
+        // JSON. Populated by worker_event_complete / worker_event_fail when
+        // the worker row's currentEventTokens are still around.
+        registerMigration("v7_event_token_attribution") { db in
+            do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN model TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN totalTokens INTEGER") } catch { /* column exists */ }
+            // completedAt index is already created in createSchema for new installs;
+            // ensure existing installs that predate it get one for fast daily rollups.
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_completedAt ON workerEvents(completedAt)")
+        }
     }
 }

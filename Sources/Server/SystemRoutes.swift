@@ -65,3 +65,32 @@ struct RecentActivityResponse: Encodable {
     let items: [ActivityItem]
     let generatedAt: Int64
 }
+
+struct DailyTokenTotal: Encodable {
+    let date: String        // "YYYY-MM-DD" in the user's local zone
+    let spendUSD: Double
+    let totalTokens: Int64
+}
+
+struct TokenUsageTodaySummary: Encodable {
+    let spendUSD: Double
+    let totalTokens: Int64
+}
+
+struct TokenUsageTopConsumer: Encodable {
+    let label: String
+    let spendUSD: Double
+}
+
+struct TokenUsageAnomaly: Encodable {
+    let flagged: Bool
+    let ratio: Double?
+}
+
+struct TokenUsageResponse: Encodable {
+    let today: TokenUsageTodaySummary
+    let dailyTotals: [DailyTokenTotal]   // last 7 days, oldest → newest
+    let topConsumer: TokenUsageTopConsumer?
+    let anomaly: TokenUsageAnomaly
+    let generatedAt: Int64
+}

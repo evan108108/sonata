@@ -764,9 +764,36 @@ let workerEventActions: [SonataAction] = [
                         sql: "SELECT * FROM workerEvents WHERE id = ?",
                         arguments: [eventId])
 
+                    // Pull totalTokens + model attribution off the worker row before
+                    // we clear it. Model resolves from the payload's `model` field
+                    // when present (the dispatcher propagates tasks.model into the
+                    // payload), else falls back to Opus — matches the rest of the
+                    // system's default for dispatched task work.
+                    var attributedTokens: Int64?
+                    var attributedModel: String?
+                    if let workerId = row?.assignedTo {
+                        let tokRow = try Row.fetchOne(db, sql: """
+                            SELECT currentEventTokens FROM workers WHERE workerId = ?
+                        """, arguments: [workerId])
+                        attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                    }
+                    if let payload = row?.payload,
+                       let payloadData = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let m = json["model"] as? String, !m.isEmpty {
+                        attributedModel = m
+                    }
+                    if attributedModel == nil { attributedModel = ModelPricing.defaultModel }
+
                     try db.execute(sql: """
-                        UPDATE workerEvents SET status = 'completed', result = ?, completedAt = ? WHERE id = ?
-                    """, arguments: [resultText, now, eventId])
+                        UPDATE workerEvents
+                        SET status = 'completed',
+                            result = ?,
+                            completedAt = ?,
+                            totalTokens = COALESCE(?, totalTokens),
+                            model = COALESCE(?, model)
+                        WHERE id = ?
+                    """, arguments: [resultText, now, attributedTokens, attributedModel, eventId])
 
                     // Set worker back to idle (unless draining — keep draining status)
                     var captured: String?
@@ -878,9 +905,33 @@ let workerEventActions: [SonataAction] = [
                         sql: "SELECT * FROM workerEvents WHERE id = ?",
                         arguments: [eventId])
 
+                    // Same token attribution as the complete path — failures still
+                    // burned tokens and should show up in the Dashboard cost card.
+                    var attributedTokens: Int64?
+                    var attributedModel: String?
+                    if let workerId = row?.assignedTo {
+                        let tokRow = try Row.fetchOne(db, sql: """
+                            SELECT currentEventTokens FROM workers WHERE workerId = ?
+                        """, arguments: [workerId])
+                        attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                    }
+                    if let payload = row?.payload,
+                       let payloadData = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let m = json["model"] as? String, !m.isEmpty {
+                        attributedModel = m
+                    }
+                    if attributedModel == nil { attributedModel = ModelPricing.defaultModel }
+
                     try db.execute(sql: """
-                        UPDATE workerEvents SET status = 'failed', result = ?, completedAt = ? WHERE id = ?
-                    """, arguments: [errorText, now, eventId])
+                        UPDATE workerEvents
+                        SET status = 'failed',
+                            result = ?,
+                            completedAt = ?,
+                            totalTokens = COALESCE(?, totalTokens),
+                            model = COALESCE(?, model)
+                        WHERE id = ?
+                    """, arguments: [errorText, now, attributedTokens, attributedModel, eventId])
 
                     var captured: String?
                     if let workerId = row?.assignedTo {

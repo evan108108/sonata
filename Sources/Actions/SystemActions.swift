@@ -494,6 +494,130 @@ let systemActions: [SonataAction] = [
         }
     ),
 
+    // GET /api/token_usage — today's spend, 7d daily totals, top consumer, anomaly flag
+    SonataAction(
+        name: "system_token_usage",
+        description: "Token usage and spend rollup: today's USD spend (and total tokens), the last 7 days of daily totals, the top consumer (worker label or event type), and an anomaly flag when today's extrapolated spend is more than 2× yesterday's.",
+        group: "/api",
+        path: "/token_usage",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                return try await ctx.dbPool.read { db -> TokenUsageResponse in
+                    let now = nowMs()
+                    let cal = Calendar.current
+                    let nowDate = Date(timeIntervalSince1970: TimeInterval(now) / 1000)
+                    // Anchor "today" to the user's local midnight — the user reads
+                    // the spend number on their own clock, not UTC.
+                    let startOfToday = cal.startOfDay(for: nowDate)
+                    let startOfTodayMs = Int64(startOfToday.timeIntervalSince1970 * 1000)
+                    let sevenDaysAgo = cal.date(byAdding: .day, value: -6, to: startOfToday) ?? startOfToday
+                    let sevenDaysAgoMs = Int64(sevenDaysAgo.timeIntervalSince1970 * 1000)
+                    let yesterdayStartMs: Int64 = {
+                        let d = cal.date(byAdding: .day, value: -1, to: startOfToday) ?? startOfToday
+                        return Int64(d.timeIntervalSince1970 * 1000)
+                    }()
+
+                    // Pull every completed/failed event with token data over the
+                    // 7-day window once, then bucket in Swift. Cheaper and clearer
+                    // than five SQL passes; 7 days × even a busy install fits in
+                    // a few thousand rows.
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT we.id, we.type, we.totalTokens, we.model, we.completedAt,
+                               we.assignedTo, w.sessionLabel
+                        FROM workerEvents we
+                        LEFT JOIN workers w ON w.workerId = we.assignedTo
+                        WHERE we.completedAt IS NOT NULL
+                          AND we.completedAt >= ?
+                          AND we.totalTokens IS NOT NULL
+                          AND we.totalTokens > 0
+                    """, arguments: [sevenDaysAgoMs])
+
+                    // Per-day buckets keyed by "YYYY-MM-DD" in the user's locale.
+                    let dayFmt = DateFormatter()
+                    dayFmt.dateFormat = "yyyy-MM-dd"
+                    dayFmt.timeZone = .current
+
+                    var dayTokens: [String: Int64] = [:]
+                    var daySpend: [String: Double] = [:]
+                    var todayTokens: Int64 = 0
+                    var todaySpend: Double = 0
+                    var yesterdaySpend: Double = 0
+                    var consumerSpend: [String: Double] = [:]
+
+                    for r in rows {
+                        let totalTokens: Int64 = (r["totalTokens"] as? Int64) ?? 0
+                        let completedAt: Int64 = (r["completedAt"] as? Int64) ?? 0
+                        let model: String = (r["model"] as? String) ?? ModelPricing.defaultModel
+                        let evType: String = (r["type"] as? String) ?? "unknown"
+                        let label: String? = r["sessionLabel"]
+                        let assignedTo: String? = r["assignedTo"]
+
+                        let cost = ModelPricing.blendedCostUSD(model: model, totalTokens: totalTokens)
+                        let date = Date(timeIntervalSince1970: TimeInterval(completedAt) / 1000)
+                        let key = dayFmt.string(from: date)
+
+                        dayTokens[key, default: 0] += totalTokens
+                        daySpend[key, default: 0] += cost
+
+                        if completedAt >= startOfTodayMs {
+                            todayTokens += totalTokens
+                            todaySpend += cost
+                            // Top consumer is keyed by worker label when known,
+                            // event type otherwise. The brief preferred worker label.
+                            let consumer = label ?? assignedTo ?? evType
+                            consumerSpend[consumer, default: 0] += cost
+                        } else if completedAt >= yesterdayStartMs {
+                            yesterdaySpend += cost
+                        }
+                    }
+
+                    // Build the dailyTotals array oldest → newest, including zero days.
+                    var dailyTotals: [DailyTokenTotal] = []
+                    for offset in (0...6).reversed() {
+                        guard let day = cal.date(byAdding: .day, value: -offset, to: startOfToday) else { continue }
+                        let key = dayFmt.string(from: day)
+                        dailyTotals.append(DailyTokenTotal(
+                            date: key,
+                            spendUSD: daySpend[key] ?? 0,
+                            totalTokens: dayTokens[key] ?? 0
+                        ))
+                    }
+
+                    let top = consumerSpend.max { $0.value < $1.value }
+                    let topConsumer: TokenUsageTopConsumer? = top.map {
+                        TokenUsageTopConsumer(label: $0.key, spendUSD: $0.value)
+                    }
+
+                    // Extrapolate today's spend to end-of-day so a busy morning
+                    // doesn't trigger the anomaly flag at 6am. Floor at $1 of
+                    // yesterday spend so we don't flag "200% of nothing."
+                    let secondsIntoDay = max(60.0, nowDate.timeIntervalSince(startOfToday))
+                    let dayShare = secondsIntoDay / 86_400.0
+                    let projected = todaySpend / dayShare
+                    var anomaly = TokenUsageAnomaly(flagged: false, ratio: nil)
+                    if yesterdaySpend >= 1.0 {
+                        let ratio = projected / yesterdaySpend
+                        if ratio > 2.0 {
+                            anomaly = TokenUsageAnomaly(flagged: true, ratio: ratio)
+                        }
+                    }
+
+                    return TokenUsageResponse(
+                        today: TokenUsageTodaySummary(spendUSD: todaySpend, totalTokens: todayTokens),
+                        dailyTotals: dailyTotals,
+                        topConsumer: topConsumer,
+                        anomaly: anomaly,
+                        generatedAt: now
+                    )
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
     // POST /api/backup — trigger an immediate full backup (local + S3)
     SonataAction(
         name: "system_backup",

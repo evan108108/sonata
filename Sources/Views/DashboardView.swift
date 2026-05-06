@@ -12,6 +12,7 @@ struct DashboardView: View {
     @ObservedObject private var workerManager = WorkerManager.shared
     @ObservedObject private var sessionsVM = InteractiveSessionsViewModel.shared
     @StateObject private var activityVM = ActivityFeedViewModel()
+    @StateObject private var tokenVM = TokenUsageViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -102,6 +103,9 @@ struct DashboardView: View {
                         }
                         .padding(.horizontal)
 
+                        TokenUsageCard(vm: tokenVM)
+                            .padding(.horizontal)
+
                         ActivityFeedSection(vm: activityVM) { item in
                             switch item.type {
                             case "worker_completed":          selectedTab = .workers
@@ -143,9 +147,17 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !tokenVM.hasLoadedOnce && !Task.isCancelled {
+                await tokenVM.fetch()
+                if tokenVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
+            Task { await tokenVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)
