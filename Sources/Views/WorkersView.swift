@@ -341,6 +341,8 @@ class WorkerManager: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                // First pass: reconcile present workers; collect IDs to remove.
+                var toRemove: [String] = []
                 for worker in self.workers {
                     if let info = serverState[worker.id] {
                         let status = info["status"] as? String ?? "offline"
@@ -374,9 +376,25 @@ class WorkerManager: ObservableObject {
                             worker.currentCacheReadTokens = 0
                         }
                     } else {
-                        if worker.status != .starting && worker.status != .restarting {
+                        // Worker is no longer in the server's worker_list. The right
+                        // reaction depends on what we last knew about it:
+                        // - draining: server's stale-sweep DELETEd it on purpose. Don't
+                        //   resurrect it as 'offline' — that's the non-sensical
+                        //   draining→offline transition. Just remove it locally.
+                        // - starting/restarting: in-flight registration; keep waiting.
+                        // - anything else: surprise disappearance — surface as offline
+                        //   so the supervisor can repair.
+                        if worker.status == .draining {
+                            toRemove.append(worker.id)
+                        } else if worker.status != .starting && worker.status != .restarting {
                             worker.status = .offline
                         }
+                    }
+                }
+                if !toRemove.isEmpty {
+                    self.workers.removeAll { toRemove.contains($0.id) }
+                    if let selected = self.selectedWorkerId, toRemove.contains(selected) {
+                        self.selectedWorkerId = self.workers.first?.id
                     }
                 }
             }
