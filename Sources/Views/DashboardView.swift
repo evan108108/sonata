@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DashboardView: View {
+    @Binding var selectedTab: SonataTab
     @State private var status: SystemStatus?
     @State private var error: String?
     @State private var lastRefresh: Date?
@@ -8,6 +9,7 @@ struct DashboardView: View {
     @State private var showingMemoryBreakdown = false
     @State private var showingTaskBreakdown = false
     @State private var showingEmailBreakdown = false
+    @ObservedObject private var workerManager = WorkerManager.shared
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
@@ -95,6 +97,16 @@ struct DashboardView: View {
                             StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo)
                         }
                         .padding(.horizontal)
+
+                        let activeWorkers = workerManager.workers.filter { !$0.currentEventId.isEmpty }
+                        if !activeWorkers.isEmpty {
+                            Divider()
+                                .padding(.horizontal)
+                            LiveWorkersSection(workers: activeWorkers) {
+                                selectedTab = .workers
+                            }
+                            .padding(.horizontal)
+                        }
                     }
                     .padding(.bottom)
                 }
@@ -413,5 +425,84 @@ private struct StatCard: View {
         .frame(maxWidth: .infinity)
         .padding()
         .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Live Workers Section
+
+private struct LiveWorkersSection: View {
+    let workers: [Worker]
+    let onTapRow: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Live Workers")
+                    .font(.headline)
+                Text("\(workers.count) active")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            VStack(spacing: 2) {
+                ForEach(workers) { worker in
+                    Button(action: onTapRow) {
+                        LiveWorkerRow(worker: worker)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+}
+
+private struct LiveWorkerRow: View {
+    @ObservedObject var worker: Worker
+
+    private static let cacheSampleFloor = 5_000
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(worker.label)
+                .font(.system(.caption, design: .monospaced))
+                .frame(minWidth: 110, alignment: .leading)
+
+            if !worker.currentSlug.isEmpty {
+                Text(worker.currentSlug)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if worker.taskStartedAt > 0 {
+                let elapsedSec = Int((Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 1000)
+                Text("\(elapsedSec)s")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if worker.currentEventTokens > 0 {
+                let kTokens = Double(worker.currentEventTokens) / 1000.0
+                Text(String(format: "%.1fk tokens", kTokens))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let hr = worker.currentCacheHitRate,
+               worker.currentInputTokens >= Self.cacheSampleFloor {
+                Text(String(format: "%.0f%% cache", hr * 100))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if hr < 0.5 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Spacer()
+        }
+        .frame(height: 28)
+        .contentShape(Rectangle())
     }
 }

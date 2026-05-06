@@ -125,7 +125,7 @@ struct ContentView: View {
         case .plugins:
             PluginsView()
         case .dashboard:
-            DashboardView()
+            DashboardView(selectedTab: $selectedTab)
         case .settings:
             SettingsView()
         }
