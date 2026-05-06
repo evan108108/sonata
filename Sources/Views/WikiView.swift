@@ -549,7 +549,7 @@ private struct WikiDetailView: View {
 
 // MARK: - Markdown WebView
 
-import WebKit
+@preconcurrency import WebKit
 
 private struct MarkdownWebView: NSViewRepresentable {
     let markdown: String

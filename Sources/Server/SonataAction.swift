@@ -257,7 +257,7 @@ struct SonataAction: Sendable {
             if p.required { required.append(p.name) }
         }
 
-        var schema: [String: Any] = [
+        let schema: [String: Any] = [
             "name": name,
             "description": description,
             "inputSchema": [

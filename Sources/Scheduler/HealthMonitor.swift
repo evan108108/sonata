@@ -230,7 +230,7 @@ actor HealthMonitor {
     /// the DB read fails.
     private func loadSupervisorSchedule() async -> SupervisorSchedule {
         do {
-            let row: Row? = try await dbPool.read { db -> Row? in
+            let row: Row? = try dbPool.read { db -> Row? in
                 try Row.fetchOne(db, sql: """
                     SELECT dayIntervalSec, nightIntervalSec, nightStartHour,
                            nightEndHour, enabled

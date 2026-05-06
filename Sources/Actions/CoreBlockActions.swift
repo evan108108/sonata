@@ -48,7 +48,7 @@ let coreBlockActions: [SonataAction] = [
             sql += " ORDER BY priority DESC, key ASC"
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try CoreBlockRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(coreBlockRowToResponseForAction)

@@ -47,7 +47,7 @@ let supervisorConfigActions: [SonataAction] = [
         params: [],
         handler: { ctx in
             do {
-                let row: Row? = try await ctx.dbPool.read { db -> Row? in
+                let row: Row? = try ctx.dbPool.read { db -> Row? in
                     try Row.fetchOne(db, sql: """
                         SELECT dayIntervalSec, nightIntervalSec, nightStartHour,
                                nightEndHour, enabled, updatedAt
@@ -156,7 +156,7 @@ let supervisorConfigActions: [SonataAction] = [
             }
 
             // Return the fresh row in the same shape as GET.
-            let row: Row? = try await ctx.dbPool.read { db -> Row? in
+            let row: Row? = try ctx.dbPool.read { db -> Row? in
                 try Row.fetchOne(db, sql: """
                     SELECT dayIntervalSec, nightIntervalSec, nightStartHour,
                            nightEndHour, enabled, updatedAt

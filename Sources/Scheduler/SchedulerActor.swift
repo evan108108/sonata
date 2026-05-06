@@ -168,7 +168,7 @@ public actor SchedulerActor {
         // Not in queue — load it from DB directly
         do {
             // Try scheduledJobs first
-            let row: Row? = try await dbPool.read { db in
+            let row: Row? = try dbPool.read { db in
                 try Row.fetchOne(db, sql: "SELECT id, name, schedule, command FROM scheduledJobs WHERE id = ?", arguments: [jobId])
             }
             if let row = row, let id = row["id"] as? String,
@@ -180,7 +180,7 @@ public actor SchedulerActor {
                 return
             }
             // Try calendarEvents
-            let calRow: Row? = try await dbPool.read { db in
+            let calRow: Row? = try dbPool.read { db in
                 try Row.fetchOne(db, sql: "SELECT id, title, prompt, taskType, workingDir, model, maxTurns FROM calendarEvents WHERE id = ?", arguments: [jobId])
             }
             if let row = calRow, let id = row["id"] as? String {

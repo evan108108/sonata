@@ -244,10 +244,11 @@ let calendarActions: [SonataAction] = [
 
             args.append(id)
             let sql = "UPDATE calendarEvents SET \(setClauses.joined(separator: ", ")) WHERE id = ?"
+            let stmtArgs = StatementArguments(args.map { $0 as (any DatabaseValueConvertible)? })
 
             do {
                 try await ctx.dbPool.write { db in
-                    try db.execute(sql: sql, arguments: StatementArguments(args))
+                    try db.execute(sql: sql, arguments: stmtArgs)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)

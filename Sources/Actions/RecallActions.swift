@@ -479,9 +479,10 @@ private func recallWanderFromAnchors(
         }
 
         if !peripheryIds.isEmpty {
+            let snapshot = peripheryIds
             let fetched: [WanderMemoryAction] = (try? await dbPool.read { db -> [WanderMemoryAction] in
                 var results: [WanderMemoryAction] = []
-                for (memId, score) in peripheryIds {
+                for (memId, score) in snapshot {
                     guard let mem = try MemoryRow.fetchOne(
                         db,
                         sql: "SELECT * FROM memories WHERE id = ? AND (status IS NULL OR status = 'active')",
@@ -674,8 +675,9 @@ let recallActions: [SonataAction] = [
                 let hop1EntityIds = Set(entities.map(\.id))
                 var hop2Entities: [(id: String, via: String)] = []
 
+                let entitiesSnapshot = entities
                 let depth1Results = try await dbPool.read { db -> [[RelationRow]] in
-                    try entities.map { entity in
+                    try entitiesSnapshot.map { entity in
                         try recallFetchRelations(db: db, id: entity.id, type: "entity")
                     }
                 }
@@ -754,13 +756,14 @@ let recallActions: [SonataAction] = [
                 timings["phase3b_memoriesToFetch"] = memoryIdsToFetch.count
 
                 let t3b = DispatchTime.now()
+                let idsToFetch = memoryIdsToFetch
                 let additionalMemories: [MemoryRow] = try await dbPool.read { db in
-                    guard !memoryIdsToFetch.isEmpty else { return [] }
-                    let placeholders = memoryIdsToFetch.map { _ in "?" }.joined(separator: ",")
+                    guard !idsToFetch.isEmpty else { return [] }
+                    let placeholders = idsToFetch.map { _ in "?" }.joined(separator: ",")
                     return try MemoryRow.fetchAll(
                         db,
                         sql: "SELECT * FROM memories WHERE id IN (\(placeholders))",
-                        arguments: StatementArguments(memoryIdsToFetch)
+                        arguments: StatementArguments(idsToFetch)
                     )
                 }
 

@@ -1,5 +1,5 @@
 import SwiftUI
-import WebKit
+@preconcurrency import WebKit
 
 // MARK: - File Tree Node
 

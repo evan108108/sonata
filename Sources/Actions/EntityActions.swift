@@ -105,7 +105,7 @@ let entityActions: [SonataAction] = [
             args.append(limit)
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try EntityRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(entityRowToResponse)
@@ -169,7 +169,7 @@ let entityActions: [SonataAction] = [
             args.append(limit)
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try EntityRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(entityRowToResponse)
@@ -275,7 +275,7 @@ let entityActions: [SonataAction] = [
             let sql = "UPDATE entities SET \(setClauses.joined(separator: ", ")) WHERE id = ?"
 
             do {
-                try await ctx.dbPool.write { db in
+                try ctx.dbPool.write { db in
                     try db.execute(sql: sql, arguments: StatementArguments(args))
                 }
             } catch {

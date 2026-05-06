@@ -942,7 +942,7 @@ final class PluginManager: @unchecked Sendable {
             .replacingOccurrences(of: "https://", with: "wss://")
             + channelPath
 
-        guard let url = URL(string: wsURL) else {
+        guard URL(string: wsURL) != nil else {
             sonataFileLog("Plugin \(runtime.name): invalid WebSocket URL \(wsURL)")
             return
         }

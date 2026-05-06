@@ -448,7 +448,7 @@ actor EmailHandler {
     /// (and logs) on error so the poll loop never crashes.
     private func loadInboxes() async -> [InboxConfig] {
         do {
-            let rows: [Row] = try await dbPool.read { db -> [Row] in
+            let rows: [Row] = try dbPool.read { db -> [Row] in
                 try Row.fetchAll(db, sql: """
                     SELECT address, role, displayName, autoReply, dispatchTo, systemPrompt
                     FROM emailInboxes

@@ -49,7 +49,7 @@ let emailInboxActions: [SonataAction] = [
         params: [],
         handler: { ctx in
             do {
-                let rows: [Row] = try await ctx.dbPool.read { db -> [Row] in
+                let rows: [Row] = try ctx.dbPool.read { db -> [Row] in
                     try Row.fetchAll(db, sql: """
                         SELECT id, address, role, displayName, enabled, autoReply,
                                dispatchTo, systemPrompt, createdAt, updatedAt

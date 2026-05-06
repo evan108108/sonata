@@ -73,8 +73,7 @@ func ensureGlobalMCPServers() {
             for (name, config) in requiredServers {
                 if let existing = mcpServers[name] as? [String: Any],
                    let existingArgs = existing["args"] as? [String],
-                   let newConfig = config as? [String: Any],
-                   let newArgs = newConfig["args"] as? [String],
+                   let newArgs = config["args"] as? [String],
                    existingArgs == newArgs {
                     continue  // Already correct
                 }

@@ -54,7 +54,7 @@ let contactActions: [SonataAction] = [
             args.append(limit)
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try ContactRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(contactRowToResponseForAction)

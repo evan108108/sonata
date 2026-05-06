@@ -574,7 +574,7 @@ let compositeActions: [SonataAction] = [
         mcpOnly: true,
         handler: { ctx in
             do {
-                let rows = try await ctx.dbPool.read { db -> [Row] in
+                let rows = try ctx.dbPool.read { db -> [Row] in
                     try Row.fetchAll(
                         db,
                         sql: "SELECT slug, title, pageType, updatedAt FROM wikiPages ORDER BY slug"

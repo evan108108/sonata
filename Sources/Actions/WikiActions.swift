@@ -289,7 +289,7 @@ let wikiActions: [SonataAction] = [
             args.append(limit)
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try MemoryRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(memRowToResponse)
@@ -343,7 +343,7 @@ let wikiActions: [SonataAction] = [
             let sql = "UPDATE wikiPages SET \(setClauses.joined(separator: ", ")) WHERE slug = ?"
 
             do {
-                try await ctx.dbPool.write { db in
+                try ctx.dbPool.write { db in
                     try db.execute(sql: sql, arguments: StatementArguments(args))
                 }
             } catch {

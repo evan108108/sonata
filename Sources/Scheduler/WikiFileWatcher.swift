@@ -79,11 +79,7 @@ actor WikiFileWatcher {
             return
         }
 
-        FSEventStreamScheduleWithRunLoop(
-            newStream,
-            CFRunLoopGetMain(),
-            CFRunLoopMode.defaultMode.rawValue
-        )
+        FSEventStreamSetDispatchQueue(newStream, DispatchQueue.main)
 
         if !FSEventStreamStart(newStream) {
             logger.error("WikiFileWatcher: failed to start FSEventStream")

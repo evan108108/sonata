@@ -371,7 +371,7 @@ let workerActions: [SonataAction] = [
         params: [],
         handler: { ctx in
             do {
-                let rows: [Row] = try await ctx.dbPool.read { db in
+                let rows: [Row] = try ctx.dbPool.read { db in
                     try Row.fetchAll(db, sql: """
                         SELECT w.*,
                             COALESCE(
@@ -467,7 +467,7 @@ let workerActions: [SonataAction] = [
         params: [],
         handler: { ctx in
             do {
-                let rows: [Row] = try await ctx.dbPool.read { db in
+                let rows: [Row] = try ctx.dbPool.read { db in
                     try Row.fetchAll(db, sql: """
                         SELECT promptKey, eventType, promptHash,
                                totalInputTokens, totalCacheReadTokens,
@@ -757,9 +757,9 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let resultText = ctx.params.string("result")
             let now = nowMs()
-            var completedWorkerId: String?
+            let completedWorkerId: String?
             do {
-                try await ctx.dbPool.write { db in
+                completedWorkerId = try await ctx.dbPool.write { db -> String? in
                     let row = try WorkerEventRow.fetchOne(db,
                         sql: "SELECT * FROM workerEvents WHERE id = ?",
                         arguments: [eventId])
@@ -769,8 +769,9 @@ let workerEventActions: [SonataAction] = [
                     """, arguments: [resultText, now, eventId])
 
                     // Set worker back to idle (unless draining — keep draining status)
+                    var captured: String?
                     if let workerId = row?.assignedTo {
-                        completedWorkerId = workerId
+                        captured = workerId
                         let workerRow = try Row.fetchOne(db, sql: """
                             SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash
                             FROM workers WHERE workerId = ?
@@ -837,6 +838,7 @@ let workerEventActions: [SonataAction] = [
                             """, arguments: StatementArguments(args))
                         }
                     }
+                    return captured
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -869,9 +871,9 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let errorText = ctx.params.string("error")
             let now = nowMs()
-            var completedWorkerId: String?
+            let completedWorkerId: String?
             do {
-                try await ctx.dbPool.write { db in
+                completedWorkerId = try await ctx.dbPool.write { db -> String? in
                     let row = try WorkerEventRow.fetchOne(db,
                         sql: "SELECT * FROM workerEvents WHERE id = ?",
                         arguments: [eventId])
@@ -880,8 +882,9 @@ let workerEventActions: [SonataAction] = [
                         UPDATE workerEvents SET status = 'failed', result = ?, completedAt = ? WHERE id = ?
                     """, arguments: [errorText, now, eventId])
 
+                    var captured: String?
                     if let workerId = row?.assignedTo {
-                        completedWorkerId = workerId
+                        captured = workerId
                         let workerRow = try Row.fetchOne(db, sql: """
                             SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash
                             FROM workers WHERE workerId = ?
@@ -935,6 +938,7 @@ let workerEventActions: [SonataAction] = [
                         try unblockDependents(taskId: taskId, in: db, now: now)
                         try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
                     }
+                    return captured
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)

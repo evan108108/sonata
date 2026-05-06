@@ -237,7 +237,7 @@ let schedulerActions: [SonataAction] = [
             guard let scheduler = ctx.scheduler else {
                 return [SchedulerQueueEntry]()
             }
-            let entries = await scheduler.status()
+            let entries = scheduler.status()
             let iso = ISO8601DateFormatter()
             return entries.map { entry in
                 SchedulerQueueEntry(

@@ -235,7 +235,7 @@ let taskActions: [SonataAction] = [
             args.append(offset)
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try TaskRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(rowToTaskResp)
@@ -334,7 +334,7 @@ let taskActions: [SonataAction] = [
             args.append(limit)
 
             do {
-                let rows = try await ctx.dbPool.read { db in
+                let rows = try ctx.dbPool.read { db in
                     try TaskRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
                 return rows.map(rowToTaskResp)
@@ -424,7 +424,7 @@ let taskActions: [SonataAction] = [
             let sql = "UPDATE tasks SET \(setClauses.joined(separator: ", ")) WHERE id = ?"
 
             do {
-                try await ctx.dbPool.write { db in
+                try ctx.dbPool.write { db in
                     try db.execute(sql: sql, arguments: StatementArguments(args))
                 }
             } catch {
