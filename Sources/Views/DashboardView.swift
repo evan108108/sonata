@@ -98,11 +98,10 @@ struct DashboardView: View {
                         }
                         .padding(.horizontal)
 
-                        let activeWorkers = workerManager.workers.filter { !$0.currentEventId.isEmpty }
-                        if !activeWorkers.isEmpty {
+                        if !workerManager.workers.isEmpty {
                             Divider()
                                 .padding(.horizontal)
-                            LiveWorkersSection(workers: activeWorkers) {
+                            LiveWorkersSection(workers: workerManager.workers) {
                                 selectedTab = .workers
                             }
                             .padding(.horizontal)
@@ -434,12 +433,16 @@ private struct LiveWorkersSection: View {
     let workers: [Worker]
     let onTapRow: () -> Void
 
+    private var busyCount: Int {
+        workers.filter { $0.status == .busy }.count
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Live Workers")
                     .font(.headline)
-                Text("\(workers.count) active")
+                Text("\(workers.count) total · \(busyCount) busy")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -462,41 +465,71 @@ private struct LiveWorkerRow: View {
 
     private static let cacheSampleFloor = 5_000
 
+    private var statusDotColor: Color {
+        switch worker.status {
+        case .idle: return .green
+        case .busy: return .blue
+        case .draining: return .purple
+        case .starting, .restarting: return .orange
+        case .offline: return .red
+        }
+    }
+
+    private var statusText: String {
+        worker.status.rawValue.lowercased()
+    }
+
     var body: some View {
         HStack(spacing: 10) {
+            Circle()
+                .fill(statusDotColor)
+                .frame(width: 8, height: 8)
+
             Text(worker.label)
                 .font(.system(.caption, design: .monospaced))
                 .frame(minWidth: 110, alignment: .leading)
 
-            if !worker.currentSlug.isEmpty {
-                Text(worker.currentSlug)
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if worker.status == .draining {
+                Text("(cycling)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if worker.taskStartedAt > 0 {
-                let elapsedSec = Int((Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 1000)
-                Text("\(elapsedSec)s")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+            if worker.status == .busy {
+                if !worker.currentSlug.isEmpty {
+                    Text("· \(worker.currentSlug)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
-            if worker.currentEventTokens > 0 {
-                let kTokens = Double(worker.currentEventTokens) / 1000.0
-                Text(String(format: "%.1fk tokens", kTokens))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+                if worker.taskStartedAt > 0 {
+                    let elapsedSec = Int((Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 1000)
+                    Text("· \(elapsedSec)s elapsed")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
 
-            if let hr = worker.currentCacheHitRate,
-               worker.currentInputTokens >= Self.cacheSampleFloor {
-                Text(String(format: "%.0f%% cache", hr * 100))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                if hr < 0.5 {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
+                if worker.currentEventTokens > 0 {
+                    let kTokens = Double(worker.currentEventTokens) / 1000.0
+                    Text(String(format: "· %.1fk tokens", kTokens))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                if let hr = worker.currentCacheHitRate,
+                   worker.currentInputTokens >= Self.cacheSampleFloor {
+                    Text(String(format: "· %.0f%% cache", hr * 100))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    if hr < 0.5 {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
 
@@ -504,5 +537,6 @@ private struct LiveWorkerRow: View {
         }
         .frame(height: 28)
         .contentShape(Rectangle())
+        .opacity(worker.status == .offline ? 0.6 : 1.0)
     }
 }
