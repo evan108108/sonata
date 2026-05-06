@@ -689,13 +689,13 @@ final class SupervisorWindowController: NSObject, NSWindowDelegate {
         guard window == nil else { return }
 
         // Create terminal view directly (same pattern as Worker)
-        let termView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let termView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         let coord = SupervisorCoordinator(terminalView: termView)
         self.coordinator = coord
         termView.processDelegate = coord
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false

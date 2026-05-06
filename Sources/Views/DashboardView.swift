@@ -5,6 +5,8 @@ struct DashboardView: View {
     @State private var status: SystemStatus?
     @State private var error: String?
     @State private var lastRefresh: Date?
+    @State private var hasLoadedOnce = false
+    @State private var gracePeriodElapsed = false
     @State private var showingEntityBreakdown = false
     @State private var showingMemoryBreakdown = false
     @State private var showingTaskBreakdown = false
@@ -13,6 +15,7 @@ struct DashboardView: View {
     @ObservedObject private var sessionsVM = InteractiveSessionsViewModel.shared
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    private let bootGracePeriod: TimeInterval = 5
 
     var body: some View {
         mainContent
@@ -42,20 +45,7 @@ struct DashboardView: View {
 
             Divider()
 
-            if let error {
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.red)
-                    Text("Cannot reach Sonata server")
-                        .font(.headline)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let status {
+            if let status {
                 ScrollView {
                     VStack(spacing: 16) {
                         // Overall health indicator
@@ -115,18 +105,36 @@ struct DashboardView: View {
                     }
                     .padding(.bottom)
                 }
+            } else if gracePeriodElapsed && error != nil {
+                VStack(spacing: 12) {
+                    Text("Couldn't load dashboard data")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        Task { await fetchStatus() }
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 12) {
                     ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading status...")
+                        .scaleEffect(1.2)
+                    Text("Loading…")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task {
-            // Small delay to let server start on first launch
+            // Quiet loader for the first few seconds — local API may still be booting.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(bootGracePeriod))
+                gracePeriodElapsed = true
+            }
             try? await Task.sleep(for: .milliseconds(800))
             await fetchStatus()
         }
@@ -156,15 +164,22 @@ struct DashboardView: View {
             let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/status")!
             let (data, response) = try await URLSession.shared.data(from: url)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                self.error = "Server returned non-200 status"
+                // Only surface as a hard error if we've never loaded — otherwise
+                // keep last-known state and quietly retry on the next tick.
+                if !hasLoadedOnce {
+                    self.error = "load_failed"
+                }
                 return
             }
             let decoded = try JSONDecoder().decode(StatusResponse.self, from: data)
             self.status = SystemStatus(from: decoded)
+            self.hasLoadedOnce = true
             self.error = nil
             self.lastRefresh = Date()
         } catch {
-            self.error = error.localizedDescription
+            if !hasLoadedOnce {
+                self.error = "load_failed"
+            }
         }
     }
 }
