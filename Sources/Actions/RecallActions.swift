@@ -148,6 +148,8 @@ private struct TokenUsageAction: Encodable {
     let memoriesIncluded: Int
     let memoriesTotal: Int
     let truncated: Bool
+    let tier: String
+    let unreturnedCandidates: Int
 }
 
 private struct DocSearchResultResponse: Encodable {
@@ -167,8 +169,15 @@ private struct RecallResponseAction: Encodable {
     let wanderCount: Int
     let query: String
     let vectorResultCount: Int
+    let partial: Bool
     let tokenUsage: TokenUsageAction
     let _timings: [String: Int]
+}
+
+private struct FetchFullResponse: Encodable {
+    let memories: [RecallMemoryAction]
+    let requested: Int
+    let found: Int
 }
 
 // MARK: - Internal scored memory container
@@ -536,6 +545,7 @@ let recallActions: [SonataAction] = [
             ActionParam("project", .string, description: "Filter by project namespace"),
             ActionParam("filterTopic", .string, description: "Filter by topic namespace"),
             ActionParam("wander", .string, description: "'false' to disable wander (default enabled)"),
+            ActionParam("tier", .string, description: "Response tier: 'l0' (id+abstract only, ~10x smaller) or 'full' (LOD-packed bodies). HTTP default: full. MCP default: l0."),
         ],
         handler: { ctx in
             let rawTopic = try ctx.params.require("topic")
@@ -545,6 +555,8 @@ let recallActions: [SonataAction] = [
             let project = ctx.params.string("project")
             let filterTopic = ctx.params.string("filterTopic")
             let wanderEnabled = (ctx.params.string("wander") ?? "true") != "false"
+            let tierParam = (ctx.params.string("tier") ?? "full").lowercased()
+            let tier = (tierParam == "l0") ? "l0" : "full"
 
             let dbPool = ctx.dbPool
             let t0 = DispatchTime.now()
@@ -724,9 +736,13 @@ let recallActions: [SonataAction] = [
                 var allFoundIds = existingIds
                 var memoryIdsToFetch: [String] = []
                 var graphCount = 0
+                var graphPartial = false
 
                 for memId in relatedMemoryIds {
-                    if graphCount >= maxGraphMemories { break }
+                    if graphCount >= maxGraphMemories {
+                        if !allFoundIds.contains(memId) { graphPartial = true }
+                        break
+                    }
                     if !allFoundIds.contains(memId) {
                         allFoundIds.insert(memId)
                         memoryIdsToFetch.append(memId)
@@ -832,52 +848,71 @@ let recallActions: [SonataAction] = [
                 }
                 let memoryBudget = budget - wikiTokens
 
-                // Budget-aware LOD packing (capped at memoryBudget so wiki's reserve is preserved)
+                // Budget-aware packing — branches by tier.
+                // tier=l0:   id + l0 abstract only. ~10x smaller per memory.
+                // tier=full: today's LOD ladder (full → l1 → l0) up to budget.
                 var used = 0
                 var included: [RecallMemoryAction] = []
 
-                for scored in sorted {
-                    let mem = scored.row
-                    let tags = parseTags(mem.tagsJSON)
-
-                    let l0Text = mem.l0 ?? String(mem.content.prefix(80))
-                    let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
-                    let l0Tokens = recallEstimateTokens(l0Repr)
-
-                    if used + l0Tokens > memoryBudget { break }
-
-                    let fullJSON = recallEncodeMemoryForBudget(mem, tags: tags)
-                    let fullTokens = recallEstimateTokens(fullJSON)
-
-                    if used + fullTokens <= memoryBudget {
+                if tier == "l0" {
+                    for scored in sorted {
+                        let mem = scored.row
+                        let tags = parseTags(mem.tagsJSON)
+                        let l0Text = mem.l0 ?? String(mem.content.prefix(80))
+                        let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
+                        let l0Tokens = recallEstimateTokens(l0Repr)
+                        if used + l0Tokens > memoryBudget { break }
                         included.append(recallMakeRecallMemory(
                             mem, tags: tags, searchRank: scored.searchRank,
-                            rankScore: scored.rankScore, tier: "full", includeContent: true
+                            rankScore: scored.rankScore, tier: "l0", includeContent: false,
+                            overrideL0: l0Text
                         ))
-                        used += fullTokens
-                        continue
+                        used += l0Tokens
                     }
+                } else {
+                    for scored in sorted {
+                        let mem = scored.row
+                        let tags = parseTags(mem.tagsJSON)
 
-                    let l1Text = mem.l1 ?? String(mem.content.prefix(250))
-                    let l1Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"l1\":\"\(l1Text)\",\"importance\":\(mem.importance),\"source\":\"\(mem.source ?? "")\"}"
-                    let l1Tokens = recallEstimateTokens(l1Repr)
+                        let l0Text = mem.l0 ?? String(mem.content.prefix(80))
+                        let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
+                        let l0Tokens = recallEstimateTokens(l0Repr)
 
-                    if used + l1Tokens <= memoryBudget {
+                        if used + l0Tokens > memoryBudget { break }
+
+                        let fullJSON = recallEncodeMemoryForBudget(mem, tags: tags)
+                        let fullTokens = recallEstimateTokens(fullJSON)
+
+                        if used + fullTokens <= memoryBudget {
+                            included.append(recallMakeRecallMemory(
+                                mem, tags: tags, searchRank: scored.searchRank,
+                                rankScore: scored.rankScore, tier: "full", includeContent: true
+                            ))
+                            used += fullTokens
+                            continue
+                        }
+
+                        let l1Text = mem.l1 ?? String(mem.content.prefix(250))
+                        let l1Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"l1\":\"\(l1Text)\",\"importance\":\(mem.importance),\"source\":\"\(mem.source ?? "")\"}"
+                        let l1Tokens = recallEstimateTokens(l1Repr)
+
+                        if used + l1Tokens <= memoryBudget {
+                            included.append(recallMakeRecallMemory(
+                                mem, tags: tags, searchRank: scored.searchRank,
+                                rankScore: scored.rankScore, tier: "l1", includeContent: false,
+                                overrideL0: l0Text, overrideL1: l1Text
+                            ))
+                            used += l1Tokens
+                            continue
+                        }
+
                         included.append(recallMakeRecallMemory(
                             mem, tags: tags, searchRank: scored.searchRank,
-                            rankScore: scored.rankScore, tier: "l1", includeContent: false,
-                            overrideL0: l0Text, overrideL1: l1Text
+                            rankScore: scored.rankScore, tier: "l0", includeContent: false,
+                            overrideL0: l0Text
                         ))
-                        used += l1Tokens
-                        continue
+                        used += l0Tokens
                     }
-
-                    included.append(recallMakeRecallMemory(
-                        mem, tags: tags, searchRank: scored.searchRank,
-                        rankScore: scored.rankScore, tier: "l0", includeContent: false,
-                        overrideL0: l0Text
-                    ))
-                    used += l0Tokens
                 }
 
                 // Entities within memory budget
@@ -953,6 +988,10 @@ let recallActions: [SonataAction] = [
 
                 timings["total"] = recallMsElapsed(since: t0)
 
+                let budgetCapHit = included.count < sorted.count
+                let unreturnedCandidates = sorted.count - included.count
+                let partial = budgetCapHit || graphPartial
+
                 return RecallResponseAction(
                     memories: included,
                     entities: finalEntities,
@@ -963,18 +1002,64 @@ let recallActions: [SonataAction] = [
                     wanderCount: finalWanderCount,
                     query: topic,
                     vectorResultCount: vectorScores.count,
+                    partial: partial,
                     tokenUsage: TokenUsageAction(
                         budget: budget,
                         used: used,
                         memoriesIncluded: included.count,
                         memoriesTotal: sorted.count,
-                        truncated: included.count < sorted.count
+                        truncated: budgetCapHit,
+                        tier: tier,
+                        unreturnedCandidates: max(0, unreturnedCandidates)
                     ),
                     _timings: timings
                 )
             } catch {
                 throw ActionError.custom("Recall failed: \(error.localizedDescription)", .internalServerError)
             }
+        }
+    ),
+
+    // GET /api/recall/fetch — pure id-keyed body fetch (no re-ranking, no search).
+    // Companion to tier=l0 mem_recall: caller picks ids of interest from the l0
+    // summary, then expands them in one round-trip.
+    SonataAction(
+        name: "mem_fetch_full",
+        description: "Fetch full memory bodies by id list. No ranking, no search — pure batch read. Pair with tier=l0 mem_recall: get summaries, pick ids, expand them here.",
+        group: "/api/recall",
+        path: "/fetch",
+        method: .get,
+        params: [
+            ActionParam("ids", .stringArray, required: true, description: "Memory ids (comma-separated or JSON array)"),
+        ],
+        handler: { ctx in
+            guard let ids = ctx.params.stringArray("ids"), !ids.isEmpty else {
+                throw ActionError.custom("ids is required and must be non-empty", .badRequest)
+            }
+            let dbPool = ctx.dbPool
+            let rows: [MemoryRow] = try await dbPool.read { db in
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                return try MemoryRow.fetchAll(
+                    db,
+                    sql: "SELECT * FROM memories WHERE id IN (\(placeholders))",
+                    arguments: StatementArguments(ids)
+                )
+            }
+            let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+            var memories: [RecallMemoryAction] = []
+            for id in ids {
+                guard let mem = byId[id] else { continue }
+                let tags = parseTags(mem.tagsJSON)
+                memories.append(recallMakeRecallMemory(
+                    mem, tags: tags, searchRank: 0, rankScore: 0,
+                    tier: "full", includeContent: true
+                ))
+            }
+            return FetchFullResponse(
+                memories: memories,
+                requested: ids.count,
+                found: memories.count
+            )
         }
     ),
 
