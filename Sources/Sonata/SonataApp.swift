@@ -541,6 +541,11 @@ struct SonataApp: App {
                     SupervisorWindowController.shared.show()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .option])
+
+                Button("Interactive Sessions") {
+                    InteractiveSessionsWindowController.shared.show()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
             }
         }
     }

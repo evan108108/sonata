@@ -10,16 +10,13 @@ struct DashboardView: View {
     @State private var showingTaskBreakdown = false
     @State private var showingEmailBreakdown = false
     @ObservedObject private var workerManager = WorkerManager.shared
+    @ObservedObject private var sessionsVM = InteractiveSessionsViewModel.shared
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(spacing: 0) {
-            mainContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            DashboardChatStrip()
-        }
+        mainContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var mainContent: some View {
@@ -106,6 +103,9 @@ struct DashboardView: View {
                             StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo)
                         }
                         .padding(.horizontal)
+
+                        SessionsSection(sessionsVM: sessionsVM)
+                            .padding(.horizontal)
 
                         if !workerManager.workers.isEmpty {
                             LiveWorkersSection(workers: workerManager.workers) { worker in
@@ -601,5 +601,88 @@ private struct LiveWorkerRow: View {
         .frame(height: 28)
         .contentShape(Rectangle())
         .opacity(worker.status == .offline ? 0.6 : 1.0)
+    }
+}
+
+// MARK: - Sessions Section
+
+private struct SessionsSection: View {
+    @ObservedObject var sessionsVM: InteractiveSessionsViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Sessions")
+                .font(.headline)
+
+            HStack(spacing: 12) {
+                SessionLaunchCard(
+                    title: "Supervisor",
+                    icon: "shield.lefthalf.filled",
+                    tint: .indigo,
+                    badge: nil,
+                    action: { SupervisorWindowController.shared.show() }
+                )
+
+                SessionLaunchCard(
+                    title: "Interactive Sessions",
+                    icon: "bubble.left.and.bubble.right.fill",
+                    tint: .purple,
+                    badge: badgeText,
+                    action: { InteractiveSessionsWindowController.shared.show() }
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Tab count when the window is open, otherwise nothing.
+    private var badgeText: String? {
+        guard InteractiveSessionsWindowController.shared.isVisible else { return nil }
+        let n = sessionsVM.tabs.count
+        return n > 0 ? "\(n)" : nil
+    }
+}
+
+private struct SessionLaunchCard: View {
+    let title: String
+    let icon: String
+    let tint: Color
+    let badge: String?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundStyle(tint)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(title)
+                            .font(.system(.body, design: .rounded).weight(.semibold))
+                        if let badge {
+                            Text(badge)
+                                .font(.caption2.monospacedDigit())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(tint.opacity(0.18), in: Capsule())
+                                .foregroundStyle(tint)
+                        }
+                    }
+                    Text("Open window")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right.square")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
     }
 }
