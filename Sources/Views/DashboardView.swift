@@ -99,9 +99,8 @@ struct DashboardView: View {
                         .padding(.horizontal)
 
                         if !workerManager.workers.isEmpty {
-                            Divider()
-                                .padding(.horizontal)
-                            LiveWorkersSection(workers: workerManager.workers) {
+                            LiveWorkersSection(workers: workerManager.workers) { worker in
+                                WorkerManager.shared.selectedWorkerId = worker.id
                                 selectedTab = .workers
                             }
                             .padding(.horizontal)
@@ -431,7 +430,7 @@ private struct StatCard: View {
 
 private struct LiveWorkersSection: View {
     let workers: [Worker]
-    let onTapRow: () -> Void
+    let onTapRow: (Worker) -> Void
 
     private var busyCount: Int {
         workers.filter { $0.status == .busy }.count
@@ -450,13 +449,18 @@ private struct LiveWorkersSection: View {
 
             VStack(spacing: 2) {
                 ForEach(workers) { worker in
-                    Button(action: onTapRow) {
+                    Button {
+                        onTapRow(worker)
+                    } label: {
                         LiveWorkerRow(worker: worker)
                     }
                     .buttonStyle(.plain)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
