@@ -431,7 +431,7 @@ actor HealthMonitor {
                 alertFromEmail = inbox.address
                 // Alert recipient: look for owner_email in core config, fall back to sender
                 let ownerEmail: String? = try? await dbPool.read { db in
-                    try String.fetchOne(db, sql: "SELECT value FROM coreMemory WHERE key = 'owner_email'")
+                    try String.fetchOne(db, sql: "SELECT content FROM coreBlocks WHERE key = 'owner_email' AND active = 1")
                 }
                 alertToEmail = ownerEmail ?? inbox.address
                 logger.info("Health alerts: from=\(inbox.address), to=\(alertToEmail ?? inbox.address)")

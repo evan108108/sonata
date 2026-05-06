@@ -423,7 +423,7 @@ actor EmailHandler {
     private func sendFailureAlert(emails: [EmailRecord], inbox: InboxConfig, apiKey: String) async throws {
         // Resolve recipient: owner_email from core config, or fall back to the inbox itself
         let ownerEmail: String = (try? await dbPool.read { db in
-            try String.fetchOne(db, sql: "SELECT value FROM coreMemory WHERE key = 'owner_email'")
+            try String.fetchOne(db, sql: "SELECT content FROM coreBlocks WHERE key = 'owner_email' AND active = 1")
         }) ?? inbox.address
 
         let subjects = emails.map { "\"\($0.subject)\" from \($0.from)" }.joined(separator: ", ")

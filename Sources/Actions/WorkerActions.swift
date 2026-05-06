@@ -61,29 +61,35 @@ private struct PromptCacheStatsItem: Encodable {
 
 // MARK: - Helpers
 
-/// Sweep workers whose lastHeartbeat is older than 60s ago, set them offline,
-/// fail their active events and associated tasks. Mirrors sweepStaleWorkers in WorkerRoutes.swift.
+/// Sweep workers whose lastHeartbeat is older than 30s ago, set them offline,
+/// fail their active events and associated tasks. Bridge heartbeats every 15s,
+/// so 30s gives a 2x margin while clearing ghost rows quickly when a session dies.
 private func sweepStaleWorkersForActions(in db: Database) throws {
-    let cutoff = nowMs() - 60_000
+    let cutoff = nowMs() - 30_000
 
     let staleWorkers = try Row.fetchAll(db, sql: """
         SELECT workerId, currentEventId FROM workers
         WHERE lastHeartbeat < ? AND status != 'offline'
     """, arguments: [cutoff])
 
+    // Workers that lost heartbeat unexpectedly flip to 'offline' so the supervisor
+    // sees them and can repair. Draining workers were intentionally retired by
+    // WorkerManager — surfacing them as 'offline' makes the supervisor try to fix
+    // a worker that is supposed to be going away. Drop them outright instead.
     try db.execute(sql: """
         UPDATE workers SET status = 'offline'
-        WHERE lastHeartbeat < ? AND status != 'offline'
+        WHERE lastHeartbeat < ? AND status NOT IN ('offline', 'draining')
     """, arguments: [cutoff])
 
-    // Garbage-collect long-offline rows. A row that's been offline >5 min is a
-    // dead worker process — keeping it around just inflates counts in the UI
-    // (and was the source of two repeat zombie-row complaints today).
-    let gcCutoff = nowMs() - 300_000
     try db.execute(sql: """
         DELETE FROM workers
-        WHERE status = 'offline' AND lastHeartbeat < ?
-    """, arguments: [gcCutoff])
+        WHERE lastHeartbeat < ? AND status = 'draining'
+    """, arguments: [cutoff])
+
+    // Note: hard deletion of long-offline rows is intentionally left to explicit
+    // worker_purge only. Auto-deleting here caused live sessions to lose their DB
+    // registration while still running, making the pool appear empty even when
+    // workers were alive.
 
     let now = nowMs()
     for row in staleWorkers {
@@ -101,6 +107,39 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
                let payloadData = payload.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
                let taskId = json["task_id"] as? String {
+                // Heartbeat loss is usually a transient worker-process failure,
+                // not a problem with the task itself. Auto-retry once before
+                // giving up so a flapping session doesn't strand its work.
+                let taskRow = try Row.fetchOne(db, sql: """
+                    SELECT status, retryCount, COALESCE(maxRetries, 1) AS maxRetries FROM tasks WHERE id = ?
+                """, arguments: [taskId])
+                let currentStatus = taskRow?["status"] as? String
+                let retryCount = taskRow?["retryCount"] as? Int ?? 0
+                let maxRetries = taskRow?["maxRetries"] as? Int ?? 1
+
+                if currentStatus == "active" && retryCount < maxRetries {
+                    try db.execute(sql: """
+                        UPDATE tasks SET status = 'pending',
+                                         retryCount = retryCount + 1,
+                                         startedAt = NULL,
+                                         lastError = 'Worker lost heartbeat — auto-retry',
+                                         updatedAt = ?
+                        WHERE id = ? AND status = 'active'
+                    """, arguments: [now, taskId])
+                    // Skip dependent unblocking — the task will run again.
+                    try db.execute(sql: """
+                        UPDATE workers SET
+                            currentEventId = NULL,
+                            currentEventTokens = NULL,
+                            currentSlug = NULL,
+                            currentCacheReadTokens = NULL,
+                            currentInputTokens = NULL,
+                            currentPromptHash = NULL
+                        WHERE workerId = ?
+                    """, arguments: [workerId])
+                    continue
+                }
+
                 try db.execute(sql: """
                     UPDATE tasks SET status = 'failed', lastError = 'Worker lost heartbeat', updatedAt = ?
                     WHERE id = ? AND status = 'active'
@@ -458,6 +497,54 @@ let workerActions: [SonataAction] = [
         }
     ),
 
+    // POST /api/worker/set_status — supervisor repair: directly set worker.status
+    SonataAction(
+        name: "worker_set_status",
+        description: "Directly set a worker's status field (supervisor repair tool for mismatched state).",
+        group: "/api/worker",
+        path: "/set_status",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier"),
+            ActionParam("status", .string, required: true, description: "Target status: idle, busy, draining, offline"),
+            ActionParam("clearCurrentEvent", .boolean, description: "If true, also NULL out currentEventId and live-monitoring fields"),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            let status = try ctx.params.require("status")
+            let clearCurrent = ctx.params.bool("clearCurrentEvent") ?? false
+            let allowed: Set<String> = ["idle", "busy", "draining", "offline"]
+            guard allowed.contains(status) else {
+                throw ActionError.invalidParam("status", "must be one of: idle, busy, draining, offline")
+            }
+            do {
+                try await ctx.dbPool.write { db in
+                    if clearCurrent {
+                        try db.execute(sql: """
+                            UPDATE workers SET
+                                status = ?,
+                                currentEventId = NULL,
+                                currentEventTokens = NULL,
+                                currentSlug = NULL,
+                                currentCacheReadTokens = NULL,
+                                currentInputTokens = NULL,
+                                currentPromptHash = NULL
+                            WHERE workerId = ?
+                        """, arguments: [status, workerId])
+                    } else {
+                        try db.execute(
+                            sql: "UPDATE workers SET status = ? WHERE workerId = ?",
+                            arguments: [status, workerId]
+                        )
+                    }
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
     // GET /api/worker/status — summary
     SonataAction(
         name: "worker_status",
@@ -468,7 +555,9 @@ let workerActions: [SonataAction] = [
         params: [],
         handler: { ctx in
             do {
-                let cutoff = nowMs() - 60_000
+                // Match the sweep cutoff so a worker the sweeper just marked
+                // offline doesn't still register as "online" here.
+                let cutoff = nowMs() - 30_000
                 return try await ctx.dbPool.read { db -> WorkerStatusResponse in
                     let online = try Int.fetchOne(db,
                         sql: "SELECT COUNT(*) FROM workers WHERE lastHeartbeat >= ?",
@@ -627,10 +716,15 @@ let workerEventActions: [SonataAction] = [
                         WHERE id = ?
                     """, arguments: [workerId, now, workerSessionId, row.id])
 
-                    // Mark worker busy
+                    // Mark worker busy. Bump lastHeartbeat to `now` at claim time so
+                    // that lastHeartbeat >= assignedAt; otherwise the supervisor sees a
+                    // worker whose assignedAt is fresh but heartbeat is stale and can't
+                    // tell "just claimed" from "dead session." The bridge will resume
+                    // its 15s heartbeat shortly after; this is the seed.
                     try db.execute(sql: """
-                        UPDATE workers SET status = 'busy', currentEventId = ? WHERE workerId = ?
-                    """, arguments: [row.id, workerId])
+                        UPDATE workers SET status = 'busy', currentEventId = ?, lastHeartbeat = ?
+                        WHERE workerId = ?
+                    """, arguments: [row.id, now, workerId])
 
                     return try WorkerEventRow.fetchOne(db,
                         sql: "SELECT * FROM workerEvents WHERE id = ?",

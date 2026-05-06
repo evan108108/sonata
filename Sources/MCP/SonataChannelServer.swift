@@ -35,7 +35,7 @@ actor SonataChannelServer {
                     SELECT COUNT(*) FROM workers
                     WHERE status != 'offline'
                     AND lastHeartbeat > ?
-                """, arguments: [nowMs() - 60_000])
+                """, arguments: [nowMs() - 30_000])
             }
             return (count ?? 0) > 0
         } catch {
@@ -53,7 +53,7 @@ actor SonataChannelServer {
                     AND lastHeartbeat > ?
                     ORDER BY lastHeartbeat DESC
                     LIMIT 1
-                """, arguments: [nowMs() - 60_000])
+                """, arguments: [nowMs() - 30_000])
             }
         } catch {
             logger.error("Error finding idle worker: \(error.localizedDescription)")

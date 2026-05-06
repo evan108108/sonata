@@ -683,5 +683,35 @@ extension DatabaseMigrator {
             """)
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS plugins_by_status ON plugins(status)")
         }
+
+        // v6: live worker monitoring + per-prompt cache hit-rate aggregation.
+        // The earlier LWM v0 build added this SQL to `createSchema(in:)` directly,
+        // which only runs as part of the v1 migration on FRESH databases — so
+        // existing installs never got the promptCacheStats table or some of the
+        // worker columns. Promote those changes to their own migration so every
+        // existing install picks them up on next launch.
+        registerMigration("v6_live_monitoring_v0") { db in
+            // Worker columns for in-flight token/cache telemetry. Idempotent —
+            // some installs already have these from the createSchema body.
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentEventTokens INTEGER") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentSlug TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentCacheReadTokens INTEGER") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentInputTokens INTEGER") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentPromptHash TEXT") } catch { /* column exists */ }
+
+            // Per-prompt-template cache hit-rate aggregation.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS promptCacheStats (
+                    promptKey            TEXT PRIMARY KEY,
+                    eventType            TEXT NOT NULL,
+                    promptHash           TEXT NOT NULL,
+                    totalInputTokens     INTEGER NOT NULL DEFAULT 0,
+                    totalCacheReadTokens INTEGER NOT NULL DEFAULT 0,
+                    sampleCount          INTEGER NOT NULL DEFAULT 0,
+                    lastSeenAt           INTEGER NOT NULL
+                )
+            """)
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS promptCacheStats_eventType ON promptCacheStats(eventType)")
+        }
     }
 }

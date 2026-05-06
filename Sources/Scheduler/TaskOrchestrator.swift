@@ -56,7 +56,7 @@ actor TaskOrchestrator {
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM workers
                 WHERE status = 'idle' AND lastHeartbeat >= ?
-            """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 60_000]) ?? 0
+            """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 30_000]) ?? 0
         }) ?? 0
 
         guard idleWorkerCount > 0 else { return }
@@ -69,7 +69,7 @@ actor TaskOrchestrator {
             try OrchestratorTaskRow.fetchAll(db, sql: """
                 SELECT * FROM tasks t
                 WHERE t.status = 'pending'
-                AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL)
+                AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL OR t.assignedTo = '')
                 AND (t.blockedBy IS NULL OR t.blockedBy = '[]' OR t.blockedBy = '')
                 AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parentTask = t.id)
                 ORDER BY
@@ -217,10 +217,10 @@ actor TaskOrchestrator {
             try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
         }
 
-        // Reset worker to idle
+        // Reset worker to idle, but preserve draining status
         try? await dbPool.write { db in
             try db.execute(
-                sql: "UPDATE workers SET status = 'idle', currentEventId = NULL WHERE currentEventId = ?",
+                sql: "UPDATE workers SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'idle' END, currentEventId = NULL WHERE currentEventId = ?",
                 arguments: [taskId]
             )
         }
@@ -245,10 +245,10 @@ actor TaskOrchestrator {
             try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
         }
 
-        // Reset worker to idle
+        // Reset worker to idle, but preserve draining status
         try? await dbPool.write { db in
             try db.execute(
-                sql: "UPDATE workers SET status = 'idle', currentEventId = NULL WHERE currentEventId = ?",
+                sql: "UPDATE workers SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'idle' END, currentEventId = NULL WHERE currentEventId = ?",
                 arguments: [taskId]
             )
         }
@@ -298,7 +298,12 @@ actor TaskOrchestrator {
 
     private func findIdleWorker() async throws -> String? {
         try await dbPool.read { db in
-            try String.fetchOne(db, sql: "SELECT workerId FROM workers WHERE status = 'idle' LIMIT 1")
+            try String.fetchOne(db, sql: """
+                SELECT workerId FROM workers
+                WHERE status = 'idle' AND lastHeartbeat >= ?
+                ORDER BY lastHeartbeat DESC
+                LIMIT 1
+            """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 30_000])
         }
     }
 }
