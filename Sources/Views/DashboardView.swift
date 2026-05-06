@@ -107,13 +107,11 @@ struct DashboardView: View {
                         SessionsSection(sessionsVM: sessionsVM)
                             .padding(.horizontal)
 
-                        if !workerManager.workers.isEmpty {
-                            LiveWorkersSection(workers: workerManager.workers) { worker in
-                                WorkerManager.shared.selectedWorkerId = worker.id
-                                selectedTab = .workers
-                            }
-                            .padding(.horizontal)
+                        LiveWorkersSection(workers: workerManager.workers) { worker in
+                            WorkerManager.shared.selectedWorkerId = worker.id
+                            selectedTab = .workers
                         }
+                        .padding(.horizontal)
                     }
                     .padding(.bottom)
                 }
@@ -464,9 +462,22 @@ private struct LiveWorkersSection: View {
                 .help("Add worker")
             }
 
-            VStack(spacing: 2) {
-                ForEach(workers) { worker in
-                    LiveWorkerRow(worker: worker, onTap: onTapRow)
+            if workers.isEmpty {
+                VStack(spacing: 4) {
+                    Text("No workers registered")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Text("Use + above to spawn a Claude Code worker.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+            } else {
+                VStack(spacing: 2) {
+                    ForEach(workers) { worker in
+                        LiveWorkerRow(worker: worker, onTap: onTapRow)
+                    }
                 }
             }
         }
