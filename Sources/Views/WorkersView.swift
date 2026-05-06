@@ -15,6 +15,16 @@ class Worker: ObservableObject, Identifiable {
     @Published var taskStartedAt: Int64 = 0
     @Published var eventsHandled: Int = 0
     @Published var tasksSinceSpawn: Int = 0
+    @Published var currentEventTokens: Int = 0
+    @Published var currentSlug: String = ""
+    @Published var currentCacheReadTokens: Int = 0
+    @Published var currentInputTokens: Int = 0
+
+    var currentCacheHitRate: Double? {
+        currentInputTokens > 0
+            ? Double(currentCacheReadTokens) / Double(currentInputTokens)
+            : nil
+    }
 
     let terminalView: LocalProcessTerminalView
     var coordinator: WorkerCoordinator?
@@ -347,10 +357,21 @@ class WorkerManager: ObservableObject {
                             if let assignedAt = info["assignedAt"] as? Int64 {
                                 worker.taskStartedAt = assignedAt
                             }
+                            worker.currentSlug = info["currentSlug"] as? String ?? ""
+                            worker.currentEventTokens = (info["currentEventTokens"] as? Int)
+                                ?? Int((info["currentEventTokens"] as? Int64) ?? 0)
+                            worker.currentInputTokens = (info["currentInputTokens"] as? Int)
+                                ?? Int((info["currentInputTokens"] as? Int64) ?? 0)
+                            worker.currentCacheReadTokens = (info["currentCacheReadTokens"] as? Int)
+                                ?? Int((info["currentCacheReadTokens"] as? Int64) ?? 0)
                         } else {
                             worker.currentEventId = ""
                             worker.currentTask = ""
                             worker.taskStartedAt = 0
+                            worker.currentSlug = ""
+                            worker.currentEventTokens = 0
+                            worker.currentInputTokens = 0
+                            worker.currentCacheReadTokens = 0
                         }
                     } else {
                         if worker.status != .starting && worker.status != .restarting {
@@ -619,18 +640,21 @@ struct WorkersView: View {
     // MARK: - Sidebar
 
     private var workerSidebar: some View {
-        List(selection: $manager.selectedWorkerId) {
-            ForEach(manager.workers) { worker in
-                WorkerSidebarRow(worker: worker)
-                    .tag(worker.id)
-                    .contextMenu {
-                        Button("Restart") { manager.restartWorker(worker) }
-                        Button("Remove", role: .destructive) { manager.removeWorker(worker) }
-                    }
+        VStack(spacing: 0) {
+            List(selection: $manager.selectedWorkerId) {
+                ForEach(manager.workers) { worker in
+                    WorkerSidebarRow(worker: worker)
+                        .tag(worker.id)
+                        .contextMenu {
+                            Button("Restart") { manager.restartWorker(worker) }
+                            Button("Remove", role: .destructive) { manager.removeWorker(worker) }
+                        }
+                }
             }
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
+            .listStyle(.sidebar)
+
+            PromptCacheStatsPanel()
+
             HStack {
                 Button(action: { manager.addWorker() }) {
                     Label("Add Worker", systemImage: "plus")
@@ -645,7 +669,7 @@ struct WorkersView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .frame(minWidth: 180, idealWidth: 220)
+        .frame(minWidth: 220, idealWidth: 260)
     }
 
     // MARK: - Empty State
@@ -694,11 +718,11 @@ struct WorkerSidebarRow: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        if worker.taskStartedAt > 0 {
-                            let elapsed = (Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 60_000
-                            Text("\(Int(elapsed))m")
+                        if !worker.currentEventId.isEmpty {
+                            Text(liveMonitoringLine(worker))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
+                                .lineLimit(1)
                         }
                     }
                 }
@@ -727,6 +751,24 @@ struct WorkerSidebarRow: View {
         .padding(.vertical, 4)
     }
 
+    private func liveMonitoringLine(_ worker: Worker) -> String {
+        var parts: [String] = []
+        let slug = worker.currentSlug.isEmpty ? "—" : worker.currentSlug
+        parts.append(slug)
+        if worker.taskStartedAt > 0 {
+            let elapsedSec = Int((Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 1000)
+            parts.append("\(elapsedSec)s")
+        }
+        if worker.currentEventTokens > 0 {
+            let kTokens = Double(worker.currentEventTokens) / 1000.0
+            parts.append(String(format: "%.1fk", kTokens))
+        }
+        if let hr = worker.currentCacheHitRate {
+            parts.append(String(format: "%.0f%%", hr * 100))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private func releaseWorker(_ worker: Worker) async {
         guard !worker.currentEventId.isEmpty,
               let endpoint = WorkerManager.healthEndpoint else { return }
@@ -737,5 +779,136 @@ struct WorkerSidebarRow: View {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{\"error\":\"Released by user\"}".utf8)
         _ = try? await URLSession.shared.data(for: request)
+    }
+}
+
+// MARK: - Prompt Cache Stats Panel
+
+struct PromptCacheStatsRow: Identifiable {
+    let id: String         // promptKey
+    let eventType: String
+    let promptHash: String
+    let sampleCount: Int64
+    let hitRate: Double?
+
+    /// Threshold flag from planning doc: enough samples to trust the rate AND
+    /// hit rate is below 50%. Sub-floor samples are treated as noise.
+    var isLeak: Bool {
+        guard let hr = hitRate else { return false }
+        return sampleCount >= 20 && hr < 0.5
+    }
+}
+
+@MainActor
+final class PromptCacheStatsModel: ObservableObject {
+    @Published var rows: [PromptCacheStatsRow] = []
+    private var timer: Timer?
+
+    init() { startPolling() }
+    deinit { timer?.invalidate() }
+
+    private func startPolling() {
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+    }
+
+    private func refresh() {
+        let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+        guard let url = URL(string: "http://localhost:\(port)/api/prompt_cache_stats") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let data,
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            let parsed: [PromptCacheStatsRow] = arr.compactMap { row in
+                guard let key = row["promptKey"] as? String else { return nil }
+                let hr = row["hitRate"] as? Double
+                let sample: Int64 = (row["sampleCount"] as? Int64)
+                    ?? Int64((row["sampleCount"] as? Int) ?? 0)
+                return PromptCacheStatsRow(
+                    id: key,
+                    eventType: row["eventType"] as? String ?? "",
+                    promptHash: row["promptHash"] as? String ?? "",
+                    sampleCount: sample,
+                    hitRate: hr
+                )
+            }
+            DispatchQueue.main.async { self?.rows = parsed }
+        }.resume()
+    }
+}
+
+struct PromptCacheStatsPanel: View {
+    @StateObject private var model = PromptCacheStatsModel()
+    @State private var expanded: Bool = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Divider()
+            HStack(spacing: 6) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2)
+                Text("Prompt cache")
+                    .font(.caption.bold())
+                Spacer()
+                if !model.rows.isEmpty {
+                    Text("\(model.rows.count)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .onTapGesture { expanded.toggle() }
+
+            if expanded {
+                if model.rows.isEmpty {
+                    Text("No data yet")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(model.rows) { row in
+                                HStack(spacing: 6) {
+                                    if row.isLeak {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.orange)
+                                    }
+                                    Text("\(row.eventType) · \(row.promptHash)")
+                                        .font(.system(.caption2, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text("\(row.sampleCount)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .frame(width: 36, alignment: .trailing)
+                                    if let hr = row.hitRate {
+                                        Text(String(format: "%.0f%%", hr * 100))
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundStyle(row.isLeak ? .orange : .secondary)
+                                            .frame(width: 36, alignment: .trailing)
+                                    } else {
+                                        Text("—")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .frame(width: 36, alignment: .trailing)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 160)
+                }
+            }
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
     }
 }

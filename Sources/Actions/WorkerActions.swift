@@ -18,6 +18,10 @@ private struct WorkerListItem: Encodable {
     let registeredAt: Int64
     let currentTask: String?
     let assignedAt: Int64?
+    let currentEventTokens: Int64?
+    let currentSlug: String?
+    let currentCacheReadTokens: Int64?
+    let currentInputTokens: Int64?
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -31,12 +35,28 @@ private struct WorkerListItem: Encodable {
         try c.encode(registeredAt, forKey: .registeredAt)
         try c.encodeIfPresent(currentTask, forKey: .currentTask)
         try c.encodeIfPresent(assignedAt, forKey: .assignedAt)
+        try c.encodeIfPresent(currentEventTokens, forKey: .currentEventTokens)
+        try c.encodeIfPresent(currentSlug, forKey: .currentSlug)
+        try c.encodeIfPresent(currentCacheReadTokens, forKey: .currentCacheReadTokens)
+        try c.encodeIfPresent(currentInputTokens, forKey: .currentInputTokens)
     }
 
     enum CodingKeys: String, CodingKey {
         case _id, workerId, sessionLabel, status, capabilities
         case lastHeartbeat, currentEventId, registeredAt, currentTask, assignedAt
+        case currentEventTokens, currentSlug, currentCacheReadTokens, currentInputTokens
     }
+}
+
+private struct PromptCacheStatsItem: Encodable {
+    let promptKey: String
+    let eventType: String
+    let promptHash: String
+    let totalInputTokens: Int64
+    let totalCacheReadTokens: Int64
+    let sampleCount: Int64
+    let lastSeenAt: Int64
+    let hitRate: Double?
 }
 
 // MARK: - Helpers
@@ -113,8 +133,16 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
                 }
             }
 
-            try db.execute(sql: "UPDATE workers SET currentEventId = NULL WHERE workerId = ?",
-                           arguments: [workerId])
+            try db.execute(sql: """
+                UPDATE workers SET
+                    currentEventId = NULL,
+                    currentEventTokens = NULL,
+                    currentSlug = NULL,
+                    currentCacheReadTokens = NULL,
+                    currentInputTokens = NULL,
+                    currentPromptHash = NULL
+                WHERE workerId = ?
+            """, arguments: [workerId])
         } catch {
             continue
         }
@@ -179,24 +207,47 @@ let workerActions: [SonataAction] = [
     // POST /api/worker/heartbeat — update lastHeartbeat, sweep stale
     SonataAction(
         name: "worker_heartbeat",
-        description: "Heartbeat a worker; update lastHeartbeat and sweep stale workers.",
+        description: "Heartbeat a worker; update lastHeartbeat, live-monitoring fields, and sweep stale workers.",
         group: "/api/worker",
         path: "/heartbeat",
         method: .post,
         params: [
             ActionParam("workerId", .string, required: true, description: "Worker identifier"),
             ActionParam("lastProgressAt", .integer, description: "Last progress timestamp (epoch ms)"),
+            ActionParam("currentEventTokens", .integer, description: "Cumulative tokens for in-flight event"),
+            ActionParam("currentSlug", .string, description: "Coarse 'what is it doing' label (event type in v0)"),
+            ActionParam("currentCacheReadTokens", .integer, description: "Cumulative cache_read_input_tokens for in-flight event"),
+            ActionParam("currentInputTokens", .integer, description: "Cumulative input-side tokens for in-flight event"),
+            ActionParam("promptHash", .string, description: "8-char sha256 prefix of the event's prompt prefix"),
         ],
         handler: { ctx in
             let workerId = try ctx.params.require("workerId")
             let lastProgressAt = ctx.params.int("lastProgressAt").map { Int64($0) }
+            let currentEventTokens = ctx.params.int("currentEventTokens").map { Int64($0) }
+            let currentSlug = ctx.params.string("currentSlug")
+            let currentCacheReadTokens = ctx.params.int("currentCacheReadTokens").map { Int64($0) }
+            let currentInputTokens = ctx.params.int("currentInputTokens").map { Int64($0) }
+            let promptHash = ctx.params.string("promptHash")
 
             let now = nowMs()
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
-                        sql: "UPDATE workers SET lastHeartbeat = ?, lastProgressAt = COALESCE(?, lastProgressAt) WHERE workerId = ?",
-                        arguments: [now, lastProgressAt, workerId]
+                        sql: """
+                        UPDATE workers SET
+                            lastHeartbeat = ?,
+                            lastProgressAt = COALESCE(?, lastProgressAt),
+                            currentEventTokens = COALESCE(?, currentEventTokens),
+                            currentSlug = COALESCE(?, currentSlug),
+                            currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
+                            currentInputTokens = COALESCE(?, currentInputTokens),
+                            currentPromptHash = COALESCE(?, currentPromptHash)
+                        WHERE workerId = ?
+                        """,
+                        arguments: [now, lastProgressAt,
+                                    currentEventTokens, currentSlug,
+                                    currentCacheReadTokens, currentInputTokens,
+                                    promptHash, workerId]
                     )
                     try sweepStaleWorkersForActions(in: db)
                 }
@@ -306,7 +357,11 @@ let workerActions: [SonataAction] = [
                         currentEventId: row["currentEventId"] as? String ?? "",
                         registeredAt: row["registeredAt"] as? Int64 ?? 0,
                         currentTask: row["currentTask"] as? String,
-                        assignedAt: row["eventAssignedAt"] as? Int64
+                        assignedAt: row["eventAssignedAt"] as? Int64,
+                        currentEventTokens: row["currentEventTokens"] as? Int64,
+                        currentSlug: row["currentSlug"] as? String,
+                        currentCacheReadTokens: row["currentCacheReadTokens"] as? Int64,
+                        currentInputTokens: row["currentInputTokens"] as? Int64
                     )
                 }
             } catch {
@@ -360,6 +415,46 @@ let workerActions: [SonataAction] = [
                 throw ActionError.database(error.localizedDescription)
             }
             return SuccessResponse()
+        }
+    ),
+
+    // GET /api/prompt_cache_stats — aggregated cache hit-rate per prompt template
+    SonataAction(
+        name: "prompt_cache_stats",
+        description: "List per-prompt-template cache hit-rate aggregates, highest-sample first.",
+        group: "/api",
+        path: "/prompt_cache_stats",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                let rows: [Row] = try await ctx.dbPool.read { db in
+                    try Row.fetchAll(db, sql: """
+                        SELECT promptKey, eventType, promptHash,
+                               totalInputTokens, totalCacheReadTokens,
+                               sampleCount, lastSeenAt
+                        FROM promptCacheStats
+                        ORDER BY sampleCount DESC, lastSeenAt DESC
+                    """)
+                }
+                return rows.map { row -> PromptCacheStatsItem in
+                    let input = row["totalInputTokens"] as? Int64 ?? 0
+                    let cacheRead = row["totalCacheReadTokens"] as? Int64 ?? 0
+                    let hitRate: Double? = input > 0 ? Double(cacheRead) / Double(input) : nil
+                    return PromptCacheStatsItem(
+                        promptKey: row["promptKey"] as? String ?? "",
+                        eventType: row["eventType"] as? String ?? "",
+                        promptHash: row["promptHash"] as? String ?? "",
+                        totalInputTokens: input,
+                        totalCacheReadTokens: cacheRead,
+                        sampleCount: row["sampleCount"] as? Int64 ?? 0,
+                        lastSeenAt: row["lastSeenAt"] as? Int64 ?? 0,
+                        hitRate: hitRate
+                    )
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
         }
     ),
 
@@ -582,12 +677,44 @@ let workerEventActions: [SonataAction] = [
                     // Set worker back to idle (unless draining — keep draining status)
                     if let workerId = row?.assignedTo {
                         completedWorkerId = workerId
-                        let workerStatus = try String.fetchOne(db, sql: """
-                            SELECT status FROM workers WHERE workerId = ?
+                        let workerRow = try Row.fetchOne(db, sql: """
+                            SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash
+                            FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
+                        let workerStatus = workerRow?["status"] as? String
+                        let inputTokens = workerRow?["currentInputTokens"] as? Int64
+                        let cacheReadTokens = workerRow?["currentCacheReadTokens"] as? Int64
+                        let promptHash = workerRow?["currentPromptHash"] as? String
+
+                        // Roll up into promptCacheStats when we have enough data.
+                        if let eventType = row?.type,
+                           let promptHash, !promptHash.isEmpty,
+                           let inputTokens, inputTokens > 0,
+                           let cacheReadTokens {
+                            let promptKey = "\(eventType):\(promptHash)"
+                            try db.execute(sql: """
+                                INSERT INTO promptCacheStats
+                                    (promptKey, eventType, promptHash, totalInputTokens, totalCacheReadTokens, sampleCount, lastSeenAt)
+                                VALUES (?, ?, ?, ?, ?, 1, ?)
+                                ON CONFLICT(promptKey) DO UPDATE SET
+                                    totalInputTokens = totalInputTokens + excluded.totalInputTokens,
+                                    totalCacheReadTokens = totalCacheReadTokens + excluded.totalCacheReadTokens,
+                                    sampleCount = sampleCount + 1,
+                                    lastSeenAt = excluded.lastSeenAt
+                            """, arguments: [promptKey, eventType, promptHash, inputTokens, cacheReadTokens, now])
+                        }
+
                         let newStatus = workerStatus == "draining" ? "draining" : "idle"
                         try db.execute(sql: """
-                            UPDATE workers SET status = ?, currentEventId = NULL WHERE workerId = ?
+                            UPDATE workers SET
+                                status = ?,
+                                currentEventId = NULL,
+                                currentEventTokens = NULL,
+                                currentSlug = NULL,
+                                currentCacheReadTokens = NULL,
+                                currentInputTokens = NULL,
+                                currentPromptHash = NULL
+                            WHERE workerId = ?
                         """, arguments: [newStatus, workerId])
                     }
 
@@ -661,12 +788,44 @@ let workerEventActions: [SonataAction] = [
 
                     if let workerId = row?.assignedTo {
                         completedWorkerId = workerId
-                        let workerStatus = try String.fetchOne(db, sql: """
-                            SELECT status FROM workers WHERE workerId = ?
+                        let workerRow = try Row.fetchOne(db, sql: """
+                            SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash
+                            FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
+                        let workerStatus = workerRow?["status"] as? String
+                        let inputTokens = workerRow?["currentInputTokens"] as? Int64
+                        let cacheReadTokens = workerRow?["currentCacheReadTokens"] as? Int64
+                        let promptHash = workerRow?["currentPromptHash"] as? String
+
+                        // Roll up into promptCacheStats — failures still consumed tokens.
+                        if let eventType = row?.type,
+                           let promptHash, !promptHash.isEmpty,
+                           let inputTokens, inputTokens > 0,
+                           let cacheReadTokens {
+                            let promptKey = "\(eventType):\(promptHash)"
+                            try db.execute(sql: """
+                                INSERT INTO promptCacheStats
+                                    (promptKey, eventType, promptHash, totalInputTokens, totalCacheReadTokens, sampleCount, lastSeenAt)
+                                VALUES (?, ?, ?, ?, ?, 1, ?)
+                                ON CONFLICT(promptKey) DO UPDATE SET
+                                    totalInputTokens = totalInputTokens + excluded.totalInputTokens,
+                                    totalCacheReadTokens = totalCacheReadTokens + excluded.totalCacheReadTokens,
+                                    sampleCount = sampleCount + 1,
+                                    lastSeenAt = excluded.lastSeenAt
+                            """, arguments: [promptKey, eventType, promptHash, inputTokens, cacheReadTokens, now])
+                        }
+
                         let newStatus = workerStatus == "draining" ? "draining" : "idle"
                         try db.execute(sql: """
-                            UPDATE workers SET status = ?, currentEventId = NULL WHERE workerId = ?
+                            UPDATE workers SET
+                                status = ?,
+                                currentEventId = NULL,
+                                currentEventTokens = NULL,
+                                currentSlug = NULL,
+                                currentCacheReadTokens = NULL,
+                                currentInputTokens = NULL,
+                                currentPromptHash = NULL
+                            WHERE workerId = ?
                         """, arguments: [newStatus, workerId])
                     }
 

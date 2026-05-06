@@ -421,6 +421,28 @@ func createSchema(in db: Database) throws {
     // Migration: add sessionId for worker cycling (idempotent)
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
 
+    // Migration: live monitoring v0 — per-event token spend, slug, cache hit rate.
+    // All NULL when idle; cleared by the 60s sweep alongside currentEventId.
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentEventTokens INTEGER") } catch { /* column exists */ }
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentSlug TEXT") } catch { /* column exists */ }
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentCacheReadTokens INTEGER") } catch { /* column exists */ }
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentInputTokens INTEGER") } catch { /* column exists */ }
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentPromptHash TEXT") } catch { /* column exists */ }
+
+    // MARK: promptCacheStats — per-prompt-template cache hit-rate aggregation
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS promptCacheStats (
+            promptKey            TEXT PRIMARY KEY,
+            eventType            TEXT NOT NULL,
+            promptHash           TEXT NOT NULL,
+            totalInputTokens     INTEGER NOT NULL DEFAULT 0,
+            totalCacheReadTokens INTEGER NOT NULL DEFAULT 0,
+            sampleCount          INTEGER NOT NULL DEFAULT 0,
+            lastSeenAt           INTEGER NOT NULL
+        )
+    """)
+    try db.execute(sql: "CREATE INDEX IF NOT EXISTS promptCacheStats_eventType ON promptCacheStats(eventType)")
+
     // MARK: workerEvents
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS workerEvents (

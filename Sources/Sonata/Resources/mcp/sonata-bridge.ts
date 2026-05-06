@@ -13,34 +13,126 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createHash } from "node:crypto";
+import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // --- Config ---
 
 const SONATA_API = process.env.SONATA_API || "http://localhost:3211";
 const WORKER_ID = process.env.WORKER_ID;
 const SESSION_LABEL = process.env.SESSION_LABEL;
-const SONA_SESSION_ID = process.env.SONA_SESSION_ID || undefined;
+const SONA_SESSION_ID = process.env.SONA_SESSION_ID;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
 
-const SONATA_ROLE = process.env.SONATA_ROLE || "worker";
-const IS_SUPERVISOR = SONATA_ROLE === "supervisor";
-const IS_INSPECTOR = SONATA_ROLE === "inspector";
+// --- Live monitoring: in-flight event tracking ---
+
+interface InFlightEvent {
+  eventId: string;
+  eventType: string;
+  promptHash: string;
+}
+let inFlight: InFlightEvent | null = null;
+
+/** Resolve the running JSONL transcript path for this worker's session. */
+function resolveTranscriptPath(): string | null {
+  if (!SONA_SESSION_ID) return null;
+  const cwd = process.cwd();
+  const encoded = cwd.replace(/\//g, "-");
+  const candidate = join(homedir(), ".claude", "projects", encoded, `${SONA_SESSION_ID}.jsonl`);
+  return existsSync(candidate) ? candidate : null;
+}
+
+/** Stable per-(eventType, worker-pool, cwd) prompt-prefix hash. v0 proxy for
+ * "system + skill + tools" — those are determined by the worker pool's
+ * CLAUDE.md, the session-label-driven mcp config, and the working dir. */
+function computePromptHash(eventType: string): string {
+  const material = [eventType, SESSION_LABEL || "", process.cwd()].join("|");
+  return createHash("sha256").update(material).digest("hex").slice(0, 8);
+}
+
+/** Read the transcript JSONL and sum usage across all assistant turns. Returns
+ * null if the file isn't readable yet. */
+function readTranscriptUsage(transcriptPath: string): {
+  totalTokens: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+} | null {
+  try {
+    // Whole-file read is fine: workers' transcripts are well under a MB and we
+    // need cumulative usage, not just the last turn.
+    const text = readFileSync(transcriptPath, "utf-8");
+    let totalTokens = 0, inputTokens = 0, cacheReadTokens = 0;
+    let sawAssistant = false;
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      let entry: any;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (entry.type !== "assistant") continue;
+      const usage = entry.message?.usage;
+      if (!usage) continue;
+      sawAssistant = true;
+      const input = usage.input_tokens || 0;
+      const cacheCreate = usage.cache_creation_input_tokens || 0;
+      const cacheRead = usage.cache_read_input_tokens || 0;
+      const output = usage.output_tokens || 0;
+      totalTokens += input + cacheCreate + cacheRead + output;
+      inputTokens += input + cacheCreate + cacheRead;
+      cacheReadTokens += cacheRead;
+    }
+    if (!sawAssistant) return null;
+    return { totalTokens, inputTokens, cacheReadTokens };
+  } catch {
+    return null;
+  }
+}
+
+/** Snapshot usage at the moment the event is claimed, so subsequent
+ * heartbeats report tokens *for this event only* (not session lifetime). */
+let usageBaseline: { totalTokens: number; inputTokens: number; cacheReadTokens: number } | null = null;
+
+/** Send the standard worker heartbeat plus, if an event is in flight,
+ * the per-event token deltas read from the running transcript JSONL. */
+async function pushLiveHeartbeat(): Promise<void> {
+  const body: any = { workerId: WORKER_ID, lastProgressAt: lastProgressMs };
+  if (inFlight) {
+    body.currentSlug = inFlight.eventType;
+    body.promptHash = inFlight.promptHash;
+    const transcriptPath = resolveTranscriptPath();
+    if (transcriptPath) {
+      const usage = readTranscriptUsage(transcriptPath);
+      if (usage) {
+        // Lock baseline on first read after claim so the first turn's massive
+        // cache_creation isn't double-counted from prior session traffic.
+        if (!usageBaseline) usageBaseline = usage;
+        body.currentEventTokens = Math.max(0, usage.totalTokens - usageBaseline.totalTokens);
+        body.currentInputTokens = Math.max(0, usage.inputTokens - usageBaseline.inputTokens);
+        body.currentCacheReadTokens = Math.max(0, usage.cacheReadTokens - usageBaseline.cacheReadTokens);
+      }
+    }
+  }
+  try {
+    await fetch(`${SONATA_API}/api/worker/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {}
+}
 
 // Only act as a worker when SONA_WORKER=1 is set AND both WORKER_ID and
-// SESSION_LABEL are explicitly provided. Supervisor/inspector roles use
-// SONATA_ROLE and don't need the worker-mode env vars. Without this guard,
-// sessions started outside the Sonata-spawned pool used to silently
-// auto-register with bogus IDs and label="worker", polluting the table.
-const IS_WORKER = process.env.SONA_WORKER === "1"
-  && !IS_SUPERVISOR
-  && !IS_INSPECTOR
-  && !!WORKER_ID
-  && !!SESSION_LABEL;
-if (process.env.SONA_WORKER === "1" && !IS_WORKER && !IS_SUPERVISOR && !IS_INSPECTOR) {
+// SESSION_LABEL are explicitly provided. Without them, sessions started
+// outside the Sonata-spawned pool used to silently auto-register with
+// bogus IDs and label="worker", polluting the workers table.
+const IS_WORKER = process.env.SONA_WORKER === "1" && !!WORKER_ID && !!SESSION_LABEL;
+if (process.env.SONA_WORKER === "1" && !IS_WORKER) {
   console.error("[sonata-bridge] SONA_WORKER=1 but WORKER_ID/SESSION_LABEL missing — not registering as worker");
 }
+const SONATA_ROLE = process.env.SONATA_ROLE || "worker";
+const IS_SUPERVISOR = SONATA_ROLE === "supervisor";
 
 // --- MCP Server ---
 
@@ -105,7 +197,7 @@ Read and acknowledge the alert. Call complete_event.`,
 // --- Tools ---
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: IS_INSPECTOR ? [] : [
+  tools: [
     {
       name: "complete_event",
       description: "Mark a worker event as completed.",
@@ -138,6 +230,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "complete_event") {
     lastProgressMs = Date.now();
+    // Push one final heartbeat so the per-event token totals land in
+    // promptCacheStats before complete_event clears the worker row.
+    await pushLiveHeartbeat();
     const { event_id, result } = args as { event_id: string; result?: string };
     try {
       await fetch(`${SONATA_API}/api/worker/events/complete`, {
@@ -148,11 +243,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return { content: [{ type: "text" as const, text: `Event ${event_id} completed` }] };
     } catch (err: any) {
       return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    } finally {
+      inFlight = null;
+      usageBaseline = null;
     }
   }
 
   if (name === "fail_event") {
     lastProgressMs = Date.now();
+    await pushLiveHeartbeat();
     const { event_id, error: errMsg } = args as { event_id: string; error: string };
     try {
       await fetch(`${SONATA_API}/api/worker/events/fail`, {
@@ -163,6 +262,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return { content: [{ type: "text" as const, text: `Event ${event_id} failed` }] };
     } catch (err: any) {
       return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    } finally {
+      inFlight = null;
+      usageBaseline = null;
     }
   }
 
@@ -176,9 +278,7 @@ console.error(`[sonata-bridge] Connected. Worker: ${WORKER_ID}`);
 
 // --- Worker mode ---
 
-if (IS_INSPECTOR) {
-  console.error(`[sonata-bridge] Inspector mode — no registration, no claim, no heartbeat. MCP tools available.`);
-} else if (IS_WORKER || IS_SUPERVISOR) {
+if (IS_WORKER || IS_SUPERVISOR) {
   // Register
   if (IS_SUPERVISOR) {
     try {
@@ -199,7 +299,6 @@ if (IS_INSPECTOR) {
         body: JSON.stringify({
           workerId: WORKER_ID,
           sessionLabel: SESSION_LABEL,
-          sessionId: SONA_SESSION_ID,
           capabilities: ["email", "task", "alert"],
         }),
       });
@@ -219,11 +318,7 @@ if (IS_INSPECTOR) {
           body: JSON.stringify({ sessionId: WORKER_ID }),
         });
       } else {
-        await fetch(`${SONATA_API}/api/worker/heartbeat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workerId: WORKER_ID, lastProgressAt: lastProgressMs }),
-        });
+        await pushLiveHeartbeat();
       }
     } catch {}
   }, HEARTBEAT_INTERVAL_MS);
@@ -290,6 +385,15 @@ if (IS_INSPECTOR) {
           lastProgressMs = Date.now();
 
           console.error(`[sonata-bridge] Pushing event: ${evt.type} (${evt._id})`);
+
+          // Track in-flight event for live monitoring heartbeats. Reset
+          // baseline so cumulative usage is captured fresh per event.
+          inFlight = {
+            eventId: evt._id,
+            eventType: evt.type,
+            promptHash: computePromptHash(evt.type),
+          };
+          usageBaseline = null;
 
           try {
             const payload = JSON.parse(evt.payload);
