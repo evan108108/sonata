@@ -53,6 +53,19 @@ struct RecentThoughtsResponse: Encodable {
     let generatedAt: Int64
 }
 
+struct DeadlineItem: Encodable {
+    let id: String
+    let source: String   // "task" | "memory"
+    let title: String    // task title OR memory l0 truncated
+    let subtitle: String?
+    let dueAt: Int64
+}
+
+struct DeadlinesResponse: Encodable {
+    let items: [DeadlineItem]
+    let generatedAt: Int64
+}
+
 struct BackupResponse: Encodable {
     let success: Bool
     let path: String

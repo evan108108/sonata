@@ -716,6 +716,107 @@ let systemActions: [SonataAction] = [
         }
     ),
 
+    // GET /api/deadlines — universal deadline surface
+    //
+    // Two local sources only:
+    //   1. tasks with dueAt <= end-of-today-local AND status NOT IN ('completed','cancelled')
+    //   2. memories with type='deadline' OR tags containing 'deadline', AND validUntil <= end-of-today-local
+    //
+    // Project-specific deadline data (Scout RFPs, Linear issues, etc.) is the
+    // responsibility of those projects to mirror INTO Sonata via tagged memories.
+    SonataAction(
+        name: "system_deadlines",
+        description: "Universal deadlines for the Dashboard's Attention zone: tasks with dueAt today-or-overdue and memories tagged 'deadline' with validUntil today-or-overdue. Sorted ASC, capped at 20.",
+        group: "/api",
+        path: "/deadlines",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                return try await ctx.dbPool.read { db -> DeadlinesResponse in
+                    let now = nowMs()
+                    // End of today, local timezone, exclusive — anything with
+                    // dueAt strictly less than this falls within "today or earlier."
+                    let cal = Calendar.current
+                    let startOfToday = cal.startOfDay(for: Date())
+                    let endOfTodayDate = cal.date(byAdding: .day, value: 1, to: startOfToday) ?? startOfToday
+                    let endOfTodayMs = Int64(endOfTodayDate.timeIntervalSince1970 * 1000)
+
+                    var items: [DeadlineItem] = []
+
+                    let taskRows = try Row.fetchAll(db, sql: """
+                        SELECT id, title, dueAt, project, status
+                        FROM tasks
+                        WHERE dueAt IS NOT NULL
+                          AND dueAt < ?
+                          AND status NOT IN ('completed', 'cancelled')
+                        ORDER BY dueAt ASC
+                        LIMIT 20
+                    """, arguments: [endOfTodayMs])
+                    for r in taskRows {
+                        let id: String = r["id"]
+                        let title: String = r["title"]
+                        let dueAt: Int64 = r["dueAt"]
+                        let project: String? = r["project"]
+                        let status: String? = r["status"]
+                        // Subtitle: prefer "<project> · <status>" when project is set.
+                        var parts: [String] = []
+                        if let project, !project.isEmpty { parts.append(project) }
+                        if let status, !status.isEmpty { parts.append(status) }
+                        let subtitle = parts.isEmpty ? nil : parts.joined(separator: " · ")
+                        items.append(DeadlineItem(
+                            id: id,
+                            source: "task",
+                            title: title,
+                            subtitle: subtitle,
+                            dueAt: dueAt
+                        ))
+                    }
+
+                    // tags is a JSON array text column; matching `%"deadline"%`
+                    // catches the canonical `["deadline", ...]` form. Type also
+                    // accepted — the spec calls out both conventions.
+                    let memRows = try Row.fetchAll(db, sql: """
+                        SELECT id, l0, content, validUntil, type, project
+                        FROM memories
+                        WHERE validUntil IS NOT NULL
+                          AND validUntil < ?
+                          AND (type = 'deadline' OR tags LIKE '%"deadline"%')
+                        ORDER BY validUntil ASC
+                        LIMIT 20
+                    """, arguments: [endOfTodayMs])
+                    for r in memRows {
+                        let id: String = r["id"]
+                        let l0: String? = r["l0"]
+                        let content: String = r["content"]
+                        let validUntil: Int64 = r["validUntil"]
+                        let memType: String? = r["type"]
+                        let project: String? = r["project"]
+                        let raw = (l0?.isEmpty == false ? l0! : content)
+                        let title = String(raw.prefix(80))
+                        var parts: [String] = []
+                        if let project, !project.isEmpty { parts.append(project) }
+                        if let memType, !memType.isEmpty { parts.append(memType) }
+                        let subtitle = parts.isEmpty ? nil : parts.joined(separator: " · ")
+                        items.append(DeadlineItem(
+                            id: id,
+                            source: "memory",
+                            title: title,
+                            subtitle: subtitle,
+                            dueAt: validUntil
+                        ))
+                    }
+
+                    items.sort { $0.dueAt < $1.dueAt }
+                    if items.count > 20 { items = Array(items.prefix(20)) }
+                    return DeadlinesResponse(items: items, generatedAt: now)
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
     // POST /api/backup — trigger an immediate full backup (local + S3)
     SonataAction(
         name: "system_backup",

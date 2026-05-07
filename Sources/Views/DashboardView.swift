@@ -15,6 +15,7 @@ struct DashboardView: View {
     @StateObject private var tokenVM = TokenUsageViewModel()
     @StateObject private var pluginVM = PluginStatusViewModel()
     @StateObject private var thoughtsVM = RecentThoughtsViewModel()
+    @StateObject private var deadlinesVM = DeadlinesViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -69,6 +70,14 @@ struct DashboardView: View {
                                 blockedTasks: status.blockedTasks
                             ) {
                                 selectedTab = .tasks
+                            }
+                            .padding(.horizontal)
+                        }
+
+                        // Attention zone — Deadlines card; hides entirely when empty.
+                        if !deadlinesVM.items.isEmpty {
+                            DeadlinesCard(items: deadlinesVM.items) { item in
+                                selectedTab = item.source == "task" ? .tasks : .memory
                             }
                             .padding(.horizontal)
                         }
@@ -196,12 +205,20 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !deadlinesVM.hasLoadedOnce && !Task.isCancelled {
+                await deadlinesVM.fetch()
+                if deadlinesVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
             Task { await tokenVM.fetch() }
             Task { await pluginVM.fetch() }
             Task { await thoughtsVM.fetch() }
+            Task { await deadlinesVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)

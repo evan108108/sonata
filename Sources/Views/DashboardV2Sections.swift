@@ -134,6 +134,140 @@ struct AttentionTasksCard: View {
     }
 }
 
+// MARK: - Deadlines (Attention zone)
+
+struct DeadlineItemModel: Identifiable, Decodable, Equatable {
+    let id: String
+    let source: String       // "task" | "memory"
+    let title: String
+    let subtitle: String?
+    let dueAt: Int64
+}
+
+private struct DeadlinesPayload: Decodable {
+    let items: [DeadlineItemModel]
+    let generatedAt: Int64
+}
+
+@MainActor
+final class DeadlinesViewModel: ObservableObject {
+    @Published var items: [DeadlineItemModel] = []
+    @Published var hasLoadedOnce = false
+
+    func fetch() async {
+        do {
+            let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/deadlines")!
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(DeadlinesPayload.self, from: data)
+            self.items = decoded.items
+            self.hasLoadedOnce = true
+        } catch {
+            // Quiet on transient failures.
+        }
+    }
+}
+
+struct DeadlinesCard: View {
+    let items: [DeadlineItemModel]
+    let onTapItem: (DeadlineItemModel) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "clock.badge.exclamationmark.fill")
+                    .foregroundStyle(.red)
+                Text("Deadlines")
+                    .font(.headline)
+                Text("today")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(items.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 2) {
+                ForEach(items) { item in
+                    Button {
+                        onTapItem(item)
+                    } label: {
+                        deadlineRow(item)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.red.opacity(0.20), lineWidth: 1)
+        )
+    }
+
+    private func deadlineRow(_ item: DeadlineItemModel) -> some View {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let isOverdue = item.dueAt < nowMs
+        let isDueToday = !isOverdue && item.dueAt < endOfTodayMs()
+        let tint: Color = isOverdue ? .red : (isDueToday ? .orange : .secondary)
+
+        return HStack(spacing: 10) {
+            Image(systemName: item.source == "task" ? "checklist" : "brain")
+                .font(.callout)
+                .foregroundStyle(tint)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.callout)
+                    .lineLimit(1)
+                if let subtitle = item.subtitle {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(Self.relativeDeadline(to: item.dueAt))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(tint)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    /// "due in 3h", "due in 23m", "overdue 1d", "overdue 2h".
+    static func relativeDeadline(to dueAtMs: Int64) -> String {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let deltaSec = (dueAtMs - nowMs) / 1000
+        let absSec = abs(deltaSec)
+        let prefix = deltaSec >= 0 ? "due in" : "overdue"
+        let amount = absSec
+        if amount < 60 { return deltaSec >= 0 ? "due now" : "overdue" }
+        let mins = amount / 60
+        if mins < 60 { return "\(prefix) \(mins)m" }
+        let hours = mins / 60
+        if hours < 24 { return "\(prefix) \(hours)h" }
+        let days = hours / 24
+        return "\(prefix) \(days)d"
+    }
+
+    /// Local end-of-today as epoch ms. Used to color "due today" rows orange.
+    private func endOfTodayMs() -> Int64 {
+        let cal = Calendar.current
+        let start = cal.startOfDay(for: Date())
+        let end = cal.date(byAdding: .day, value: 1, to: start) ?? start
+        return Int64(end.timeIntervalSince1970 * 1000)
+    }
+}
+
 // MARK: - Upcoming calendar events
 
 struct UpcomingEventInfo: Identifiable, Decodable, Equatable {
