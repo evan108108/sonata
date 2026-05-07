@@ -89,6 +89,9 @@ let systemActions: [SonataAction] = [
         method: .get,
         params: [],
         handler: { ctx in
+            // Read external-bridge count outside the dbPool block — the registry
+            // is in-memory and entirely independent of the SQLite connection.
+            let externalBridgeCount = ExternalBridgeRegistry.shared.currentCount()
             do {
                 return try await ctx.dbPool.read { db -> SystemStatusResponse in
                     let memRow = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS cnt FROM memories")!
@@ -137,12 +140,21 @@ let systemActions: [SonataAction] = [
                         let c: Int = r["cnt"]
                         tasksByStatus[s] = c
                     }
-                    let failedTasks: Int = tasksByStatus["failed"] ?? 0
+                    // Stuck-task counts (failed + blocked) exclude items the user has
+                    // acknowledged on the dashboard's attention card. tasksByStatus is
+                    // left as the raw breakdown so the Tasks tab still sees the whole
+                    // history; only the attention surfaces filter on acknowledgedAt.
+                    let failedRow = try Row.fetchOne(db, sql: """
+                        SELECT COUNT(*) AS cnt FROM tasks
+                        WHERE status = 'failed' AND acknowledgedAt IS NULL
+                    """)!
+                    let failedTasks: Int = failedRow["cnt"]
 
                     // Already-blocked pending tasks: blockedBy is a non-empty JSON array.
                     let blockedRow = try Row.fetchOne(db, sql: """
                         SELECT COUNT(*) AS cnt FROM tasks
                         WHERE status = 'pending'
+                          AND acknowledgedAt IS NULL
                           AND blockedBy IS NOT NULL
                           AND blockedBy != '[]'
                           AND blockedBy != ''
@@ -244,6 +256,7 @@ let systemActions: [SonataAction] = [
                         upcomingCalendarEvents: upcomingEvents,
                         workerCount: workerCount,
                         workersByStatus: workersByStatus,
+                        externalBridgeCount: externalBridgeCount,
                         backgroundJobs: bgSummary
                     )
                 }

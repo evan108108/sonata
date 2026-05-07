@@ -624,6 +624,151 @@ let taskActions: [SonataAction] = [
         }
     ),
 
+    // POST /api/task/acknowledge — soft-archive failed/blocked tasks the user has seen.
+    // Either pass `id` to ack one task, or `status` ('failed' | 'blocked' | 'all') to bulk-ack.
+    // Sets acknowledgedAt=now without changing the task's status field, so the Tasks tab
+    // history is preserved while the dashboard's attention card stops surfacing them.
+    SonataAction(
+        name: "mem_task_acknowledge",
+        description: "Acknowledge (soft-archive) failed/blocked tasks. Pass id to ack one, or status='failed'|'blocked'|'all' to bulk.",
+        group: "/api/task",
+        path: "/acknowledge",
+        method: .post,
+        params: [
+            ActionParam("id", .string, description: "Task ID for single ack"),
+            ActionParam("status", .string, description: "Bulk filter: 'failed', 'blocked', or 'all'"),
+        ],
+        handler: { ctx in
+            let id = ctx.params.string("id")
+            let status = ctx.params.string("status")
+            let now = nowMs()
+            guard id != nil || status != nil else {
+                throw ActionError.invalidParam("id", "must provide either id (single) or status (bulk)")
+            }
+            do {
+                let count = try await ctx.dbPool.write { db -> Int in
+                    if let id {
+                        try db.execute(
+                            sql: "UPDATE tasks SET acknowledgedAt = ?, updatedAt = ? WHERE id = ? AND acknowledgedAt IS NULL",
+                            arguments: [now, now, id]
+                        )
+                        return db.changesCount
+                    }
+                    switch status {
+                    case "failed":
+                        try db.execute(
+                            sql: "UPDATE tasks SET acknowledgedAt = ?, updatedAt = ? WHERE status = 'failed' AND acknowledgedAt IS NULL",
+                            arguments: [now, now]
+                        )
+                    case "blocked":
+                        try db.execute(
+                            sql: """
+                                UPDATE tasks SET acknowledgedAt = ?, updatedAt = ?
+                                WHERE status = 'pending'
+                                  AND acknowledgedAt IS NULL
+                                  AND blockedBy IS NOT NULL
+                                  AND blockedBy != '[]'
+                                  AND blockedBy != ''
+                            """,
+                            arguments: [now, now]
+                        )
+                    case "all":
+                        try db.execute(
+                            sql: """
+                                UPDATE tasks SET acknowledgedAt = ?, updatedAt = ?
+                                WHERE acknowledgedAt IS NULL
+                                  AND (status = 'failed'
+                                       OR (status = 'pending' AND blockedBy IS NOT NULL AND blockedBy != '[]' AND blockedBy != ''))
+                            """,
+                            arguments: [now, now]
+                        )
+                    default:
+                        throw ActionError.invalidParam("status", "must be 'failed', 'blocked', or 'all'")
+                    }
+                    return db.changesCount
+                }
+                return AckResponse(acknowledged: count)
+            } catch let e as ActionError {
+                throw e
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // POST /api/task/restore — undo an acknowledgement (clears acknowledgedAt).
+    SonataAction(
+        name: "mem_task_restore",
+        description: "Un-acknowledge a previously dismissed task so it surfaces on the dashboard again.",
+        group: "/api/task",
+        path: "/restore",
+        method: .post,
+        params: [
+            ActionParam("id", .string, required: true, description: "Task ID", source: .query),
+        ],
+        handler: { ctx in
+            let id = try ctx.params.require("id")
+            let now = nowMs()
+            do {
+                try await ctx.dbPool.write { db in
+                    try db.execute(
+                        sql: "UPDATE tasks SET acknowledgedAt = NULL, updatedAt = ? WHERE id = ?",
+                        arguments: [now, id]
+                    )
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            return SuccessResponse()
+        }
+    ),
+
+    // GET /api/task/attention — items powering the dashboard AttentionTasksCard.
+    // Returns failed + blocked tasks that haven't been acknowledged, with the
+    // fields the card needs (title, status, lastError, blockedBy count).
+    SonataAction(
+        name: "mem_task_attention",
+        description: "List unacknowledged failed and blocked tasks for the dashboard attention card.",
+        group: "/api/task",
+        path: "/attention",
+        method: .get,
+        params: [
+            ActionParam("limit", .integer, description: "Max items (default 25)", source: .query),
+        ],
+        handler: { ctx in
+            let limit = ctx.params.int("limit") ?? 25
+            do {
+                let items = try await ctx.dbPool.read { db -> [AttentionTaskItem] in
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT id, title, status, lastError, blockedBy, updatedAt
+                        FROM tasks
+                        WHERE acknowledgedAt IS NULL
+                          AND (status = 'failed'
+                               OR (status = 'pending'
+                                   AND blockedBy IS NOT NULL
+                                   AND blockedBy != '[]'
+                                   AND blockedBy != ''))
+                        ORDER BY updatedAt DESC
+                        LIMIT ?
+                    """, arguments: [limit])
+                    return rows.map { r in
+                        AttentionTaskItem(
+                            id: r["id"] as? String ?? "",
+                            title: r["title"] as? String ?? "(untitled)",
+                            status: r["status"] as? String ?? "",
+                            lastError: r["lastError"] as? String,
+                            blockedBy: r["blockedBy"] as? String,
+                            updatedAt: r["updatedAt"] as? Int64 ?? 0
+                        )
+                    }
+                }
+                return AttentionTaskListResponse(items: items)
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
     // GET /api/task/stats
     SonataAction(
         name: "mem_task_stats",

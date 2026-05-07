@@ -216,6 +216,19 @@ let workerActions: [SonataAction] = [
                     // sessionLabel is the "slot"; workerId is the running instance.
                     // When a fresh process registers, drop any predecessors that occupied the same slot.
                     if !sessionLabel.isEmpty {
+                        // Release any in-flight events held by predecessors before
+                        // deleting their rows. Otherwise the events sit `assigned`
+                        // forever pointing at a workerId nothing can sweep.
+                        try db.execute(
+                            sql: """
+                                UPDATE workerEvents SET assignedTo = NULL, status = 'pending'
+                                WHERE status = 'assigned' AND assignedTo IN (
+                                    SELECT workerId FROM workers
+                                    WHERE sessionLabel = ? AND workerId != ?
+                                )
+                            """,
+                            arguments: [sessionLabel, workerId]
+                        )
                         try db.execute(
                             sql: "DELETE FROM workers WHERE sessionLabel = ? AND workerId != ?",
                             arguments: [sessionLabel, workerId]
@@ -270,7 +283,7 @@ let workerActions: [SonataAction] = [
 
             let now = nowMs()
             do {
-                try await ctx.dbPool.write { db in
+                let changed = try await ctx.dbPool.write { db -> Int in
                     try db.execute(
                         sql: """
                         UPDATE workers SET
@@ -288,8 +301,17 @@ let workerActions: [SonataAction] = [
                                     currentCacheReadTokens, currentInputTokens,
                                     promptHash, workerId]
                     )
+                    let count = db.changesCount
                     try sweepStaleWorkersForActions(in: db)
+                    return count
                 }
+                // Worker row is gone (purged by supervisor or supplanted by predecessor-cleanup).
+                // Tell the bridge to re-register instead of heartbeating into the void forever.
+                guard changed > 0 else {
+                    throw ActionError.custom("unknown worker — re-register", .gone)
+                }
+            } catch let e as ActionError {
+                throw e
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
@@ -311,6 +333,14 @@ let workerActions: [SonataAction] = [
             let workerId = try ctx.params.require("workerId")
             do {
                 try await ctx.dbPool.write { db in
+                    // Release any in-flight events before the row goes away.
+                    try db.execute(
+                        sql: """
+                            UPDATE workerEvents SET assignedTo = NULL, status = 'pending'
+                            WHERE assignedTo = ? AND status = 'assigned'
+                        """,
+                        arguments: [workerId]
+                    )
                     try db.execute(sql: "DELETE FROM workers WHERE workerId = ?", arguments: [workerId])
                 }
             } catch {

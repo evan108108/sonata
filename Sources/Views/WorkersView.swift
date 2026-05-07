@@ -150,6 +150,27 @@ class WorkerManager: ObservableObject {
         }
     }
 
+    /// Ensure the pool has a Worker for every slot index in 1...defaultWorkerCount.
+    /// Called from pollHealth and from any removal path so that pollHealth-driven
+    /// removals (displaced predecessors, drained-and-vanished) and coordinator-driven
+    /// removals don't leave the pool below its configured size. Fills gaps by index
+    /// (e.g. sona-worker-1 missing while sona-worker-2 exists → spawn sona-worker-1)
+    /// rather than appending sona-worker-N+1, which would create duplicate-label
+    /// drift over time.
+    @MainActor
+    func maintainPoolSize() {
+        let target = WorkerManager.defaultWorkerCount
+        let prefix = "sona-worker-"
+        let occupied: Set<Int> = Set(workers.compactMap { w in
+            guard w.label.hasPrefix(prefix) else { return nil }
+            return Int(w.label.dropFirst(prefix.count))
+        })
+        for idx in 1...target where !occupied.contains(idx) {
+            print("[pool] missing slot — spawning sona-worker-\(idx)")
+            addWorker(label: "sona-worker-\(idx)")
+        }
+    }
+
     func addWorker(label: String? = nil) {
         let usedIndices = workers.compactMap { w -> Int? in
             let prefix = "sona-worker-"
@@ -220,8 +241,13 @@ class WorkerManager: ObservableObject {
         let slotLabel = oldWorker.label
         let settings = CycleSettings.shared
 
-        // Mark old worker draining in DB
+        // Mark old worker draining in DB and freeze auto-restart on its coordinator.
+        // If the old bridge exits early (e.g. server returns 410 Gone after the new
+        // bridge's predecessor-cleanup deletes its row), we do NOT want the coordinator
+        // to helpfully respawn it — that would resurrect a worker we just intentionally
+        // retired and put it back into the rotation.
         oldWorker.status = .draining
+        oldWorker.coordinator?.autoRestartEnabled = false
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
         Task {
             var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/drain?workerId=\(oldWorker.id)")!)
@@ -270,8 +296,10 @@ class WorkerManager: ObservableObject {
         newWorker.coordinator?.stop()
         workers.removeAll { $0.id == newWorker.id }
 
-        // Un-drain the old worker
+        // Un-drain the old worker — restore both DB status and auto-restart so it
+        // continues serving (cycleWorker disabled auto-restart preemptively).
         oldWorker.status = .idle
+        oldWorker.coordinator?.autoRestartEnabled = true
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
         Task {
             var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/undrain?workerId=\(oldWorker.id)")!)
@@ -392,10 +420,22 @@ class WorkerManager: ObservableObject {
                         // - draining: server's stale-sweep DELETEd it on purpose. Don't
                         //   resurrect it as 'offline' — that's the non-sensical
                         //   draining→offline transition. Just remove it locally.
+                        // - displaced predecessor: another live Worker shares this slot
+                        //   label, meaning a fresh bridge registered with the same
+                        //   sessionLabel and the register handler's predecessor-cleanup
+                        //   deleted this row. The local draining flag may have been
+                        //   overwritten by an earlier pollHealth tick that observed the
+                        //   row before the drain POST landed — same effective state.
                         // - starting/restarting: in-flight registration; keep waiting.
                         // - anything else: surprise disappearance — surface as offline
                         //   so the supervisor can repair.
-                        if worker.status == .draining {
+                        let displacedBySameSlot = self.workers.contains { other in
+                            other.id != worker.id
+                                && other.label == worker.label
+                                && other.status != .offline
+                                && other.status != .draining
+                        }
+                        if worker.status == .draining || displacedBySameSlot {
                             toRemove.append(worker.id)
                         } else if worker.status != .starting && worker.status != .restarting {
                             worker.status = .offline
@@ -408,6 +448,11 @@ class WorkerManager: ObservableObject {
                         self.selectedWorkerId = self.workers.first?.id
                     }
                 }
+                // Pool maintainer — every health tick. Cheap when the pool is full
+                // (single dictionary build); spawns deterministically when a slot is
+                // missing. Replaces the implicit assumption that cycleWorker is the
+                // only path that removes Workers.
+                self.maintainPoolSize()
             }
         }.resume()
     }

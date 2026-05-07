@@ -120,6 +120,54 @@ func ensureRoleDirectories() {
     }
 }
 
+/// Redirect stdout + stderr to ~/Library/Logs/Sonata.log so any `print(...)`,
+/// FileHandle.standardError write, or runtime crash trace lands in the same
+/// file the in-app Logs viewer tails. Without this, Finder-launched Sonata
+/// silently drops every print() — making the LogsView miss most runtime errors
+/// from the worker pool, inspector, and ad-hoc debug print sites.
+///
+/// Gated on `isatty(stderr)`: when stderr is already a terminal (`swift run`,
+/// Xcode console, ssh shell) we leave it alone so console output keeps working.
+/// When stderr is *not* a TTY (Finder launch, double-clicked .app) we redirect
+/// to the log file so the LogsView is the source of truth.
+private var stderrRedirectInstalled = false
+func installSonataStdoutRedirect() {
+    guard !stderrRedirectInstalled else { return }
+    stderrRedirectInstalled = true
+
+    // If stderr is already a TTY, the developer is running from a terminal and
+    // wants console output. Skip the redirect.
+    if isatty(fileno(stderr)) != 0 { return }
+
+    let logsDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs")
+    try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+    let logURL = logsDir.appendingPathComponent("Sonata.log")
+
+    // Boot-time rotation: if Sonata.log is over the cap, move it aside to
+    // Sonata.log.1 (overwriting any older rotation) and start fresh. Sonata
+    // restarts often enough that a once-per-boot check is sufficient — we
+    // don't bother with a mid-session timer.
+    let rotateCapBytes: UInt64 = 200 * 1024 * 1024
+    let size = (try? FileManager.default.attributesOfItem(atPath: logURL.path))
+        .flatMap { ($0[.size] as? NSNumber)?.uint64Value } ?? 0
+    if size > rotateCapBytes {
+        let prev = logsDir.appendingPathComponent("Sonata.log.1")
+        try? FileManager.default.removeItem(at: prev)
+        try? FileManager.default.moveItem(at: logURL, to: prev)
+    }
+
+    let fd = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+    guard fd >= 0 else { return }
+    // Line-buffer so prints land in the file promptly instead of waiting for a
+    // 4 KB flush — the LogsView polls every 500 ms and we want it lively.
+    setvbuf(stdout, nil, _IOLBF, 0)
+    setvbuf(stderr, nil, _IOLBF, 0)
+    dup2(fd, fileno(stdout))
+    dup2(fd, fileno(stderr))
+    close(fd)
+}
+
 /// Append a line to ~/Library/Logs/Sonata.log so errors are visible when the
 /// app is launched from the Finder (where stderr is discarded).
 func sonataFileLog(_ line: String) {
@@ -168,6 +216,12 @@ struct SonataApp: App {
     let dbPool: DatabasePool
 
     init() {
+        // Tee stdout/stderr into ~/Library/Logs/Sonata.log so every print() and
+        // runtime stderr write is captured by the in-app LogsView. Must run
+        // before any other code that might print, so it lives at the very top
+        // of init().
+        installSonataStdoutRedirect()
+
         // Singleton guard: if another Sonata is already running, activate it and exit
         let runningApps = NSRunningApplication.runningApplications(
             withBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.sona.Sonata"
@@ -246,6 +300,7 @@ struct SonataApp: App {
                 registry.register(taskActions)
                 registry.register(workerActions)
                 registry.register(workerEventActions)
+                registry.register(bridgeActions)
                 registry.register(inspectorAction)
                 registry.register(afkActions)
                 registry.register(calendarActions)
@@ -546,6 +601,11 @@ struct SonataApp: App {
                     InteractiveSessionsWindowController.shared.show()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
+
+                Button("Logs") {
+                    LogsWindowController.shared.show()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
             }
         }
     }

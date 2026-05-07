@@ -85,52 +85,229 @@ struct PluginStatCard: View {
 
 // MARK: - Attention zone: failed / blocked tasks
 
-struct AttentionTasksCard: View {
-    let failedTasks: Int
-    let blockedTasks: Int
-    let onTap: () -> Void
+struct AttentionTaskItemModel: Identifiable, Decodable, Equatable {
+    let id: String
+    let title: String
+    let status: String
+    let lastError: String?
+    let blockedBy: String?
+    let updatedAt: Int64
 
-    private var total: Int { failedTasks + blockedTasks }
+    /// Number of upstream blockers parsed from the JSON array string.
+    var blockerCount: Int {
+        guard let raw = blockedBy, !raw.isEmpty, raw != "[]" else { return 0 }
+        if let data = raw.data(using: .utf8),
+           let arr = try? JSONDecoder().decode([String].self, from: data) {
+            return arr.count
+        }
+        return 0
+    }
+}
+
+private struct AttentionPayload: Decodable {
+    let items: [AttentionTaskItemModel]
+}
+
+@MainActor
+final class AttentionTasksViewModel: ObservableObject {
+    @Published var items: [AttentionTaskItemModel] = []
+    @Published var hasLoadedOnce = false
+
+    func fetch() async {
+        do {
+            let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/task/attention")!
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(AttentionPayload.self, from: data)
+            self.items = decoded.items
+            self.hasLoadedOnce = true
+        } catch {
+            // Quiet on transient failures — same pattern as DeadlinesViewModel.
+        }
+    }
+
+    func acknowledge(id: String) async {
+        var comps = URLComponents(string: "http://127.0.0.1:\(sonataPort)/api/task/acknowledge")!
+        comps.queryItems = [URLQueryItem(name: "id", value: id)]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "POST"
+        _ = try? await URLSession.shared.data(for: req)
+        // Optimistic local update; refetch will reconcile any drift.
+        items.removeAll { $0.id == id }
+    }
+
+    func acknowledgeAll() async {
+        var comps = URLComponents(string: "http://127.0.0.1:\(sonataPort)/api/task/acknowledge")!
+        comps.queryItems = [URLQueryItem(name: "status", value: "all")]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "POST"
+        _ = try? await URLSession.shared.data(for: req)
+        items.removeAll()
+    }
+}
+
+/// Inline attention card. Section-style: header line with icon, title, count,
+/// and right-side actions (Clear all, Open Tasks). Body is the first N rows
+/// with per-row acknowledge X. If there are more, an inline "Show N more"
+/// button expands the list in place — no modal.
+struct AttentionTasksCard: View {
+    @ObservedObject var vm: AttentionTasksViewModel
+    let onOpenTasks: () -> Void
+
+    @State private var expanded = false
+
+    private static let collapsedRowLimit = 3
+
+    private var failedCount: Int { vm.items.filter { $0.status == "failed" }.count }
+    private var blockedCount: Int { vm.items.filter { $0.status == "pending" }.count }
+
+    private var visibleItems: [AttentionTaskItemModel] {
+        if expanded || vm.items.count <= Self.collapsedRowLimit {
+            return vm.items
+        }
+        return Array(vm.items.prefix(Self.collapsedRowLimit))
+    }
 
     private var subtitle: String {
         var parts: [String] = []
-        if failedTasks > 0 { parts.append("\(failedTasks) failed") }
-        if blockedTasks > 0 { parts.append("\(blockedTasks) blocked") }
+        if failedCount > 0 { parts.append("\(failedCount) failed") }
+        if blockedCount > 0 { parts.append("\(blockedCount) blocked") }
         return parts.joined(separator: " · ")
     }
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
+            // Section header
+            HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.title2)
                     .foregroundStyle(.red)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("\(total)")
-                            .font(.system(.title, design: .rounded).bold())
-                        Text(total == 1 ? "stuck task" : "stuck tasks")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(subtitle)
+                Text("Stuck Tasks")
+                    .font(.headline)
+                Text("\(vm.items.count)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                if !subtitle.isEmpty {
+                    Text("· \(subtitle)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                if vm.items.count > 1 {
+                    Button {
+                        Task { await vm.acknowledgeAll() }
+                    } label: {
+                        Text("Clear all")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                }
+                Button {
+                    onOpenTasks()
+                } label: {
+                    Text("Open Tasks")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
             }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.red.opacity(0.25), lineWidth: 1)
-            )
+
+            // Rows
+            VStack(spacing: 4) {
+                ForEach(visibleItems) { item in
+                    AttentionTaskRow(item: item) {
+                        Task { await vm.acknowledge(id: item.id) }
+                    }
+                }
+            }
+
+            // Inline "Show N more" expander
+            if !expanded && vm.items.count > Self.collapsedRowLimit {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { expanded = true }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                        Text("Show \(vm.items.count - Self.collapsedRowLimit) more")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            } else if expanded && vm.items.count > Self.collapsedRowLimit {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { expanded = false }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.up")
+                            .font(.caption2)
+                        Text("Collapse")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.red.opacity(0.25), lineWidth: 1)
+        )
+    }
+}
+
+private struct AttentionTaskRow: View {
+    let item: AttentionTaskItemModel
+    let onDismiss: () -> Void
+
+    private var detail: String {
+        if item.status == "failed" {
+            return item.lastError?.replacingOccurrences(of: "\n", with: " ") ?? "Failed"
+        } else {
+            let n = item.blockerCount
+            return n > 0 ? "Blocked by \(n) task\(n == 1 ? "" : "s")" : "Blocked"
+        }
+    }
+
+    private var statusColor: Color {
+        item.status == "failed" ? .red : .orange
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.callout)
+                    .lineLimit(2)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            Spacer(minLength: 8)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary.opacity(0.7))
+            }
+            .buttonStyle(.borderless)
+            .help("Acknowledge — hide from the dashboard. The task stays in the Tasks tab.")
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

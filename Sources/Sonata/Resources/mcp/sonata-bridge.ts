@@ -139,6 +139,29 @@ function readTranscriptUsage(transcriptPath: string): {
  * heartbeats report tokens *for this event only* (not session lifetime). */
 let usageBaseline: { totalTokens: number; inputTokens: number; cacheReadTokens: number } | null = null;
 
+/** Register (or re-register) this worker. Called on boot and on first 410 response
+ * from /heartbeat (server lost our row — supervisor purge, predecessor-cleanup, etc). */
+async function registerWorker(): Promise<void> {
+  try {
+    const res = await fetch(`${SONATA_API}/api/worker/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workerId: WORKER_ID,
+        sessionLabel: SESSION_LABEL,
+        capabilities: ["email", "task", "alert"],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`[sonata-bridge] Register failed: HTTP ${res.status}`);
+    } else {
+      console.error(`[sonata-bridge] Registered as ${WORKER_ID}`);
+    }
+  } catch (err: any) {
+    console.error(`[sonata-bridge] Register threw: ${err?.message ?? err}`);
+  }
+}
+
 /** Send the standard worker heartbeat plus, if an event is in flight,
  * the per-event token deltas read from the running transcript JSONL. */
 async function pushLiveHeartbeat(): Promise<void> {
@@ -158,12 +181,24 @@ async function pushLiveHeartbeat(): Promise<void> {
     }
   }
   try {
-    await fetch(`${SONATA_API}/api/worker/heartbeat`, {
+    const res = await fetch(`${SONATA_API}/api/worker/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch {}
+    if (res.status === 410) {
+      // Server has no row for us — either supervisor purged us, or a fresh bridge
+      // claimed our sessionLabel (predecessor-cleanup). Exit the bridge process
+      // and let the WorkerCoordinator decide whether to auto-restart. Re-registering
+      // here would resurrect drained workers and ping-pong with the replacement.
+      console.error(`[sonata-bridge] Heartbeat got 410 Gone — bridge ${WORKER_ID} exiting; coordinator will respawn if appropriate`);
+      process.exit(0);
+    } else if (!res.ok) {
+      console.error(`[sonata-bridge] Heartbeat HTTP ${res.status}`);
+    }
+  } catch (err: any) {
+    console.error(`[sonata-bridge] Heartbeat threw: ${err?.message ?? err}`);
+  }
 }
 
 // Only act as a worker when SONA_WORKER=1 is set AND both WORKER_ID and
@@ -418,6 +453,50 @@ function ensureAFKPollLoop(): void {
   }, AFK_POLL_INTERVAL_MS);
 }
 
+// --- External bridge tracking ---
+//
+// Bridges that aren't pool workers/supervisors (typically interactive `claude`
+// or claude-patched sessions with sonata-bridge configured as an MCP server)
+// announce themselves so the Sonata dashboard can surface a live count.
+// Workers/supervisors are tracked separately via the workers/supervisor tables
+// and never call these endpoints.
+
+const BRIDGE_HEARTBEAT_INTERVAL_MS = 15_000;
+
+async function announceExternalBridge(): Promise<void> {
+  try {
+    await fetch(`${SONATA_API}/api/bridge/announce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: BRIDGE_SESSION_ID,
+        sessionLabel: SESSION_LABEL || null,
+        pid: process.pid,
+      }),
+    });
+  } catch {}
+}
+
+async function heartbeatExternalBridge(): Promise<void> {
+  try {
+    await fetch(`${SONATA_API}/api/bridge/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: BRIDGE_SESSION_ID }),
+    });
+  } catch {}
+}
+
+async function unregisterExternalBridge(): Promise<void> {
+  try {
+    await fetch(`${SONATA_API}/api/bridge/unregister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: BRIDGE_SESSION_ID }),
+    });
+  } catch {}
+}
+
 // --- Connect MCP ---
 
 await mcp.connect(new StdioServerTransport());
@@ -439,20 +518,7 @@ if (IS_WORKER || IS_SUPERVISOR) {
       console.error(`[sonata-bridge] Supervisor registration failed: ${err.message}`);
     }
   } else {
-    try {
-      await fetch(`${SONATA_API}/api/worker/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workerId: WORKER_ID,
-          sessionLabel: SESSION_LABEL,
-          capabilities: ["email", "task", "alert"],
-        }),
-      });
-      console.error(`[sonata-bridge] Registered as ${WORKER_ID}`);
-    } catch (err: any) {
-      console.error(`[sonata-bridge] Registration failed: ${err.message}`);
-    }
+    await registerWorker();
   }
 
   // Heartbeat — different endpoint for supervisor

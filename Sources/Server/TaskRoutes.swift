@@ -184,3 +184,20 @@ struct TaskStatsResponse: Encodable {
     let cancelled: Int
     let total: Int
 }
+
+struct AckResponse: Encodable {
+    let acknowledged: Int
+}
+
+struct AttentionTaskItem: Encodable {
+    let id: String
+    let title: String
+    let status: String          // "failed" or "pending" (with blockedBy non-empty)
+    let lastError: String?
+    let blockedBy: String?      // JSON array string, used by UI to compute blocker count
+    let updatedAt: Int64
+}
+
+struct AttentionTaskListResponse: Encodable {
+    let items: [AttentionTaskItem]
+}

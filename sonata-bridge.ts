@@ -13,7 +13,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -441,4 +441,50 @@ if (IS_WORKER || IS_SUPERVISOR) {
   console.error(`[sonata-bridge] ${modeLabel} mode active. Claiming every ${CLAIM_INTERVAL_MS / 1000}s.`);
 } else {
   console.error(`[sonata-bridge] Passive mode. Tools available but not claiming events.`);
+
+  // Announce this bridge as an external (non-worker, non-supervisor) session so
+  // the dashboard's external-bridges counter sees it. Heartbeats keep the entry
+  // alive; unregister on graceful exit drops it immediately.
+  const externalSessionId = process.env.SONA_SESSION_ID || randomUUID();
+  const externalSessionLabel = SESSION_LABEL || process.env.CLAUDE_CODE_SESSION_LABEL || null;
+
+  const announceExternal = async () => {
+    try {
+      await fetch(`${SONATA_API}/api/bridge/announce`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: externalSessionId,
+          sessionLabel: externalSessionLabel,
+          pid: process.pid,
+        }),
+      });
+    } catch {}
+  };
+
+  const heartbeatExternal = async () => {
+    try {
+      await fetch(`${SONATA_API}/api/bridge/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: externalSessionId }),
+      });
+    } catch {}
+  };
+
+  await announceExternal();
+  setInterval(heartbeatExternal, HEARTBEAT_INTERVAL_MS);
+
+  const externalCleanup = async () => {
+    try {
+      await fetch(`${SONATA_API}/api/bridge/unregister`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: externalSessionId }),
+      });
+    } catch {}
+    process.exit(0);
+  };
+  process.on("SIGTERM", externalCleanup);
+  process.on("SIGINT", externalCleanup);
 }

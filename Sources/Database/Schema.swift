@@ -725,5 +725,15 @@ extension DatabaseMigrator {
             // ensure existing installs that predate it get one for fast daily rollups.
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS workerEvents_by_completedAt ON workerEvents(completedAt)")
         }
+
+        // v8: tasks.acknowledgedAt for soft-archive of failed/blocked items the user
+        // has seen and dismissed from the dashboard's attention zone. The status field
+        // stays untouched ('failed' / 'pending' with blockedBy) so the Tasks tab can
+        // still show what happened — `acknowledgedAt IS NOT NULL` just means the user
+        // has triaged it. Stuck-tasks count and the AttentionTasksCard filter on this.
+        registerMigration("v8_task_acknowledged_at") { db in
+            do { try db.execute(sql: "ALTER TABLE tasks ADD COLUMN acknowledgedAt INTEGER") } catch { /* column exists */ }
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS tasks_by_acknowledgedAt ON tasks(acknowledgedAt)")
+        }
     }
 }

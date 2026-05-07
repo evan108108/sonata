@@ -17,6 +17,7 @@ struct DashboardView: View {
     @StateObject private var thoughtsVM = RecentThoughtsViewModel()
     @StateObject private var deadlinesVM = DeadlinesViewModel()
     @StateObject private var afkVM = AFKQuestionsViewModel()
+    @StateObject private var attentionVM = AttentionTasksViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -28,10 +29,10 @@ struct DashboardView: View {
 
     private var mainContent: some View {
         VStack(spacing: 0) {
-            // Header
+            // Subtle refresh strip — the dashboard is now the entry surface for the
+            // whole app, so we no longer brand it with a "System Health" title. The
+            // green-dot health indicator below acts as the de-facto title.
             HStack {
-                Text("System Health")
-                    .font(.title.bold())
                 Spacer()
                 if let lastRefresh {
                     Text("Updated \(lastRefresh.formatted(.relative(presentation: .named)))")
@@ -42,40 +43,80 @@ struct DashboardView: View {
                     Task { await fetchStatus() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
             }
-            .padding()
-
-            Divider()
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
 
             if let status {
                 ScrollView {
                     VStack(spacing: 16) {
-                        // Overall health indicator
+                        // Health line — sits at the top as the de-facto title now
+                        // that "System Health" is gone. One-line status with a
+                        // colored dot is enough to anchor the page.
                         HStack(spacing: 12) {
                             Circle()
                                 .fill(status.healthColor)
-                                .frame(width: 16, height: 16)
+                                .frame(width: 14, height: 14)
                             Text(status.healthLabel)
-                                .font(.headline)
+                                .font(.title3.weight(.semibold))
                             Spacer()
                         }
                         .padding(.horizontal)
-                        .padding(.top, 8)
 
-                        // Attention zone — only renders when something is stuck.
-                        if status.failedTasks + status.blockedTasks > 0 {
-                            AttentionTasksCard(
-                                failedTasks: status.failedTasks,
-                                blockedTasks: status.blockedTasks
-                            ) {
-                                selectedTab = .tasks
-                            }
+                        // ── Summary grid ────────────────────────────────────────
+                        // High-level state at a glance. Tap a card to peek the
+                        // breakdown sheet for that resource.
+                        LazyVGrid(columns: [
+                            GridItem(.flexible()),
+                            GridItem(.flexible()),
+                            GridItem(.flexible()),
+                        ], spacing: 16) {
+                            Button { showingMemoryBreakdown = true } label: {
+                                StatCard(title: "Memories", value: "\(status.memoryCount)", icon: "brain.head.profile", color: .purple, detail: status.memoriesBreakdown)
+                            }.buttonStyle(.plain)
+                            Button { showingEntityBreakdown = true } label: {
+                                StatCard(title: "Entities", value: "\(status.entityCount)", icon: "point.3.connected.trianglepath.dotted", color: .blue, detail: status.entitiesBreakdown)
+                            }.buttonStyle(.plain)
+                            Button { showingTaskBreakdown = true } label: {
+                                StatCard(title: "Tasks", value: "\(status.totalTasks)", icon: "checklist", color: status.pendingTasks > 10 ? .orange : .green, detail: status.tasksBreakdown)
+                            }.buttonStyle(.plain)
+                            Button { showingEmailBreakdown = true } label: {
+                                StatCard(title: "Emails", value: "\(status.totalEmails)", icon: "envelope.badge.fill", color: status.unreadEmails > 0 ? .orange : .green, detail: status.emailsBreakdown)
+                            }.buttonStyle(.plain)
+                            StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo)
+                            PluginStatCard(vm: pluginVM) { selectedTab = .plugins }
+                        }
+                        .padding(.horizontal)
+
+                        // ── Live Workers ───────────────────────────────────────
+                        // Sits directly below the summary grid: "what does the
+                        // pool look like right now" is the natural follow-on to
+                        // the totals above.
+                        LiveWorkersSection(
+                            workers: workerManager.workers,
+                            externalBridgeCount: status.externalBridgeCount
+                        ) { worker in
+                            WorkerManager.shared.selectedWorkerId = worker.id
+                            selectedTab = .workers
+                        }
+                        .padding(.horizontal)
+
+                        // ── Token Usage ────────────────────────────────────────
+                        // What is this costing right now — sparkline + today's spend.
+                        TokenUsageCard(vm: tokenVM)
                             .padding(.horizontal)
+
+                        // ── Attention zone ─────────────────────────────────────
+                        // Things needing the user's eyes; each hides when empty.
+                        if !attentionVM.items.isEmpty {
+                            AttentionTasksCard(vm: attentionVM) { selectedTab = .tasks }
+                                .padding(.horizontal)
                         }
 
-                        // Attention zone — Deadlines card; hides entirely when empty.
                         if !deadlinesVM.items.isEmpty {
                             DeadlinesCard(items: deadlinesVM.items) { item in
                                 selectedTab = item.source == "task" ? .tasks : .memory
@@ -83,7 +124,6 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
 
-                        // Attention zone — AFK Questions; hides entirely when empty.
                         if !afkVM.entries.isEmpty {
                             AFKQuestionsCard(
                                 entries: afkVM.entries,
@@ -97,55 +137,9 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
 
-                        LazyVGrid(columns: [
-                            GridItem(.flexible()),
-                            GridItem(.flexible()),
-                            GridItem(.flexible()),
-                        ], spacing: 16) {
-                            Button {
-                                showingMemoryBreakdown = true
-                            } label: {
-                                StatCard(title: "Memories", value: "\(status.memoryCount)", icon: "brain.head.profile", color: .purple, detail: status.memoriesBreakdown)
-                            }
-                            .buttonStyle(.plain)
-                            Button {
-                                showingEntityBreakdown = true
-                            } label: {
-                                StatCard(title: "Entities", value: "\(status.entityCount)", icon: "point.3.connected.trianglepath.dotted", color: .blue, detail: status.entitiesBreakdown)
-                            }
-                            .buttonStyle(.plain)
-                            // Workers card removed — LiveWorkersSection below is the single source
-                            // of truth for worker count, status, and per-worker telemetry. The
-                            // duplicate StatCard read from a SQL aggregate that drifted out of sync
-                            // with Sonata's local Worker array during cycle (showing e.g. "3 / 2 busy"
-                            // when an old draining row hadn't been cleaned up yet).
-                            Button {
-                                showingTaskBreakdown = true
-                            } label: {
-                                StatCard(title: "Tasks", value: "\(status.totalTasks)", icon: "checklist", color: status.pendingTasks > 10 ? .orange : .green, detail: status.tasksBreakdown)
-                            }
-                            .buttonStyle(.plain)
-                            Button {
-                                showingEmailBreakdown = true
-                            } label: {
-                                StatCard(title: "Emails", value: "\(status.totalEmails)", icon: "envelope.badge.fill", color: status.unreadEmails > 0 ? .orange : .green, detail: status.emailsBreakdown)
-                            }
-                            .buttonStyle(.plain)
-                            StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo)
-                            PluginStatCard(vm: pluginVM) {
-                                selectedTab = .plugins
-                            }
-                        }
-                        .padding(.horizontal)
-
-                        SessionsSection(sessionsVM: sessionsVM)
-                            .padding(.horizontal)
-
-                        LiveWorkersSection(workers: workerManager.workers) { worker in
-                            WorkerManager.shared.selectedWorkerId = worker.id
-                            selectedTab = .workers
-                        }
-                        .padding(.horizontal)
+                        // (SessionsSection lives in a pinned footer below the ScrollView
+                        //  so the Supervisor / Interactive Sessions launchers are always
+                        //  reachable without scrolling.)
 
                         if !status.upcomingEvents.isEmpty {
                             UpcomingEventsSection(events: status.upcomingEvents) {
@@ -153,9 +147,6 @@ struct DashboardView: View {
                             }
                             .padding(.horizontal)
                         }
-
-                        TokenUsageCard(vm: tokenVM)
-                            .padding(.horizontal)
 
                         ActivityFeedSection(vm: activityVM) { item in
                             switch item.type {
@@ -174,8 +165,19 @@ struct DashboardView: View {
                                 .padding(.horizontal)
                         }
                     }
+                    .padding(.top, 4)
                     .padding(.bottom)
                 }
+
+                // Pinned footer — Supervisor / Interactive Sessions launchers are
+                // always one click away regardless of scroll position. The Sessions
+                // section is small (two buttons) and accessing live agent surfaces
+                // shouldn't require remembering where it scrolled to.
+                Divider()
+                SessionsSection(sessionsVM: sessionsVM)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
             } else {
                 VStack(spacing: 12) {
                     ProgressView()
@@ -238,6 +240,13 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !attentionVM.hasLoadedOnce && !Task.isCancelled {
+                await attentionVM.fetch()
+                if attentionVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
@@ -246,6 +255,7 @@ struct DashboardView: View {
             Task { await thoughtsVM.fetch() }
             Task { await deadlinesVM.fetch() }
             Task { await afkVM.fetch() }
+            Task { await attentionVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)
@@ -292,6 +302,7 @@ private struct StatusResponse: Decodable {
     let entitiesByType: [String: Int]?
     let workerCount: Int?
     let workersByStatus: [String: Int]?
+    let externalBridgeCount: Int?
     let pendingTasks: Int?
     let tasksByStatus: [String: Int]?
     let failedTasks: Int?
@@ -317,6 +328,7 @@ private struct SystemStatus {
     let entitiesByType: [String: Int]
     let workerCount: Int
     let workersByStatus: [String: Int]
+    let externalBridgeCount: Int
     let pendingTasks: Int
     let tasksByStatus: [String: Int]
     let failedTasks: Int
@@ -341,6 +353,9 @@ private struct SystemStatus {
         self.entitiesByType = r.entitiesByType ?? [:]
         self.workerCount = r.workerCount ?? 0
         self.workersByStatus = r.workersByStatus ?? [:]
+        // Older servers won't have this field; default to 0 so the chip just
+        // hides until a fresh binary lands.
+        self.externalBridgeCount = r.externalBridgeCount ?? 0
         self.pendingTasks = r.pendingTasks ?? 0
         self.tasksByStatus = r.tasksByStatus ?? [:]
         // Older servers won't have these fields; default to 0 so the Attention
@@ -554,7 +569,10 @@ private struct StatCard: View {
                     .multilineTextAlignment(.center)
             }
         }
-        .frame(maxWidth: .infinity)
+        // maxHeight: .infinity makes the card stretch to its grid row height so
+        // a card with a wrapping value/detail (e.g. a long "Next Event" title)
+        // doesn't leave its row-mates shorter than itself.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
         .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
@@ -564,6 +582,7 @@ private struct StatCard: View {
 
 private struct LiveWorkersSection: View {
     let workers: [Worker]
+    let externalBridgeCount: Int
     let onTapRow: (Worker) -> Void
 
     private var busyCount: Int {
@@ -571,19 +590,30 @@ private struct LiveWorkersSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            // Section header — matches AttentionTasksCard's pattern so stacked
+            // sections read as a consistent set: icon + title + count + meta on
+            // the left, actions on the right.
+            HStack(spacing: 10) {
+                Image(systemName: "cpu")
+                    .foregroundStyle(.cyan)
                 Text("Live Workers")
                     .font(.headline)
-                Text("\(workers.count) total · \(busyCount) busy")
+                Text("\(workers.count)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("· \(busyCount) busy")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if externalBridgeCount > 0 {
+                    ExternalBridgesChip(count: externalBridgeCount)
+                }
                 Spacer()
                 Button {
                     WorkerManager.shared.addWorker()
                 } label: {
-                    Image(systemName: "plus.circle")
-                        .foregroundStyle(.secondary)
+                    Label("Add", systemImage: "plus.circle")
+                        .font(.caption)
                 }
                 .buttonStyle(.borderless)
                 .help("Add worker")
@@ -611,6 +641,28 @@ private struct LiveWorkersSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(Color.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// Compact pill on the LiveWorkersSection header showing how many
+/// sonata-bridge.ts processes are running outside the worker pool — typically
+/// interactive `claude` (or claude-patched) sessions with sonata-bridge as an
+/// MCP server. Hidden when the count is zero.
+private struct ExternalBridgesChip: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "person.fill.viewfinder")
+                .font(.caption2)
+            Text("\(count) external")
+                .font(.caption.weight(.medium))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Color.cyan.opacity(0.18), in: Capsule())
+        .help("\(count) external Claude session\(count == 1 ? "" : "s") — sonata-bridge.ts processes that aren't pool workers")
     }
 }
 
@@ -748,27 +800,24 @@ private struct SessionsSection: View {
     @ObservedObject var sessionsVM: InteractiveSessionsViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Sessions")
-                .font(.headline)
+        // No headline — the launchers themselves are self-explanatory in the
+        // pinned footer; "Sessions" was redundant chrome.
+        HStack(spacing: 12) {
+            SessionLaunchCard(
+                title: "Supervisor",
+                icon: "shield.lefthalf.filled",
+                tint: .indigo,
+                badge: nil,
+                action: { SupervisorWindowController.shared.show() }
+            )
 
-            HStack(spacing: 12) {
-                SessionLaunchCard(
-                    title: "Supervisor",
-                    icon: "shield.lefthalf.filled",
-                    tint: .indigo,
-                    badge: nil,
-                    action: { SupervisorWindowController.shared.show() }
-                )
-
-                SessionLaunchCard(
-                    title: "Interactive Sessions",
-                    icon: "bubble.left.and.bubble.right.fill",
-                    tint: .purple,
-                    badge: badgeText,
-                    action: { InteractiveSessionsWindowController.shared.show() }
-                )
-            }
+            SessionLaunchCard(
+                title: "Interactive Sessions",
+                icon: "bubble.left.and.bubble.right.fill",
+                tint: .purple,
+                badge: badgeText,
+                action: { InteractiveSessionsWindowController.shared.show() }
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
