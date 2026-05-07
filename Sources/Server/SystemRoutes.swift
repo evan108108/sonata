@@ -17,9 +17,12 @@ struct SystemStatusResponse: Encodable {
     let entitiesByType: [String: Int] // breakdown by entity type (concept, tool, project, ...)
     let pendingTasks: Int
     let tasksByStatus: [String: Int]   // breakdown by task status (pending/completed/cancelled/failed/...)
+    let failedTasks: Int               // tasks WHERE status = 'failed'
+    let blockedTasks: Int              // pending tasks WHERE blockedBy is non-empty
     let unreadEmails: Int
     let emailsByStatus: [String: Int]  // breakdown by email status (unread/read/replied/error/...)
     let nextCalendarEvent: NextEventInfo?
+    let upcomingCalendarEvents: [NextEventInfo]  // top 3 by scheduledAt ASC
     let workerCount: Int               // alive: not offline, fresh heartbeat
     let workersByStatus: [String: Int] // breakdown by effective status (idle/busy/starting/.../stale/offline)
     let backgroundJobs: BackgroundJobSummary
@@ -29,6 +32,25 @@ struct NextEventInfo: Encodable {
     let id: String
     let title: String
     let startTime: Int64
+}
+
+struct PluginStatusResponse: Encodable {
+    let total: Int
+    let byStatus: [String: Int]   // installed/running/disabled/error/...
+    let generatedAt: Int64
+}
+
+struct RecentThoughtItem: Encodable {
+    let id: String
+    let title: String      // l0 truncated to 80 chars (falls back to content prefix)
+    let body: String       // full memory content for the sheet
+    let source: String     // cron name like 'innerLife', 'curiosityGarden'
+    let timestamp: Int64
+}
+
+struct RecentThoughtsResponse: Encodable {
+    let items: [RecentThoughtItem]
+    let generatedAt: Int64
 }
 
 struct BackupResponse: Encodable {

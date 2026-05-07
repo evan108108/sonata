@@ -13,6 +13,8 @@ struct DashboardView: View {
     @ObservedObject private var sessionsVM = InteractiveSessionsViewModel.shared
     @StateObject private var activityVM = ActivityFeedViewModel()
     @StateObject private var tokenVM = TokenUsageViewModel()
+    @StateObject private var pluginVM = PluginStatusViewModel()
+    @StateObject private var thoughtsVM = RecentThoughtsViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -60,6 +62,17 @@ struct DashboardView: View {
                         .padding(.horizontal)
                         .padding(.top, 8)
 
+                        // Attention zone — only renders when something is stuck.
+                        if status.failedTasks + status.blockedTasks > 0 {
+                            AttentionTasksCard(
+                                failedTasks: status.failedTasks,
+                                blockedTasks: status.blockedTasks
+                            ) {
+                                selectedTab = .tasks
+                            }
+                            .padding(.horizontal)
+                        }
+
                         LazyVGrid(columns: [
                             GridItem(.flexible()),
                             GridItem(.flexible()),
@@ -91,6 +104,9 @@ struct DashboardView: View {
                             }
                             .buttonStyle(.plain)
                             StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo)
+                            PluginStatCard(vm: pluginVM) {
+                                selectedTab = .plugins
+                            }
                         }
                         .padding(.horizontal)
 
@@ -102,6 +118,13 @@ struct DashboardView: View {
                             selectedTab = .workers
                         }
                         .padding(.horizontal)
+
+                        if !status.upcomingEvents.isEmpty {
+                            UpcomingEventsSection(events: status.upcomingEvents) {
+                                selectedTab = .schedule
+                            }
+                            .padding(.horizontal)
+                        }
 
                         TokenUsageCard(vm: tokenVM)
                             .padding(.horizontal)
@@ -117,6 +140,11 @@ struct DashboardView: View {
                             }
                         }
                         .padding(.horizontal)
+
+                        if !thoughtsVM.items.isEmpty {
+                            BackgroundThoughtsSection(vm: thoughtsVM)
+                                .padding(.horizontal)
+                        }
                     }
                     .padding(.bottom)
                 }
@@ -154,10 +182,26 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !pluginVM.hasLoadedOnce && !Task.isCancelled {
+                await pluginVM.fetch()
+                if pluginVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
+        .task {
+            while !thoughtsVM.hasLoadedOnce && !Task.isCancelled {
+                await thoughtsVM.fetch()
+                if thoughtsVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
             Task { await tokenVM.fetch() }
+            Task { await pluginVM.fetch() }
+            Task { await thoughtsVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)
@@ -206,9 +250,12 @@ private struct StatusResponse: Decodable {
     let workersByStatus: [String: Int]?
     let pendingTasks: Int?
     let tasksByStatus: [String: Int]?
+    let failedTasks: Int?
+    let blockedTasks: Int?
     let unreadEmails: Int?
     let emailsByStatus: [String: Int]?
     let nextCalendarEvent: NextCalendarEvent?
+    let upcomingCalendarEvents: [NextCalendarEvent]?
     let status: String?
 
     struct NextCalendarEvent: Decodable {
@@ -228,9 +275,12 @@ private struct SystemStatus {
     let workersByStatus: [String: Int]
     let pendingTasks: Int
     let tasksByStatus: [String: Int]
+    let failedTasks: Int
+    let blockedTasks: Int
     let unreadEmails: Int
     let emailsByStatus: [String: Int]
     let nextEvent: String
+    let upcomingEvents: [UpcomingEventInfo]
     let serverStatus: String
 
     init(from r: StatusResponse) {
@@ -249,9 +299,17 @@ private struct SystemStatus {
         self.workersByStatus = r.workersByStatus ?? [:]
         self.pendingTasks = r.pendingTasks ?? 0
         self.tasksByStatus = r.tasksByStatus ?? [:]
+        // Older servers won't have these fields; default to 0 so the Attention
+        // card simply doesn't render against a stale binary.
+        self.failedTasks = r.failedTasks ?? (r.tasksByStatus?["failed"] ?? 0)
+        self.blockedTasks = r.blockedTasks ?? 0
         self.unreadEmails = r.unreadEmails ?? 0
         self.emailsByStatus = r.emailsByStatus ?? [:]
         self.nextEvent = r.nextCalendarEvent?.title ?? "None"
+        self.upcomingEvents = (r.upcomingCalendarEvents ?? []).compactMap { e in
+            guard let id = e.id, let title = e.title, let st = e.startTime else { return nil }
+            return UpcomingEventInfo(id: id, title: title, startTime: st)
+        }
         self.serverStatus = r.status ?? "unknown"
     }
 

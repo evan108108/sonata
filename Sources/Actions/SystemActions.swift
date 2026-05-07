@@ -137,6 +137,17 @@ let systemActions: [SonataAction] = [
                         let c: Int = r["cnt"]
                         tasksByStatus[s] = c
                     }
+                    let failedTasks: Int = tasksByStatus["failed"] ?? 0
+
+                    // Already-blocked pending tasks: blockedBy is a non-empty JSON array.
+                    let blockedRow = try Row.fetchOne(db, sql: """
+                        SELECT COUNT(*) AS cnt FROM tasks
+                        WHERE status = 'pending'
+                          AND blockedBy IS NOT NULL
+                          AND blockedBy != '[]'
+                          AND blockedBy != ''
+                    """)!
+                    let blockedTasks: Int = blockedRow["cnt"]
 
                     let emailRow = try Row.fetchOne(db, sql: """
                         SELECT COUNT(*) AS cnt FROM emails WHERE status = 'unread'
@@ -154,19 +165,22 @@ let systemActions: [SonataAction] = [
                         emailsByStatus[s] = c
                     }
 
-                    // Next upcoming calendar event
+                    // Upcoming calendar events: top 3 by scheduledAt ASC. The first row is
+                    // also surfaced as `nextCalendarEvent` for backward compatibility with
+                    // the existing Next Event StatCard.
                     let now = nowMs()
-                    let calRow = try Row.fetchOne(db, sql: """
+                    let upcomingRows = try Row.fetchAll(db, sql: """
                         SELECT id, title, scheduledAt FROM calendarEvents
-                        WHERE scheduledAt > ? AND enabled = 1 ORDER BY scheduledAt ASC LIMIT 1
+                        WHERE scheduledAt > ? AND enabled = 1 ORDER BY scheduledAt ASC LIMIT 3
                     """, arguments: [now])
-                    let nextEvent: NextEventInfo? = calRow.map { r in
+                    let upcomingEvents: [NextEventInfo] = upcomingRows.map { r in
                         NextEventInfo(
                             id: r["id"],
                             title: r["title"],
                             startTime: r["scheduledAt"]
                         )
                     }
+                    let nextEvent: NextEventInfo? = upcomingEvents.first
 
                     // Worker liveness: a row is "alive" only with fresh heartbeat (<90s)
                     // and a non-offline status. A row with status='idle' but a stale
@@ -222,9 +236,12 @@ let systemActions: [SonataAction] = [
                         entitiesByType: entitiesByType,
                         pendingTasks: pendingTasks,
                         tasksByStatus: tasksByStatus,
+                        failedTasks: failedTasks,
+                        blockedTasks: blockedTasks,
                         unreadEmails: unreadEmails,
                         emailsByStatus: emailsByStatus,
                         nextCalendarEvent: nextEvent,
+                        upcomingCalendarEvents: upcomingEvents,
                         workerCount: workerCount,
                         workersByStatus: workersByStatus,
                         backgroundJobs: bgSummary
@@ -611,6 +628,87 @@ let systemActions: [SonataAction] = [
                         anomaly: anomaly,
                         generatedAt: now
                     )
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // GET /api/plugins_status — plugin counts grouped by status
+    SonataAction(
+        name: "system_plugins",
+        description: "Plugin state summary — total count and a breakdown by status (installed/running/disabled/error/...) from the plugins table.",
+        group: "/api",
+        path: "/plugins_status",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                return try await ctx.dbPool.read { db -> PluginStatusResponse in
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT status, COUNT(*) AS cnt FROM plugins GROUP BY status
+                    """)
+                    var byStatus: [String: Int] = [:]
+                    for r in rows {
+                        let s: String = r["status"]
+                        let c: Int = r["cnt"]
+                        byStatus[s] = c
+                    }
+                    let total = byStatus.values.reduce(0, +)
+                    return PluginStatusResponse(
+                        total: total,
+                        byStatus: byStatus,
+                        generatedAt: nowMs()
+                    )
+                }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // GET /api/recent_thoughts — last 5 background-thinking memories within 24h
+    SonataAction(
+        name: "system_recent_thoughts",
+        description: "Top 5 most-recent background-thinking memories from the last 24h. Each item includes the cron source name, an l0-derived title, and the full body for sheet display.",
+        group: "/api",
+        path: "/recent_thoughts",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            do {
+                return try await ctx.dbPool.read { db -> RecentThoughtsResponse in
+                    let now = nowMs()
+                    let cutoff = now - 24 * 60 * 60 * 1000
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT id, l0, content, source, createdAt
+                        FROM memories
+                        WHERE source LIKE 'background-thinking%'
+                          AND createdAt >= ?
+                        ORDER BY createdAt DESC
+                        LIMIT 5
+                    """, arguments: [cutoff])
+
+                    var items: [RecentThoughtItem] = []
+                    for r in rows {
+                        let id: String = r["id"]
+                        let l0: String? = r["l0"]
+                        let content: String = r["content"]
+                        let source: String? = r["source"]
+                        let createdAt: Int64 = r["createdAt"]
+
+                        let raw0 = (l0?.isEmpty == false ? l0! : content)
+                        let title = String(raw0.prefix(80))
+                        items.append(RecentThoughtItem(
+                            id: id,
+                            title: title,
+                            body: content,
+                            source: source ?? "background-thinking",
+                            timestamp: createdAt
+                        ))
+                    }
+                    return RecentThoughtsResponse(items: items, generatedAt: now)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
