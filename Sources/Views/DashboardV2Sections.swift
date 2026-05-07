@@ -341,6 +341,172 @@ struct UpcomingEventsSection: View {
     }
 }
 
+// MARK: - AFK Questions (Attention zone)
+
+struct AFKActiveEntryModel: Identifiable, Decodable, Equatable {
+    let token: String
+    let workerId: String
+    let registeredAt: Int64
+    let workerLabel: String?
+    let lastQuestion: String?
+
+    var id: String { token }
+}
+
+private struct AFKActiveResponse: Decodable {
+    let entries: [AFKActiveEntryModel]
+    let generatedAt: Int64
+}
+
+@MainActor
+final class AFKQuestionsViewModel: ObservableObject {
+    @Published var entries: [AFKActiveEntryModel] = []
+    @Published var hasLoadedOnce = false
+
+    func fetch() async {
+        do {
+            let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/afk/active")!
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(AFKActiveResponse.self, from: data)
+            self.entries = decoded.entries
+            self.hasLoadedOnce = true
+        } catch {
+            // Quiet on transient failures.
+        }
+    }
+}
+
+struct AFKQuestionsCard: View {
+    let entries: [AFKActiveEntryModel]
+    /// Worker `sessionId → Worker` lookup so taps can navigate to the live row.
+    let workersBySessionId: [String: Worker]
+    let onTapWorker: (Worker) -> Void
+
+    @State private var unmatchedToken: String?
+
+    private static let userEmail = "evan108108@gmail.com"
+
+    private var countText: String {
+        "\(entries.count) pending"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .foregroundStyle(.orange)
+                Text("AFK Questions")
+                    .font(.headline)
+                Text(countText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            VStack(spacing: 2) {
+                ForEach(entries) { entry in
+                    Button {
+                        if let worker = workersBySessionId[entry.workerId] {
+                            onTapWorker(worker)
+                        } else {
+                            unmatchedToken = entry.token
+                        }
+                    } label: {
+                        afkRow(entry)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Text("Reply via email at \(Self.userEmail) — subject [AFK:<token>]")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.orange.opacity(0.22), lineWidth: 1)
+        )
+        .alert("AFK token", isPresented: Binding(
+            get: { unmatchedToken != nil },
+            set: { if !$0 { unmatchedToken = nil } }
+        )) {
+            Button("OK", role: .cancel) { unmatchedToken = nil }
+        } message: {
+            Text("No live worker matches this AFK session. Token: \(unmatchedToken ?? "")")
+        }
+    }
+
+    private func afkRow(_ entry: AFKActiveEntryModel) -> some View {
+        let label = entry.workerLabel ?? Self.shortWorkerId(entry.workerId)
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .frame(width: 18)
+
+                Text(label)
+                    .font(.system(.callout, design: .monospaced))
+
+                Text(entry.token)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer()
+
+                Text("registered \(Self.relativeAgo(entry.registeredAt))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let q = entry.lastQuestion, !q.isEmpty {
+                Text(Self.truncate(q, to: 120))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .padding(.leading, 26)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    /// "5m ago", "2h ago", "1d ago" — short and unambiguous.
+    static func relativeAgo(_ ms: Int64) -> String {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let deltaSec = max(0, nowMs - ms) / 1000
+        if deltaSec < 60 { return "\(deltaSec)s ago" }
+        let mins = deltaSec / 60
+        if mins < 60 { return "\(mins)m ago" }
+        let hours = mins / 60
+        if hours < 24 { return "\(hours)h ago" }
+        let days = hours / 24
+        return "\(days)d ago"
+    }
+
+    private static func shortWorkerId(_ id: String) -> String {
+        guard id.count > 12 else { return id }
+        let prefix = id.prefix(8)
+        let suffix = id.suffix(4)
+        return "\(prefix)…\(suffix)"
+    }
+
+    private static func truncate(_ s: String, to n: Int) -> String {
+        guard s.count > n else { return s }
+        return String(s.prefix(n)) + "…"
+    }
+}
+
 // MARK: - Background thoughts
 
 struct RecentThoughtItemModel: Identifiable, Decodable, Equatable {

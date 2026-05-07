@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 // AFK channel-push routing: replaces inbox polling.
 //
@@ -19,26 +20,42 @@ struct AFKReply: Codable, Sendable {
     let receivedAt: Int64
 }
 
+struct AFKRegistration: Sendable {
+    let token: String
+    let sessionId: String
+    let registeredAt: Int64
+}
+
 final class AFKRegistry: @unchecked Sendable {
     static let shared = AFKRegistry()
 
     private let lock = NSLock()
-    private var tokenToSession: [String: String] = [:]
+    private var registrations: [String: AFKRegistration] = [:]   // token → registration
     private var pendingReplies: [String: [AFKReply]] = [:]
 
     func register(token: String, sessionId: String) {
         lock.lock(); defer { lock.unlock() }
-        tokenToSession[token] = sessionId
+        registrations[token] = AFKRegistration(
+            token: token,
+            sessionId: sessionId,
+            registeredAt: Int64(Date().timeIntervalSince1970 * 1000)
+        )
     }
 
     func unregister(token: String) {
         lock.lock(); defer { lock.unlock() }
-        tokenToSession.removeValue(forKey: token)
+        registrations.removeValue(forKey: token)
     }
 
     func lookupSession(token: String) -> String? {
         lock.lock(); defer { lock.unlock() }
-        return tokenToSession[token]
+        return registrations[token]?.sessionId
+    }
+
+    /// Snapshot of all currently-registered AFK sessions, ordered by registeredAt ASC.
+    func listRegistrations() -> [AFKRegistration] {
+        lock.lock(); defer { lock.unlock() }
+        return registrations.values.sorted { $0.registeredAt < $1.registeredAt }
     }
 
     /// Enqueue a reply for whatever session owns `token`. Returns true if a
@@ -46,7 +63,7 @@ final class AFKRegistry: @unchecked Sendable {
     @discardableResult
     func enqueueReply(_ reply: AFKReply) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let sessionId = tokenToSession[reply.token] else { return false }
+        guard let sessionId = registrations[reply.token]?.sessionId else { return false }
         pendingReplies[sessionId, default: []].append(reply)
         return true
     }
@@ -67,6 +84,18 @@ private struct AFKLookupResponse: Encodable {
 
 private struct AFKPollResponse: Encodable {
     let replies: [AFKReply]
+}
+
+private struct AFKActiveEntry: Encodable {
+    let token: String
+    let workerId: String       // bridge sessionId — the routing target
+    let registeredAt: Int64
+    let workerLabel: String?   // sessionLabel from workers table when found
+}
+
+private struct AFKActiveResponse: Encodable {
+    let entries: [AFKActiveEntry]
+    let generatedAt: Int64
 }
 
 let afkActions: [SonataAction] = [
@@ -120,6 +149,49 @@ let afkActions: [SonataAction] = [
                 return AFKLookupResponse(sessionId: sessionId, found: true)
             }
             throw ActionError.notFound("AFK token \(token)")
+        }
+    ),
+
+    SonataAction(
+        name: "afk_active",
+        description: "List currently-registered AFK sessions. Each entry pairs a token with the bridge session it routes to, plus the worker's friendly label (when resolvable from the workers table).",
+        group: "/api/afk",
+        path: "/active",
+        method: .get,
+        params: [],
+        handler: { ctx in
+            let registrations = AFKRegistry.shared.listRegistrations()
+            // Resolve sessionLabel by sessionId in one batched query — empty result on error.
+            var labelBySessionId: [String: String] = [:]
+            if !registrations.isEmpty {
+                let sessionIds = Array(Set(registrations.map { $0.sessionId }))
+                do {
+                    labelBySessionId = try await ctx.dbPool.read { db -> [String: String] in
+                        var result: [String: String] = [:]
+                        let placeholders = sessionIds.map { _ in "?" }.joined(separator: ",")
+                        let sql = "SELECT sessionId, sessionLabel FROM workers WHERE sessionId IN (\(placeholders))"
+                        let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(sessionIds))
+                        for r in rows {
+                            if let sid: String = r["sessionId"] {
+                                let label: String = r["sessionLabel"]
+                                result[sid] = label
+                            }
+                        }
+                        return result
+                    }
+                } catch {
+                    // Quiet — fall back to nil labels rather than failing the whole list.
+                }
+            }
+            let entries = registrations.map { reg in
+                AFKActiveEntry(
+                    token: reg.token,
+                    workerId: reg.sessionId,
+                    registeredAt: reg.registeredAt,
+                    workerLabel: labelBySessionId[reg.sessionId]
+                )
+            }
+            return AFKActiveResponse(entries: entries, generatedAt: Int64(Date().timeIntervalSince1970 * 1000))
         }
     ),
 

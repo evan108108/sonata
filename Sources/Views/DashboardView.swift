@@ -16,6 +16,7 @@ struct DashboardView: View {
     @StateObject private var pluginVM = PluginStatusViewModel()
     @StateObject private var thoughtsVM = RecentThoughtsViewModel()
     @StateObject private var deadlinesVM = DeadlinesViewModel()
+    @StateObject private var afkVM = AFKQuestionsViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -82,6 +83,20 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
 
+                        // Attention zone — AFK Questions; hides entirely when empty.
+                        if !afkVM.entries.isEmpty {
+                            AFKQuestionsCard(
+                                entries: afkVM.entries,
+                                workersBySessionId: Dictionary(
+                                    uniqueKeysWithValues: workerManager.workers.map { ($0.sessionId, $0) }
+                                )
+                            ) { worker in
+                                WorkerManager.shared.selectedWorkerId = worker.id
+                                selectedTab = .workers
+                            }
+                            .padding(.horizontal)
+                        }
+
                         LazyVGrid(columns: [
                             GridItem(.flexible()),
                             GridItem(.flexible()),
@@ -99,7 +114,11 @@ struct DashboardView: View {
                                 StatCard(title: "Entities", value: "\(status.entityCount)", icon: "point.3.connected.trianglepath.dotted", color: .blue, detail: status.entitiesBreakdown)
                             }
                             .buttonStyle(.plain)
-                            StatCard(title: "Workers", value: "\(status.totalWorkers)", icon: "cpu", color: status.workerCount == 0 ? .red : .cyan, detail: status.workersBreakdown)
+                            // Workers card removed — LiveWorkersSection below is the single source
+                            // of truth for worker count, status, and per-worker telemetry. The
+                            // duplicate StatCard read from a SQL aggregate that drifted out of sync
+                            // with Sonata's local Worker array during cycle (showing e.g. "3 / 2 busy"
+                            // when an old draining row hadn't been cleaned up yet).
                             Button {
                                 showingTaskBreakdown = true
                             } label: {
@@ -212,6 +231,13 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !afkVM.hasLoadedOnce && !Task.isCancelled {
+                await afkVM.fetch()
+                if afkVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
@@ -219,6 +245,7 @@ struct DashboardView: View {
             Task { await pluginVM.fetch() }
             Task { await thoughtsVM.fetch() }
             Task { await deadlinesVM.fetch() }
+            Task { await afkVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)
