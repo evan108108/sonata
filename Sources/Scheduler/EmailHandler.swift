@@ -165,8 +165,59 @@ actor EmailHandler {
             for email in newEmails {
                 try? await storeEmail(email, status: "unread")
             }
-            await processNewEmails(newEmails, inbox: inbox)
+            // Pull out any [AFK:<token>] replies and route them via the channel
+            // before falling through to the normal dispatch flow.
+            let remaining = await routeAFKReplies(newEmails)
+            if remaining.isEmpty { continue }
+            await processNewEmails(remaining, inbox: inbox)
         }
+    }
+
+    // MARK: - AFK Routing
+
+    /// Split out emails whose subject matches `[AFK:<token>]` and route them to
+    /// the AFKRegistry instead of dispatching a worker. Returns the leftover
+    /// emails (no AFK match, or no session registered for the token).
+    private func routeAFKReplies(_ emails: [EmailRecord]) async -> [EmailRecord] {
+        var leftover: [EmailRecord] = []
+        for email in emails {
+            guard let token = Self.extractAFKToken(from: email.subject) else {
+                leftover.append(email)
+                continue
+            }
+            let reply = AFKReply(
+                token: token,
+                replyText: email.body,
+                fromAddr: email.from,
+                subject: email.subject,
+                messageId: email.messageId,
+                receivedAt: nowMs()
+            )
+            let routed = AFKRegistry.shared.enqueueReply(reply)
+            if routed {
+                logger.info("EmailHandler: routed AFK reply for token \(token) (msg \(email.messageId))")
+                try? await markEmailProcessed(messageId: email.messageId, success: true)
+            } else {
+                // No session registered for this token — fall through to normal
+                // handling so the user still sees the email surface somewhere.
+                logger.info("EmailHandler: AFK token \(token) has no registered session; falling through")
+                leftover.append(email)
+            }
+        }
+        return leftover
+    }
+
+    /// Match `[AFK:<token>]` anywhere in the subject. Token is alnum + dashes.
+    static func extractAFKToken(from subject: String) -> String? {
+        guard let range = subject.range(of: #"\[AFK:([A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
+            return nil
+        }
+        let match = subject[range]
+        guard let colonIdx = match.firstIndex(of: ":") else { return nil }
+        let after = match.index(after: colonIdx)
+        let before = match.index(before: match.endIndex)
+        guard after < before else { return nil }
+        return String(match[after..<before])
     }
 
     // MARK: - Pending Unread Recovery

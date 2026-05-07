@@ -13,7 +13,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +26,16 @@ const SESSION_LABEL = process.env.SESSION_LABEL;
 const SONA_SESSION_ID = process.env.SONA_SESSION_ID;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
+const AFK_POLL_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
+
+// Stable per-bridge-process identity for AFK routing. Worker bridges already
+// have a WORKER_ID; non-worker (interactive) sessions get a fresh UUID at boot
+// so the server has something to address replies to. When the bridge dies, the
+// AFK registration dies with it — that's fine, AFK is transient.
+const BRIDGE_SESSION_ID = WORKER_ID || SONA_SESSION_ID || randomUUID();
+let afkPollTimer: ReturnType<typeof setInterval> | null = null;
+const registeredAFKTokens = new Set<string>();
 
 // --- Live monitoring: in-flight event tracking ---
 
@@ -224,7 +233,18 @@ Steps:
 
 ## Event Type: ALERT
 
-Read and acknowledge the alert. Call complete_event.`,
+Read and acknowledge the alert. Call complete_event.
+
+---
+
+## Event Type: AFK_REPLY
+
+A reply to an AFK question you asked has arrived. The meta carries the token, sender, subject, and message_id. The content has the reply body.
+
+Steps:
+1. Read the reply.
+2. Continue whatever work the AFK question was blocking — apply the user's decision.
+3. Do NOT call complete_event for afk_reply notifications. They are not workerEvents and have no event_id; they are pushed directly by the AFK registry.`,
   }
 );
 
@@ -256,6 +276,28 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["event_id", "error"],
       },
     },
+    {
+      name: "afk_register",
+      description: "Register this session as the AFK target for a token. After calling this, end your turn — replies tagged [AFK:<token>] will arrive as channel notifications instead of needing inbox polling.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          token: { type: "string", description: "The AFK token (also embedded in the email subject as [AFK:<token>])" },
+        },
+        required: ["token"],
+      },
+    },
+    {
+      name: "afk_unregister",
+      description: "Unregister an AFK token. Call this on AFK exit so replies stop being routed.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          token: { type: "string", description: "The AFK token to unregister" },
+        },
+        required: ["token"],
+      },
+    },
   ],
 }));
 
@@ -283,6 +325,42 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   }
 
+  if (name === "afk_register") {
+    const { token } = args as { token: string };
+    try {
+      const res = await fetch(`${SONATA_API}/api/afk/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, sessionId: BRIDGE_SESSION_ID }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      registeredAFKTokens.add(token);
+      ensureAFKPollLoop();
+      return { content: [{ type: "text" as const, text: `AFK token ${token} registered. Replies will arrive as channel notifications.` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+
+  if (name === "afk_unregister") {
+    const { token } = args as { token: string };
+    try {
+      await fetch(`${SONATA_API}/api/afk/unregister`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      registeredAFKTokens.delete(token);
+      if (registeredAFKTokens.size === 0 && afkPollTimer) {
+        clearInterval(afkPollTimer);
+        afkPollTimer = null;
+      }
+      return { content: [{ type: "text" as const, text: `AFK token ${token} unregistered.` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+
   if (name === "fail_event") {
     lastProgressMs = Date.now();
     await pushLiveHeartbeat();
@@ -304,6 +382,41 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   throw new Error(`Unknown tool: ${name}`);
 });
+
+// --- AFK polling ---
+
+/** Start the AFK reply poller if it isn't already running. We share this loop
+ * with the worker poll where possible, but in non-worker (interactive) sessions
+ * the worker poll never starts, so AFK has its own. */
+function ensureAFKPollLoop(): void {
+  if (afkPollTimer) return;
+  afkPollTimer = setInterval(async () => {
+    if (registeredAFKTokens.size === 0) return;
+    try {
+      const url = `${SONATA_API}/api/afk/poll?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data: any = await res.json();
+      const replies: any[] = data?.replies || [];
+      for (const reply of replies) {
+        const content = `[AFK reply for token ${reply.token}]\nFrom: ${reply.fromAddr}\nSubject: ${reply.subject}\n\n${reply.replyText}`;
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content,
+            meta: {
+              event_type: "afk_reply",
+              afk_token: String(reply.token || ""),
+              message_id: String(reply.messageId || ""),
+              from_addr: String(reply.fromAddr || ""),
+              subject: String(reply.subject || ""),
+            },
+          },
+        });
+      }
+    } catch {}
+  }, AFK_POLL_INTERVAL_MS);
+}
 
 // --- Connect MCP ---
 
