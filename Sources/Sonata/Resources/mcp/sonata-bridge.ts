@@ -16,7 +16,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 // --- Config ---
 
@@ -365,7 +365,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object" as const,
         properties: {
           label: { type: "string", description: "Optional human-readable session label (default: SESSION_LABEL env)" },
-          role: { type: "string", description: "Optional role hint: orchestrator | worker | interactive" },
+          role: { type: "string", description: "Optional role hint: worker | interactive" },
         },
       },
     },
@@ -722,6 +722,57 @@ function ensureDMPollLoop(): void {
   }, DM_POLL_INTERVAL_MS);
 }
 
+/** Auto-register this bridge as a DM target so plain `claude` sessions are
+ * reachable without a CLAUDE.md directive. Idempotent; safe to call after the
+ * `sonar_dm_register` MCP tool has already run. 422 is the documented
+ * "heartbeat-not-yet-propagated" signal — retried once after 500ms. Persistent
+ * failure is logged but never crashes the bridge. */
+async function autoRegisterDM(): Promise<void> {
+  if (dmRegistered) return;
+  const labelDefault = `${basename(process.cwd())}·${process.pid}`;
+  const sessionLabel = SESSION_LABEL || labelDefault;
+  const role = (process.env.SONA_WORKER === "1" || !!WORKER_ID) ? "worker" : "interactive";
+
+  const attempt = async (): Promise<{ ok: boolean; status: number }> => {
+    try {
+      const res = await fetch(`${SONATA_API}/api/dm/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: BRIDGE_SESSION_ID, sessionLabel, role }),
+      });
+      return { ok: res.ok, status: res.status };
+    } catch {
+      return { ok: false, status: 0 };
+    }
+  };
+
+  let result = await attempt();
+  if (!result.ok && result.status === 422) {
+    await new Promise((r) => setTimeout(r, 500));
+    result = await attempt();
+  }
+  if (result.ok) {
+    dmRegistered = true;
+    ensureDMPollLoop();
+    console.error(`[sonata-bridge] DM auto-registered: sessionId=${BRIDGE_SESSION_ID} role=${role}`);
+  } else {
+    console.error(`[sonata-bridge] DM auto-register failed (status ${result.status}); sonar_dm_register MCP tool can be used as fallback`);
+  }
+}
+
+/** Unregister DM on shutdown if we ever registered. Best-effort; safe if the
+ * bridge crashes hard since pruneStale will eventually evict the row. */
+async function unregisterDMOnShutdown(): Promise<void> {
+  if (!dmRegistered) return;
+  try {
+    await fetch(`${SONATA_API}/api/dm/unregister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: BRIDGE_SESSION_ID }),
+    });
+  } catch {}
+}
+
 // --- External bridge tracking ---
 //
 // Bridges that aren't pool workers/supervisors (typically interactive `claude`
@@ -766,167 +817,187 @@ async function unregisterExternalBridge(): Promise<void> {
   } catch {}
 }
 
-// --- Connect MCP ---
+// Boot side-effects only run when this file is the entrypoint (bun /path/to/sonata-bridge.ts).
+// Skips the boot when loaded as a module (syntax checks, test imports, IDE language server, etc.) so
+// importing the file does not phantom-register against live Sonata.
+if (import.meta.main) {
+  // --- Connect MCP ---
 
-await mcp.connect(new StdioServerTransport());
-console.error(`[sonata-bridge] Connected. Worker: ${WORKER_ID}`);
+  await mcp.connect(new StdioServerTransport());
+  console.error(`[sonata-bridge] Connected. Worker: ${WORKER_ID}`);
 
-// --- Worker mode ---
+  // --- Worker mode ---
 
-if (IS_WORKER || IS_SUPERVISOR) {
-  // Register
-  if (IS_SUPERVISOR) {
-    try {
-      await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: WORKER_ID }),
-      });
-      console.error(`[sonata-bridge] Supervisor registered as ${WORKER_ID}`);
-    } catch (err: any) {
-      console.error(`[sonata-bridge] Supervisor registration failed: ${err.message}`);
-    }
-  } else {
-    await registerWorker();
-  }
-
-  // Heartbeat — different endpoint for supervisor
-  setInterval(async () => {
-    try {
-      if (IS_SUPERVISOR) {
+  if (IS_WORKER || IS_SUPERVISOR) {
+    // Register
+    if (IS_SUPERVISOR) {
+      try {
         await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId: WORKER_ID }),
         });
-      } else {
-        await pushLiveHeartbeat();
+        console.error(`[sonata-bridge] Supervisor registered as ${WORKER_ID}`);
+      } catch (err: any) {
+        console.error(`[sonata-bridge] Supervisor registration failed: ${err.message}`);
       }
-    } catch {}
-  }, HEARTBEAT_INTERVAL_MS);
+    } else {
+      await registerWorker();
+      // First worker heartbeat so /api/dm/register can find our worker row.
+      await pushLiveHeartbeat();
+    }
 
-  // Poll for events — different source for supervisor
-  let knownEventIds = new Set<string>();
+    // Auto-register as a DM target now that this bridge is known to Sonata.
+    await autoRegisterDM();
 
-  setInterval(async () => {
-    try {
-      if (IS_SUPERVISOR) {
-        // Supervisor: poll supervisorEvents table
-        const res = await fetch(`${SONATA_API}/api/supervisor/events/claim`);
-        if (!res.ok) return;
-        const data: any = await res.json();
-        if (!data || !data._id) return;
-
-        const eventId = data._id;
-        const eventType = data.type || "check";
-        const payload = data.payload || "{}";
-
-        if (knownEventIds.has(eventId)) return;
-        knownEventIds.add(eventId);
-        lastProgressMs = Date.now();
-
-        let content = "";
-        const meta: Record<string, string> = { event_id: eventId, event_type: eventType };
-
-        if (eventType === "check") {
-          content = "Periodic health check. Run your checklist and report findings.";
-        } else if (eventType === "query") {
-          try {
-            const parsed = JSON.parse(payload);
-            content = parsed.message || payload;
-            if (parsed.messageId) meta.message_id = String(parsed.messageId);
-          } catch {
-            content = payload;
-          }
+    // Heartbeat — different endpoint for supervisor
+    setInterval(async () => {
+      try {
+        if (IS_SUPERVISOR) {
+          await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: WORKER_ID }),
+          });
         } else {
-          content = payload;
+          await pushLiveHeartbeat();
         }
+      } catch {}
+    }, HEARTBEAT_INTERVAL_MS);
 
-        console.error(`[sonata-bridge] Supervisor event ${eventId} (${eventType})`);
-        await mcp.notification({
-          method: "notifications/claude/channel",
-          params: { content, meta },
-        });
-      } else {
-        // Worker: claim a pending event, then push assigned into session
-        await fetch(`${SONATA_API}/api/worker/events/claim`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workerId: WORKER_ID }),
-        });
+    // Poll for events — different source for supervisor
+    let knownEventIds = new Set<string>();
 
-        // Fetch assigned events
-        const res = await fetch(`${SONATA_API}/api/worker/events/recent?limit=10`);
-        const events: any[] = await res.json();
+    setInterval(async () => {
+      try {
+        if (IS_SUPERVISOR) {
+          // Supervisor: poll supervisorEvents table
+          const res = await fetch(`${SONATA_API}/api/supervisor/events/claim`);
+          if (!res.ok) return;
+          const data: any = await res.json();
+          if (!data || !data._id) return;
 
-        for (const evt of events) {
-          if (evt.assignedTo !== WORKER_ID) continue;
-          if (evt.status !== "assigned") continue;
-          if (knownEventIds.has(evt._id)) continue;
-          knownEventIds.add(evt._id);
+          const eventId = data._id;
+          const eventType = data.type || "check";
+          const payload = data.payload || "{}";
+
+          if (knownEventIds.has(eventId)) return;
+          knownEventIds.add(eventId);
           lastProgressMs = Date.now();
 
-          console.error(`[sonata-bridge] Pushing event: ${evt.type} (${evt._id})`);
+          let content = "";
+          const meta: Record<string, string> = { event_id: eventId, event_type: eventType };
 
-          // Track in-flight event for live monitoring heartbeats. Snapshot
-          // the transcript usage NOW (at claim time) so even short events
-          // that finish before the first heartbeat report a non-zero delta.
-          inFlight = {
-            eventId: evt._id,
-            eventType: evt.type,
-            promptHash: computePromptHash(evt.type),
-          };
-          {
-            const transcriptPath = resolveTranscriptPath();
-            usageBaseline = transcriptPath
-              ? (readTranscriptUsage(transcriptPath) ?? { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 })
-              : { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 };
+          if (eventType === "check") {
+            content = "Periodic health check. Run your checklist and report findings.";
+          } else if (eventType === "query") {
+            try {
+              const parsed = JSON.parse(payload);
+              content = parsed.message || payload;
+              if (parsed.messageId) meta.message_id = String(parsed.messageId);
+            } catch {
+              content = payload;
+            }
+          } else {
+            content = payload;
           }
 
-          try {
-            const payload = JSON.parse(evt.payload);
-            const content = typeof payload === "string"
-              ? payload
-              : payload.summary || payload.prompt || payload.body || JSON.stringify(payload);
+          console.error(`[sonata-bridge] Supervisor event ${eventId} (${eventType})`);
+          await mcp.notification({
+            method: "notifications/claude/channel",
+            params: { content, meta },
+          });
+        } else {
+          // Worker: claim a pending event, then push assigned into session
+          await fetch(`${SONATA_API}/api/worker/events/claim`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workerId: WORKER_ID }),
+          });
 
-            await mcp.notification({
-              method: "notifications/claude/channel",
-              params: {
-                content: `[${evt.type.toUpperCase()}] ${content}`,
-                meta: {
-                  event_id: evt._id,
-                  event_type: evt.type,
-                  priority: String(evt.priority),
-                  timestamp: new Date(evt.createdAt).toISOString(),
+          // Fetch assigned events
+          const res = await fetch(`${SONATA_API}/api/worker/events/recent?limit=10`);
+          const events: any[] = await res.json();
+
+          for (const evt of events) {
+            if (evt.assignedTo !== WORKER_ID) continue;
+            if (evt.status !== "assigned") continue;
+            if (knownEventIds.has(evt._id)) continue;
+            knownEventIds.add(evt._id);
+            lastProgressMs = Date.now();
+
+            console.error(`[sonata-bridge] Pushing event: ${evt.type} (${evt._id})`);
+
+            // Track in-flight event for live monitoring heartbeats. Snapshot
+            // the transcript usage NOW (at claim time) so even short events
+            // that finish before the first heartbeat report a non-zero delta.
+            inFlight = {
+              eventId: evt._id,
+              eventType: evt.type,
+              promptHash: computePromptHash(evt.type),
+            };
+            {
+              const transcriptPath = resolveTranscriptPath();
+              usageBaseline = transcriptPath
+                ? (readTranscriptUsage(transcriptPath) ?? { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 })
+                : { totalTokens: 0, inputTokens: 0, cacheReadTokens: 0 };
+            }
+
+            try {
+              const payload = JSON.parse(evt.payload);
+              const content = typeof payload === "string"
+                ? payload
+                : payload.summary || payload.prompt || payload.body || JSON.stringify(payload);
+
+              await mcp.notification({
+                method: "notifications/claude/channel",
+                params: {
+                  content: `[${evt.type.toUpperCase()}] ${content}`,
+                  meta: {
+                    event_id: evt._id,
+                    event_type: evt.type,
+                    priority: String(evt.priority),
+                    timestamp: new Date(evt.createdAt).toISOString(),
+                  },
                 },
-              },
-            });
-          } catch (err: any) {
-            console.error(`[sonata-bridge] Push error: ${err.message}`);
+              });
+            } catch (err: any) {
+              console.error(`[sonata-bridge] Push error: ${err.message}`);
+            }
           }
         }
-      }
-    } catch {}
-  }, CLAIM_INTERVAL_MS);
-
-  // Cleanup on exit
-  const cleanup = async () => {
-    if (!IS_SUPERVISOR) {
-      try {
-        await fetch(`${SONATA_API}/api/worker/unregister`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workerId: WORKER_ID }),
-        });
       } catch {}
-    }
-    process.exit(0);
-  };
-  process.on("SIGTERM", cleanup);
-  process.on("SIGINT", cleanup);
+    }, CLAIM_INTERVAL_MS);
 
-  const modeLabel = IS_SUPERVISOR ? "Supervisor" : "Worker";
-  console.error(`[sonata-bridge] ${modeLabel} mode active. Claiming every ${CLAIM_INTERVAL_MS / 1000}s.`);
-} else {
-  console.error(`[sonata-bridge] Passive mode. Tools available but not claiming events.`);
+    // Cleanup on exit
+    const cleanup = async () => {
+      await unregisterDMOnShutdown();
+      if (!IS_SUPERVISOR) {
+        try {
+          await fetch(`${SONATA_API}/api/worker/unregister`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workerId: WORKER_ID }),
+          });
+        } catch {}
+      }
+      process.exit(0);
+    };
+    process.on("SIGTERM", cleanup);
+    process.on("SIGINT", cleanup);
+
+    const modeLabel = IS_SUPERVISOR ? "Supervisor" : "Worker";
+    console.error(`[sonata-bridge] ${modeLabel} mode active. Claiming every ${CLAIM_INTERVAL_MS / 1000}s.`);
+  } else {
+    console.error(`[sonata-bridge] Passive mode. Tools available but not claiming events.`);
+    // Interactive bridges still need to be reachable as DM targets so any plain
+    // `claude` session can receive session-addressed messages.
+    await autoRegisterDM();
+    const passiveCleanup = async () => {
+      await unregisterDMOnShutdown();
+      process.exit(0);
+    };
+    process.on("SIGTERM", passiveCleanup);
+    process.on("SIGINT", passiveCleanup);
+  }
 }
