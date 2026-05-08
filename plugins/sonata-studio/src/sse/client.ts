@@ -17,7 +17,8 @@
 // before their epoch key, drained when the matching key-grant lands.
 
 import { hexToBytes, bytesToHex } from "@noble/hashes/utils.js";
-import type { GatewayClient, NostrEventLike } from "../a4-client";
+import { schnorr } from "@noble/curves/secp256k1.js";
+import { GatewayError, type GatewayClient, type NostrEventLike } from "../a4-client";
 import { unwrap } from "../crypto/nip17";
 import * as nip44 from "../crypto/nip44";
 import { log } from "../logger";
@@ -105,6 +106,23 @@ interface RoomState {
  */
 const PENDING_GRANT_REPLAY_WINDOW_SEC = 60;
 
+/**
+ * Plan §12 Pass D race: the SSE handshake can return 403
+ * `caller is not a current member of the audience` if a peer races us —
+ * we open the stream after `joinRoom`'s claim succeeds but before the
+ * founder admits us. The reconnect loop then needs to reach back across
+ * the gap so the gateway's replay tail covers the key-grant + declaration
+ * update that landed while we were in backoff. Window is in unix-ms to
+ * match the gateway's `since_ts` contract (audience-stream.ts:163-170).
+ *
+ * Distinct from PENDING_GRANT_REPLAY_WINDOW_SEC: that window targets the
+ * first-ever connect for rooms whose local state is still `pending-grant`;
+ * this one fires on any 403 forbidden response, which can also occur if a
+ * post-admit epoch rotation kicked us out and we haven't projected the
+ * declaration update yet.
+ */
+const PRE_ADMIT_REPLAY_LOOKBACK_MS = 60_000;
+
 interface PendingItem {
   rumor: StudioRumor;
   publisherPub: string;
@@ -158,6 +176,24 @@ function findTag(tags: string[][], name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Discriminator for "we tried to listen before the inviter admitted us."
+ *
+ * The gateway path that emits this is `audience-stream.ts:196`:
+ *   `jsonError("forbidden", "caller is not a current member of the audience", 403)`.
+ *
+ * We match on `code === "forbidden"` (the stable hook) OR the literal
+ * message phrase (defensive fallback if the gateway later splits the code
+ * into more specific reasons). Other 403s — bad signature, expired NIP-98
+ * window, malformed audience — fall through to normal reconnect without
+ * the lookback override.
+ */
+function isPreAdmitRejection(err: unknown): boolean {
+  if (!(err instanceof GatewayError)) return false;
+  if (err.status !== 403) return false;
+  return err.code === "forbidden" || /not a current member/i.test(err.message);
+}
+
 export class SSEClient implements AbortFlag {
   aborted = false;
   private retries = 0;
@@ -168,6 +204,15 @@ export class SSEClient implements AbortFlag {
   private cursorDirty = false;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private activeBody: ReadableStream<Uint8Array> | null = null;
+  /**
+   * Set when the most recent connect attempt was rejected with 403
+   * `caller is not a current member of the audience`. The next iteration
+   * of the run loop overrides `since_ts` with a 60s lookback so the
+   * gateway's replay tail catches a key-grant or declaration-update that
+   * was published while we were waiting in backoff. Cleared on the first
+   * successful connect.
+   */
+  private pendingAdmitReconnect = false;
   private readonly project: (
     rumor: StudioRumor,
     payload: Record<string, unknown>,
@@ -208,7 +253,14 @@ export class SSEClient implements AbortFlag {
           audience_slug: this.roomSlug,
           aud_id_pub: this.state.audIdPub,
         };
-        if (this.state.cursor > 0) {
+        if (this.pendingAdmitReconnect) {
+          // Plan §12 Pass D: previous connect was rejected with 403
+          // `caller is not a current member`. Ask for the last 60s in
+          // unix-ms so the gateway replays the grant + declaration-update
+          // that landed in the gap. Overrides cursor and pending-grant
+          // logic — the gap can straddle either case.
+          args.since_ts = Math.max(0, Date.now() - PRE_ADMIT_REPLAY_LOOKBACK_MS);
+        } else if (this.state.cursor > 0) {
           args.since_ts = this.state.cursor;
         } else if (this.state.state === "pending-grant") {
           // Plan §7 Pass D3: a pending-grant room may already have a
@@ -223,17 +275,27 @@ export class SSEClient implements AbortFlag {
           args.since_ts = Math.max(0, Math.min(joinedSec, nowSec) - PENDING_GRANT_REPLAY_WINDOW_SEC);
         }
         const resp = await this.gateway.openStream(args);
+        // First successful connect clears the pre-admit flag so the next
+        // reconnect uses normal cursor logic.
+        this.pendingAdmitReconnect = false;
         if (!resp.body) {
           throw new Error("gateway response had no body");
         }
         this.activeBody = resp.body;
         await this.consume(resp.body);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log.warn("[sse] stream error, will reconnect", {
-          room: this.roomSlug,
-          err: msg,
-        });
+        if (isPreAdmitRejection(err)) {
+          this.pendingAdmitReconnect = true;
+          log.info("[sse] pre-admit 403, will reconnect with 60s lookback", {
+            room: this.roomSlug,
+          });
+        } else {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn("[sse] stream error, will reconnect", {
+            room: this.roomSlug,
+            err: msg,
+          });
+        }
       } finally {
         this.activeBody = null;
       }
@@ -708,10 +770,22 @@ export class SSEClient implements AbortFlag {
 
   private async persistEpochKeys(): Promise<void> {
     if (!this.state) return;
-    const out: Record<string, string> = {};
+    // Write BOTH shapes:
+    //   - Flat `{<n>: <priv_hex>}` for any consumer that just needs priv.
+    //   - Verbose `{epochs: {<n>: {priv_hex, pub_hex}}}` — the shape
+    //     loadRoomCtx (src/actions/util.ts) expects so non-founder members
+    //     can post cards. Without the verbose mirror, B's card-post fails
+    //     with "studio_room <slug> epoch <n> key missing" even though SSE
+    //     delivered the priv correctly.
+    const flat: Record<string, string> = {};
+    const epochs: Record<string, { priv_hex: string; pub_hex: string }> = {};
     for (const [epoch, priv] of this.epochKeys) {
-      out[String(epoch)] = bytesToHex(priv);
+      const privHex = bytesToHex(priv);
+      const pubHex = bytesToHex(schnorr.getPublicKey(priv));
+      flat[String(epoch)] = privHex;
+      epochs[String(epoch)] = { priv_hex: privHex, pub_hex: pubHex };
     }
+    const out = { ...flat, epochs };
     try {
       await this.memory.secret.set({
         name: this.state.epochKeysSecretName,

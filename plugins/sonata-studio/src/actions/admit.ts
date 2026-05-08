@@ -260,12 +260,21 @@ async function admitRoomInner(
     const recipient = String(g.recipient ?? "").toLowerCase();
     const claim = claimByPub.get(recipient);
     if (!claim) continue;
-    const allFailed = (g.relay_acks ?? []).length > 0
-      && (g.relay_acks ?? []).every((a) => a.status !== "accepted");
-    if (allFailed) {
+    // Trust the gateway's explicit `accepted` field if present (post-fix).
+    // Fall back to deriving from relay_acks for backward compatibility with
+    // older gateway versions. The previous code only checked `length > 0`,
+    // which meant an empty acks array (zero-relay-response edge case)
+    // silently passed as success.
+    const explicitAccepted = typeof g.accepted === "boolean" ? g.accepted : null;
+    const derivedAccepted = (g.relay_acks ?? []).length > 0
+      && (g.relay_acks ?? []).some((a) => a.status === "accepted");
+    const grantAccepted = explicitAccepted ?? derivedAccepted;
+    if (!grantAccepted) {
       failed.push({
         recipient,
-        reason: "all relays rejected the grant",
+        reason: explicitAccepted === false
+          ? `gateway reported accepted=false; ${(g.relay_acks ?? []).length} ack(s)`
+          : "all relays rejected the grant (or zero relay acks)",
       });
     } else {
       admitted.push({

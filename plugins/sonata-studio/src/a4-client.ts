@@ -70,7 +70,15 @@ export interface RawRotateRequest {
 export interface RawRotateResponse {
   ok: true;
   declaration_event_id: string;
-  grants: { recipient: string; event_id: string; relay_acks: RelayAck[] }[];
+  // `accepted` is an explicit per-grant boolean added by the gateway after
+  // the silent-failure bug where empty `relay_acks` length-check passed.
+  // Optional for backwards-compat with older gateway deploys.
+  grants: {
+    recipient: string;
+    event_id: string;
+    accepted?: boolean;
+    relay_acks: RelayAck[];
+  }[];
 }
 
 export interface RawInviteRequest {
