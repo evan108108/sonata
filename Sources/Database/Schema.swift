@@ -735,5 +735,33 @@ extension DatabaseMigrator {
             do { try db.execute(sql: "ALTER TABLE tasks ADD COLUMN acknowledgedAt INTEGER") } catch { /* column exists */ }
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS tasks_by_acknowledgedAt ON tasks(acknowledgedAt)")
         }
+
+        // v9: dm_messages — durable log of session-addressed Sonar DMs (sonar-dm v0).
+        // Inbound DMs are persisted here BEFORE the in-memory DMRegistry enqueue so a
+        // bridge that registers later can backfill via /api/dm/inbox?since=<ms>.
+        // 7-day TTL on `deliveredAtMs IS NOT NULL` rows is enforced by the nightly
+        // maintenance task; undelivered rows are retained until first poll.
+        registerMigration("v9_dm_messages") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS dm_messages (
+                    messageId        TEXT PRIMARY KEY,
+                    targetSessionId  TEXT NOT NULL,
+                    fromSessionId    TEXT,
+                    fromPubkey       TEXT,
+                    fromPeerId       TEXT,
+                    body             TEXT NOT NULL,
+                    context          TEXT,
+                    metaJson         TEXT,
+                    sentAtMs         INTEGER NOT NULL,
+                    receivedAtMs     INTEGER NOT NULL,
+                    deliveredAtMs    INTEGER,
+                    deliveryStatus   TEXT NOT NULL
+                )
+            """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS dm_messages_target_received
+                    ON dm_messages(targetSessionId, receivedAtMs DESC)
+            """)
+        }
     }
 }

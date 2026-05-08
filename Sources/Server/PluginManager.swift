@@ -1032,6 +1032,17 @@ final class PluginManager: @unchecked Sendable {
     func handlePluginEvent(pluginName: String, event: String, payload: [String: Any]) async {
         switch event {
         case "new_message":
+            // sonar-dm v0 pre-filter: if the inbound message carries a non-empty
+            // `target_session_id`, route through DMActions and short-circuit
+            // the legacy SONAR_MESSAGE worker dispatch. Old payloads without
+            // the field fall through unchanged so mixed-Sonar-version fleets
+            // remain backwards compatible.
+            if let target = payload["target_session_id"] as? String, !target.isEmpty {
+                await DMActions.routeInbound(payload: payload, dbPool: dbPool)
+                sonataFileLog("Plugin \(pluginName): routed DM target=\(target) (pre-filter, no legacy dispatch)")
+                return
+            }
+
             let messageId = payload["message_id"] as? String ?? ""
             let fromPeer = payload["from_peer"] as? String ?? "unknown"
             let question = payload["question"] as? String ?? ""

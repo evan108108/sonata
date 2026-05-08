@@ -32,5 +32,16 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        .testTarget(
+            name: "SonataTests",
+            dependencies: [
+                "Sonata",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/SonataTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
     ]
 )

@@ -62,6 +62,13 @@ actor BackupManager {
         try? FileManager.default.copyItem(atPath: localLatestPath, toPath: localDatedPath)
         cleanupLocalBackups(keepLast: 7)
 
+        // sonar-dm v0: 7-day TTL on delivered DM rows. Best-effort; logged but
+        // never fails the backup itself.
+        let dmDeleted = await dmMessagesCleanupOld(dbPool: dbPool)
+        if dmDeleted > 0 {
+            logger.info("BackupManager: dm_messages TTL pruned \(dmDeleted) delivered rows older than 7 days")
+        }
+
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: localLatestPath)[.size] as? Int64) ?? 0
         let sizeMB = String(format: "%.1f", Double(fileSize) / 1_048_576)
         logger.info("BackupManager: local backup complete (\(sizeMB) MB)")
