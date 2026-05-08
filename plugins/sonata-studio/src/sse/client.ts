@@ -396,50 +396,81 @@ export class SSEClient implements AbortFlag {
     if (!wrap || typeof receivedAtMs !== "number") return;
     if (!this.state) return;
 
-    if (this.isDuplicateWrap(wrap.id, receivedAtMs)) return;
+    if (this.isDuplicateWrap(wrap.id, receivedAtMs)) {
+      log.info("[sse-trace] gift-wrap duplicate-skip", { room: this.roomSlug, wrap_id: wrap.id });
+      return;
+    }
 
     let unwrapped;
     try {
       unwrapped = unwrap(wrap as never, this.pluginPriv);
     } catch (e) {
-      // Wraps for other recipients arrive on the same stream; failing to
-      // decrypt the seal is the expected case for those.
-      log.debug("[sse] unwrap failed (likely not for us)", {
+      log.info("[sse-trace] gift-wrap unwrap-failed", {
         room: this.roomSlug,
         wrap_id: wrap.id,
+        err: e instanceof Error ? e.message : String(e),
       });
       this.advanceCursor(receivedAtMs);
       return;
     }
     const rumor = unwrapped.rumor;
+    log.info("[sse-trace] gift-wrap unwrapped", {
+      room: this.roomSlug,
+      wrap_id: wrap.id,
+      rumor_id: rumor.id,
+      rumor_kind: rumor.kind,
+    });
     if (!(STUDIO_KINDS as readonly number[]).includes(rumor.kind)) {
+      log.info("[sse-trace] gift-wrap non-studio-kind-skip", { room: this.roomSlug, rumor_kind: rumor.kind });
       this.advanceCursor(receivedAtMs);
       return;
     }
     const aTag = findTag(rumor.tags, "a");
     const expectedAddr = `30520:${this.state.audIdPub}:${this.roomSlug}`;
     if (aTag !== expectedAddr) {
+      log.info("[sse-trace] gift-wrap a-tag-mismatch", {
+        room: this.roomSlug,
+        a_tag: aTag,
+        expected: expectedAddr,
+      });
       this.advanceCursor(receivedAtMs);
       return;
     }
     const epochTag = findTag(rumor.tags, "fa:epoch");
     const epoch = epochTag !== undefined ? Number(epochTag) : NaN;
     if (!Number.isFinite(epoch)) {
-      log.warn("[sse] gift-wrap rumor missing fa:epoch", {
-        room: this.roomSlug,
-        rumor_id: rumor.id,
-      });
+      log.info("[sse-trace] gift-wrap missing-epoch", { room: this.roomSlug, rumor_id: rumor.id });
       this.advanceCursor(receivedAtMs);
       return;
     }
 
     const epochPriv = this.epochKeys.get(epoch);
     if (!epochPriv) {
+      log.info("[sse-trace] gift-wrap pending-no-epoch-key", {
+        room: this.roomSlug,
+        rumor_id: rumor.id,
+        epoch,
+        available_epochs: Array.from(this.epochKeys.keys()),
+      });
       this.pushPending(epoch, rumor as StudioRumor, unwrapped.publisherPub);
       this.advanceCursor(receivedAtMs);
       return;
     }
-    await this.decryptAndProject(rumor as StudioRumor, unwrapped.publisherPub, epochPriv);
+    log.info("[sse-trace] gift-wrap decrypting-and-projecting", {
+      room: this.roomSlug,
+      rumor_id: rumor.id,
+      epoch,
+    });
+    try {
+      await this.decryptAndProject(rumor as StudioRumor, unwrapped.publisherPub, epochPriv);
+      log.info("[sse-trace] gift-wrap projected-ok", { room: this.roomSlug, rumor_id: rumor.id });
+    } catch (e) {
+      log.info("[sse-trace] gift-wrap decrypt-or-project-failed", {
+        room: this.roomSlug,
+        rumor_id: rumor.id,
+        err: e instanceof Error ? e.message : String(e),
+      });
+    }
     this.advanceCursor(receivedAtMs);
   }
 

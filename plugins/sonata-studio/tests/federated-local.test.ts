@@ -898,21 +898,21 @@ async function runOnce(attempt: number): Promise<Fixture> {
       log_tail_B: readPluginLogTail(binB).slice(-200),
     };
   } finally {
-    // Teardown: kill both plugins and clean up data dirs. Both shims close.
+    // Teardown: kill both plugins; preserve data dirs on failure for diagnosis.
+    // Set STUDIO_T4B_KEEP_DATA=1 to keep on success too.
+    const keepData = process.env["STUDIO_T4B_KEEP_DATA"] === "1";
     if (binA) {
       await killPlugin(binA);
-      try {
-        rmSync(binA.dataDir, { recursive: true, force: true });
-      } catch {
-        /* ignore */
+      console.error(`[t4b] A dataDir: ${binA.dataDir}`);
+      if (!keepData) {
+        try { rmSync(binA.dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
     }
     if (binB) {
       await killPlugin(binB);
-      try {
-        rmSync(binB.dataDir, { recursive: true, force: true });
-      } catch {
-        /* ignore */
+      console.error(`[t4b] B dataDir: ${binB.dataDir}`);
+      if (!keepData) {
+        try { rmSync(binB.dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
     }
     await shimA.close();

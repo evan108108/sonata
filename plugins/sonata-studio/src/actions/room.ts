@@ -269,6 +269,24 @@ export async function createRoom(
     }
   }
 
+  // Open the SSE stream for this newly-created room. Without this, the
+  // founder never subscribes to the audience's gift-wrap firehose and
+  // therefore never receives cards posted by other members. (T4b root
+  // cause: B's cards published correctly + stored on the gateway, but A's
+  // SSEManager only opened streams for rooms it had at boot — and the
+  // join action at line ~500 calls sseManager.open while create did not.)
+  // Idempotent; safe if SSEManager already had a client for this slug.
+  try {
+    await ctx.sseManager.open(slug);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.create] sseManager.open("${slug}") failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
   return {
     audience_address: audienceAddress(audIdPub, slug),
     room_event_id: rumorEventId,

@@ -1,0 +1,500 @@
+{
+  "ts": "2026-05-08T21:50:00.624Z",
+  "gateway": "https://api.4a4.ai",
+  "plugin_pub_A": "0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818",
+  "plugin_pub_B": "91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8",
+  "audience_address": "30520:b6b2d23bc64766eed1c836916675a772103f68ea32e0120a9f0feced83bd9747:fed-local-ecd514",
+  "room_slug": "fed-local-ecd514",
+  "iterations": [
+    {
+      "direction": "B->A",
+      "t_post_ms": 1778276981710,
+      "t_recv_ms": 1778276982115,
+      "latency_ms": 405,
+      "card_event_id": "efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c"
+    },
+    {
+      "direction": "B->A",
+      "t_post_ms": 1778276983302,
+      "t_recv_ms": 1778276984116,
+      "latency_ms": 814,
+      "card_event_id": "afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9"
+    },
+    {
+      "direction": "B->A",
+      "t_post_ms": 1778276985248,
+      "t_recv_ms": 1778276986154,
+      "latency_ms": 906,
+      "card_event_id": "32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628"
+    },
+    {
+      "direction": "B->A",
+      "t_post_ms": 1778276987233,
+      "t_recv_ms": 1778276988143,
+      "latency_ms": 910,
+      "card_event_id": "38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724"
+    },
+    {
+      "direction": "B->A",
+      "t_post_ms": 1778276989191,
+      "t_recv_ms": 1778276990207,
+      "latency_ms": 1016,
+      "card_event_id": "fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e"
+    },
+    {
+      "direction": "A->B",
+      "t_post_ms": 1778276991283,
+      "t_recv_ms": 1778276992496,
+      "latency_ms": 1213,
+      "card_event_id": "5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece"
+    },
+    {
+      "direction": "A->B",
+      "t_post_ms": 1778276994247,
+      "t_recv_ms": 1778276994550,
+      "latency_ms": 303,
+      "card_event_id": "b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164"
+    },
+    {
+      "direction": "A->B",
+      "t_post_ms": 1778276995589,
+      "t_recv_ms": 1778276996701,
+      "latency_ms": 1112,
+      "card_event_id": "236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984"
+    },
+    {
+      "direction": "A->B",
+      "t_post_ms": 1778276997838,
+      "t_recv_ms": 1778276998546,
+      "latency_ms": 708,
+      "card_event_id": "eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5"
+    },
+    {
+      "direction": "A->B",
+      "t_post_ms": 1778276999614,
+      "t_recv_ms": 1778277000623,
+      "latency_ms": 1009,
+      "card_event_id": "3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7"
+    }
+  ],
+  "summary": {
+    "median_ms": 908,
+    "p99_ms": 1213,
+    "max_ms": 1213
+  },
+  "events": [
+    {
+      "t": 781,
+      "actor": "A",
+      "action": "boot",
+      "result": {
+        "plugin_pub": "0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818",
+        "port": 61035
+      }
+    },
+    {
+      "t": 781,
+      "actor": "B",
+      "action": "boot",
+      "result": {
+        "plugin_pub": "91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8",
+        "port": 61036
+      }
+    },
+    {
+      "t": 3201,
+      "actor": "A",
+      "action": "studio_room_create",
+      "result": {
+        "ok": true,
+        "result": {
+          "audience_address": "30520:b6b2d23bc64766eed1c836916675a772103f68ea32e0120a9f0feced83bd9747:fed-local-ecd514",
+          "room_event_id": "b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1",
+          "declaration_event_id": "118c49745d6cb01f2679b94ebbd16bd63bdbaa57f0322c4818f3b69e6ab33c27",
+          "founding_grant_event_id": "2277b94139e6d1a2443ddb000ee2aa6fe5cd90b5f1113fb37ebbc7493dce9c33",
+          "members": [
+            "0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818"
+          ],
+          "epoch": 1,
+          "default_tracks": [
+            "main"
+          ]
+        }
+      }
+    },
+    {
+      "t": 3810,
+      "actor": "A",
+      "action": "studio_room_invite",
+      "result": {
+        "ok": true,
+        "result": {
+          "four_a_url": "4a://invite/fed-local-ecd514/1?k=a0efdcb153cc0fdc034b2edead0fa738bef066adc876a98d3e287fb0f94684cb",
+          "https_url": "https://claim.4a4.ai/invite/fed-local-ecd514/1?k=a0efdcb153cc0fdc034b2edead0fa738bef066adc876a98d3e287fb0f94684cb",
+          "invite_pub": "6a2b304d00c967d786fd879889d3f53452e8d11adf11ab104fd5fc26773a9b72",
+          "expires_at": 1778881775
+        }
+      }
+    },
+    {
+      "t": 4468,
+      "actor": "B",
+      "action": "studio_room_join",
+      "result": {
+        "ok": true,
+        "result": {
+          "audience_address": "30520:b6b2d23bc64766eed1c836916675a772103f68ea32e0120a9f0feced83bd9747:fed-local-ecd514",
+          "room_slug": "fed-local-ecd514",
+          "epoch": 1,
+          "claim_event_id": "a0fb662b986047d599d8cd242ebe9b6b7fd3ae96ed35f4950e32cadca52eb699",
+          "state": "pending-grant"
+        }
+      }
+    },
+    {
+      "t": 6085,
+      "actor": "A",
+      "action": "studio_room_admit",
+      "result": {
+        "ok": true,
+        "result": {
+          "ok": true,
+          "admitted": [
+            {
+              "claim_pubkey": "91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8",
+              "key_grant_event_id": "a32e2381f3a84849c84bd4a4330ecc8d4de0f2f29849b51d8261aea65ccadbac"
+            }
+          ],
+          "new_epoch": 2,
+          "declaration_event_id": "7de2071326e118353b69ba530ab3ea2410defa4c66b6f371e212e773577b867c"
+        }
+      }
+    },
+    {
+      "t": 7847,
+      "actor": "B",
+      "action": "state_flip_active",
+      "result": {
+        "name": "studio:room:fed-local-ecd514",
+        "attrs": {
+          "_studio_kind": 30536,
+          "_studio_type": "Room",
+          "slug": "fed-local-ecd514",
+          "title": "fed-local-ecd514",
+          "description": null,
+          "project": null,
+          "default_tracks": [],
+          "aud_id_pub_hex": "b6b2d23bc64766eed1c836916675a772103f68ea32e0120a9f0feced83bd9747",
+          "aud_id_priv_secret_name": null,
+          "epoch_keys_secret_name": "studio:room:fed-local-ecd514:epoch_keys",
+          "current_epoch": 2,
+          "members": [
+            "0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818",
+            "91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8"
+          ],
+          "state": "active",
+          "last_seen_wrap_at_ms": null,
+          "joined_at_ms": 1778276977090,
+          "tags": [
+            "sonata-studio",
+            "room:fed-local-ecd514"
+          ],
+          "pending": []
+        }
+      }
+    },
+    {
+      "t": 9489,
+      "actor": "B",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "B->A",
+        "t_post_ms": 1778276981710,
+        "t_recv_ms": 1778276982115,
+        "latency_ms": 405,
+        "card_event_id": "efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c"
+      }
+    },
+    {
+      "t": 11490,
+      "actor": "B",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "B->A",
+        "t_post_ms": 1778276983302,
+        "t_recv_ms": 1778276984116,
+        "latency_ms": 814,
+        "card_event_id": "afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9"
+      }
+    },
+    {
+      "t": 13528,
+      "actor": "B",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "B->A",
+        "t_post_ms": 1778276985248,
+        "t_recv_ms": 1778276986154,
+        "latency_ms": 906,
+        "card_event_id": "32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628"
+      }
+    },
+    {
+      "t": 15517,
+      "actor": "B",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "B->A",
+        "t_post_ms": 1778276987233,
+        "t_recv_ms": 1778276988143,
+        "latency_ms": 910,
+        "card_event_id": "38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724"
+      }
+    },
+    {
+      "t": 17581,
+      "actor": "B",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "B->A",
+        "t_post_ms": 1778276989191,
+        "t_recv_ms": 1778276990207,
+        "latency_ms": 1016,
+        "card_event_id": "fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e"
+      }
+    },
+    {
+      "t": 19870,
+      "actor": "A",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "A->B",
+        "t_post_ms": 1778276991283,
+        "t_recv_ms": 1778276992496,
+        "latency_ms": 1213,
+        "card_event_id": "5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece"
+      }
+    },
+    {
+      "t": 21924,
+      "actor": "A",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "A->B",
+        "t_post_ms": 1778276994247,
+        "t_recv_ms": 1778276994550,
+        "latency_ms": 303,
+        "card_event_id": "b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164"
+      }
+    },
+    {
+      "t": 24075,
+      "actor": "A",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "A->B",
+        "t_post_ms": 1778276995589,
+        "t_recv_ms": 1778276996701,
+        "latency_ms": 1112,
+        "card_event_id": "236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984"
+      }
+    },
+    {
+      "t": 25920,
+      "actor": "A",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "A->B",
+        "t_post_ms": 1778276997838,
+        "t_recv_ms": 1778276998546,
+        "latency_ms": 708,
+        "card_event_id": "eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5"
+      }
+    },
+    {
+      "t": 27997,
+      "actor": "A",
+      "action": "studio_card_post",
+      "result": {
+        "direction": "A->B",
+        "t_post_ms": 1778276999614,
+        "t_recv_ms": 1778277000623,
+        "latency_ms": 1009,
+        "card_event_id": "3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7"
+      }
+    }
+  ],
+  "attempts": 1,
+  "log_tail_A": [
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.289Z] sonata-studio booting {\"pid\":61832,\"port\":61035}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.299Z] Sonata reachable {\"host\":\"http://127.0.0.1:61033\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.315Z] Generating plugin keypair on first run {\"plugin_pub\":\"0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.317Z] Config loaded {\"plugin_pub\":\"0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61033\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.322Z] HTTP server listening {\"port\":61035,\"actions\":13}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.322Z] [sse] manager started {\"rooms\":0}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.827Z] DEBUG: [sse] opened client {\"room\":\"fed-local-ecd514\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.903Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"85ff3b3066839b2ff58dc821c9278e2f33a5ba0ab01de76ddae6a9cca5c5678d\",\"rumor_id\":\"b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1\",\"rumor_kind\":30536}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.903Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.906Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.911Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"91a2ef501687102982d7207fe0901d6bb7c4685dc3f9e8625960523b899e639c\",\"rumor_id\":\"c011f0ffcd01fc40644f0a157705b273b7906d6808b710f9bef0a31c418f9418\",\"rumor_kind\":30531}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.911Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"c011f0ffcd01fc40644f0a157705b273b7906d6808b710f9bef0a31c418f9418\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.913Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"c011f0ffcd01fc40644f0a157705b273b7906d6808b710f9bef0a31c418f9418\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:35.917Z] [sse] key-grant landed {\"room\":\"fed-local-ecd514\",\"epoch\":1,\"promoted\":false}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:39.962Z] [sse] key-grant landed {\"room\":\"fed-local-ecd514\",\"epoch\":2,\"promoted\":false}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:42.077Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"02a5493561efc6d24367d87cf95ff1ef08d402416af2614cff4962104508a8e0\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:42.077Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:42.083Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:44.021Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"85eaf33c9b9da642fee4b502fe63695147b11ffb0772efc7050c716675eb57f7\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:44.021Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:44.026Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:46.071Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"73233b72d4e465504617f4a8a69f03d7b836b690152fccf698b5121d65030196\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:46.072Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:46.075Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:48.045Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"ac6d17479d3c7cb5e4ac48bd504db346bacf451ed96e7830584d10599454bcd4\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:48.045Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:48.049Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:50.155Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"ea4878e2d854d014d7960297daa6d6c436c20bee76e0faba71c8a074654f7a76\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:50.155Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:50.160Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:52.090Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"3759d87bff3982661b078441eebce89b84f8d968e00a613982c95add3437713d\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:52.090Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:52.093Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:54.155Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"3268f7ad8913026bb15c2a5d0c913f2c936af83da30c3368e4c1ccae5052bdf2\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:54.155Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:54.159Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:56.144Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"c72c529b965f47dd9f96c6a6ca7d1f33ec55f8f8b8ada6ece45052cd21695e64\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:56.144Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:56.147Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:58.251Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"3b9584f24508abf252b39627f8a9c3e3fbee87cfce3a02cc62e47c70306c0759\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:58.252Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:58.255Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:50:00.198Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"9ca9b710aabbe663f2dbc83b968a0604c333fbf97fefecf5d536581d89a110fc\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:50:00.199Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:50:00.202Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.289Z\",\"level\":\"info\",\"msg\":\"sonata-studio booting\",\"pid\":61832,\"port\":61035}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.299Z\",\"level\":\"info\",\"msg\":\"Sonata reachable\",\"host\":\"http://127.0.0.1:61033\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.315Z\",\"level\":\"info\",\"msg\":\"Generating plugin keypair on first run\",\"plugin_pub\":\"0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.317Z\",\"level\":\"info\",\"msg\":\"Config loaded\",\"plugin_pub\":\"0050383dfb8a2b003bfa69d807b28365723cacbc59641fbb08f6f8b3472ac818\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61033\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.322Z\",\"level\":\"info\",\"msg\":\"HTTP server listening\",\"port\":61035,\"actions\":13}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.322Z\",\"level\":\"info\",\"msg\":\"[sse] manager started\",\"rooms\":0}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.827Z\",\"level\":\"debug\",\"msg\":\"[sse] opened client\",\"room\":\"fed-local-ecd514\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.903Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"85ff3b3066839b2ff58dc821c9278e2f33a5ba0ab01de76ddae6a9cca5c5678d\",\"rumor_id\":\"b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1\",\"rumor_kind\":30536}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.903Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.906Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b67480bf576641498005a9cde816153311d4b8129a68d34847c3b687c699ebe1\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.911Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"91a2ef501687102982d7207fe0901d6bb7c4685dc3f9e8625960523b899e639c\",\"rumor_id\":\"c011f0ffcd01fc40644f0a157705b273b7906d6808b710f9bef0a31c418f9418\",\"rumor_kind\":30531}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.911Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"c011f0ffcd01fc40644f0a157705b273b7906d6808b710f9bef0a31c418f9418\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.913Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"c011f0ffcd01fc40644f0a157705b273b7906d6808b710f9bef0a31c418f9418\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:35.917Z\",\"level\":\"info\",\"msg\":\"[sse] key-grant landed\",\"room\":\"fed-local-ecd514\",\"epoch\":1,\"promoted\":false}",
+    "[log] {\"ts\":\"2026-05-08T21:49:39.962Z\",\"level\":\"info\",\"msg\":\"[sse] key-grant landed\",\"room\":\"fed-local-ecd514\",\"epoch\":2,\"promoted\":false}",
+    "[log] {\"ts\":\"2026-05-08T21:49:42.077Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"02a5493561efc6d24367d87cf95ff1ef08d402416af2614cff4962104508a8e0\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:42.077Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:42.083Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:44.021Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"85eaf33c9b9da642fee4b502fe63695147b11ffb0772efc7050c716675eb57f7\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:44.021Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:44.026Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:46.071Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"73233b72d4e465504617f4a8a69f03d7b836b690152fccf698b5121d65030196\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:46.072Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:46.075Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:48.045Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"ac6d17479d3c7cb5e4ac48bd504db346bacf451ed96e7830584d10599454bcd4\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:48.045Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:48.049Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:50.155Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"ea4878e2d854d014d7960297daa6d6c436c20bee76e0faba71c8a074654f7a76\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:50.155Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:50.160Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:52.090Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"3759d87bff3982661b078441eebce89b84f8d968e00a613982c95add3437713d\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:52.090Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:52.093Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:54.155Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"3268f7ad8913026bb15c2a5d0c913f2c936af83da30c3368e4c1ccae5052bdf2\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:54.155Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:54.159Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:56.144Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"c72c529b965f47dd9f96c6a6ca7d1f33ec55f8f8b8ada6ece45052cd21695e64\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:56.144Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:56.147Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:58.251Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"3b9584f24508abf252b39627f8a9c3e3fbee87cfce3a02cc62e47c70306c0759\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:58.252Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:58.255Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\"}",
+    "[log] {\"ts\":\"2026-05-08T21:50:00.198Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"9ca9b710aabbe663f2dbc83b968a0604c333fbf97fefecf5d536581d89a110fc\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:50:00.199Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:50:00.202Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\"}"
+  ],
+  "log_tail_B": [
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.289Z] sonata-studio booting {\"pid\":61833,\"port\":61036}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.300Z] Sonata reachable {\"host\":\"http://127.0.0.1:61034\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.315Z] Generating plugin keypair on first run {\"plugin_pub\":\"91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.318Z] Config loaded {\"plugin_pub\":\"91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61034\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.322Z] HTTP server listening {\"port\":61036,\"actions\":13}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:33.322Z] [sse] manager started {\"rooms\":0}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:37.094Z] DEBUG: [sse] opened client {\"room\":\"fed-local-ecd514\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:37.135Z] [sse] pre-admit 403, will reconnect with 60s lookback {\"room\":\"fed-local-ecd514\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:40.331Z] [sse] key-grant landed {\"room\":\"fed-local-ecd514\",\"epoch\":2,\"promoted\":true}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:42.319Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"e499d3c6f9a26dcf8b910133d8fad72d4b7e6fe20067688bf7e63fd9b1d362db\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:42.319Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:42.322Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:44.345Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"a9548a4404cb959953c7d5b35eeadcde509813371755612930f5a87f946001ed\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:44.345Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:44.347Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:46.365Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"8caf6367deaee32dfd0cba8c296f07f1c6cc305ed59de0ea4b7154e3afb8b0f6\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:46.366Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:46.368Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:48.392Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"7d0524b60026f73c05c4fb464829cf3b8abc17ad0c53f8cc497e0b5e390189e1\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:48.392Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:48.395Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:50.416Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"16102a6ffea40f59047f10c688798af6a9a57499f04ff9c2b0d59f8cabad53d8\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:50.416Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:50.419Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:52.439Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"764363f34c943aaf6a45e1e78508f47fd222fcca12921ce8935672c480412b03\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:52.440Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:52.444Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:54.464Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"0b227c6b0d09b0c648915d685301f6bbc55bbba7542c3b59e71189f3d8f771e4\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:54.464Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:54.467Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:56.615Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"928bc87e6d17112b8670f01844dd33c94635ff0c8b6a49d162ec917653251ba7\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:56.615Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:56.619Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:58.519Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"fa10c4e3f4a4572a23d9cecb375813ddd90df75cfceb2fedc84e2fc98f3f36ab\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:58.519Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:49:58.523Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\"}",
+    "[stdout] [sonata-studio 2026-05-08T21:50:00.539Z] [sse-trace] gift-wrap unwrapped {\"room\":\"fed-local-ecd514\",\"wrap_id\":\"529838bb8973895b55108693e9a4bea46a496b5792d0c9d12da90060d43588e4\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-05-08T21:50:00.539Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"epoch\":2}",
+    "[stdout] [sonata-studio 2026-05-08T21:50:00.544Z] [sse-trace] gift-wrap projected-ok {\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.289Z\",\"level\":\"info\",\"msg\":\"sonata-studio booting\",\"pid\":61833,\"port\":61036}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.300Z\",\"level\":\"info\",\"msg\":\"Sonata reachable\",\"host\":\"http://127.0.0.1:61034\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.315Z\",\"level\":\"info\",\"msg\":\"Generating plugin keypair on first run\",\"plugin_pub\":\"91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.318Z\",\"level\":\"info\",\"msg\":\"Config loaded\",\"plugin_pub\":\"91b100a3cfd595752a1f6b70fdd58d1f67c3bd49233a90da8d6a0bfa4c326bb8\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61034\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.322Z\",\"level\":\"info\",\"msg\":\"HTTP server listening\",\"port\":61036,\"actions\":13}",
+    "[log] {\"ts\":\"2026-05-08T21:49:33.322Z\",\"level\":\"info\",\"msg\":\"[sse] manager started\",\"rooms\":0}",
+    "[log] {\"ts\":\"2026-05-08T21:49:37.094Z\",\"level\":\"debug\",\"msg\":\"[sse] opened client\",\"room\":\"fed-local-ecd514\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:37.135Z\",\"level\":\"info\",\"msg\":\"[sse] pre-admit 403, will reconnect with 60s lookback\",\"room\":\"fed-local-ecd514\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:40.331Z\",\"level\":\"info\",\"msg\":\"[sse] key-grant landed\",\"room\":\"fed-local-ecd514\",\"epoch\":2,\"promoted\":true}",
+    "[log] {\"ts\":\"2026-05-08T21:49:42.319Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"e499d3c6f9a26dcf8b910133d8fad72d4b7e6fe20067688bf7e63fd9b1d362db\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:42.319Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:42.322Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"efcbf1358c3fe8425161774a53f4c27fc0e9e91520d2958a18beef244839086c\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:44.345Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"a9548a4404cb959953c7d5b35eeadcde509813371755612930f5a87f946001ed\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:44.345Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:44.347Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"afbd1ca1b27ccbd8cb8cc9c58c7f5861f8c127fb85de64573be1ee282f3464f9\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:46.365Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"8caf6367deaee32dfd0cba8c296f07f1c6cc305ed59de0ea4b7154e3afb8b0f6\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:46.366Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:46.368Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"32d91761ab89414640457e13d535c46f161a61b779d58ad089d5f0b467c5e628\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:48.392Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"7d0524b60026f73c05c4fb464829cf3b8abc17ad0c53f8cc497e0b5e390189e1\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:48.392Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:48.395Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"38d9edd034473ae4ad0a7b5dec8dd26e58a5c2eeda067cee8b6e1de7d7126724\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:50.416Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"16102a6ffea40f59047f10c688798af6a9a57499f04ff9c2b0d59f8cabad53d8\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:50.416Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:50.419Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"fc3f4d18d0edd385862bc043deef8ff462729dca8bd68226b37cc64c72852c3e\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:52.439Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"764363f34c943aaf6a45e1e78508f47fd222fcca12921ce8935672c480412b03\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:52.440Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:52.444Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"5c1aeb6026ab8bbaca135961f80c85cf5aa13778f05de96bad4ae7bb11cf6ece\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:54.464Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"0b227c6b0d09b0c648915d685301f6bbc55bbba7542c3b59e71189f3d8f771e4\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:54.464Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:54.467Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"b622c159a7514416ac6bc0f487ad542310174da3ef3130f3b26a38a0a17d4164\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:56.615Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"928bc87e6d17112b8670f01844dd33c94635ff0c8b6a49d162ec917653251ba7\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:56.615Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:56.619Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"236b6522febe2fa40267579bcde0db955cb9fa0183be2875c33a8fdf0aad1984\"}",
+    "[log] {\"ts\":\"2026-05-08T21:49:58.519Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"fa10c4e3f4a4572a23d9cecb375813ddd90df75cfceb2fedc84e2fc98f3f36ab\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:49:58.519Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:49:58.523Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"eb6eec386530f18cea1d8831619a9dfa1950b71edc7e521b66e6502d5d1c5aa5\"}",
+    "[log] {\"ts\":\"2026-05-08T21:50:00.539Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"fed-local-ecd514\",\"wrap_id\":\"529838bb8973895b55108693e9a4bea46a496b5792d0c9d12da90060d43588e4\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-05-08T21:50:00.539Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\",\"epoch\":2}",
+    "[log] {\"ts\":\"2026-05-08T21:50:00.544Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"fed-local-ecd514\",\"rumor_id\":\"3b02bbcaa2bee55ed0d36165b118e848b4844bcaf1f07748debe57cee3e045f7\"}"
+  ]
+}
