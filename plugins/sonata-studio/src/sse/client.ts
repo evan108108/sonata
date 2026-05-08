@@ -654,6 +654,7 @@ export class SSEClient implements AbortFlag {
         if (Number.isFinite(n) && n >= 1) epoch = n;
       }
     }
+    const previousEpoch = this.state.currentEpoch;
     this.state.members = members;
     if (epoch !== null) this.state.currentEpoch = epoch;
     const attrs: Record<string, unknown> = {
@@ -672,6 +673,69 @@ export class SSEClient implements AbortFlag {
         err: err instanceof Error ? err.message : String(err),
       });
     }
+    // T4b root cause #2: when the founder rotates the audience, A's plugin
+    // generates the new epoch_(n+1) priv locally inside admit.ts and persists
+    // it to the secret store, but A's SSEClient.this.epochKeys map only holds
+    // what was loaded at startup (epoch_1). A doesn't receive a key-grant
+    // SSE event for itself (A is the publisher), so without an explicit
+    // reload here, B's cards encrypted to epoch_2 hit `epochKeys.get(2) =
+    // undefined` and get queued forever in this.pending. Solution: when
+    // declaration-updated reports a new epoch, re-read the secret store
+    // and drain any pending items for the new epoch.
+    if (epoch !== null && epoch > previousEpoch) {
+      const loaded = await this.reloadEpochKeysFromSecret();
+      if (loaded > 0) {
+        log.info("[sse] declaration-updated reloaded epoch keys", {
+          room: this.roomSlug,
+          new_epoch: epoch,
+          loaded_count: loaded,
+        });
+      }
+      if (this.epochKeys.has(epoch)) {
+        await this.drainPending(epoch);
+      }
+    }
+  }
+
+  /**
+   * Re-read the audience's epoch keys secret and merge any new entries into
+   * this.epochKeys. Used by handleDeclarationUpdated to pick up keys the
+   * founder generated locally (admit.ts → mergeEpochKeysSecret) without
+   * waiting for a non-existent key-grant SSE event addressed to self.
+   * Returns the number of new epoch privs added (existing entries unchanged).
+   */
+  private async reloadEpochKeysFromSecret(): Promise<number> {
+    if (!this.state) return 0;
+    let added = 0;
+    try {
+      const sec = await this.memory.secret.get(this.state.epochKeysSecretName);
+      const parsed = JSON.parse(sec.value) as Record<string, unknown>;
+      const verbose = parsed["epochs"];
+      if (verbose && typeof verbose === "object" && !Array.isArray(verbose)) {
+        for (const [k, v] of Object.entries(verbose as Record<string, unknown>)) {
+          const epoch = Number(k);
+          if (!Number.isFinite(epoch)) continue;
+          if (this.epochKeys.has(epoch)) continue;
+          if (!v || typeof v !== "object") continue;
+          const priv = (v as Record<string, unknown>)["priv_hex"];
+          if (typeof priv !== "string" || !HEX64.test(priv)) continue;
+          this.epochKeys.set(epoch, hexToBytes(priv));
+          added++;
+        }
+      }
+      for (const [k, v] of Object.entries(parsed)) {
+        if (k === "epochs") continue;
+        const epoch = Number(k);
+        if (!Number.isFinite(epoch) || typeof v !== "string") continue;
+        if (!HEX64.test(v)) continue;
+        if (this.epochKeys.has(epoch)) continue;
+        this.epochKeys.set(epoch, hexToBytes(v));
+        added++;
+      }
+    } catch {
+      // secret missing — nothing to reload
+    }
+    return added;
   }
 
   // ── room state load + epoch keys persistence ─────────────────────────────
