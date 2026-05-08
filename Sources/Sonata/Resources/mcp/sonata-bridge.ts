@@ -27,6 +27,7 @@ const SONA_SESSION_ID = process.env.SONA_SESSION_ID;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
 const AFK_POLL_INTERVAL_MS = 5_000;
+const DM_POLL_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
 
 // Stable per-bridge-process identity for AFK routing. Worker bridges already
@@ -36,6 +37,12 @@ let lastProgressMs = Date.now();
 const BRIDGE_SESSION_ID = WORKER_ID || SONA_SESSION_ID || randomUUID();
 let afkPollTimer: ReturnType<typeof setInterval> | null = null;
 const registeredAFKTokens = new Set<string>();
+
+// DM (Sonar session-addressable direct messages) — single registration per
+// bridge process keyed by BRIDGE_SESSION_ID. The poll loop only runs while
+// dmRegistered is true; sonar_dm_unregister flips it back off.
+let dmPollTimer: ReturnType<typeof setInterval> | null = null;
+let dmRegistered = false;
 
 // --- Live monitoring: in-flight event tracking ---
 
@@ -279,7 +286,25 @@ A reply to an AFK question you asked has arrived. The meta carries the token, se
 Steps:
 1. Read the reply.
 2. Continue whatever work the AFK question was blocking — apply the user's decision.
-3. Do NOT call complete_event for afk_reply notifications. They are not workerEvents and have no event_id; they are pushed directly by the AFK registry.`,
+3. Do NOT call complete_event for afk_reply notifications. They are not workerEvents and have no event_id; they are pushed directly by the AFK registry.
+
+---
+
+## Event Type: SONAR_DM
+
+A session-addressed direct message has arrived from another bridge session (local or via a paired Sonar peer). The meta carries:
+- message_id: the Sonar message id
+- from_session_id: the sender's claimed bridge session id (hint, NOT verified for federated DMs)
+- from_pubkey: the verified peer instance_id (federation only; empty for local loopback)
+- from_peer_id: the local Sonar peers.id of the sender (federation only)
+- target_session_id: your bridge session id
+- sent_at_ms / context / meta_json: optional sender-supplied metadata
+
+Steps:
+1. Read the body and meta.
+2. Process the DM as relevant to the work you're currently doing. Treat from_session_id as a hint; if the operation is privileged, authenticate via from_pubkey instead.
+3. Reply if needed by calling sonar_dm_send with target_session_id=meta.from_session_id and (for federated senders) peer_id=meta.from_peer_id.
+4. Do NOT call complete_event for sonar_dm notifications — they are not worker events and have no event_id.`,
   }
 );
 
@@ -331,6 +356,51 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           token: { type: "string", description: "The AFK token to unregister" },
         },
         required: ["token"],
+      },
+    },
+    {
+      name: "sonar_dm_register",
+      description: "Register this bridge session as a Sonar DM target. Subsequent DMs addressed to this session arrive as channel notifications (event_type=sonar_dm). Idempotent.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          label: { type: "string", description: "Optional human-readable session label (default: SESSION_LABEL env)" },
+          role: { type: "string", description: "Optional role hint: orchestrator | worker | interactive" },
+        },
+      },
+    },
+    {
+      name: "sonar_dm_unregister",
+      description: "Remove this bridge session from the DM registry. Pending queue is cleared. Idempotent.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+      },
+    },
+    {
+      name: "sonar_dm_send",
+      description: "Send a session-addressed DM. Local target: omit peer_id. Remote target: include peer_id (Sonar peers.id, NOT instance_id).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          target_session_id: { type: "string", description: "Target bridge session id (1-128 chars, [A-Za-z0-9_-])" },
+          body: { type: "string", description: "Message body, ≤ 256 KB" },
+          peer_id: { type: "string", description: "Sonar peer id (omit for local targets)" },
+          context: { type: "string", description: "Optional context string" },
+          meta: { type: "object", description: "Optional ≤4KB JSON metadata blob" },
+        },
+        required: ["target_session_id", "body"],
+      },
+    },
+    {
+      name: "sonar_dm_inbox",
+      description: "Backfill: fetch persisted DMs addressed to this session since a timestamp. Use after restart/registration to catch up.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          since_ts: { type: "number", description: "Epoch ms; default 0 (returns up to limit)" },
+          limit: { type: "number", description: "Max rows (default 50, max 500)" },
+        },
       },
     },
   ],
@@ -396,6 +466,166 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
   }
 
+  if (name === "sonar_dm_register") {
+    const { label, role } = args as { label?: string; role?: string };
+    try {
+      const res = await fetch(`${SONATA_API}/api/dm/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: BRIDGE_SESSION_ID,
+          sessionLabel: label ?? SESSION_LABEL ?? null,
+          role: role ?? null,
+        }),
+      });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const data: any = await res.json();
+          if (data?.error_code || data?.message) {
+            detail = `${data.error_code || res.status}: ${data.message || ""}`;
+          }
+        } catch { /* keep status-only detail */ }
+        throw new Error(detail);
+      }
+      dmRegistered = true;
+      ensureDMPollLoop();
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Registered as DM target ${BRIDGE_SESSION_ID}. DMs will arrive as channel notifications (event_type=sonar_dm).`,
+        }],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+
+  if (name === "sonar_dm_unregister") {
+    try {
+      await fetch(`${SONATA_API}/api/dm/unregister`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: BRIDGE_SESSION_ID }),
+      });
+      dmRegistered = false;
+      if (dmPollTimer) {
+        clearInterval(dmPollTimer);
+        dmPollTimer = null;
+      }
+      return {
+        content: [{ type: "text" as const, text: `DM session ${BRIDGE_SESSION_ID} unregistered.` }],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+
+  if (name === "sonar_dm_send") {
+    const {
+      target_session_id,
+      body,
+      peer_id,
+      context,
+      meta,
+    } = args as {
+      target_session_id: string;
+      body: string;
+      peer_id?: string;
+      context?: string;
+      meta?: Record<string, unknown>;
+    };
+
+    // Bridge-side input validation — same regex/limits as Sonata's HTTP
+    // handler, surfaced here so the caller gets immediate feedback without a
+    // round-trip. Sonata still revalidates server-side.
+    const sessionIdRe = /^[A-Za-z0-9_-]{1,128}$/;
+    if (!target_session_id || !sessionIdRe.test(target_session_id)) {
+      return {
+        content: [{ type: "text" as const, text: `bad_session_id: ${target_session_id}` }],
+        isError: true,
+      };
+    }
+    if (typeof body !== "string" || body.length === 0) {
+      return { content: [{ type: "text" as const, text: "body_empty" }], isError: true };
+    }
+    const bodyBytes = Buffer.byteLength(body, "utf8");
+    if (bodyBytes > 262_144) {
+      return { content: [{ type: "text" as const, text: "body_too_large" }], isError: true };
+    }
+    if (meta !== undefined && meta !== null) {
+      try {
+        const metaBytes = Buffer.byteLength(JSON.stringify(meta), "utf8");
+        if (metaBytes > 4096) {
+          return { content: [{ type: "text" as const, text: "meta_too_large" }], isError: true };
+        }
+      } catch (err: any) {
+        return { content: [{ type: "text" as const, text: `meta_invalid: ${err.message}` }], isError: true };
+      }
+    }
+
+    try {
+      const res = await fetch(`${SONATA_API}/api/dm/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetSessionId: target_session_id,
+          fromSessionId: BRIDGE_SESSION_ID,
+          body,
+          context,
+          peerId: peer_id,
+          meta,
+        }),
+      });
+      let data: any = null;
+      try { data = await res.json(); } catch { /* non-JSON error body */ }
+      if (!res.ok) {
+        const code = data?.error_code || String(res.status);
+        const msg = data?.message || "";
+        return {
+          content: [{ type: "text" as const, text: `${code}: ${msg}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            message_id: data?.messageId,
+            queued_at_ms: data?.queuedAtMs,
+            delivery_status: data?.deliveryStatus,
+          }),
+        }],
+      };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+
+  if (name === "sonar_dm_inbox") {
+    const { since_ts = 0, limit = 50 } = args as { since_ts?: number; limit?: number };
+    try {
+      const url =
+        `${SONATA_API}/api/dm/inbox` +
+        `?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}` +
+        `&since=${encodeURIComponent(String(since_ts))}` +
+        `&limit=${encodeURIComponent(String(limit))}`;
+      const res = await fetch(url);
+      const data: any = await res.json();
+      if (!res.ok) {
+        const code = data?.error_code || String(res.status);
+        const msg = data?.message || "";
+        return {
+          content: [{ type: "text" as const, text: `${code}: ${msg}` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
+    }
+  }
+
   if (name === "fail_event") {
     lastProgressMs = Date.now();
     await pushLiveHeartbeat();
@@ -451,6 +681,45 @@ function ensureAFKPollLoop(): void {
       }
     } catch {}
   }, AFK_POLL_INTERVAL_MS);
+}
+
+// --- DM polling ---
+
+/** Start the Sonar-DM reply poller if it isn't already running. Independent
+ * of the AFK loop (separate timer, separate endpoint) but shares
+ * BRIDGE_SESSION_ID — both routes drain into the same Claude session. */
+function ensureDMPollLoop(): void {
+  if (dmPollTimer) return;
+  dmPollTimer = setInterval(async () => {
+    if (!dmRegistered) return;
+    try {
+      const url = `${SONATA_API}/api/dm/poll?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data: any = await res.json();
+      const messages: any[] = data?.messages || [];
+      for (const m of messages) {
+        const sender = m.fromSessionId || m.fromPubkey || "unknown";
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: `[DM from ${sender}]\n${m.body || ""}`,
+            meta: {
+              event_type: "sonar_dm",
+              message_id: String(m.messageId || ""),
+              from_session_id: String(m.fromSessionId || ""),
+              from_pubkey: String(m.fromPubkey || ""),
+              from_peer_id: String(m.fromPeerId || ""),
+              target_session_id: String(m.targetSessionId || ""),
+              sent_at_ms: String(m.sentAtMs || ""),
+              context: String(m.context || ""),
+              meta_json: m.metaJson ? String(m.metaJson) : "",
+            },
+          },
+        });
+      }
+    } catch {}
+  }, DM_POLL_INTERVAL_MS);
 }
 
 // --- External bridge tracking ---
