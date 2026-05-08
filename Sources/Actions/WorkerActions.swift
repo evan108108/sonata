@@ -67,9 +67,14 @@ private struct PromptCacheStatsItem: Encodable {
 private func sweepStaleWorkersForActions(in db: Database) throws {
     let cutoff = nowMs() - 30_000
 
+    // Restart-recovery v0: exclude `recovering` so freshly-respawned workers
+    // get their 30s grace window before the sweeper marks them offline + the
+    // task-failure path auto-retries their work (sonata-restart-recovery-v0
+    // §4 / §7). The recovery path stamps lastHeartbeat=now when it flips
+    // status='recovering', so this guard is a redundant belt-and-suspenders.
     let staleWorkers = try Row.fetchAll(db, sql: """
         SELECT workerId, currentEventId FROM workers
-        WHERE lastHeartbeat < ? AND status != 'offline'
+        WHERE lastHeartbeat < ? AND status NOT IN ('offline', 'recovering')
     """, arguments: [cutoff])
 
     // Workers that lost heartbeat unexpectedly flip to 'offline' so the supervisor
@@ -78,7 +83,7 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
     // a worker that is supposed to be going away. Drop them outright instead.
     try db.execute(sql: """
         UPDATE workers SET status = 'offline'
-        WHERE lastHeartbeat < ? AND status NOT IN ('offline', 'draining')
+        WHERE lastHeartbeat < ? AND status NOT IN ('offline', 'draining', 'recovering')
     """, arguments: [cutoff])
 
     try db.execute(sql: """
@@ -234,6 +239,10 @@ let workerActions: [SonataAction] = [
                             arguments: [sessionLabel, workerId]
                         )
                     }
+                    // Status is derived from currentEventId on register too —
+                    // a registering worker with prior work pending (restart-recovery
+                    // case) must come up 'busy', not 'idle', or the UI shows the
+                    // wrong state until the first heartbeat fixes it.
                     try db.execute(
                         sql: """
                         INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt, sessionId)
@@ -243,7 +252,11 @@ let workerActions: [SonataAction] = [
                             capabilities = excluded.capabilities,
                             lastHeartbeat = excluded.lastHeartbeat,
                             sessionId = excluded.sessionId,
-                            status = 'idle'
+                            status = CASE
+                                WHEN status IN ('offline', 'draining') THEN status
+                                WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
+                                ELSE 'idle'
+                            END
                         """,
                         arguments: [newUUID(), workerId, sessionLabel, capsJSON, now, now, sessionId]
                     )
@@ -284,6 +297,13 @@ let workerActions: [SonataAction] = [
             let now = nowMs()
             do {
                 let changed = try await ctx.dbPool.write { db -> Int in
+                    // Status is derived on every heartbeat: any worker with a
+                    // currentEventId is BUSY, any without one is IDLE. Terminal
+                    // states (offline, draining) are not overridden — those are
+                    // explicit lifecycle decisions. This makes status rock-solid
+                    // for the UI: the workers row always reflects truth, and
+                    // restart-recovery's transient 'recovering' state auto-resolves
+                    // to busy/idle as soon as the new bridge heartbeats.
                     try db.execute(
                         sql: """
                         UPDATE workers SET
@@ -293,7 +313,12 @@ let workerActions: [SonataAction] = [
                             currentSlug = COALESCE(?, currentSlug),
                             currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
                             currentInputTokens = COALESCE(?, currentInputTokens),
-                            currentPromptHash = COALESCE(?, currentPromptHash)
+                            currentPromptHash = COALESCE(?, currentPromptHash),
+                            status = CASE
+                                WHEN status IN ('offline', 'draining') THEN status
+                                WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
+                                ELSE 'idle'
+                            END
                         WHERE workerId = ?
                         """,
                         arguments: [now, lastProgressAt,

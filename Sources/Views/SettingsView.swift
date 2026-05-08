@@ -211,8 +211,8 @@ struct SettingsView: View {
                         MCPManagerView()
                     }
 
-                    // MARK: - Worker Cycling Section
-                    collapsibleSection("Worker Cycling", icon: "arrow.triangle.2.circlepath", expanded: $workerExpanded) {
+                    // MARK: - Workers Section
+                    collapsibleSection("Workers", icon: "arrow.triangle.2.circlepath", expanded: $workerExpanded) {
                         WorkerCyclingSettingsView()
                     }
 
@@ -416,6 +416,8 @@ struct SecretEntry: Identifiable, Codable {
 // MARK: - Worker Cycling Settings
 
 struct WorkerCyclingSettingsView: View {
+    @State private var defaultWorkerCount: Int = WorkerManager.defaultWorkerCount
+    @State private var restartRecoveryEnabled: Bool = WorkerManager.restartRecoveryEnabled
     @State private var cycleTasks: Int = {
         let val = UserDefaults.standard.integer(forKey: "sonata.cycleTasks")
         return val > 0 ? val : 4
@@ -437,7 +439,7 @@ struct WorkerCyclingSettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Worker Cycling")
+                Text("Workers")
                     .font(.headline)
                 Spacer()
                 if pauseCycling {
@@ -455,6 +457,25 @@ struct WorkerCyclingSettingsView: View {
             Divider()
 
             VStack(spacing: 12) {
+                settingRow(label: "Default workers on launch", description: "Pool size at app boot. Pool grows automatically when restart-recovery resurrects more.", value: $defaultWorkerCount, range: 1...16, key: "defaultWorkerCount")
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Restart recovery")
+                            .font(.body)
+                        Text("On launch, respawn workers that died holding active tasks; resume their prior claude sessions via --resume.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $restartRecoveryEnabled)
+                        .toggleStyle(.switch)
+                        .onChange(of: restartRecoveryEnabled) { _, newValue in
+                            WorkerManager.restartRecoveryEnabled = newValue
+                        }
+                }
+                .padding(.horizontal)
+
                 settingRow(label: "Cycle after N tasks", description: "Replace worker process after this many completed tasks. 0 = disabled.", value: $cycleTasks, range: 0...50, key: "sonata.cycleTasks")
 
                 settingRow(label: "Spawn timeout", description: "Seconds to wait for replacement to register.", value: $spawnTimeout, range: 5...300, key: "sonata.spawnTimeout")

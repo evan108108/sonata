@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftTerm
 import AppKit
+import GRDB
 
 // MARK: - Worker Model
 
@@ -36,12 +37,21 @@ class Worker: ObservableObject, Identifiable {
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     }
 
-    func startProcess() {
+    /// Recovery init: reuse a candidate's prior workerId + sessionId so claude
+    /// resumes the existing JSONL on relaunch (sonata-restart-recovery-v0-plan §4).
+    init(label: String, workerId: String, sessionId: String) {
+        self.id = workerId
+        self.label = label
+        self.sessionId = sessionId
+        self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+    }
+
+    func startProcess(restartNudge: Bool = false, taskId: String? = nil, lastEventId: String? = nil) {
         let coord = WorkerCoordinator(worker: self)
         self.coordinator = coord
         terminalView.processDelegate = coord
         coord.terminalView = terminalView
-        coord.startProcess()
+        coord.startProcess(restartNudge: restartNudge, taskId: taskId, lastEventId: lastEventId)
     }
 
     enum WorkerStatus: String {
@@ -99,6 +109,25 @@ class WorkerManager: ObservableObject {
         }
     }
 
+    /// Whether to respawn recovery workers on app launch (sonata-restart-recovery v0).
+    /// Defaults to ON (the feature is the point of v0). Stored in UserDefaults so
+    /// settings UI can toggle without env-var fiddling. Reads SONATA_RESTART_RECOVERY
+    /// env as an override for testing if set to "0" or "1".
+    static var restartRecoveryEnabled: Bool {
+        get {
+            if let env = ProcessInfo.processInfo.environment["SONATA_RESTART_RECOVERY"] {
+                return env == "1"
+            }
+            if UserDefaults.standard.object(forKey: "restartRecoveryEnabled") == nil {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: "restartRecoveryEnabled")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "restartRecoveryEnabled")
+        }
+    }
+
     /// Config — mirrors SonaWorkers Config but reads from env
     static var claudeBinary: String {
         if let env = ProcessInfo.processInfo.environment["SONA_CLAUDE_BINARY"] {
@@ -136,18 +165,92 @@ class WorkerManager: ObservableObject {
     }
 
     init() {
-        startHealthPolling()
+        // Health polling is started by SonataApp boot AFTER respawnRecoveryWorkers
+        // and spawnDefaultWorkers populate the workers collection. Starting it here
+        // would race the recovery: pollHealth → maintainPoolSize → addWorker(label:)
+        // would spawn fresh-ID Workers in slots before the recovery workers appear.
     }
 
     /// Spawn the default number of workers on app launch.
     /// Called from SonataApp after the HTTP server is ready.
+    ///
+    /// `reservingFor` is the count of recovery workers already pre-populated by
+    /// `respawnRecoveryWorkers()`. Slot indices `1...reservingFor` are skipped so
+    /// recovery workers and fresh-default workers don't double-allocate the pool
+    /// (sonata-restart-recovery-v0-plan §4).
     @MainActor
-    func spawnDefaultWorkers() {
-        guard workers.isEmpty else { return } // don't double-spawn
+    func spawnDefaultWorkers(reservingFor: Int = 0) {
+        guard workers.count <= reservingFor else { return } // don't double-spawn
         let count = WorkerManager.defaultWorkerCount
-        for i in 1...count {
+        let total = max(reservingFor, count)
+        guard total > reservingFor else { return }
+        for i in (reservingFor + 1)...total {
             addWorker(label: "sona-worker-\(i)")
         }
+    }
+
+    /// Restart-recovery v0 (T4): on app boot, find workers whose `lastHeartbeat`
+    /// is stale AND whose `currentEventId` points to a still-active task, then
+    /// spawn replacement processes reusing the prior `workerId`/`sessionId`/
+    /// `sessionLabel`. claude resumes the existing JSONL session and the bridge
+    /// fires a one-shot `sonata_restart` channel event so the worker knows it's
+    /// resumed. Returns the count of recoveries actually started so
+    /// `spawnDefaultWorkers(reservingFor:)` doesn't double-allocate slots.
+    @MainActor
+    func respawnRecoveryWorkers(dbPool: DatabasePool) async -> Int {
+        let now = nowMs()
+        // Boot-time recovery: every existing worker is dead (Sonata just started;
+        // none have heartbeated yet). The runtime 30s stale threshold doesn't
+        // apply — pass Int64.max so the lastHeartbeat filter accepts any row.
+        let candidates = findStaleWorkersWithActiveWork(
+            in: dbPool,
+            cutoffMs: Int64.max,
+            taskMaxAgeMs: now - 86_400_000
+        )
+        if candidates.isEmpty {
+            return 0
+        }
+
+        var spawned = 0
+        for candidate in candidates {
+            let priorAgeSec: Int64
+            do {
+                priorAgeSec = try await dbPool.write { db -> Int64 in
+                    let row = try Row.fetchOne(db, sql: """
+                        SELECT lastHeartbeat FROM workers WHERE workerId = ?
+                    """, arguments: [candidate.workerId])
+                    let age = (row?["lastHeartbeat"] as? Int64).map { (now - $0) / 1000 } ?? 0
+                    // Set status='busy' directly — the worker has currentEventId
+                    // pointing at an active task, so the derived-state rule is
+                    // already busy. Setting 'recovering' first and letting heartbeat
+                    // resolve it adds 15-30s of UI lag where the worker shows idle.
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'busy', lastHeartbeat = ?
+                        WHERE workerId = ?
+                    """, arguments: [now, candidate.workerId])
+                    return age
+                }
+            } catch {
+                print("[restart-recovery] skipped workerId=\(candidate.workerId) taskId=\(candidate.taskId) reason=db-write-failed:\(error.localizedDescription)")
+                continue
+            }
+
+            print("[restart-recovery] respawning workerId=\(candidate.workerId) taskId=\(candidate.taskId) priorSessionAge=\(priorAgeSec)")
+
+            let label = candidate.sessionLabel.isEmpty ? "sona-worker-recovery" : candidate.sessionLabel
+            let worker = Worker(label: label, workerId: candidate.workerId, sessionId: candidate.sessionId)
+            workers.append(worker)
+            selectedWorkerId = worker.id
+            let taskId = candidate.taskId
+            let lastEventId = candidate.currentEventId
+            DispatchQueue.main.async {
+                worker.startProcess(restartNudge: true, taskId: taskId, lastEventId: lastEventId)
+            }
+            spawned += 1
+        }
+
+        print("[restart-recovery] recovered \(spawned) workers")
+        return spawned
     }
 
     /// Ensure the pool has a Worker for every slot index in 1...defaultWorkerCount.
@@ -357,7 +460,7 @@ class WorkerManager: ObservableObject {
         }
     }
 
-    private func startHealthPolling() {
+    func startHealthPolling() {
         healthTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.pollHealth()
         }
@@ -474,10 +577,17 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         self.worker = worker
     }
 
-    func startProcess() {
+    func startProcess(restartNudge: Bool = false, taskId: String? = nil, lastEventId: String? = nil) {
         guard let view = terminalView else { return }
 
-        let env = WorkerCoordinator.buildEnvironment(workerId: worker.id, sessionId: worker.sessionId, sessionLabel: worker.label)
+        let env = WorkerCoordinator.buildEnvironment(
+            workerId: worker.id,
+            sessionId: worker.sessionId,
+            sessionLabel: worker.label,
+            restartNudge: restartNudge,
+            taskId: taskId,
+            lastEventId: lastEventId
+        )
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -487,7 +597,15 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             terminal.resetToInitialState()
 
             var args: [String] = []
-            args.append(contentsOf: ["--session-id", self.worker.sessionId])
+            // Recovery workers use --resume to load the existing JSONL session;
+            // claude rejects --session-id with "already in use" when the JSONL exists
+            // (sessionIdExists in claude's CLI just statSyncs <sessionId>.jsonl).
+            // Fresh workers use --session-id with a new UUID — no existing JSONL.
+            if restartNudge {
+                args.append(contentsOf: ["--resume", self.worker.sessionId])
+            } else {
+                args.append(contentsOf: ["--session-id", self.worker.sessionId])
+            }
             if WorkerManager.skipPermissions {
                 args.append("--dangerously-skip-permissions")
             }
@@ -576,7 +694,14 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
     }
 
-    static func buildEnvironment(workerId: String, sessionId: String? = nil, sessionLabel: String? = nil) -> [String] {
+    static func buildEnvironment(
+        workerId: String,
+        sessionId: String? = nil,
+        sessionLabel: String? = nil,
+        restartNudge: Bool = false,
+        taskId: String? = nil,
+        lastEventId: String? = nil
+    ) -> [String] {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
@@ -603,6 +728,15 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
         if let sessionId {
             env.append("SONA_SESSION_ID=\(sessionId)")
+        }
+        if restartNudge {
+            env.append("SONATA_RESTART_NUDGE=1")
+        }
+        if let taskId {
+            env.append("SONATA_RESTART_TASK_ID=\(taskId)")
+        }
+        if let lastEventId {
+            env.append("SONATA_RESTART_LAST_EVENT_ID=\(lastEventId)")
         }
 
         // Pass through auth and API keys from parent environment or .env file

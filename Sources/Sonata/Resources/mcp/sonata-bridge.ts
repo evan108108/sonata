@@ -755,8 +755,43 @@ async function autoRegisterDM(): Promise<void> {
     dmRegistered = true;
     ensureDMPollLoop();
     console.error(`[sonata-bridge] DM auto-registered: sessionId=${BRIDGE_SESSION_ID} role=${role}`);
+    void maybeFireRestartNudge();
   } else {
     console.error(`[sonata-bridge] DM auto-register failed (status ${result.status}); sonar_dm_register MCP tool can be used as fallback`);
+  }
+}
+
+/** One-shot restart-recovery nudge. When Sonata.app respawns a worker after a
+ * restart it sets SONATA_RESTART_NUDGE=1 in the child env; on first successful
+ * DM auto-register we push a `sonata_restart` channel notification so the
+ * resumed claude session knows to look at its last action and decide whether
+ * to retry / recover / continue. Fire-and-forget; never crashes the bridge. */
+async function maybeFireRestartNudge(): Promise<void> {
+  if (process.env.SONATA_RESTART_NUDGE !== "1") return;
+  const taskId = process.env.SONATA_RESTART_TASK_ID || "";
+  const lastEventId = process.env.SONATA_RESTART_LAST_EVENT_ID || "";
+  const restartedAt = Date.now();
+  const content =
+    `[SONATA_RESTART] task=${taskId} ts=${restartedAt}\n` +
+    `Sonata.app was restarted. You are resumed in your prior conversation. ` +
+    `Look at your most recent action — if it was a tool call without a result, ` +
+    `decide whether to retry, recover, or continue. Otherwise carry on.`;
+  try {
+    await mcp.notification({
+      method: "notifications/claude/channel",
+      params: {
+        content,
+        meta: {
+          event_type: "sonata_restart",
+          task_id: taskId,
+          last_event_id: lastEventId,
+          restarted_at_ms: String(restartedAt),
+        },
+      },
+    });
+    console.error("[sonata-bridge] sonata_restart nudge fired for task=" + taskId);
+  } catch (err) {
+    console.error("[sonata-bridge] sonata_restart nudge failed: " + err);
   }
 }
 

@@ -486,12 +486,23 @@ struct SonataApp: App {
 
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")
 
-                // 6. Spawn default workers (runs on MainActor since it creates terminal views)
+                // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up
+                // the default pool. Both run on MainActor since they create terminal views.
                 let workerCount = WorkerManager.defaultWorkerCount
+                // sonata-restart-recovery v0 (claude/documents/evenflow/sonata-restart-recovery-v0-plan.md):
+                // when toggled on, respawn workers that died holding active work, reusing
+                // their prior workerId/sessionId so claude --resume loads the prior JSONL.
+                // Toggle stored in UserDefaults at "restartRecoveryEnabled" (UI exposes it);
+                // SONATA_RESTART_RECOVERY env override available for testing.
+                let enableRecovery = WorkerManager.restartRecoveryEnabled
+                let recovered = enableRecovery
+                    ? await WorkerManager.shared.respawnRecoveryWorkers(dbPool: pool)
+                    : 0
                 await MainActor.run {
-                    WorkerManager.shared.spawnDefaultWorkers()
+                    WorkerManager.shared.spawnDefaultWorkers(reservingFor: recovered)
+                    WorkerManager.shared.startHealthPolling()
                 }
-                logger.info("Spawned \(workerCount) default workers")
+                logger.info("Spawned \(workerCount) default workers (\(recovered) recovered, recovery=\(enableRecovery ? "on" : "off"))")
 
                 // 6b. Spawn the supervisor window (hidden by default — accessible from Window menu).
                 // Creating the NSWindow spins up the SupervisorTerminalView, which starts Claude
