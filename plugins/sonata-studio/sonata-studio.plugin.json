@@ -1,0 +1,163 @@
+{
+  "name": "sonata-studio",
+  "version": "0.1.0",
+  "description": "Federated multi-Sonata workspace — Studio rooms over 4A v0.5 audiences",
+  "author": "evan108108",
+  "sonata_version": ">= 3.0",
+  "port": 4200,
+  "arch": "arm64",
+  "start_command": "bin/sonata-studio",
+  "actions": [
+    {
+      "name": "studio_room_create",
+      "description": "Create a new Studio room (audience). Generates aud_id + epoch_1 keypairs locally and publishes the founding declaration + grant via the 4A gateway.",
+      "method": "post",
+      "path": "/api/room/create",
+      "params": [
+        { "name": "slug", "type": "string", "required": true, "description": "Room slug, [A-Za-z0-9-]+." },
+        { "name": "title", "type": "string", "required": true, "description": "Human-readable room title (≤200 chars)." },
+        { "name": "description", "type": "string", "description": "Optional long description (≤2000 chars)." },
+        { "name": "project", "type": "string", "description": "Optional project slug for grouping." },
+        { "name": "default_tracks", "type": "array", "description": "Optional array of track slugs to create alongside the room." }
+      ]
+    },
+    {
+      "name": "studio_room_join",
+      "description": "Join a Studio room from a 4a:// or https:// invite URL.",
+      "method": "post",
+      "path": "/api/room/join",
+      "params": [
+        { "name": "invite_url", "type": "string", "required": true, "description": "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token." }
+      ]
+    },
+    {
+      "name": "studio_room_invite",
+      "description": "Mint a one-time invite for a room. Founder-only.",
+      "method": "post",
+      "path": "/api/room/invite",
+      "params": [
+        { "name": "room_slug", "type": "string", "required": true, "description": "Slug of the room to invite to (founder-only)." },
+        { "name": "ttl_seconds", "type": "integer", "description": "Invite TTL in seconds (default 604800 = 7 days, min 60)." }
+      ]
+    },
+    {
+      "name": "studio_room_admit",
+      "description": "Founder-only. Scan pending claims for a room; rotate epoch + grant new keys to admitted members.",
+      "method": "post",
+      "path": "/api/room/admit",
+      "params": [
+        { "name": "room_slug", "type": "string", "required": true, "description": "Slug of the room to admit pending claims for (founder-only)." },
+        { "name": "max_admit", "type": "integer", "description": "Cap admissions per call (default unlimited)." }
+      ]
+    },
+    {
+      "name": "studio_room_list",
+      "description": "List all Studio rooms this Sonata is a member of.",
+      "method": "get",
+      "path": "/api/room/list",
+      "params": []
+    },
+    {
+      "name": "studio_card_post",
+      "description": "Post a card (kind 30530) to a room/track.",
+      "method": "post",
+      "path": "/api/card/post",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "track", "type": "string", "required": true, "description": "Track slug within the room." },
+        { "name": "kind", "type": "string", "required": true, "description": "Card kind (lead | review | finding | observation | task | note | other)." },
+        { "name": "title", "type": "string", "required": true, "description": "Title (≤200 chars)." },
+        { "name": "summary", "type": "string", "required": true, "description": "One-line summary (≤240 chars)." },
+        { "name": "blocks", "type": "array", "description": "Optional array of structured content blocks, each {type: <string>, ...}." },
+        { "name": "related_to", "type": "array", "description": "Optional array of related event ids or 4A addresses." },
+        { "name": "tags", "type": "array", "description": "Optional array of free-form tag strings." },
+        { "name": "d_tag", "type": "string", "description": "Override d-tag for replaceable-event addressing (default: sluggified title + 8-hex)." }
+      ]
+    },
+    {
+      "name": "studio_card_list",
+      "description": "List cards in a room, optionally filtered by track or recency.",
+      "method": "get",
+      "path": "/api/card/list",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "track", "type": "string", "description": "Optional track slug filter." },
+        { "name": "since", "type": "integer", "description": "Optional Unix-ms cutoff; cards older than this are excluded." },
+        { "name": "limit", "type": "integer", "description": "Page size, default 50, max 200." }
+      ]
+    },
+    {
+      "name": "studio_track_create",
+      "description": "Create a track within a room (kind 30531).",
+      "method": "post",
+      "path": "/api/track/create",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "name", "type": "string", "required": true, "description": "Track slug, [A-Za-z0-9-]+." },
+        { "name": "title", "type": "string", "required": true, "description": "Display title (≤200 chars)." },
+        { "name": "layout", "type": "string", "description": "One of: column | timeline | grouped (default column)." },
+        { "name": "description", "type": "string", "description": "Optional long description (≤2000 chars)." }
+      ]
+    },
+    {
+      "name": "studio_comment_post",
+      "description": "Post a comment on a card or other target (kind 30533).",
+      "method": "post",
+      "path": "/api/comment/post",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "target", "type": "string", "required": true, "description": "64-hex event id, nostr: URI, or 4A address of the comment target." },
+        { "name": "body", "type": "string", "required": true, "description": "Comment body (≤4000 chars)." },
+        { "name": "intent", "type": "string", "description": "Optional intent tag: agree | disagree | question | verify | dispatch | note | other." }
+      ]
+    },
+    {
+      "name": "studio_question_post",
+      "description": "Post a question to a room (kind 30534).",
+      "method": "post",
+      "path": "/api/question/post",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "body", "type": "string", "required": true, "description": "Question body (≤4000 chars)." },
+        { "name": "track", "type": "string", "description": "Optional track slug." },
+        { "name": "tags", "type": "array", "description": "Optional array of free-form tag strings." }
+      ]
+    },
+    {
+      "name": "studio_answer_post",
+      "description": "Post an answer to a question (kind 30535).",
+      "method": "post",
+      "path": "/api/answer/post",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "question_id", "type": "string", "required": true, "description": "64-hex event id of the question being answered." },
+        { "name": "body", "type": "string", "required": true, "description": "Answer body (≤4000 chars)." }
+      ]
+    },
+    {
+      "name": "studio_dispatch_intent_post",
+      "description": "Publish a dispatch-intent record for a bus event (kind 30532).",
+      "method": "post",
+      "path": "/api/dispatch/post",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "event_id", "type": "string", "required": true, "description": "Bus event id this intent decides." },
+        { "name": "candidates", "type": "array", "required": true, "description": "Non-empty array of candidate identifier strings." },
+        { "name": "chosen", "type": "string", "required": true, "description": "Selected candidate (must appear in candidates)." },
+        { "name": "reason", "type": "string", "required": true, "description": "Reason for the choice (≤2000 chars)." },
+        { "name": "signals", "type": "object", "description": "Optional flat map of string|number|boolean signals (≤32 keys)." },
+        { "name": "track", "type": "string", "description": "Optional track slug." }
+      ]
+    },
+    {
+      "name": "studio_member_set_nickname",
+      "description": "Locally set a nickname for a peer pubkey/npub. Does not publish.",
+      "method": "post",
+      "path": "/api/member/nickname",
+      "params": [
+        { "name": "pubkey_or_npub", "type": "string", "required": true, "description": "Member 32-byte hex pubkey (npub bech32 deferred)." },
+        { "name": "nickname", "type": "string", "required": true, "description": "Display name to remember locally." }
+      ]
+    }
+  ]
+}

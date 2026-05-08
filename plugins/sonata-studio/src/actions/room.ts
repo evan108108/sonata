@@ -30,9 +30,24 @@ import {
 } from "./util";
 import { track as trackActions } from "./track";
 
+/**
+ * Minimal SSEManager surface the action layer reaches into. Kept narrow so
+ * tests can inject a noop without depending on the full SSEManager type.
+ */
+export interface SSEOpener {
+  open(roomSlug: string): Promise<void>;
+}
+
 export interface ActionCtx {
   cfg: PluginConfig;
   gateway: GatewayClient;
+  /**
+   * Optional in tests — when present, `joinRoom` opens the SSE stream for
+   * the new room before returning so the gateway's key-grant for this
+   * recipient cannot land in the gap between `rawClaim` returning and the
+   * stream being opened. Plan §7 Pass D1.
+   */
+  sseManager?: SSEOpener;
 }
 
 interface RoomCreateRequest {
@@ -472,9 +487,28 @@ export async function joinRoom(
       members: declTagsToMembers(declTags),
       state: "pending-grant",
       last_seen_wrap_at_ms: null,
+      joined_at_ms: Date.now(),
       tags: ["sonata-studio", `room:${parsed.slug}`],
     },
   });
+
+  // Open the SSE stream BEFORE returning so the founder's rotate-and-grant
+  // can't slip into a window where the room exists locally but no SSE
+  // client is listening for the key-grant. Plan §7 Pass D1+D3.
+  if (ctx.sseManager) {
+    try {
+      await ctx.sseManager.open(parsed.slug);
+    } catch (err) {
+      // Don't fail the join just because SSE failed to open — the run loop
+      // self-recovers on reconnect. Log only.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[room.join] sseManager.open("${parsed.slug}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 
   return {
     audience_address: audAddr,
