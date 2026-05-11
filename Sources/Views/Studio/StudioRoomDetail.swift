@@ -13,6 +13,7 @@ struct StudioRoomDetail: View {
 
     @State private var selectedTrack: String? = nil
     @State private var showDispatchTrace: Bool = false
+    @State private var selectedCard: StudioCard? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,11 +32,15 @@ struct StudioRoomDetail: View {
                 room: room,
                 track: selectedTrack,
                 dispatchTrace: dispatchTraceActive,
-                store: store
+                store: store,
+                selectedCard: $selectedCard
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(NSColor.textBackgroundColor))
+        .overlay(alignment: .trailing) { drawerOverlay }
+        .animation(.easeOut(duration: 0.18), value: selectedCard?.eventId)
+        .onChange(of: room.slug) { _, _ in selectedCard = nil }
         .onAppear {
             showDispatchTrace = room.dispatchTraceOn
             store.openRoom(room.slug)
@@ -131,5 +136,40 @@ struct StudioRoomDetail: View {
 
     private var dispatchTraceActive: Bool {
         showDispatchTrace && selectedTrack == StudioTrackBar.dispatchTraceTag
+    }
+
+    // MARK: - Drawer overlay
+
+    @ViewBuilder
+    private var drawerOverlay: some View {
+        if let card = selectedCard, let fetcher = store.imageFetcher {
+            ZStack(alignment: .trailing) {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedCard = nil }
+                StudioCardDetailDrawer(
+                    card: card,
+                    store: store,
+                    fetcher: fetcher,
+                    selectedCard: $selectedCard,
+                    onEnrich: { _ in /* T5 */ },
+                    onOpenPR: { c in openPRLink(card: c) },
+                    onAnswer: { _ in /* T5 */ }
+                )
+            }
+        }
+    }
+
+    private func openPRLink(card: StudioCard) {
+        for b in card.blocks {
+            if case .link(let href, let label) = b,
+               (label ?? "").trimmingCharacters(in: .whitespaces) == "PR",
+               let url = URL(string: href),
+               let scheme = url.scheme?.lowercased(),
+               scheme == "http" || scheme == "https" {
+                NSWorkspace.shared.open(url)
+                return
+            }
+        }
     }
 }

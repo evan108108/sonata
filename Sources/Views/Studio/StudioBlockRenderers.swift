@@ -1,0 +1,345 @@
+import AppKit
+import SwiftUI
+
+// MARK: - TextBlockView
+
+/// Markdown body via `AttributedString(markdown:)`. macOS 13+ ships
+/// GitHub-flavored inline markdown. On decode error, falls back to plain text.
+struct TextBlockView: View {
+    let text: String
+
+    var body: some View {
+        if let attributed = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            Text(attributed)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+// MARK: - CodeBlockView
+
+/// Monospaced code block with hover-revealed copy button.
+struct CodeBlockView: View {
+    let language: String
+    let code: String
+
+    @State private var hovering: Bool = false
+    @State private var copied: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(language.isEmpty ? "code" : language)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if hovering {
+                    Button {
+                        copy()
+                    } label: {
+                        Label(copied ? "Copied" : "Copy",
+                              systemImage: copied ? "checkmark" : "doc.on.doc")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.gray.opacity(0.18))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+            .background(Color.gray.opacity(0.10))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .onHover { hovering = $0 }
+    }
+
+    private func copy() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(code, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            copied = false
+        }
+    }
+}
+
+// MARK: - LinkBlockView
+
+/// Clickable text. Opens `href` via `NSWorkspace.shared.open`. Only `http`/
+/// `https` URLs are clickable; everything else degrades to plain text.
+struct LinkBlockView: View {
+    let href: String
+    let label: String?
+
+    var body: some View {
+        if let url = Self.validURL(href) {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                HStack(spacing: 4) {
+                    Text(label?.isEmpty == false ? label! : href)
+                        .underline()
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.caption)
+                }
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Text(label?.isEmpty == false ? label! : href)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    static func validURL(_ s: String) -> URL? {
+        guard let url = URL(string: s) else { return nil }
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        return url
+    }
+}
+
+// MARK: - FieldBlockView
+
+/// Two-column key/value row. v0 ragged-alignment per W5 R3.
+struct FieldBlockView: View {
+    let key: String
+    let value: String
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 12, verticalSpacing: 0) {
+            GridRow {
+                Text(key)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .gridColumnAlignment(.trailing)
+                Text(value)
+                    .font(.body)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+// MARK: - ImageBlockView
+
+/// Three states: loading, loaded, failed. The fetcher is the `StudioImageFetcher`
+/// actor; `roomSlug` and `authorPubHex` come from the drawer's containing card.
+struct ImageBlockView: View {
+    let block: StudioImageBlock
+    let room: String
+    let authorPubHex: String
+    let fetcher: StudioImageFetcher
+
+    @State private var image: CGImage? = nil
+    @State private var error: StudioImageError? = nil
+    @State private var fullscreenOpen: Bool = false
+
+    var body: some View {
+        Group {
+            if let img = image {
+                Image(decorative: img, scale: 1.0, orientation: .up)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { fullscreenOpen = true }
+                    .sheet(isPresented: $fullscreenOpen) {
+                        ImageFullscreen(cgImage: img, dismiss: { fullscreenOpen = false })
+                    }
+            } else if let err = error {
+                failed(err)
+            } else {
+                loading
+            }
+        }
+        .task(id: block.sha256) {
+            await load()
+        }
+    }
+
+    @ViewBuilder
+    private var loading: some View {
+        VStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("decrypting…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 80)
+    }
+
+    @ViewBuilder
+    private func failed(_ err: StudioImageError) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "photo.fill")
+                .foregroundStyle(.secondary)
+            Text(Self.toastText(for: err))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.gray.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func load() async {
+        do {
+            let cg = try await fetcher.image(
+                for: block,
+                room: room,
+                authorPubHex: authorPubHex
+            )
+            await MainActor.run {
+                self.image = cg
+                self.error = nil
+            }
+        } catch let e as StudioImageError {
+            await MainActor.run { self.error = e }
+        } catch {
+            await MainActor.run { self.error = .decodeFailed }
+        }
+    }
+
+    /// Toast text from spec §13. Drawer-local strings match the global toast.
+    static func toastText(for err: StudioImageError) -> String {
+        switch err {
+        case .allMirrorsFailed:
+            return "Image unavailable on any mirror."
+        case .integrityMismatch(let host):
+            return "Image integrity check failed on \(host)."
+        case .decryptFailed:
+            return "Image cannot be decrypted (wrong epoch)."
+        case .missingEpochKey(let n):
+            return "Image references epoch \(n); key not yet received."
+        case .decodeFailed:
+            return "Image data could not be decoded."
+        }
+    }
+}
+
+/// Full-screen sheet. Renders the CGImage at native size, scrollable.
+struct ImageFullscreen: View {
+    let cgImage: CGImage
+    let dismiss: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.opacity(0.85)
+                .ignoresSafeArea()
+                .onTapGesture(perform: dismiss)
+            ScrollView([.horizontal, .vertical]) {
+                Image(decorative: cgImage, scale: 1.0, orientation: .up)
+                    .frame(
+                        width: CGFloat(cgImage.width),
+                        height: CGFloat(cgImage.height)
+                    )
+            }
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .padding(16)
+            .keyboardShortcut(.escape, modifiers: [])
+        }
+        .frame(minWidth: 600, minHeight: 400)
+    }
+}
+
+// MARK: - UnknownBlockView
+
+/// "Unsupported block: <type>" line; debug disclosure visible when the room's
+/// `dispatchTraceOn` is true.
+struct UnknownBlockView: View {
+    let type: String
+    let raw: [String: AnyCodableValue]
+    let dispatchTraceOn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Unsupported block: \(type)")
+                .font(.body.italic())
+                .foregroundStyle(.secondary)
+            if dispatchTraceOn {
+                DisclosureGroup("debug info") {
+                    Text(Self.prettyJSON(raw))
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .background(Color.gray.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .font(.caption)
+            }
+        }
+    }
+
+    static func prettyJSON(_ raw: [String: AnyCodableValue]) -> String {
+        struct Box: Encodable {
+            let raw: [String: AnyCodableValue]
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: K.self)
+                for (k, v) in raw {
+                    try c.encode(v, forKey: K(stringValue: k)!)
+                }
+            }
+            struct K: CodingKey {
+                let stringValue: String
+                init?(stringValue s: String) { self.stringValue = s }
+                var intValue: Int? { nil }
+                init?(intValue: Int) { return nil }
+            }
+        }
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? enc.encode(Box(raw: raw)),
+           let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return String(describing: raw)
+    }
+}
+
+// MARK: - AnyCodableValue Encodable extension
+
+/// `AnyCodableValue` is `Decodable` in StudioModels but not `Encodable`.
+/// Pretty-printing JSON for `UnknownBlockView`'s debug disclosure needs encode;
+/// added here as a renderer-local concern (W5 R4).
+extension AnyCodableValue: Encodable {
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null:          try c.encodeNil()
+        case .bool(let b):   try c.encode(b)
+        case .int(let i):    try c.encode(i)
+        case .double(let d): try c.encode(d)
+        case .string(let s): try c.encode(s)
+        case .array(let a):  try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
+    }
+}

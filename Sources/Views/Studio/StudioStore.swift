@@ -20,11 +20,20 @@ final class StudioStore: ObservableObject {
     private var dbPool: DatabasePool?
     private var cancellables: [String: AnyDatabaseCancellable] = [:]
 
+    /// One-per-tab image fetcher. Created on `start(dbPool:)` because the
+    /// fetcher's epoch-key lookup needs the live pool. Held as `let?` so
+    /// downstream views (`StudioRoomDetail`, `StudioCardDetailDrawer`) can
+    /// pass it into `ImageBlockView` without rebuilding the actor.
+    private(set) var imageFetcher: StudioImageFetcher?
+
     init() {}
 
     func start(dbPool: DatabasePool) {
         if self.dbPool === dbPool, cancellables["rooms"] != nil { return }
         self.dbPool = dbPool
+        if imageFetcher == nil {
+            imageFetcher = StudioImageFetcher(dbPool: dbPool)
+        }
         if cancellables["rooms"] == nil {
             startRoomsObservation()
         }

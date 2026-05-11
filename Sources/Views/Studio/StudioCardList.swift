@@ -11,6 +11,7 @@ struct StudioCardList: View {
     let track: String?
     let dispatchTrace: Bool
     @ObservedObject var store: StudioStore
+    @Binding var selectedCard: StudioCard?
 
     var body: some View {
         ScrollView {
@@ -42,7 +43,12 @@ struct StudioCardList: View {
             )
         } else {
             ForEach(cards, id: \.id) { card in
-                StudioCardRowT2Placeholder(card: card, store: store)
+                StudioCardRow(
+                    card: card,
+                    authorName: store.displayName(for: card.createdByPubkey),
+                    commentCount: store.comments(forCard: card.eventId).count,
+                    selectedCard: $selectedCard
+                )
                 Divider().opacity(0.4)
             }
         }
@@ -101,73 +107,6 @@ struct StudioCardList: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 48)
-    }
-}
-
-// MARK: - Placeholder card row (replaced by §9.3's StudioCardRow)
-
-/// Minimal placeholder so T2 can verify the list scaffold end-to-end. §9.3
-/// will create `StudioCardRow.swift` with the full row and the implementer
-/// should delete this struct + rename the call site to `StudioCardRow(card:)`.
-private struct StudioCardRowT2Placeholder: View {
-    let card: StudioCard
-    @ObservedObject var store: StudioStore
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: kindSymbol)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(.secondary)
-                .frame(width: 18, alignment: .center)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(card.title.isEmpty ? "(untitled)" : card.title)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                HStack(spacing: 6) {
-                    Text(store.displayName(for: card.createdByPubkey))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("·")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text(relativeTime(card.createdAtSeconds))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 8)
-        .contentShape(Rectangle())
-    }
-
-    private var kindSymbol: String {
-        switch card.cardKind ?? "" {
-        case "lead":        return "briefcase.fill"
-        case "review":      return "checkmark.shield.fill"
-        case "finding":     return "magnifyingglass"
-        case "observation": return "eye.fill"
-        case "task":        return "checklist"
-        case "note":        return "note.text"
-        default:            return "square.text.square"
-        }
-    }
-
-    private func relativeTime(_ seconds: Int64) -> String {
-        let now = Int64(Date().timeIntervalSince1970)
-        let dt = max(0, now - seconds)
-        switch dt {
-        case 0..<60:       return "just now"
-        case 60..<3600:    return "\(dt / 60)m ago"
-        case 3600..<86400: return "\(dt / 3600)h ago"
-        case 86400..<604800: return "\(dt / 86400)d ago"
-        default:
-            let f = DateFormatter()
-            f.dateFormat = "MMM d"
-            return f.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
-        }
     }
 }
 
