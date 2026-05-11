@@ -345,16 +345,18 @@ async function mergeEpochKeysSecret(
   pubHex: string,
 ): Promise<void> {
   let parsed: Record<string, unknown> = {};
-  try {
-    const got = await secret.get(secretName);
-    if (got?.value) {
+  const got = await secret.getOrNull(secretName);
+  if (got?.value) {
+    try {
       const v = JSON.parse(got.value);
       if (v && typeof v === "object" && !Array.isArray(v)) {
         parsed = v as Record<string, unknown>;
       }
+    } catch {
+      // corrupt JSON on an existing secret — treat as empty so the
+      // upcoming write replaces it; the old behavior swallowed parse
+      // errors via the same catch that handled 404, so this preserves it.
     }
-  } catch {
-    // first-write — start with empty record
   }
   const epochsRaw = parsed["epochs"];
   const epochs: Record<string, { epoch: number; priv_hex: string; pub_hex: string }> =

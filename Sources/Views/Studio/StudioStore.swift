@@ -234,21 +234,24 @@ final class StudioStore: ObservableObject {
         }
     }
 
-    /// Toggle the per-room dispatch-trace pseudo-tab.
-    func setDispatchTraceOn(_ slug: String, _ on: Bool) {
-        guard let room = rooms.first(where: { $0.slug == slug }) else { return }
+    /// Toggle the per-room dispatch-trace pseudo-tab. Starts/stops the
+    /// `studio_dispatch_intent` observation for the room and patches the
+    /// local-only `dispatch_trace_on` attribute on the `studio_room` entity.
+    func setDispatchTraceOn(slug: String, _ on: Bool) async {
+        guard let room = rooms.first(where: { $0.slug == slug }) else {
+            NSLog("[StudioStore] setDispatchTraceOn: no room for slug \(slug)")
+            return
+        }
         if on {
             startDispatchIntentsObservation(forRoom: slug)
         } else {
             cancellables["dispatch-\(slug)"]?.cancel()
             cancellables.removeValue(forKey: "dispatch-\(slug)")
         }
-        Task {
-            await EntityHTTP.patchAttributes(
-                id: room.id,
-                attributes: ["dispatch_trace_on": on]
-            )
-        }
+        await EntityHTTP.patchAttributes(
+            id: room.id,
+            attributes: ["dispatch_trace_on": on]
+        )
     }
 
     // MARK: - Optimistic helpers (§15)
@@ -295,37 +298,23 @@ final class StudioStore: ObservableObject {
     }
 
     /// T1: POST `/api/plugins/sonata-studio/room/create` per §8.1. Default tracks
-    /// are sent as bare name strings (W1 R3); titles that differ from names are
-    /// patched via follow-up `studio_track_create` calls.
+    /// are sent as `{name, title}` objects so the plugin can stamp the user-typed
+    /// title on the first publish (no follow-up patch loop required).
     @discardableResult
     func createRoom(slug: String, title: String, description: String? = nil,
                     defaultTracks: [(name: String, title: String)] = []) async throws -> StudioRoom {
-        let names = defaultTracks.map { $0.name }
+        let tracks = defaultTracks.map { StudioDefaultTrack(name: $0.name, title: $0.title) }
         let req = StudioRoomCreateRequest(
             slug: slug,
             title: title,
             description: description,
             project: nil,
-            defaultTracks: names.isEmpty ? nil : names
+            defaultTracks: tracks.isEmpty ? nil : tracks
         )
         let response: StudioRoomCreateResponse = try await EntityHTTP.postPluginAction(
             path: "sonata-studio/room/create",
             body: req
         )
-
-        // Follow-up track title patches for any track whose title != name.
-        for t in defaultTracks where t.title != t.name && !t.title.isEmpty {
-            let trackReq = StudioTrackCreateRequest(
-                roomSlug: slug,
-                name: t.name,
-                title: t.title,
-                layout: nil
-            )
-            _ = try? await EntityHTTP.postPluginActionVoid(
-                path: "sonata-studio/track/create",
-                body: trackReq
-            )
-        }
 
         // Best-effort: return a synthetic StudioRoom snapshot from the response.
         // ValueObservation will deliver the real row shortly.
@@ -419,12 +408,17 @@ struct StudioRoomCreateRequest: Encodable {
     let title: String
     let description: String?
     let project: String?
-    let defaultTracks: [String]?
+    let defaultTracks: [StudioDefaultTrack]?
 
     enum CodingKeys: String, CodingKey {
         case slug, title, description, project
         case defaultTracks = "default_tracks"
     }
+}
+
+struct StudioDefaultTrack: Encodable {
+    let name: String
+    let title: String
 }
 
 struct StudioRoomCreateResponse: Decodable {

@@ -127,7 +127,7 @@ export async function loadRoomCtx(
   if (!SLUG.test(slug)) {
     throw new HttpError(400, "bad_request", `room slug "${slug}" must match [A-Za-z0-9-]+`);
   }
-  const ent = await entity.byName(`studio:room:${slug}`);
+  const ent = await entity.byNameOrNull(`studio:room:${slug}`);
   if (!ent) {
     throw new HttpError(404, "room_not_found", `no local studio_room for slug "${slug}"`);
   }
@@ -155,12 +155,8 @@ export async function loadRoomCtx(
       ? (attrs["aud_id_priv_secret_name"] as string)
       : null;
   if (audIdPrivSecretName) {
-    try {
-      const got = await secret.get(audIdPrivSecretName);
-      audIdPrivHex = got?.value?.toLowerCase() ?? null;
-    } catch {
-      audIdPrivHex = null;
-    }
+    const got = await secret.getOrNull(audIdPrivSecretName);
+    audIdPrivHex = got?.value?.toLowerCase() ?? null;
   }
 
   // Current epoch keypair — secret stores a JSON record keyed by epoch.

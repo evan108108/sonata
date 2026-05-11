@@ -21,3 +21,9 @@ DerivedData/
 
 # Dependencies (resolved via SPM)
 # Package.resolved is committed for reproducible builds
+
+# Plugin (Bun) build artifacts
+plugins/*/node_modules/
+plugins/*/bin/
+plugins/*/logs/
+plugins/*/.*.bun-build

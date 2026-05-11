@@ -119,22 +119,36 @@ export async function createRoom(
   const title = ensureString(body.title, "title");
   const description = body.description !== undefined ? ensureString(body.description, "description", { allowEmpty: true }) : undefined;
   const project = body.project !== undefined ? ensureSlug(body.project, "project") : undefined;
-  const defaultTracks = Array.isArray(body.default_tracks)
-    ? (body.default_tracks as unknown[]).map((v, i) => ensureSlug(v, `default_tracks[${i}]`))
+  const defaultTracks: Array<{ name: string; title: string }> = Array.isArray(
+    body.default_tracks,
+  )
+    ? (body.default_tracks as unknown[]).map((v, i) => {
+        if (typeof v === "string") {
+          const n = ensureSlug(v, `default_tracks[${i}]`);
+          return { name: n, title: n };
+        }
+        if (v && typeof v === "object") {
+          const obj = v as { name?: unknown; title?: unknown };
+          const n = ensureSlug(obj.name, `default_tracks[${i}].name`);
+          const t =
+            obj.title !== undefined
+              ? ensureString(obj.title, `default_tracks[${i}].title`)
+              : n;
+          return { name: n, title: t };
+        }
+        throw new HttpError(
+          400,
+          "bad_request",
+          `default_tracks[${i}] must be a slug string or {name, title} object`,
+        );
+      })
     : [];
 
   // Reject duplicate slugs cleanly. Without this, a second call with the
   // same slug would mint a fresh audience keypair and overwrite the entity
   // + epoch_keys secret — silently orphaning the original room on the
-  // gateway and breaking any peer who had already joined. The entity API
-  // returns HTTP 404 (not null) on miss, so we treat MemoryClientError(404)
-  // as "doesn't exist" and propagate anything else.
-  let existing: Awaited<ReturnType<typeof entity.byName>> = null;
-  try {
-    existing = await entity.byName(`studio:room:${slug}`);
-  } catch (err) {
-    if (!(err instanceof MemoryClientError && err.status === 404)) throw err;
-  }
+  // gateway and breaking any peer who had already joined.
+  const existing = await entity.byNameOrNull(`studio:room:${slug}`);
   if (existing) {
     throw new HttpError(409, "room_exists", `studio_room "${slug}" already exists locally`);
   }
@@ -225,7 +239,7 @@ export async function createRoom(
       title,
       description: description ?? null,
       project: project ?? null,
-      default_tracks: defaultTracks,
+      default_tracks: defaultTracks.map((t) => t.name),
       // local-only — preserved by future projections.
       aud_id_pub_hex: audIdPub,
       aud_id_priv_secret_name: audIdSecretName,
@@ -249,7 +263,7 @@ export async function createRoom(
   };
   if (description !== undefined) roomPayload["description"] = description;
   if (project !== undefined) roomPayload["project"] = project;
-  if (defaultTracks.length > 0) roomPayload["defaultTracks"] = defaultTracks;
+  if (defaultTracks.length > 0) roomPayload["defaultTracks"] = defaultTracks.map((t) => t.name);
   validatePayload(STUDIO_KIND_ROOM, roomPayload);
 
   const rumor = buildSignedRumor({
@@ -272,18 +286,18 @@ export async function createRoom(
   // 8. Default tracks — sequential so a 5xx on track #2 doesn't spawn a
   // partial room. trackActions.create is idempotent on the d-tag (replaceable).
   const createdTracks: string[] = [];
-  for (const tName of defaultTracks) {
+  for (const t of defaultTracks) {
     try {
       await trackActions.create(
-        { room: slug, name: tName, title: tName, layout: "column" },
+        { room: slug, name: t.name, title: t.title, layout: "column" },
         ctx,
       );
-      createdTracks.push(tName);
+      createdTracks.push(t.name);
     } catch (err) {
       // Surface but keep the room — operator can re-run track create later.
       const msg = err instanceof Error ? err.message : String(err);
       // eslint-disable-next-line no-console
-      console.error(`[room.create] default track "${tName}" failed: ${msg}`);
+      console.error(`[room.create] default track "${t.name}" failed: ${msg}`);
     }
   }
 
@@ -713,15 +727,7 @@ export async function deleteRoom(
 ): Promise<RoomDeleteResult> {
   const slug = ensureSlug(body.slug, "slug");
 
-  let row: Awaited<ReturnType<typeof entity.byName>> = null;
-  try {
-    row = await entity.byName(`studio:room:${slug}`);
-  } catch (err) {
-    if (err instanceof MemoryClientError && err.status === 404) {
-      throw new HttpError(404, "room_not_found", `studio_room "${slug}" not found`);
-    }
-    throw err;
-  }
+  const row = await entity.byNameOrNull(`studio:room:${slug}`);
   if (!row) {
     throw new HttpError(404, "room_not_found", `studio_room "${slug}" not found`);
   }

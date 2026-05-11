@@ -5,10 +5,9 @@ struct StudioCreateRoomSheet: View {
     @ObservedObject var store: StudioStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var slug: String = ""
     @State private var title: String = ""
     @State private var description: String = ""
-    @State private var tracks: [DraftTrack] = [DraftTrack(name: "general", title: "General")]
+    @State private var tracks: [DraftTrack] = [DraftTrack(title: "General")]
 
     @State private var isSubmitting: Bool = false
     @State private var submitError: String?
@@ -18,8 +17,10 @@ struct StudioCreateRoomSheet: View {
     private static let titleMax = 200
     private static let descriptionMax = 2000
 
+    private var derivedSlug: String { Self.slugify(title) }
+
     private var slugIsValid: Bool {
-        slug.range(of: Self.slugRegex, options: .regularExpression) != nil
+        derivedSlug.range(of: Self.slugRegex, options: .regularExpression) != nil
     }
 
     private var titleIsValid: Bool {
@@ -32,14 +33,20 @@ struct StudioCreateRoomSheet: View {
 
     private var tracksAreValid: Bool {
         !tracks.isEmpty && tracks.allSatisfy { t in
-            t.name.range(of: Self.trackNameRegex, options: .regularExpression) != nil
+            let derived = Self.slugify(t.title)
+            return derived.range(of: Self.trackNameRegex, options: .regularExpression) != nil
                 && !t.title.isEmpty
                 && t.title.count <= Self.titleMax
         }
     }
 
+    private var tracksHaveUniqueNames: Bool {
+        let names = tracks.map { Self.slugify($0.title) }
+        return Set(names).count == names.count
+    }
+
     private var formIsValid: Bool {
-        slugIsValid && titleIsValid && descriptionIsValid && tracksAreValid
+        slugIsValid && titleIsValid && descriptionIsValid && tracksAreValid && tracksHaveUniqueNames
     }
 
     var body: some View {
@@ -48,7 +55,6 @@ struct StudioCreateRoomSheet: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    slugField
                     titleField
                     descriptionField
                     tracksField
@@ -78,27 +84,6 @@ struct StudioCreateRoomSheet: View {
         .padding(.vertical, 12)
     }
 
-    private var slugField: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Slug")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            TextField("acme-leads", text: $slug)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
-                .disableAutocorrection(true)
-            if !slug.isEmpty && !slugIsValid {
-                Text("Slug must be 2-64 chars: letters, digits, hyphens only.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-            } else {
-                Text("Stable identifier used in URLs and dispatch envelopes.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
-
     private var titleField: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -122,6 +107,18 @@ struct StudioCreateRoomSheet: View {
                 Text("Title must be 1-200 characters.")
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
+            } else if !title.isEmpty && !slugIsValid {
+                Text("Slug \"\(derivedSlug)\" is invalid — needs 2-64 letters/digits/hyphens. Try a longer title.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+            } else if !title.isEmpty {
+                Text("Slug: \(derivedSlug)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text("Stable slug is derived from the title.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
         }
     }
@@ -166,7 +163,7 @@ struct StudioCreateRoomSheet: View {
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button {
-                    tracks.append(DraftTrack(name: "", title: ""))
+                    tracks.append(DraftTrack(title: ""))
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "plus.circle")
@@ -183,23 +180,33 @@ struct StudioCreateRoomSheet: View {
                     trackRow(index: i)
                 }
             }
-            Text("Each track is a tab inside the room. Track names accept letters, digits, hyphens.")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+            if !tracksHaveUniqueNames {
+                Text("Two tracks derive the same slug — give them more distinct titles.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+            } else {
+                Text("Each track is a tab inside the room. Slug is derived from the title.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
     private func trackRow(index i: Int) -> some View {
         let isLast = tracks.count == 1
+        let derived = Self.slugify(tracks[i].title)
+        let derivedIsValid = derived.range(of: Self.trackNameRegex, options: .regularExpression) != nil
         return HStack(spacing: 6) {
-            TextField("name", text: $tracks[i].name)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
-                .frame(width: 120)
-                .disableAutocorrection(true)
-            TextField("Title", text: $tracks[i].title)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 2) {
+                TextField("Title", text: $tracks[i].title)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                if !tracks[i].title.isEmpty {
+                    Text(derivedIsValid ? "slug: \(derived)" : "slug invalid — add letters or digits")
+                        .font(.system(size: 10))
+                        .foregroundStyle(derivedIsValid ? AnyShapeStyle(HierarchicalShapeStyle.tertiary) : AnyShapeStyle(Color.red))
+                }
+            }
             Button {
                 tracks.remove(at: i)
             } label: {
@@ -262,13 +269,13 @@ struct StudioCreateRoomSheet: View {
         submitError = nil
 
         let payloadTracks: [(name: String, title: String)] = tracks.map {
-            (name: $0.name, title: $0.title)
+            (name: Self.slugify($0.title), title: $0.title)
         }
         let trimmedDescription = description.isEmpty ? nil : description
 
         do {
             _ = try await store.createRoom(
-                slug: slug,
+                slug: derivedSlug,
                 title: title,
                 description: trimmedDescription,
                 defaultTracks: payloadTracks
@@ -280,10 +287,31 @@ struct StudioCreateRoomSheet: View {
             submitError = "Couldn't create room: \(error.localizedDescription)"
         }
     }
+
+    private static func slugify(_ input: String) -> String {
+        let lowered = input.lowercased()
+        var out = ""
+        out.reserveCapacity(lowered.count)
+        for scalar in lowered.unicodeScalars {
+            if (scalar >= "a" && scalar <= "z") || (scalar >= "0" && scalar <= "9") || scalar == "-" {
+                out.unicodeScalars.append(scalar)
+            } else if scalar == " " || scalar == "\t" || scalar == "\n" || scalar == "_" {
+                out.unicodeScalars.append("-")
+            }
+            // everything else dropped
+        }
+        // collapse runs of hyphens
+        while out.contains("--") {
+            out = out.replacingOccurrences(of: "--", with: "-")
+        }
+        // trim leading / trailing hyphens
+        while out.hasPrefix("-") { out.removeFirst() }
+        while out.hasSuffix("-") { out.removeLast() }
+        return out
+    }
 }
 
 private struct DraftTrack: Identifiable, Equatable {
     let id: UUID = UUID()
-    var name: String
     var title: String
 }

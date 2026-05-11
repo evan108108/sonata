@@ -46,6 +46,7 @@ export interface SSEEntityRow {
 export interface SSEMemoryClient {
   entity: {
     byName(name: string): Promise<SSEEntityRow | null>;
+    byNameOrNull(name: string): Promise<SSEEntityRow | null>;
     list(opts?: { type?: string; limit?: number }): Promise<SSEEntityRow[]>;
     patch(args: {
       id: string;
@@ -54,6 +55,7 @@ export interface SSEMemoryClient {
   };
   secret: {
     get(name: string): Promise<{ name: string; value: string }>;
+    getOrNull(name: string): Promise<{ name: string; value: string } | null>;
     set(args: {
       name: string;
       value: string;
@@ -658,18 +660,14 @@ export class SSEClient implements AbortFlag {
   private async shouldPromoteToActive(): Promise<boolean> {
     if (!this.state) return false;
     if (this.state.state !== "pending-grant") return false;
-    try {
-      const fresh = await this.memory.entity.byName(`studio:room:${this.roomSlug}`);
-      const freshAttrs = parseAttrs(fresh?.attributes);
-      const cur = freshAttrs["state"];
-      // Promote only if the on-disk state is still pending-grant. If the
-      // attribute is missing entirely (older rows pre-Phase-3), trust our
-      // in-memory pending-grant view.
-      if (cur === undefined) return true;
-      return cur === "pending-grant";
-    } catch {
-      return true;
-    }
+    const fresh = await this.memory.entity.byNameOrNull(`studio:room:${this.roomSlug}`);
+    const freshAttrs = parseAttrs(fresh?.attributes);
+    const cur = freshAttrs["state"];
+    // Promote only if the on-disk state is still pending-grant. If the row
+    // is missing entirely (older rows pre-Phase-3) or the attribute is
+    // absent, trust our in-memory pending-grant view.
+    if (cur === undefined) return true;
+    return cur === "pending-grant";
   }
 
   private parseEpochFromGrant(grant: NostrEventLike): number | null {
@@ -833,7 +831,7 @@ export class SSEClient implements AbortFlag {
 
   private async loadRoomState(): Promise<void> {
     const name = `studio:room:${this.roomSlug}`;
-    const ent = await this.memory.entity.byName(name);
+    const ent = await this.memory.entity.byNameOrNull(name);
     if (!ent) {
       this.state = null;
       return;

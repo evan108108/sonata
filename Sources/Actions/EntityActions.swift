@@ -244,9 +244,20 @@ let entityActions: [SonataAction] = [
     ),
 
     // PATCH /api/entity
+    //
+    // Partial update by id. Top-level scalar fields (name/type/description) overwrite.
+    // The `attributes` field uses RFC 7396 JSON Merge Patch semantics via SQLite's
+    // json_patch():
+    //   - keys present in the patch overwrite the target,
+    //   - keys absent from the patch are preserved,
+    //   - a key set to JSON null in the patch deletes that key from the target.
+    // Empty `attributes: {}` is a no-op against existing attributes.
+    // Plugin helpers (memory-client.ts) and HTTP convention both expect merge,
+    // not replace — full-replace was a long-standing bug that wiped sibling keys
+    // on every partial PATCH (sonata-studio T9 diagnosis).
     SonataAction(
         name: "mem_entity_patch",
-        description: "Update an entity by ID.",
+        description: "Update an entity by ID. `attributes` merges via RFC 7396 (json_patch); null deletes a key.",
         group: "/api/entity",
         path: "/",
         method: .patch,
@@ -255,7 +266,7 @@ let entityActions: [SonataAction] = [
             ActionParam("name", .string, description: "New name"),
             ActionParam("type", .string, description: "New type"),
             ActionParam("description", .string, description: "New description"),
-            ActionParam("attributes", .object, description: "New attributes (object)"),
+            ActionParam("attributes", .object, description: "Partial attributes (RFC 7396 merge; null deletes)"),
         ],
         handler: { ctx in
             let id = try ctx.params.require("id")
@@ -267,7 +278,7 @@ let entityActions: [SonataAction] = [
             if let v = ctx.params.string("type")        { setClauses.append("type = ?");        args.append(v) }
             if let v = ctx.params.string("description") { setClauses.append("description = ?"); args.append(v) }
             if let attrs = ctx.params.object("attributes"), let json = encodeAnyJSON(attrs) {
-                setClauses.append("attributes = ?")
+                setClauses.append("attributes = json_patch(IFNULL(attributes, '{}'), ?)")
                 args.append(json)
             }
 

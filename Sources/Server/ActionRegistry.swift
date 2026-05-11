@@ -340,7 +340,15 @@ final class ActionRegistry: @unchecked Sendable {
         case .stringArray:
             if let arr = value as? [String] { return normalizeStringArray(arr) }
             if let arr = value as? [Any] {
-                return normalizeStringArray(arr.compactMap { $0 as? String })
+                // Plain string array → normalize. Mixed/object array → pass
+                // through raw so plugins that accept richer shapes (e.g.
+                // `default_tracks: [{name, title}]`) aren't silently flattened
+                // to an empty list.
+                let asStrings = arr.compactMap { $0 as? String }
+                if asStrings.count == arr.count {
+                    return normalizeStringArray(asStrings)
+                }
+                return arr
             }
             if let s = value as? String { return s }  // stringArray() will parse it
             return ""
