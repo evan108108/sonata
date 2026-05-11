@@ -167,6 +167,17 @@
         { "name": "pubkey_or_npub", "type": "string", "required": true, "description": "Member 32-byte hex pubkey (npub bech32 deferred)." },
         { "name": "nickname", "type": "string", "required": true, "description": "Display name to remember locally." }
       ]
+    },
+    {
+      "name": "studio_image_attach",
+      "description": "Encrypt + upload an image to Blossom under the room's current audience epoch key. Returns an image-block payload for embedding in a card's blocks[].",
+      "method": "post",
+      "path": "/api/image/attach",
+      "params": [
+        { "name": "file_path", "type": "string", "required": true, "description": "Absolute path under ~/Library/Caches/com.sonata/ or ~/Downloads/." },
+        { "name": "room_slug", "type": "string", "required": true, "description": "Room slug — used to look up the current epoch." },
+        { "name": "mime_type", "type": "string", "description": "Optional MIME override; inferred from extension if absent." }
+      ]
     }
   ]
 }

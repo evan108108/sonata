@@ -10,6 +10,7 @@ import { room_admit } from "./admit";
 import { card } from "./card";
 import { comment } from "./comment";
 import { dispatch } from "./dispatch";
+import { imageAttach } from "./imageAttach";
 import { member } from "./member";
 import { qa } from "./qa";
 import { room } from "./room";
@@ -165,6 +166,12 @@ const MEMBER_SET_NICKNAME_PARAMS: ActionParam[] = [
   { name: "nickname", type: "string", required: true, description: "Display name to remember locally." },
 ];
 
+const IMAGE_ATTACH_PARAMS: ActionParam[] = [
+  { name: "file_path", type: "string", required: true, description: "Absolute path under ~/Library/Caches/com.sonata/ or ~/Downloads/." },
+  { name: "room_slug", type: "string", required: true, description: "Room slug — used to look up the current epoch." },
+  { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
+];
+
 // ── Action definitions ──────────────────────────────────────────────────────
 
 export const ACTIONS: ActionDef[] = [
@@ -269,6 +276,14 @@ export const ACTIONS: ActionDef[] = [
     path: "/api/member/nickname",
     params: MEMBER_SET_NICKNAME_PARAMS,
   },
+  {
+    name: "studio_image_attach",
+    description:
+      "Encrypt + upload an image to Blossom under the room's current audience epoch key. Returns an image-block payload for embedding in a card's blocks[].",
+    method: "post",
+    path: "/api/image/attach",
+    params: IMAGE_ATTACH_PARAMS,
+  },
 ];
 
 // ── Route table ─────────────────────────────────────────────────────────────
@@ -336,8 +351,12 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "post",
     handler: async (body, _q, ctx) => member.setNickname(body, ctx),
   },
+  "/api/image/attach": {
+    method: "post",
+    handler: async (body, _q, ctx) => imageAttach.attach(body, ctx),
+  },
 };
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, comment, dispatch, member, qa, room, room_admit, track };
+export { card, comment, dispatch, imageAttach, member, qa, room, room_admit, track };
