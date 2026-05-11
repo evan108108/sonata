@@ -1,4 +1,5 @@
 import SwiftUI
+import GRDB
 
 enum SonataTab: Int, CaseIterable {
     case workers = 1
@@ -12,6 +13,7 @@ enum SonataTab: Int, CaseIterable {
     case dashboard = 9
     case settings = 0
     case plugins = 11
+    case studio = 12
 }
 
 // FocusedValue key so .commands{} in SonataApp can switch tabs
@@ -30,25 +32,30 @@ struct ContentView: View {
     @State private var selectedTab: SonataTab = .dashboard
     @ObservedObject private var workerManager = WorkerManager.shared
     @StateObject private var searchVM = SearchViewModel()
+    @StateObject private var unreadCounts = StudioUnreadCounts()
+    @Environment(\.dbPool) private var dbPool: DatabasePool?
     @FocusState private var searchFocused: Bool
 
-    private static let navItems: [NavRailItem] = [
-        NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
-        NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
-        NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist"),
-        NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
-        NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
-        NavRailItem(tab: .wiki, label: "Wiki", systemImage: "book.fill"),
-        NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
-        NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
-        NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
-        NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill"),
-        NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
-    ]
+    private var navItems: [NavRailItem] {
+        [
+            NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
+            NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
+            NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist"),
+            NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
+            NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
+            NavRailItem(tab: .wiki, label: "Wiki", systemImage: "book.fill"),
+            NavRailItem(tab: .studio, label: "Studio", systemImage: "rectangle.3.group.bubble.fill", badge: unreadCounts.studioTotal),
+            NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
+            NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
+            NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
+            NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill"),
+            NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
+        ]
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            NavRail(selected: $selectedTab, items: Self.navItems)
+            NavRail(selected: $selectedTab, items: navItems)
             Divider()
             destinationView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -101,6 +108,16 @@ struct ContentView: View {
         .focusedSceneValue(\.focusSearchBar) {
             searchFocused = true
         }
+        .onAppear {
+            if let pool = dbPool {
+                unreadCounts.start(dbPool: pool)
+            }
+        }
+        .onChange(of: dbPool.map(ObjectIdentifier.init)) { _, _ in
+            if let pool = dbPool {
+                unreadCounts.start(dbPool: pool)
+            }
+        }
     }
 
     @ViewBuilder
@@ -124,6 +141,8 @@ struct ContentView: View {
             PrivateFilesView()
         case .plugins:
             PluginsView()
+        case .studio:
+            StudioView()
         case .dashboard:
             DashboardView(selectedTab: $selectedTab)
         case .settings:

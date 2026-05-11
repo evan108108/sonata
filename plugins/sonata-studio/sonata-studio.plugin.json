@@ -58,6 +58,15 @@
       "params": []
     },
     {
+      "name": "studio_room_delete",
+      "description": "Local-only delete: removes the room entity + keys from this Sonata. Does NOT publish a revocation event — other members keep their copies (federated revoke is v0.x+ work).",
+      "method": "post",
+      "path": "/api/room/delete",
+      "params": [
+        { "name": "slug", "type": "string", "required": true, "description": "Slug of the room to delete locally." }
+      ]
+    },
+    {
       "name": "studio_card_post",
       "description": "Post a card (kind 30530) to a room/track.",
       "method": "post",

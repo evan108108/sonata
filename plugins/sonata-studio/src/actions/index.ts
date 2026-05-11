@@ -77,6 +77,10 @@ const ROOM_ADMIT_PARAMS: ActionParam[] = [
 
 const ROOM_LIST_PARAMS: ActionParam[] = [];
 
+const ROOM_DELETE_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to delete locally." },
+];
+
 const CARD_POST_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "track", type: "string", required: true, description: "Track slug within the room." },
@@ -202,6 +206,14 @@ export const ACTIONS: ActionDef[] = [
     params: ROOM_LIST_PARAMS,
   },
   {
+    name: "studio_room_delete",
+    description:
+      "Local-only delete: removes the room entity + keys from this Sonata. Does NOT publish a revocation event — other members keep their copies (federated revoke is v0.x+ work).",
+    method: "post",
+    path: "/api/room/delete",
+    params: ROOM_DELETE_PARAMS,
+  },
+  {
     name: "studio_card_post",
     description: "Post a card (kind 30530) to a room/track.",
     method: "post",
@@ -287,6 +299,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/room/list": {
     method: "get",
     handler: async (_b, _q, ctx) => room.list(ctx),
+  },
+  "/api/room/delete": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.delete(body, ctx),
   },
   "/api/card/post": {
     method: "post",

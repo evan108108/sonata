@@ -5,6 +5,7 @@ import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
 
 import { GatewayError, type GatewayClient, type NostrEventLike } from "../a4-client";
+import { MemoryClientError } from "../memory-client";
 import {
   buildAudienceClaim,
   buildAudienceDeclaration,
@@ -36,6 +37,7 @@ import { track as trackActions } from "./track";
  */
 export interface SSEOpener {
   open(roomSlug: string): Promise<void>;
+  close?(roomSlug: string): Promise<void>;
 }
 
 export interface ActionCtx {
@@ -120,6 +122,22 @@ export async function createRoom(
   const defaultTracks = Array.isArray(body.default_tracks)
     ? (body.default_tracks as unknown[]).map((v, i) => ensureSlug(v, `default_tracks[${i}]`))
     : [];
+
+  // Reject duplicate slugs cleanly. Without this, a second call with the
+  // same slug would mint a fresh audience keypair and overwrite the entity
+  // + epoch_keys secret — silently orphaning the original room on the
+  // gateway and breaking any peer who had already joined. The entity API
+  // returns HTTP 404 (not null) on miss, so we treat MemoryClientError(404)
+  // as "doesn't exist" and propagate anything else.
+  let existing: Awaited<ReturnType<typeof entity.byName>> = null;
+  try {
+    existing = await entity.byName(`studio:room:${slug}`);
+  } catch (err) {
+    if (!(err instanceof MemoryClientError && err.status === 404)) throw err;
+  }
+  if (existing) {
+    throw new HttpError(409, "room_exists", `studio_room "${slug}" already exists locally`);
+  }
 
   // 1. Keypairs.
   const audIdPriv = randomBytes(32);
@@ -666,6 +684,107 @@ function pickDescription(attrs: Record<string, unknown>): string | undefined {
   return typeof d === "string" && d.length > 0 ? d : undefined;
 }
 
+// ── delete (local-only) ─────────────────────────────────────────────────────
+
+interface RoomDeleteRequest {
+  slug?: unknown;
+}
+
+interface RoomDeleteResult {
+  ok: true;
+  slug: string;
+  deleted: {
+    entity_id: string;
+    secrets: string[];
+    sse_closed: boolean;
+  };
+}
+
+/**
+ * Local-only delete. Removes the studio_room entity + its aud_id_priv and
+ * epoch_keys secrets, and closes the SSE subscription. Does NOT publish a
+ * revocation event — other members of the audience keep their local copies
+ * and the audience on the 4A gateway continues to exist until gateway-side
+ * garbage collection. Federated revoke is v0.x+ work.
+ */
+export async function deleteRoom(
+  body: RoomDeleteRequest,
+  ctx: ActionCtx,
+): Promise<RoomDeleteResult> {
+  const slug = ensureSlug(body.slug, "slug");
+
+  let row: Awaited<ReturnType<typeof entity.byName>> = null;
+  try {
+    row = await entity.byName(`studio:room:${slug}`);
+  } catch (err) {
+    if (err instanceof MemoryClientError && err.status === 404) {
+      throw new HttpError(404, "room_not_found", `studio_room "${slug}" not found`);
+    }
+    throw err;
+  }
+  if (!row) {
+    throw new HttpError(404, "room_not_found", `studio_room "${slug}" not found`);
+  }
+
+  // TODO(v0.1): enforce founder check; for v0, local-delete is unconditional.
+
+  const attrs = parseAttrs(row.attributes);
+  const audIdSecretName =
+    typeof attrs["aud_id_priv_secret_name"] === "string" && (attrs["aud_id_priv_secret_name"] as string).length > 0
+      ? (attrs["aud_id_priv_secret_name"] as string)
+      : `studio:room:${slug}:aud_id_priv`;
+  const epochSecretName =
+    typeof attrs["epoch_keys_secret_name"] === "string" && (attrs["epoch_keys_secret_name"] as string).length > 0
+      ? (attrs["epoch_keys_secret_name"] as string)
+      : `studio:room:${slug}:epoch_keys`;
+
+  let sseClosed = false;
+  if (ctx.sseManager && typeof ctx.sseManager.close === "function") {
+    try {
+      await ctx.sseManager.close(slug);
+      sseClosed = true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.delete] sseManager.close("${slug}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  const deletedSecrets: string[] = [];
+  for (const name of [audIdSecretName, epochSecretName]) {
+    try {
+      await secret.delete(name);
+      deletedSecrets.push(name);
+    } catch (err) {
+      if (err instanceof MemoryClientError && err.status === 404) {
+        // already gone — treat as success-ish, don't push.
+        continue;
+      }
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.delete] secret.delete("${name}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  await entity.delete(row.id);
+
+  return {
+    ok: true,
+    slug,
+    deleted: {
+      entity_id: row.id,
+      secrets: deletedSecrets,
+      sse_closed: sseClosed,
+    },
+  };
+}
+
 // ── list ────────────────────────────────────────────────────────────────────
 
 export async function listRooms(_ctx: ActionCtx): Promise<RoomListResult> {
@@ -734,5 +853,8 @@ export const room = {
   },
   list(ctx: ActionCtx): Promise<RoomListResult> {
     return listRooms(ctx);
+  },
+  delete(body: unknown, ctx: ActionCtx): Promise<RoomDeleteResult> {
+    return deleteRoom((body ?? {}) as RoomDeleteRequest, ctx);
   },
 };

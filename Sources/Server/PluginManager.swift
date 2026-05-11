@@ -1186,6 +1186,18 @@ struct JSONPassthrough: Encodable {
             }
         } else if value is NSNull {
             try c.encodeNil(forKey: key)
+        } else if let n = value as? NSNumber {
+            // `JSONSerialization` returns `NSNumber` for ALL numerics + bools, and
+            // `NSNumber(1) as? Bool` evaluates to `true` — so this branch MUST
+            // come before `as? Bool` / `as? Int` / `as? Double`, otherwise JSON
+            // `1` would silently re-emit as `true`. Disambiguate via CFTypeID.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try c.encode(n.boolValue, forKey: key)
+            } else if let i = n as? Int64, NSNumber(value: i) == n {
+                try c.encode(i, forKey: key)
+            } else {
+                try c.encode(n.doubleValue, forKey: key)
+            }
         } else if let b = value as? Bool {
             try c.encode(b, forKey: key)
         } else if let i = value as? Int64 {
@@ -1196,13 +1208,6 @@ struct JSONPassthrough: Encodable {
             try c.encode(d, forKey: key)
         } else if let s = value as? String {
             try c.encode(s, forKey: key)
-        } else if let n = value as? NSNumber {
-            // Disambiguate NSNumber for bool vs numeric
-            if CFGetTypeID(n) == CFBooleanGetTypeID() {
-                try c.encode(n.boolValue, forKey: key)
-            } else {
-                try c.encode(n.doubleValue, forKey: key)
-            }
         } else {
             try c.encodeNil(forKey: key)
         }
@@ -1222,6 +1227,15 @@ struct JSONPassthrough: Encodable {
             }
         } else if value is NSNull {
             try c.encodeNil()
+        } else if let n = value as? NSNumber {
+            // See keyed-variant comment: NSNumber check MUST come first.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try c.encode(n.boolValue)
+            } else if let i = n as? Int64, NSNumber(value: i) == n {
+                try c.encode(i)
+            } else {
+                try c.encode(n.doubleValue)
+            }
         } else if let b = value as? Bool {
             try c.encode(b)
         } else if let i = value as? Int64 {
@@ -1232,12 +1246,6 @@ struct JSONPassthrough: Encodable {
             try c.encode(d)
         } else if let s = value as? String {
             try c.encode(s)
-        } else if let n = value as? NSNumber {
-            if CFGetTypeID(n) == CFBooleanGetTypeID() {
-                try c.encode(n.boolValue)
-            } else {
-                try c.encode(n.doubleValue)
-            }
         } else {
             try c.encodeNil()
         }
@@ -1246,6 +1254,15 @@ struct JSONPassthrough: Encodable {
     private static func encodeScalar(_ value: Any, in c: inout SingleValueEncodingContainer) throws {
         if value is NSNull {
             try c.encodeNil()
+        } else if let n = value as? NSNumber {
+            // See keyed-variant comment: NSNumber check MUST come first.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                try c.encode(n.boolValue)
+            } else if let i = n as? Int64, NSNumber(value: i) == n {
+                try c.encode(i)
+            } else {
+                try c.encode(n.doubleValue)
+            }
         } else if let b = value as? Bool {
             try c.encode(b)
         } else if let i = value as? Int64 {
@@ -1256,12 +1273,6 @@ struct JSONPassthrough: Encodable {
             try c.encode(d)
         } else if let s = value as? String {
             try c.encode(s)
-        } else if let n = value as? NSNumber {
-            if CFGetTypeID(n) == CFBooleanGetTypeID() {
-                try c.encode(n.boolValue)
-            } else {
-                try c.encode(n.doubleValue)
-            }
         } else {
             try c.encodeNil()
         }
