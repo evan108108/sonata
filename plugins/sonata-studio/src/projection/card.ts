@@ -12,6 +12,8 @@ import {
 } from "./util";
 import { ensureTrackStub } from "./track";
 import type { ProjectionContext } from "./types";
+import { maybeDispatch } from "../auto-run/hook";
+import { log } from "../logger";
 
 export async function projectCard(ctx: ProjectionContext): Promise<void> {
   const { rumor, payload, client, roomSlug, createdByPubkey, dTag } = ctx;
@@ -150,6 +152,28 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
   if (cardKindStr.startsWith("_profile")) {
     const blocksArr = Array.isArray(payload["blocks"]) ? (payload["blocks"] as unknown[]) : [];
     await upsertRoomMember(ctx, attributes["title"] as string, blocksArr);
+  }
+
+  // Auto-run hook (§6.3 — recommended trigger location is post-upsert here).
+  // Reserved-kind cards (e.g. `_profile`) are configuration metadata, not
+  // dispatchable work, so we never fire auto-run for them. Any other failure
+  // path inside the hook is logged but never bubbles — projection must land
+  // even if dispatch can't.
+  if (!cardKindStr.startsWith("_")) {
+    try {
+      await maybeDispatch({
+        cardEntityId: cardId,
+        cardAttrs: attributes,
+        roomSlug,
+        cardDTag: dTag,
+      });
+    } catch (err) {
+      log.warn("[projectCard] auto-run hook threw", {
+        room: roomSlug,
+        d_tag: dTag,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 
