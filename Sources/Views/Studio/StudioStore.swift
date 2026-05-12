@@ -635,6 +635,15 @@ final class StudioStore: ObservableObject {
             createdAtSeconds: old.createdAtSeconds,
             dTag: old.dTag
         )
+        // Race fix: SSE may have already delivered the real card BEFORE
+        // postCard returned the rumor event id — in which case the cards
+        // observation already ran reconcile while the optimistic eventId
+        // was still empty (so the match check skipped). Now that we've
+        // populated the eventId, run a one-shot reconcile against the
+        // current materialized cards. Without this the optimistic + real
+        // duplicate forever.
+        let realCards = cardsByRoomTrack.values.flatMap { $0 }
+        reconcileOptimisticAgainstReal(realCards: realCards)
     }
 
     func rollbackOptimisticCard(clientId: String) {
