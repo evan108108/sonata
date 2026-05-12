@@ -61,6 +61,14 @@ final class AFKRegistry: @unchecked Sendable {
         return registrations.values.sorted { $0.registeredAt < $1.registeredAt }
     }
 
+    /// Number of tokens currently routed to a given sessionId. Used by the
+    /// bridge to choose fast vs idle poll cadence — when nobody has registered
+    /// for our sessionId we can back off the poll loop.
+    func tokenCount(for sessionId: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return registrations.values.reduce(0) { $0 + ($1.sessionId == sessionId ? 1 : 0) }
+    }
+
     /// Enqueue a reply for whatever session owns `token`. Returns true if a
     /// session was registered and the reply was queued.
     @discardableResult
@@ -87,6 +95,7 @@ private struct AFKLookupResponse: Encodable {
 
 private struct AFKPollResponse: Encodable {
     let replies: [AFKReply]
+    let tokensRegistered: Int
 }
 
 private struct AFKActiveEntry: Encodable {
@@ -230,7 +239,8 @@ let afkActions: [SonataAction] = [
         handler: { ctx in
             let sessionId = try ctx.params.require("sessionId")
             let replies = AFKRegistry.shared.claimReplies(sessionId: sessionId)
-            return AFKPollResponse(replies: replies)
+            let tokensRegistered = AFKRegistry.shared.tokenCount(for: sessionId)
+            return AFKPollResponse(replies: replies, tokensRegistered: tokensRegistered)
         }
     ),
 ]

@@ -26,7 +26,12 @@ const SESSION_LABEL = process.env.SESSION_LABEL;
 const SONA_SESSION_ID = process.env.SONA_SESSION_ID;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const CLAIM_INTERVAL_MS = 5_000;
-const AFK_POLL_INTERVAL_MS = 5_000;
+// Adaptive AFK cadence: poll fast when something is registered for our
+// sessionId, back off when idle. The server reports tokensRegistered on every
+// poll response so we can snap back to fast on the very next tick after a
+// registration appears.
+const AFK_POLL_FAST_MS = 5_000;
+const AFK_POLL_IDLE_MS = 30_000;
 const DM_POLL_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
 
@@ -599,34 +604,53 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
  * supervisor) once boot completes. This makes `mcp__memory__afk_register` the
  * single safe registration call: as long as a bridge process is alive for the
  * registered sessionId, replies arrive as channel notifications. Servers do
- * the gating; we just drain. */
+ * the gating; we just drain.
+ *
+ * Cadence is adaptive: 5s while AFKRegistry has at least one token for our
+ * sessionId, 30s otherwise. The server returns tokensRegistered on every
+ * poll, so we re-tune on each tick. Snap-back to fast cadence happens on the
+ * tick AFTER a registration lands (≤ 30s worst case). */
+let afkCurrentIntervalMs = AFK_POLL_IDLE_MS;
 function ensureAFKPollLoop(): void {
   if (afkPollTimer) return;
-  afkPollTimer = setInterval(async () => {
-    try {
-      const url = `${SONATA_API}/api/afk/poll?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}`;
-      const res = await fetch(url);
-      if (!res.ok) return;
-      const data: any = await res.json();
-      const replies: any[] = data?.replies || [];
-      for (const reply of replies) {
-        const content = `[AFK reply for token ${reply.token}]\nFrom: ${reply.fromAddr}\nSubject: ${reply.subject}\n\n${reply.replyText}`;
-        await mcp.notification({
-          method: "notifications/claude/channel",
-          params: {
-            content,
-            meta: {
-              event_type: "afk_reply",
-              afk_token: String(reply.token || ""),
-              message_id: String(reply.messageId || ""),
-              from_addr: String(reply.fromAddr || ""),
-              subject: String(reply.subject || ""),
-            },
+  scheduleAFKPoll(AFK_POLL_IDLE_MS);
+}
+
+function scheduleAFKPoll(intervalMs: number): void {
+  if (afkPollTimer) clearInterval(afkPollTimer);
+  afkCurrentIntervalMs = intervalMs;
+  afkPollTimer = setInterval(runAFKPollTick, intervalMs);
+}
+
+async function runAFKPollTick(): Promise<void> {
+  try {
+    const url = `${SONATA_API}/api/afk/poll?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}`;
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data: any = await res.json();
+    const replies: any[] = data?.replies || [];
+    const tokensRegistered: number = typeof data?.tokensRegistered === "number" ? data.tokensRegistered : 0;
+    const desiredInterval = tokensRegistered > 0 ? AFK_POLL_FAST_MS : AFK_POLL_IDLE_MS;
+    if (desiredInterval !== afkCurrentIntervalMs) {
+      scheduleAFKPoll(desiredInterval);
+    }
+    for (const reply of replies) {
+      const content = `[AFK reply for token ${reply.token}]\nFrom: ${reply.fromAddr}\nSubject: ${reply.subject}\n\n${reply.replyText}`;
+      await mcp.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content,
+          meta: {
+            event_type: "afk_reply",
+            afk_token: String(reply.token || ""),
+            message_id: String(reply.messageId || ""),
+            from_addr: String(reply.fromAddr || ""),
+            subject: String(reply.subject || ""),
           },
-        });
-      }
-    } catch {}
-  }, AFK_POLL_INTERVAL_MS);
+        },
+      });
+    }
+  } catch {}
 }
 
 // --- DM polling ---
