@@ -134,6 +134,36 @@ describe("projectCard", () => {
     expect(after3!["created_at_seconds"]).toBe(2000);
   });
 
+  test("_profile card upserts the per-room studio_member with nickname", async () => {
+    const fake = new FakeMemoryClient();
+    const client = fake.asMemoryClient();
+
+    const authorPub = "a".repeat(64);
+    const rumor = cardRumor({
+      pubkey: authorPub,
+      dTag: `profile:${authorPub}`,
+      eventId: "f".repeat(64),
+    });
+    const payload = cardPayload({
+      kind: "_profile",
+      title: "  Evan  ",
+      body: "(hidden — nickname carrier)",
+    });
+    await projectToMemory(rumor, payload, client);
+
+    // The card itself is still projected — wire still round-trips.
+    const cardAttrs = fake.attrs(`studio:card:studio-rt:${authorPub}:profile:${authorPub}`);
+    expect(cardAttrs).not.toBeNull();
+    expect(cardAttrs!["card_kind"]).toBe("_profile");
+
+    // Per-room member entity carries the trimmed nickname.
+    const memberAttrs = fake.attrs(`studio:member:studio-rt:${authorPub}`);
+    expect(memberAttrs).not.toBeNull();
+    expect(memberAttrs!["nickname"]).toBe("Evan");
+    expect(memberAttrs!["pubkey_hex"]).toBe(authorPub);
+    expect(memberAttrs!["room_slug"]).toBe("studio-rt");
+  });
+
   test("Track event clears the auto_created flag from a stub", async () => {
     const fake = new FakeMemoryClient();
     const client = fake.asMemoryClient();

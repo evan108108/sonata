@@ -126,6 +126,58 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
 
   // Resolve any pending --targets--> relations that were waiting on us.
   await resolvePendingRelations(client, rumor.id, cardId);
+
+  // Reserved-kind side-effects. Any `cardKind` starting with `_` is treated as
+  // hidden metadata: the card is still projected to studio_card (so the wire
+  // round-trips), but the UI filters these out and the projector layers
+  // extra entity writes on top. See §"Reserved card kinds" below.
+  const cardKindStr = typeof payload["kind"] === "string" ? (payload["kind"] as string) : "";
+  if (cardKindStr.startsWith("_profile")) {
+    await upsertRoomMember(ctx, attributes["title"] as string);
+  }
+}
+
+// ── Reserved card kinds ─────────────────────────────────────────────────────
+//
+// Any cardKind starting with `_` is reserved for "hidden metadata" — wire
+// round-trips normally, but renderers MUST hide them from card lists and the
+// projector MAY layer additional entity writes on top.
+//
+// Defined today:
+//   `_profile` — author's nickname in this room. Title field carries the
+//                nickname. d_tag MUST be `profile:<lowercase-pubkey>` so
+//                re-publishes overwrite.
+//
+// New `_`-prefixed kinds should keep the contract: the original studio_card
+// projection still happens, the side-effect is additive, and the UI filter
+// is applied at every surface that lists cards.
+
+async function upsertRoomMember(
+  ctx: ProjectionContext,
+  rawTitle: string | undefined,
+): Promise<void> {
+  const { client, roomSlug, createdByPubkey } = ctx;
+  const nickname = typeof rawTitle === "string" ? rawTitle.trim() : "";
+  if (nickname.length === 0) return;
+
+  // Per-room member entity. Distinct from the cross-room `studio:member:<pub>`
+  // used by `ensureMember()` for relation targets — those keep their existing
+  // shape so the studio_card --created_by--> relations don't churn.
+  const name = `studio:member:${roomSlug}:${createdByPubkey}`;
+  const existing = await client.entity.byNameOrNull(name);
+  const existingAttrs = parseExistingAttributes(existing?.attributes);
+  await client.entity.upsert({
+    name,
+    type: "studio_member",
+    description: `Studio member ${createdByPubkey.slice(0, 8)}… in ${roomSlug}`,
+    attributes: {
+      ...existingAttrs,
+      pubkey_hex: createdByPubkey,
+      room_slug: roomSlug,
+      nickname,
+      tags: ["sonata-studio", "studio-member", `room:${roomSlug}`],
+    },
+  });
 }
 
 async function findEntityByEventId(
