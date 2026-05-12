@@ -42,10 +42,13 @@ struct StudioCardRow: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(card.title.isEmpty ? "(untitled)" : card.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                HStack(spacing: 6) {
+                    statusIndicator
+                    Text(card.title.isEmpty ? "(untitled)" : card.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
 
                 if !card.body.isEmpty {
                     Text(Self.previewLine(card.body, limit: 150))
@@ -85,6 +88,29 @@ struct StudioCardRow: View {
 
             Spacer(minLength: 0)
 
+            // Trailing assignee chip — always visible (primary info, not hover-
+            // gated). Hidden when the card has no assignee. Tapping the chip
+            // opens the drawer at the same place as the row body click.
+            if let pk = card.assigneePubkey, !pk.isEmpty, let store {
+                HStack(spacing: 4) {
+                    StudioAvatarView(
+                        store: store,
+                        pubkeyHex: pk,
+                        roomSlug: card.roomSlug,
+                        diameter: 18
+                    )
+                    Text(store.displayName(for: pk, in: card.roomSlug))
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(.primary)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                .help("Assigned to \(store.displayName(for: pk, in: card.roomSlug))")
+            }
+
             // Trailing icon strip — visible on hover. Pencil opens the edit
             // sheet (callback owned by the parent); trash opens the delete
             // confirm. Both gate on `canMutate` so non-authors see a greyed
@@ -119,7 +145,7 @@ struct StudioCardRow: View {
         .padding(.vertical, 10)
         .background(rowFill)
         .contentShape(Rectangle())
-        .opacity(isOptimistic ? 0.55 : 1.0)
+        .opacity(rowOpacity)
         .overlay(alignment: .trailing) {
             if isOptimistic {
                 ProgressView()
@@ -193,6 +219,38 @@ struct StudioCardRow: View {
         Image(systemName: Self.symbol(for: card.cardKind))
             .resizable()
             .scaledToFit()
+    }
+
+    /// Lifecycle status marker that sits to the left of the title. Open is
+    /// rendered as an empty width-0 view so the title's leading edge doesn't
+    /// shift around as status changes.
+    @ViewBuilder
+    private var statusIndicator: some View {
+        switch card.lifecycleStatus {
+        case "in_progress":
+            Circle()
+                .fill(Color.accentColor)
+                .frame(width: 8, height: 8)
+                .help("In progress")
+        case "done":
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Color.green)
+                .help("Done")
+        case "archived":
+            Image(systemName: "archivebox")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .help("Archived")
+        default:
+            EmptyView()
+        }
+    }
+
+    private var rowOpacity: Double {
+        if isOptimistic { return 0.55 }
+        if card.lifecycleStatus == "archived" { return 0.5 }
+        return 1.0
     }
 
     private var rowFill: some View {

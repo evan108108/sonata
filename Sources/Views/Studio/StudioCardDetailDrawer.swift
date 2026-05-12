@@ -20,13 +20,28 @@ struct StudioCardDetailDrawer: View {
 
     @State private var showDeleteConfirm: Bool = false
     @State private var deleteErrorMessage: String? = nil
+    @State private var transitionErrorMessage: String? = nil
+    @State private var assignErrorMessage: String? = nil
+    @State private var showAssignPicker: Bool = false
+    @State private var auditFoldOpen: Bool = false
+
+    private var meHex: String { store.currentPubkeyHex.lowercased() }
 
     private var canMutate: Bool {
         !card.createdByPubkey.isEmpty &&
-            card.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased() &&
+            card.createdByPubkey.lowercased() == meHex &&
             !card.dTag.isEmpty
     }
 
+    /// True if the local user is the assigned pubkey for this card. Drives
+    /// permission gating for the in_progress / done segments of the status
+    /// picker when the caller isn't also the author.
+    private var isAssignee: Bool {
+        guard let pk = card.assigneePubkey, !pk.isEmpty else { return false }
+        return pk == meHex
+    }
+
+    private var canTransition: Bool { canMutate || isAssignee }
     private var canDelete: Bool { canMutate }
     private var canEdit: Bool { canMutate }
 
@@ -36,6 +51,10 @@ struct StudioCardDetailDrawer: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .background(.regularMaterial)
+            Divider()
+            controlsRow
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -193,6 +212,142 @@ struct StudioCardDetailDrawer: View {
         return nil
     }
 
+    // MARK: - Controls row (status + assignee)
+
+    @ViewBuilder
+    private var controlsRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
+                Text("Status")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 56, alignment: .leading)
+                statusSegmented
+                if canMutate, card.lifecycleStatus != "archived" {
+                    Button("Archive…") { transition(to: "archived") }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .help("Archive this card (author only)")
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .center, spacing: 8) {
+                Text("Assign")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 56, alignment: .leading)
+                if let pk = card.assigneePubkey, !pk.isEmpty {
+                    StudioAvatarView(store: store, pubkeyHex: pk, roomSlug: card.roomSlug, diameter: 18)
+                    Text(store.displayName(for: pk, in: card.roomSlug))
+                        .font(.system(size: 12))
+                } else {
+                    Text("Unassigned")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                if canMutate {
+                    Button(card.assigneePubkey == nil ? "Assign…" : "Reassign…") {
+                        showAssignPicker = true
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .popover(isPresented: $showAssignPicker, arrowEdge: .bottom) {
+                        AssigneePickerPopover(
+                            store: store,
+                            roomSlug: card.roomSlug,
+                            currentAssignee: card.assigneePubkey,
+                            onPick: { pk in
+                                showAssignPicker = false
+                                reassign(to: pk)
+                            }
+                        )
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            if let msg = transitionErrorMessage {
+                Text(msg).font(.caption).foregroundStyle(.red).lineLimit(2)
+            }
+            if let msg = assignErrorMessage {
+                Text(msg).font(.caption).foregroundStyle(.red).lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusSegmented: some View {
+        let current = card.lifecycleStatus
+        // Picker with three primary states. Archive is sidebar'd to keep the
+        // segmented control narrow. When the card is archived, we surface it
+        // as the "active" segment via a single read-only chip.
+        if current == "archived" {
+            HStack(spacing: 4) {
+                Image(systemName: "archivebox")
+                Text("Archived")
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+        } else {
+            Picker("", selection: Binding(
+                get: { current },
+                set: { transition(to: $0) }
+            )) {
+                Text("Open").tag("open")
+                Text("In progress").tag("in_progress")
+                Text("Done").tag("done")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 280)
+            .disabled(!canTransition)
+            .help(canTransition
+                ? "Move card through its lifecycle"
+                : "Only the author or current assignee can change status")
+        }
+    }
+
+    private func transition(to next: String) {
+        guard next != card.lifecycleStatus else { return }
+        let roomSlug = card.roomSlug
+        let dTag = card.dTag
+        Task {
+            do {
+                _ = try await store.transitionCardStatus(
+                    roomSlug: roomSlug,
+                    dTag: dTag,
+                    status: next
+                )
+                await MainActor.run { transitionErrorMessage = nil }
+            } catch {
+                await MainActor.run {
+                    transitionErrorMessage = (error as? StudioPluginError)?.message ?? error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func reassign(to pubkeyHex: String?) {
+        let roomSlug = card.roomSlug
+        let dTag = card.dTag
+        let eventId = card.eventId
+        Task {
+            do {
+                _ = try await store.updateCardAssignee(
+                    roomSlug: roomSlug,
+                    dTag: dTag,
+                    eventId: eventId,
+                    assigneePubkey: pubkeyHex
+                )
+                await MainActor.run { assignErrorMessage = nil }
+            } catch {
+                await MainActor.run {
+                    assignErrorMessage = (error as? StudioPluginError)?.message ?? error.localizedDescription
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var authorByline: some View {
         HStack(spacing: 8) {
@@ -244,20 +399,52 @@ struct StudioCardDetailDrawer: View {
         let optimisticIds = Set(optimisticCommentsForCard.map(\.id))
         let merged = (optimisticCommentsForCard + real)
             .sorted(by: { $0.createdAtSeconds < $1.createdAtSeconds })
-        if merged.isEmpty {
-            Text("No comments yet.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(merged) { comment in
+        let regular = merged.filter { $0.intent != "status_change" }
+        let audits = merged.filter { $0.intent == "status_change" }
+        VStack(alignment: .leading, spacing: 12) {
+            if regular.isEmpty && audits.isEmpty {
+                Text("No comments yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(regular) { comment in
+                CommentRow(
+                    comment: comment,
+                    authorName: store.displayName(for: comment.createdByPubkey, in: comment.roomSlug),
+                    isOptimistic: optimisticIds.contains(comment.id),
+                    store: store
+                )
+            }
+            if !audits.isEmpty {
+                auditFold(audits: audits)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func auditFold(audits: [StudioComment]) -> some View {
+        DisclosureGroup(
+            isExpanded: $auditFoldOpen
+        ) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(audits) { comment in
                     CommentRow(
                         comment: comment,
                         authorName: store.displayName(for: comment.createdByPubkey, in: comment.roomSlug),
-                        isOptimistic: optimisticIds.contains(comment.id),
+                        isOptimistic: false,
                         store: store
                     )
                 }
+            }
+            .padding(.top, 4)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Status history (\(audits.count))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -381,7 +568,18 @@ struct CommentRow: View {
     var isOptimistic: Bool = false
     var store: StudioStore? = nil
 
+    private var isAudit: Bool { comment.intent == "status_change" }
+
     var body: some View {
+        if isAudit {
+            auditRow
+        } else {
+            normalRow
+        }
+    }
+
+    @ViewBuilder
+    private var normalRow: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 if let store {
@@ -409,5 +607,129 @@ struct CommentRow: View {
             TextBlockView(text: comment.body)
         }
         .opacity(isOptimistic ? 0.55 : 1.0)
+    }
+
+    /// Compact one-liner for status_change audit comments. Per design §15.6:
+    /// "small icon + Sona: open → in_progress · just now".
+    @ViewBuilder
+    private var auditRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.swap")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(authorName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(":")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(auditBody)
+                .font(.caption)
+                .foregroundStyle(.primary)
+            Text("·")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(StudioCardRow.relativeTime(from: comment.createdAtSeconds))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Strip the leading `status: ` prefix so the row reads as "open → done".
+    /// Original body is `"status: open → in_progress"` — left intact for the
+    /// raw audit feed; compacted here for the inline visual.
+    private var auditBody: String {
+        let body = comment.body
+        if body.hasPrefix("status:") {
+            return body.dropFirst("status:".count).trimmingCharacters(in: .whitespaces)
+        }
+        return body
+    }
+}
+
+// MARK: - AssigneePickerPopover
+
+/// Inline popover that lists every member of a room (avatar + display name)
+/// with a Clear option at the bottom. Used by both the compose sheet's
+/// assignee chip and the drawer's Reassign button.
+struct AssigneePickerPopover: View {
+    let store: StudioStore
+    let roomSlug: String
+    let currentAssignee: String?
+    let onPick: (String?) -> Void
+
+    @State private var query: String = ""
+
+    private var members: [StudioMember] {
+        let all = store.roomMembersList(for: roomSlug)
+        guard !query.isEmpty else { return all }
+        let needle = query.lowercased()
+        return all.filter { m in
+            store.displayName(for: m.pubkeyHex, in: roomSlug).lowercased().contains(needle) ||
+            m.pubkeyHex.lowercased().contains(needle)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Search members", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(members, id: \.pubkeyHex) { m in
+                        Button {
+                            onPick(m.pubkeyHex)
+                        } label: {
+                            HStack(spacing: 8) {
+                                StudioAvatarView(
+                                    store: store,
+                                    pubkeyHex: m.pubkeyHex,
+                                    roomSlug: roomSlug,
+                                    diameter: 20
+                                )
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(store.displayName(for: m.pubkeyHex, in: roomSlug))
+                                        .font(.system(size: 12, weight: .medium))
+                                    Text(Hex.npubShort(m.pubkeyHex))
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                                if currentAssignee?.lowercased() == m.pubkeyHex.lowercased() {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: 200)
+
+            Divider()
+            Button {
+                onPick(nil)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "minus.circle")
+                    Text("Clear assignment")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 6)
+        }
+        .frame(width: 260)
     }
 }

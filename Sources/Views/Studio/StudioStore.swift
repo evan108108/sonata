@@ -856,7 +856,7 @@ final class StudioStore: ObservableObject {
         } else {
             assignees = []
         }
-        var requestBody: [String: Any] = [
+        let requestBody: [String: Any] = [
             "room": roomSlug,
             "d_tag": dTag,
             "assignees": assignees,
