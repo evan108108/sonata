@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var mcpExpanded = false
     @State private var workerExpanded = false
     @State private var supervisorExpanded = false
+    @State private var studioExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -214,6 +215,11 @@ struct SettingsView: View {
                     // MARK: - Workers Section
                     collapsibleSection("Workers", icon: "arrow.triangle.2.circlepath", expanded: $workerExpanded) {
                         WorkerCyclingSettingsView()
+                    }
+
+                    // MARK: - Studio Section
+                    collapsibleSection("Studio", icon: "rectangle.split.3x1.fill", expanded: $studioExpanded) {
+                        StudioSettingsView()
                     }
 
                     // MARK: - Supervisor Schedule Section
@@ -570,5 +576,150 @@ private struct AddSecretSheet: View {
         }
         .padding()
         .frame(width: 420)
+    }
+}
+
+// MARK: - Studio Settings
+
+/// Settings pane for Studio. Today: just the default nickname surfaced to
+/// other members. Persisted in the `studio:user_profile` singleton entity;
+/// the per-room `_profile` card auto-publishes from it on first post / join
+/// (see StudioStore). Reads + writes through EntityHTTP directly so this
+/// pane doesn't need a shared `StudioStore` env object — the live store
+/// observes the same row and picks up changes automatically.
+struct StudioSettingsView: View {
+    @State private var nickname: String = ""
+    @State private var avatarPath: String? = nil
+    @State private var savedFlash: Bool = false
+    @State private var saving: Bool = false
+    @State private var pickerError: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
+                StudioLocalAvatarPreview(path: avatarPath, diameter: 56)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Default avatar")
+                        .font(.body)
+                    Text("Federated alongside your nickname on the next room you post in or join. Re-encoded as a small JPEG and re-encrypted per room.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Choose…") { pickAvatar() }
+                            .buttonStyle(.bordered)
+                        Button("Clear") { clearAvatar() }
+                            .buttonStyle(.bordered)
+                            .disabled(avatarPath == nil)
+                    }
+                    if let err = pickerError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Default nickname")
+                        .font(.body)
+                    Text("How you appear to other members in new rooms. Federated via the next card you post or room you join.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                TextField("e.g. Sona", text: $nickname)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 220)
+                    .onSubmit { save() }
+                Button(action: save) {
+                    if saving {
+                        ProgressView().controlSize(.small)
+                    } else if savedFlash {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("Save")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(saving)
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 8)
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        Task {
+            async let nick = EntityHTTP.readDefaultNickname()
+            async let path = EntityHTTP.readDefaultAvatarLocalPath()
+            let (n, p) = await (nick, path)
+            await MainActor.run {
+                if let n = n { nickname = n }
+                avatarPath = p
+            }
+        }
+    }
+
+    private func pickAvatar() {
+        pickerError = nil
+        do {
+            guard let path = try StudioAvatarPicker.pickAndStage() else { return }
+            avatarPath = path
+            persistProfile()
+        } catch {
+            pickerError = error.localizedDescription
+        }
+    }
+
+    private func clearAvatar() {
+        avatarPath = nil
+        pickerError = nil
+        persistProfile()
+    }
+
+    private func save() {
+        let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        nickname = trimmed
+        saving = true
+        Task {
+            await EntityHTTP.upsertEntity(
+                name: "studio:user_profile",
+                type: "studio_user_profile",
+                description: "Local default profile (machine-only, not federated directly)",
+                attributes: profileAttributes()
+            )
+            await MainActor.run {
+                saving = false
+                savedFlash = true
+            }
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            await MainActor.run { savedFlash = false }
+        }
+    }
+
+    private func persistProfile() {
+        Task {
+            await EntityHTTP.upsertEntity(
+                name: "studio:user_profile",
+                type: "studio_user_profile",
+                description: "Local default profile (machine-only, not federated directly)",
+                attributes: profileAttributes()
+            )
+        }
+    }
+
+    private func profileAttributes() -> [String: Any] {
+        var attrs: [String: Any] = [
+            "default_nickname": nickname.trimmingCharacters(in: .whitespacesAndNewlines),
+        ]
+        // Persist the avatar path even when empty so a Clear action erases
+        // it server-side rather than leaving the prior value behind.
+        attrs["default_avatar_local_path"] = avatarPath ?? ""
+        return attrs
     }
 }

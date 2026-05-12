@@ -6,6 +6,19 @@ import GRDB
 import Logging
 import SwiftTerm
 
+// MARK: - Studio dbPool environment key (impl-spec §10 Diff E)
+
+private struct DBPoolKey: EnvironmentKey {
+    static let defaultValue: DatabasePool? = nil
+}
+
+extension EnvironmentValues {
+    var dbPool: DatabasePool? {
+        get { self[DBPoolKey.self] }
+        set { self[DBPoolKey.self] = newValue }
+    }
+}
+
 // MARK: - App Entry Point
 
 /// Port for the Sonata HTTP server, configurable via SONATA_PORT env var.
@@ -556,10 +569,18 @@ struct SonataApp: App {
     @FocusedValue(\.selectedTab) var selectedTab
     @FocusedValue(\.focusSearchBar) var focusSearchBar
 
+    // MARK: - Studio: DBPool environment plumbing (per impl-spec §10 Diff E)
+    //
+    // Studio's tab-scoped StudioStore needs the DatabasePool via SwiftUI's
+    // environment (plan §11 D2 — no singleton). The environment key + value
+    // accessor live alongside the app entrypoint so the value is injected
+    // once at the WindowGroup boundary below.
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
+                .environment(\.dbPool, dbPool)
         }
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0
@@ -591,6 +612,8 @@ struct SonataApp: App {
                         .keyboardShortcut("0", modifiers: .command)
                     Button("Plugins") { selectedTab?.wrappedValue = .plugins }
                         .keyboardShortcut("p", modifiers: [.command, .shift])
+                    Button("Studio") { selectedTab?.wrappedValue = .studio }
+                        .keyboardShortcut("s", modifiers: [.command, .shift])
                 }
             }
 

@@ -10,6 +10,7 @@ import { room_admit } from "./admit";
 import { card } from "./card";
 import { comment } from "./comment";
 import { dispatch } from "./dispatch";
+import { imageAttach } from "./imageAttach";
 import { member } from "./member";
 import { qa } from "./qa";
 import { room } from "./room";
@@ -55,6 +56,12 @@ const ROOM_JOIN_PARAMS: ActionParam[] = [
     required: true,
     description: "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token.",
   },
+  {
+    name: "profile",
+    type: "object",
+    description:
+      "Optional volunteered profile preview {nickname?: string, bio?: string} embedded in the claim event content so the founder can identify the joiner before admitting. PRIVACY: anyone holding the invite URL can read claim content — joiner is opting into exposing these strings to invite holders. Avatar is deliberately excluded (no room epoch key yet to encrypt against).",
+  },
 ];
 
 const ROOM_INVITE_PARAMS: ActionParam[] = [
@@ -75,7 +82,15 @@ const ROOM_ADMIT_PARAMS: ActionParam[] = [
   },
 ];
 
+const ROOM_PENDING_PARAMS: ActionParam[] = [
+  { name: "room_slug", type: "string", required: true, description: "Slug of the room to list pending claims for (founder-only)." },
+];
+
 const ROOM_LIST_PARAMS: ActionParam[] = [];
+
+const ROOM_DELETE_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to delete locally." },
+];
 
 const CARD_POST_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
@@ -87,7 +102,12 @@ const CARD_POST_PARAMS: ActionParam[] = [
     description: 'Card kind ("lead" | "review" | "finding" | "observation" | "task" | "note" | other).',
   },
   { name: "title", type: "string", required: true, description: "Title (≤200 chars)." },
-  { name: "summary", type: "string", required: true, description: "One-line summary (≤240 chars)." },
+  { name: "body", type: "string", required: true, description: "Long-form markdown body (≤10000 chars)." },
+  {
+    name: "summary",
+    type: "string",
+    description: "DEPRECATED alias for `body`. Accepted for one cutover release past 2026-05-12; new clients should send `body`.",
+  },
   {
     name: "blocks",
     type: "array",
@@ -103,6 +123,28 @@ const CARD_LIST_PARAMS: ActionParam[] = [
   { name: "track", type: "string", description: "Optional track slug filter." },
   { name: "since", type: "integer", description: "Optional Unix-ms cutoff; cards older than this are excluded." },
   { name: "limit", type: "integer", description: "Page size, default 50, max 200." },
+];
+
+const CARD_DELETE_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+  { name: "d_tag", type: "string", required: true, description: "d_tag of the card to soft-delete (from CardPostResult)." },
+];
+
+const CARD_UPDATE_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+  { name: "d_tag", type: "string", required: true, description: "d_tag of the card to update." },
+  { name: "track", type: "string", description: "Override track slug. Omit to preserve." },
+  { name: "kind", type: "string", description: "Override card kind. Omit to preserve." },
+  { name: "title", type: "string", description: "Override title (≤200 chars). Omit to preserve." },
+  { name: "body", type: "string", description: "Override long-form markdown body (≤10000 chars). Omit to preserve." },
+  {
+    name: "summary",
+    type: "string",
+    description: "DEPRECATED alias for `body`. Accepted for one cutover release past 2026-05-12; new clients should send `body`.",
+  },
+  { name: "blocks", type: "array", description: "Override blocks array. Omit to preserve." },
+  { name: "related_to", type: "array", description: "Override related_to list. Omit to preserve." },
+  { name: "tags", type: "array", description: "Override tags list. Omit to preserve." },
 ];
 
 const TRACK_CREATE_PARAMS: ActionParam[] = [
@@ -161,6 +203,12 @@ const MEMBER_SET_NICKNAME_PARAMS: ActionParam[] = [
   { name: "nickname", type: "string", required: true, description: "Display name to remember locally." },
 ];
 
+const IMAGE_ATTACH_PARAMS: ActionParam[] = [
+  { name: "file_path", type: "string", required: true, description: "Absolute path to the source image file (any readable location)." },
+  { name: "room_slug", type: "string", required: true, description: "Room slug — used to look up the current epoch." },
+  { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
+];
+
 // ── Action definitions ──────────────────────────────────────────────────────
 
 export const ACTIONS: ActionDef[] = [
@@ -195,11 +243,27 @@ export const ACTIONS: ActionDef[] = [
     params: ROOM_ADMIT_PARAMS,
   },
   {
+    name: "studio_room_pending",
+    description:
+      "Founder-only. List pending kind:30522 claims for a room without rotating, with each claim's volunteered profile preview (nickname + bio) parsed from the claim's content. Used by the admit dialog to render per-row identity previews.",
+    method: "post",
+    path: "/api/room/pending",
+    params: ROOM_PENDING_PARAMS,
+  },
+  {
     name: "studio_room_list",
     description: "List all Studio rooms this Sonata is a member of.",
     method: "get",
     path: "/api/room/list",
     params: ROOM_LIST_PARAMS,
+  },
+  {
+    name: "studio_room_delete",
+    description:
+      "Local-only delete: removes the room entity + keys from this Sonata. Does NOT publish a revocation event — other members keep their copies (federated revoke is v0.x+ work).",
+    method: "post",
+    path: "/api/room/delete",
+    params: ROOM_DELETE_PARAMS,
   },
   {
     name: "studio_card_post",
@@ -214,6 +278,22 @@ export const ACTIONS: ActionDef[] = [
     method: "get",
     path: "/api/card/list",
     params: CARD_LIST_PARAMS,
+  },
+  {
+    name: "studio_card_delete",
+    description:
+      "Author-only soft-delete: republishes the card (kind 30530) with status='deleted'. The replaceable d_tag overwrites the original; renderers filter status=deleted out.",
+    method: "post",
+    path: "/api/card/delete",
+    params: CARD_DELETE_PARAMS,
+  },
+  {
+    name: "studio_card_update",
+    description:
+      "Author-only edit: republishes the card (kind 30530) with merged fields. Omitted fields preserve the existing value from the local entity; present fields overwrite. Replaceable d_tag overwrites the prior rumor at every member.",
+    method: "post",
+    path: "/api/card/update",
+    params: CARD_UPDATE_PARAMS,
   },
   {
     name: "studio_track_create",
@@ -257,6 +337,22 @@ export const ACTIONS: ActionDef[] = [
     path: "/api/member/nickname",
     params: MEMBER_SET_NICKNAME_PARAMS,
   },
+  {
+    name: "studio_image_attach",
+    description:
+      "Encrypt + upload an image to Blossom under the room's current audience epoch key. Returns an image-block payload for embedding in a card's blocks[].",
+    method: "post",
+    path: "/api/image/attach",
+    params: IMAGE_ATTACH_PARAMS,
+  },
+  {
+    name: "studio_identity",
+    description:
+      "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI (Delete/Edit) without waiting on optimistic-reconcile heuristics.",
+    method: "get",
+    path: "/api/identity",
+    params: [],
+  },
 ];
 
 // ── Route table ─────────────────────────────────────────────────────────────
@@ -284,9 +380,17 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "post",
     handler: async (body, _q, ctx) => room_admit.admit(body, ctx),
   },
+  "/api/room/pending": {
+    method: "post",
+    handler: async (body, _q, ctx) => room_admit.pending(body, ctx),
+  },
   "/api/room/list": {
     method: "get",
     handler: async (_b, _q, ctx) => room.list(ctx),
+  },
+  "/api/room/delete": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.delete(body, ctx),
   },
   "/api/card/post": {
     method: "post",
@@ -295,6 +399,14 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/card/list": {
     method: "get",
     handler: async (_b, query, ctx) => card.list(query, ctx),
+  },
+  "/api/card/delete": {
+    method: "post",
+    handler: async (body, _q, ctx) => card.delete(body, ctx),
+  },
+  "/api/card/update": {
+    method: "post",
+    handler: async (body, _q, ctx) => card.update(body, ctx),
   },
   "/api/track/create": {
     method: "post",
@@ -320,8 +432,16 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "post",
     handler: async (body, _q, ctx) => member.setNickname(body, ctx),
   },
+  "/api/image/attach": {
+    method: "post",
+    handler: async (body, _q, ctx) => imageAttach.attach(body, ctx),
+  },
+  "/api/identity": {
+    method: "get",
+    handler: async (_b, _q, ctx) => ({ pubkey: ctx.cfg.pluginPub.toLowerCase() }),
+  },
 };
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, comment, dispatch, member, qa, room, room_admit, track };
+export { card, comment, dispatch, imageAttach, member, qa, room, room_admit, track };

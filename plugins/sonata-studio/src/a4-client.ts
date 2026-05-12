@@ -115,7 +115,19 @@ export interface RawProcessClaimsRequest {
 
 export interface RawProcessClaimsResponse {
   ok: true;
-  claimed: { invite_pub: string; claim_pubkey: string; claim_event_id: string }[];
+  claimed: {
+    invite_pub: string;
+    claim_pubkey: string;
+    claim_event_id: string;
+    /**
+     * Optional raw `content` field from the kind:30522 claim event. Gateway
+     * implementations MAY include it so callers can parse the joiner's
+     * volunteered profile preview (see `parseClaimProfile`). Older
+     * gateways omit this field; callers must treat its absence as "no
+     * preview available, fall back to pubkey-prefix only."
+     */
+    content?: string;
+  }[];
 }
 
 export interface RawPublishWrapsRequest {
@@ -263,8 +275,14 @@ export class GatewayClient {
   /**
    * Open the SSE stream. Returns the raw Response; caller pipes the body.
    * No retry at this layer — the SSE manager owns reconnect logic.
+   *
+   * `signal` is forwarded to the underlying fetch so the caller can abort
+   * both the pending request and the response body stream in one shot —
+   * the body's ReadableStream errors out of any in-flight `reader.read()`
+   * when the signal fires, which is the only way to unblock an SSE pump
+   * that's idling on the wire.
    */
-  async openStream(args: OpenStreamArgs): Promise<Response> {
+  async openStream(args: OpenStreamArgs, signal?: AbortSignal): Promise<Response> {
     const params = new URLSearchParams({
       aud_id_pub: args.aud_id_pub,
     });
@@ -286,6 +304,7 @@ export class GatewayClient {
         Authorization: auth,
         Accept: "text/event-stream",
       },
+      signal,
     });
     if (!res.ok) {
       const { code, message } = await this.readErrorPayload(res);

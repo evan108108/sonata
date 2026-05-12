@@ -11,6 +11,7 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.0.0"),
+        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1.git", from: "0.10.0"),
     ],
     targets: [
         .executableTarget(
@@ -20,6 +21,7 @@ let package = Package(
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+                .product(name: "P256K", package: "swift-secp256k1"),
             ],
             path: "Sources",
             resources: [
@@ -39,6 +41,9 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
             path: "Tests/SonataTests",
+            resources: [
+                .copy("fixtures"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

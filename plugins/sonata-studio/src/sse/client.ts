@@ -46,6 +46,7 @@ export interface SSEEntityRow {
 export interface SSEMemoryClient {
   entity: {
     byName(name: string): Promise<SSEEntityRow | null>;
+    byNameOrNull(name: string): Promise<SSEEntityRow | null>;
     list(opts?: { type?: string; limit?: number }): Promise<SSEEntityRow[]>;
     patch(args: {
       id: string;
@@ -54,6 +55,7 @@ export interface SSEMemoryClient {
   };
   secret: {
     get(name: string): Promise<{ name: string; value: string }>;
+    getOrNull(name: string): Promise<{ name: string; value: string } | null>;
     set(args: {
       name: string;
       value: string;
@@ -200,10 +202,19 @@ export class SSEClient implements AbortFlag {
   private state: RoomState | null = null;
   private epochKeys = new Map<number, Uint8Array>();
   private pending = new Map<number, PendingItem[]>();
-  private recentWrapIds = new Map<string, number>();
+  /**
+   * Per-event-id dedup window covering BOTH gift-wraps (kind:1059) and
+   * key-grants (kind:30521). The gateway emits the same event under two
+   * legitimate paths within one connection — the replay-before-hello batch
+   * AND the first live-tail poll (which still sees events newer than
+   * `now - OVERLAP_SECONDS`). Without this, every reconnect's replay
+   * window also re-floods the handlers because key-grants don't advance
+   * the gift-wrap cursor on their own.
+   */
+  private recentEventIds = new Map<string, number>();
   private cursorDirty = false;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
-  private activeBody: ReadableStream<Uint8Array> | null = null;
+  private abortController = new AbortController();
   /**
    * Set when the most recent connect attempt was rejected with 403
    * `caller is not a current member of the audience`. The next iteration
@@ -274,17 +285,19 @@ export class SSEClient implements AbortFlag {
             : nowSec;
           args.since_ts = Math.max(0, Math.min(joinedSec, nowSec) - PENDING_GRANT_REPLAY_WINDOW_SEC);
         }
-        const resp = await this.gateway.openStream(args);
+        const resp = await this.gateway.openStream(args, this.abortController.signal);
         // First successful connect clears the pre-admit flag so the next
         // reconnect uses normal cursor logic.
         this.pendingAdmitReconnect = false;
         if (!resp.body) {
           throw new Error("gateway response had no body");
         }
-        this.activeBody = resp.body;
         await this.consume(resp.body);
       } catch (err) {
-        if (isPreAdmitRejection(err)) {
+        if (this.aborted) {
+          // Expected during shutdown — fetch was aborted via the signal,
+          // surfacing as AbortError out of openStream or reader.read().
+        } else if (isPreAdmitRejection(err)) {
           this.pendingAdmitReconnect = true;
           log.info("[sse] pre-admit 403, will reconnect with 60s lookback", {
             room: this.roomSlug,
@@ -296,8 +309,6 @@ export class SSEClient implements AbortFlag {
             err: msg,
           });
         }
-      } finally {
-        this.activeBody = null;
       }
       // Persist cursor before sleeping so a crash mid-backoff doesn't lose
       // progress. flushCursor() is a no-op if nothing's dirty.
@@ -313,11 +324,13 @@ export class SSEClient implements AbortFlag {
   abort(): void {
     if (this.aborted) return;
     this.aborted = true;
-    if (this.activeBody) {
-      this.activeBody.cancel().catch(() => {
-        // best-effort
-      });
-    }
+    // Abort the in-flight fetch (and its response body). Cancelling the
+    // body directly is not viable here: `parseSSEStream` calls
+    // `body.getReader()`, which locks the stream, and `ReadableStream.cancel`
+    // on a locked stream throws TypeError — that's the root cause of the
+    // `close()` hang. Aborting the fetch propagates through the runtime and
+    // errors `reader.read()` out of the parser loop on the next iteration.
+    this.abortController.abort();
   }
 
   /** Force a cursor write right now (test hook + graceful shutdown). */
@@ -396,7 +409,7 @@ export class SSEClient implements AbortFlag {
     if (!wrap || typeof receivedAtMs !== "number") return;
     if (!this.state) return;
 
-    if (this.isDuplicateWrap(wrap.id, receivedAtMs)) {
+    if (this.isDuplicateEvent(wrap.id, receivedAtMs)) {
       log.info("[sse-trace] gift-wrap duplicate-skip", { room: this.roomSlug, wrap_id: wrap.id });
       return;
     }
@@ -474,13 +487,13 @@ export class SSEClient implements AbortFlag {
     this.advanceCursor(receivedAtMs);
   }
 
-  private isDuplicateWrap(id: string, nowMs: number): boolean {
+  private isDuplicateEvent(id: string, nowMs: number): boolean {
     // GC entries older than the dedup window.
-    for (const [k, t] of this.recentWrapIds) {
-      if (nowMs - t > DEDUP_WINDOW_MS) this.recentWrapIds.delete(k);
+    for (const [k, t] of this.recentEventIds) {
+      if (nowMs - t > DEDUP_WINDOW_MS) this.recentEventIds.delete(k);
     }
-    if (this.recentWrapIds.has(id)) return true;
-    this.recentWrapIds.set(id, nowMs);
+    if (this.recentEventIds.has(id)) return true;
+    this.recentEventIds.set(id, nowMs);
     return false;
   }
 
@@ -546,11 +559,35 @@ export class SSEClient implements AbortFlag {
 
   private async handleKeyGrant(data: unknown): Promise<void> {
     if (!data || typeof data !== "object") return;
-    const payload = data as { grant_event?: NostrEventLike };
+    const payload = data as { grant_event?: NostrEventLike; received_at_ms?: number };
     const grant = payload.grant_event;
     if (!grant) return;
     if (!this.state) return;
     if (grant.kind !== KIND_KEY_GRANT) return;
+
+    // `received_at_ms` is `grant.created_at * 1000` from the gateway
+    // (audience-stream.ts:381). Falling back to `created_at` for older
+    // gateway builds or test fixtures that omit it.
+    const receivedAtMs =
+      typeof payload.received_at_ms === "number"
+        ? payload.received_at_ms
+        : grant.created_at * 1000;
+
+    // Bug A root cause: the gateway emits the same key-grant on every
+    // SSE connect (replay window includes anything since the last
+    // gift-wrap cursor) AND once again on the first live-tail poll. Before
+    // this dedup, the loop re-processed each replay/live overlap pair,
+    // logging "[sse] key-grant landed" hundreds of times for the same
+    // event id at the same epoch. The cursor advance below closes the
+    // loop across reconnects; this catches within-connection duplicates.
+    if (this.isDuplicateEvent(grant.id, receivedAtMs)) {
+      log.info("[sse-trace] key-grant duplicate-skip", {
+        room: this.roomSlug,
+        event_id: grant.id,
+      });
+      this.advanceCursor(receivedAtMs);
+      return;
+    }
 
     const epoch = this.parseEpochFromGrant(grant);
     if (epoch === null) {
@@ -558,6 +595,7 @@ export class SSEClient implements AbortFlag {
         room: this.roomSlug,
         event_id: grant.id,
       });
+      this.advanceCursor(receivedAtMs);
       return;
     }
 
@@ -566,10 +604,12 @@ export class SSEClient implements AbortFlag {
       epochPriv = nip44.decrypt(grant.content, this.pluginPriv, grant.pubkey);
     } catch (e) {
       // Grants for other recipients land on the same stream; ignore.
+      // Still advance the cursor so the gateway stops replaying it.
       log.debug("[sse] key-grant decrypt failed (likely not for us)", {
         room: this.roomSlug,
         event_id: grant.id,
       });
+      this.advanceCursor(receivedAtMs);
       return;
     }
     if (epochPriv.length !== 32) {
@@ -578,6 +618,7 @@ export class SSEClient implements AbortFlag {
         event_id: grant.id,
         len: epochPriv.length,
       });
+      this.advanceCursor(receivedAtMs);
       return;
     }
 
@@ -609,23 +650,24 @@ export class SSEClient implements AbortFlag {
     });
 
     await this.drainPending(epoch);
+    // Move the cursor PAST this grant so the gateway's next-connect replay
+    // window excludes it (`g.created_at > sinceUnix` in audience-stream.ts).
+    // Before this, the cursor only advanced on gift-wraps, so a room that
+    // had received only key-grants kept replaying them forever.
+    this.advanceCursor(receivedAtMs);
   }
 
   private async shouldPromoteToActive(): Promise<boolean> {
     if (!this.state) return false;
     if (this.state.state !== "pending-grant") return false;
-    try {
-      const fresh = await this.memory.entity.byName(`studio:room:${this.roomSlug}`);
-      const freshAttrs = parseAttrs(fresh?.attributes);
-      const cur = freshAttrs["state"];
-      // Promote only if the on-disk state is still pending-grant. If the
-      // attribute is missing entirely (older rows pre-Phase-3), trust our
-      // in-memory pending-grant view.
-      if (cur === undefined) return true;
-      return cur === "pending-grant";
-    } catch {
-      return true;
-    }
+    const fresh = await this.memory.entity.byNameOrNull(`studio:room:${this.roomSlug}`);
+    const freshAttrs = parseAttrs(fresh?.attributes);
+    const cur = freshAttrs["state"];
+    // Promote only if the on-disk state is still pending-grant. If the row
+    // is missing entirely (older rows pre-Phase-3) or the attribute is
+    // absent, trust our in-memory pending-grant view.
+    if (cur === undefined) return true;
+    return cur === "pending-grant";
   }
 
   private parseEpochFromGrant(grant: NostrEventLike): number | null {
@@ -667,9 +709,21 @@ export class SSEClient implements AbortFlag {
   private async handleDeclarationUpdated(data: unknown): Promise<void> {
     if (!data || typeof data !== "object") return;
     if (!this.state) return;
-    const payload = data as { declaration_event?: NostrEventLike };
+    const payload = data as { declaration_event?: NostrEventLike; received_at_ms?: number };
     const decl = payload.declaration_event;
     if (!decl) return;
+    const receivedAtMs =
+      typeof payload.received_at_ms === "number"
+        ? payload.received_at_ms
+        : decl.created_at * 1000;
+    if (this.isDuplicateEvent(decl.id, receivedAtMs)) {
+      log.info("[sse-trace] declaration-updated duplicate-skip", {
+        room: this.roomSlug,
+        event_id: decl.id,
+      });
+      this.advanceCursor(receivedAtMs);
+      return;
+    }
 
     const tags = decl.tags;
     const members: string[] = [];
@@ -726,6 +780,10 @@ export class SSEClient implements AbortFlag {
         await this.drainPending(epoch);
       }
     }
+    // Advance the cursor past this declaration so the gateway's replay
+    // path (`cur.created_at > sinceUnix`, audience-stream.ts:286) stops
+    // re-emitting it on every reconnect.
+    this.advanceCursor(receivedAtMs);
   }
 
   /**
@@ -773,7 +831,7 @@ export class SSEClient implements AbortFlag {
 
   private async loadRoomState(): Promise<void> {
     const name = `studio:room:${this.roomSlug}`;
-    const ent = await this.memory.entity.byName(name);
+    const ent = await this.memory.entity.byNameOrNull(name);
     if (!ent) {
       this.state = null;
       return;

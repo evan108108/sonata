@@ -388,5 +388,179 @@ describe("studio_room_admit", () => {
   });
 });
 
+// ── Pending claims listing (admit-time profile preview) ─────────────────────
+
+function processClaimsWithContent(claimed: { invite_pub: string; claim_pubkey: string; claim_event_id: string; content?: string }[]) {
+  return {
+    match: (u: string, m: string) =>
+      m === "POST" && matchGatewayUrl("/v0/audience/raw/process-claims")(u),
+    respond: () => ({ status: 200, body: { ok: true, claimed } }),
+  };
+}
+
+describe("studio_room_pending", () => {
+  it("rejects non-founders with 403", async () => {
+    const { ctx, pluginPub } = makeCtx();
+    const seeded = seedHelpers(pluginPub);
+    seeded.joinerRoom("bar");
+    const { restore } = installMockFetch({
+      routes: [processClaimsWithContent([]), ...memoryRoutes(seeded.store)],
+    });
+    try {
+      await expect(room_admit.pending({ room_slug: "bar" }, ctx)).rejects.toMatchObject({
+        code: "not_founder",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns empty list when gateway has no pending claims", async () => {
+    const { ctx, pluginPub } = makeCtx();
+    const seeded = seedHelpers(pluginPub);
+    seeded.founderRoom("bar");
+    const { restore } = installMockFetch({
+      routes: [processClaimsWithContent([]), ...memoryRoutes(seeded.store)],
+    });
+    try {
+      const res = await room_admit.pending({ room_slug: "bar" }, ctx);
+      expect(res.ok).toBe(true);
+      expect(res.pending).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("surfaces parsed profile previews per pending claim and filters already-admitted members", async () => {
+    const { ctx, pluginPub } = makeCtx();
+    const seeded = seedHelpers(pluginPub);
+    seeded.founderRoom("bar");
+    const claimerPriv = randomBytes(32);
+    const claimerPub = bytesToHex(schnorr.getPublicKey(claimerPriv));
+    const otherPriv = randomBytes(32);
+    const otherPub = bytesToHex(schnorr.getPublicKey(otherPriv));
+    const claimContent = JSON.stringify({
+      "@type": "AudienceClaim",
+      audience: "bar",
+      epoch: 1,
+      claimPubkey: claimerPub,
+      profile: { nickname: "scout-evan", bio: "AEC lead discovery" },
+    });
+    const oldClaimNoContent = {
+      invite_pub: "i".repeat(64),
+      claim_pubkey: otherPub,
+      claim_event_id: "claim-old",
+      // content omitted → gateway-doesn't-surface case
+    };
+    const newClaimWithContent = {
+      invite_pub: "i".repeat(64),
+      claim_pubkey: claimerPub,
+      claim_event_id: "claim-new",
+      content: claimContent,
+    };
+    const alreadyMember = {
+      invite_pub: "i".repeat(64),
+      claim_pubkey: pluginPub.toLowerCase(),
+      claim_event_id: "claim-self",
+      content: JSON.stringify({ profile: { nickname: "should-be-filtered" } }),
+    };
+    const { restore } = installMockFetch({
+      routes: [
+        processClaimsWithContent([oldClaimNoContent, newClaimWithContent, alreadyMember]),
+        ...memoryRoutes(seeded.store),
+      ],
+    });
+    try {
+      const res = await room_admit.pending({ room_slug: "bar" }, ctx);
+      expect(res.ok).toBe(true);
+      // Two entries — founder's own claim is filtered as already-admitted.
+      expect(res.pending).toHaveLength(2);
+
+      const claimer = res.pending.find((p) => p.claim_pubkey === claimerPub);
+      expect(claimer).toBeDefined();
+      expect(claimer!.profile).toEqual({
+        nickname: "scout-evan",
+        bio: "AEC lead discovery",
+      });
+
+      const other = res.pending.find((p) => p.claim_pubkey === otherPub);
+      expect(other).toBeDefined();
+      expect(other!.profile).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("studio_room_admit profile surfacing", () => {
+  it("includes parsed profile on admitted entries when gateway exposes claim content", async () => {
+    const { ctx, pluginPub } = makeCtx();
+    const seeded = seedHelpers(pluginPub);
+    seeded.founderRoom("baz");
+    const claimerPriv = randomBytes(32);
+    const claimerPub = bytesToHex(schnorr.getPublicKey(claimerPriv));
+    const invitePriv = randomBytes(32);
+    const invitePub = bytesToHex(schnorr.getPublicKey(invitePriv));
+    const claimContent = JSON.stringify({
+      "@type": "AudienceClaim",
+      audience: "baz",
+      epoch: 1,
+      claimPubkey: claimerPub,
+      profile: { nickname: "scout-evan" },
+    });
+    const { restore } = installMockFetch({
+      routes: [
+        processClaimsWithContent([
+          {
+            invite_pub: invitePub,
+            claim_pubkey: claimerPub,
+            claim_event_id: "claim-1",
+            content: claimContent,
+          },
+        ]),
+        rotateRoute(),
+        ...memoryRoutes(seeded.store),
+      ],
+    });
+    try {
+      const res = await room_admit.admit({ room_slug: "baz" }, ctx);
+      expect(res.admitted).toHaveLength(1);
+      expect(res.admitted[0]!.profile).toEqual({ nickname: "scout-evan" });
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits profile when gateway omits claim content (back-compat)", async () => {
+    const { ctx, pluginPub } = makeCtx();
+    const seeded = seedHelpers(pluginPub);
+    seeded.founderRoom("baz2");
+    const claimerPriv = randomBytes(32);
+    const claimerPub = bytesToHex(schnorr.getPublicKey(claimerPriv));
+    const invitePriv = randomBytes(32);
+    const invitePub = bytesToHex(schnorr.getPublicKey(invitePriv));
+    const { restore } = installMockFetch({
+      routes: [
+        processClaimsWithContent([
+          {
+            invite_pub: invitePub,
+            claim_pubkey: claimerPub,
+            claim_event_id: "claim-1",
+          },
+        ]),
+        rotateRoute(),
+        ...memoryRoutes(seeded.store),
+      ],
+    });
+    try {
+      const res = await room_admit.admit({ room_slug: "baz2" }, ctx);
+      expect(res.admitted).toHaveLength(1);
+      expect(res.admitted[0]!.profile).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+});
+
 // Avoid unused warning on FetchCall type re-export.
 void (null as unknown as FetchCall);

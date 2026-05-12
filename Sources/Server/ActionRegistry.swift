@@ -75,6 +75,143 @@ final class ActionRegistry: @unchecked Sendable {
                 }
             }
         }
+
+        // Wildcard fallback for plugin proxy routes. Plugins enabled AFTER boot
+        // add actions to `actions` but cannot retroactively register routes on
+        // the Hummingbird trie. The wildcard catches `/api/plugins/<name>/**`
+        // and dispatches at request-time against the current `actions` list.
+        //
+        // The capture is named `name` (not `plugin`) on purpose: Hummingbird
+        // rejects two captures with different names at the same trie position,
+        // and PluginActions already uses `{name}` for /api/plugins/{name}/...
+        // management routes. Sharing the capture name lets `**` slot in as a
+        // sibling of `enable`/`disable`/`config`. Literals (priority 0) still
+        // win over the recursive wildcard (priority -5), so management routes
+        // and boot-time plugin per-action routes are unaffected.
+        let pluginWildcard: RouterPath = "/api/plugins/:name/**"
+        router.get(pluginWildcard, use: makePluginWildcardHandler(method: .get, dbPool: dbPool))
+        router.post(pluginWildcard, use: makePluginWildcardHandler(method: .post, dbPool: dbPool))
+        router.patch(pluginWildcard, use: makePluginWildcardHandler(method: .patch, dbPool: dbPool))
+        router.delete(pluginWildcard, use: makePluginWildcardHandler(method: .delete, dbPool: dbPool))
+    }
+
+    /// Build the wildcard handler for `/api/plugins/:plugin/**`. The handler
+    /// resolves the matching SonataAction at request-time so runtime-enabled
+    /// plugins become HTTP-reachable without a restart.
+    private func makePluginWildcardHandler<Context: RequestContext>(
+        method: ActionMethod,
+        dbPool: DatabasePool
+    ) -> @Sendable (Request, Context) async throws -> Response {
+        let scheduler = self.scheduler
+        let search = self.search
+        let registry = self
+        return { request, context in
+            guard let pluginName = context.parameters.get("name", as: String.self) else {
+                return errorResponse("Missing plugin name in path", status: .badRequest)
+            }
+            let segments = context.parameters.getCatchAll().map(String.init)
+            let subPath = "/" + segments.joined(separator: "/")
+
+            guard let resolved = registry.resolvePluginAction(
+                plugin: pluginName, subPath: subPath, method: method
+            ) else {
+                return pluginActionNotFoundResponse(plugin: pluginName, subPath: subPath)
+            }
+            let action = resolved.action
+            let captures = resolved.pathCaptures
+
+            do {
+                let params = try await Self.extractHTTPParams(
+                    from: request,
+                    context: context,
+                    action: action,
+                    pathOverrides: captures
+                )
+
+                for p in action.params where p.required {
+                    if params[p.name] == nil, p.defaultValue == nil {
+                        return errorResponse(
+                            "Missing required parameter: \(p.name)",
+                            status: .badRequest
+                        )
+                    }
+                }
+
+                var finalParams = params
+                for p in action.params {
+                    if finalParams[p.name] == nil, let d = p.defaultValue {
+                        finalParams[p.name] = d
+                    }
+                }
+                // Path captures that aren't declared as action params still need
+                // to flow into ActionContext so proxy handlers can substitute
+                // `:key` placeholders into the upstream target URL.
+                for (key, value) in captures where finalParams[key] == nil {
+                    finalParams[key] = value
+                }
+
+                let ctx = ActionContext(
+                    params: ActionParams(finalParams),
+                    dbPool: dbPool,
+                    scheduler: scheduler,
+                    search: search
+                )
+                let result = try await action.handler(ctx)
+                return jsonResponse(AnyEncodable(result))
+            } catch let error as ActionError {
+                return errorResponse(error.localizedDescription, status: error.httpStatus)
+            } catch {
+                return errorResponse(
+                    "Internal error: \(error.localizedDescription)",
+                    status: .internalServerError
+                )
+            }
+        }
+    }
+
+    /// Find the plugin action registered under `/api/plugins/<plugin>` whose
+    /// path template matches `subPath`. Exact matches win; if none, fall back
+    /// to segment-wise matching that captures `:name` placeholders.
+    private func resolvePluginAction(
+        plugin: String,
+        subPath: String,
+        method: ActionMethod
+    ) -> (action: SonataAction, pathCaptures: [String: String])? {
+        let groupPrefix = "/api/plugins/\(plugin)"
+        lock.lock()
+        let snapshot = actions
+        lock.unlock()
+
+        // Pass 1: exact path match (covers paths without `:name` placeholders,
+        // which is what every Studio action uses).
+        for action in snapshot
+        where action.group == groupPrefix && action.method == method && action.path == subPath {
+            return (action, [:])
+        }
+
+        // Pass 2: segment-wise match with `:name` captures. Supports plugin
+        // actions whose path templates contain path parameters (e.g.
+        // `/message/:id/forward`).
+        let requestSegments = subPath.split(separator: "/").map(String.init)
+        for action in snapshot
+        where action.group == groupPrefix && action.method == method {
+            let actionSegments = action.path.split(separator: "/").map(String.init)
+            guard actionSegments.count == requestSegments.count else { continue }
+            var captures: [String: String] = [:]
+            var matched = true
+            for (a, r) in zip(actionSegments, requestSegments) {
+                if a.hasPrefix(":") {
+                    captures[String(a.dropFirst())] = r
+                } else if a != r {
+                    matched = false
+                    break
+                }
+            }
+            if matched {
+                return (action, captures)
+            }
+        }
+        return nil
     }
 
     /// Create a generic HTTP handler for any action
@@ -130,11 +267,16 @@ final class ActionRegistry: @unchecked Sendable {
         }
     }
 
-    /// Extract parameters from an HTTP request
+    /// Extract parameters from an HTTP request.
+    ///
+    /// `pathOverrides` supplies pre-captured path parameters (used by the
+    /// runtime plugin-wildcard dispatcher, which extracts `:name` segments
+    /// itself rather than relying on Hummingbird's per-action route).
     private static func extractHTTPParams<Context: RequestContext>(
         from request: Request,
         context: Context,
-        action: SonataAction
+        action: SonataAction,
+        pathOverrides: [String: String] = [:]
     ) async throws -> [String: Any] {
         var params: [String: Any] = [:]
         let queryParams = request.uri.queryParameters
@@ -163,8 +305,11 @@ final class ActionRegistry: @unchecked Sendable {
                     params[p.name] = coerceAny(v, to: p.type)
                 }
             case .path:
-                // Path params extracted from URL segments
-                if let v = context.parameters.get(p.name, as: String.self) {
+                // Path params extracted from URL segments. Overrides win so
+                // the wildcard dispatcher can inject captures it parsed itself.
+                if let v = pathOverrides[p.name] {
+                    params[p.name] = v
+                } else if let v = context.parameters.get(p.name, as: String.self) {
                     params[p.name] = v
                 }
             }
@@ -195,7 +340,15 @@ final class ActionRegistry: @unchecked Sendable {
         case .stringArray:
             if let arr = value as? [String] { return normalizeStringArray(arr) }
             if let arr = value as? [Any] {
-                return normalizeStringArray(arr.compactMap { $0 as? String })
+                // Plain string array → normalize. Mixed/object array → pass
+                // through raw so plugins that accept richer shapes (e.g.
+                // `default_tracks: [{name, title}]`) aren't silently flattened
+                // to an empty list.
+                let asStrings = arr.compactMap { $0 as? String }
+                if asStrings.count == arr.count {
+                    return normalizeStringArray(asStrings)
+                }
+                return arr
             }
             if let s = value as? String { return s }  // stringArray() will parse it
             return ""
@@ -379,6 +532,20 @@ struct AnyEncodable: Encodable {
 }
 
 // MARK: - Helpers
+
+/// 404 envelope returned by the `/api/plugins/:plugin/**` wildcard fallback
+/// when no SonataAction matches the requested sub-path.
+private func pluginActionNotFoundResponse(plugin: String, subPath: String) -> Response {
+    struct PluginActionNotFound: Encodable {
+        let error = "plugin_action_not_found"
+        let plugin: String
+        let path: String
+    }
+    return jsonResponse(
+        PluginActionNotFound(plugin: plugin, path: subPath),
+        status: .notFound
+    )
+}
 
 /// Build a JSON response from an arbitrary JSON-serializable Any value
 /// (e.g. `[[String: Any]]` for MCP tool schemas). Mirrors `jsonResponse` but

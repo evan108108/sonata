@@ -1,0 +1,163 @@
+{
+  "ts": "2026-05-08T19:03:35.286Z",
+  "gateway": "https://api.4a4.ai",
+  "plugin_pub": "5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93",
+  "responses": {
+    "room_create": {
+      "ok": true,
+      "result": {
+        "audience_address": "30520:560b09fba5d468873169bd92e9fe7ac90aac3abe42ceb4ce459b479119c632cc:rt-test",
+        "room_event_id": "fe5bbb76485ad8c727faf9a553a0d95361b4d86097fd5c50753be46a0cd5d691",
+        "declaration_event_id": "84e753d37ce678a405731fb3b0fa79adc7d04f88052b532744268301cb769e4d",
+        "founding_grant_event_id": "fcf5616db19971d5853371491fcd0253c3c9527bda7e0789dc7ab5ddba5d96e6",
+        "members": [
+          "5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93"
+        ],
+        "epoch": 1,
+        "default_tracks": [
+          "inbox"
+        ]
+      }
+    },
+    "card_post_inbox": {
+      "ok": true,
+      "result": {
+        "rumor_event_id": "91a9ebb0709d26702ac1ab9332865447ae52d52824edeb61435056a37b52dda9",
+        "audience_address": "30520:560b09fba5d468873169bd92e9fe7ac90aac3abe42ceb4ce459b479119c632cc:rt-test",
+        "d_tag": "hello-dd3c3904"
+      }
+    },
+    "card_list_all": {
+      "ok": true,
+      "result": {
+        "cards": [
+          {
+            "event_id": "91a9ebb0709d26702ac1ab9332865447ae52d52824edeb61435056a37b52dda9",
+            "d_tag": "hello-dd3c3904",
+            "track": "inbox",
+            "kind": "note",
+            "title": "hello",
+            "summary": "hi",
+            "created_by": "5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93",
+            "created_at": 1778267006000,
+            "blocks": [
+              {
+                "type": "text",
+                "body": "world"
+              }
+            ],
+            "tags": [
+              "sonata-studio",
+              "room:rt-test"
+            ],
+            "related_to": []
+          }
+        ]
+      }
+    },
+    "room_list": {
+      "ok": true,
+      "result": {
+        "rooms": [
+          {
+            "audience_address": "30520:560b09fba5d468873169bd92e9fe7ac90aac3abe42ceb4ce459b479119c632cc:rt-test",
+            "slug": "rt-test",
+            "title": "Round-trip",
+            "epoch": 1,
+            "members": [
+              "5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93"
+            ],
+            "pending_invites": 0,
+            "state": "active"
+          }
+        ]
+      }
+    },
+    "track_create_staging": {
+      "ok": true,
+      "result": {
+        "rumor_event_id": "38a074e34665baab5a341f1b3258694c5b3c94e808977bfe3174d209443416a4",
+        "d_tag": "staging"
+      }
+    },
+    "card_post_staging": {
+      "ok": true,
+      "result": {
+        "rumor_event_id": "8c87f9e03a575e6ed15f20af6fc06734fe64094d101853f8a7edac91e6eec48b",
+        "audience_address": "30520:560b09fba5d468873169bd92e9fe7ac90aac3abe42ceb4ce459b479119c632cc:rt-test",
+        "d_tag": "stage-only-8e15f69e"
+      }
+    },
+    "card_list_inbox": {
+      "ok": true,
+      "result": {
+        "cards": [
+          {
+            "event_id": "91a9ebb0709d26702ac1ab9332865447ae52d52824edeb61435056a37b52dda9",
+            "d_tag": "hello-dd3c3904",
+            "track": "inbox",
+            "kind": "note",
+            "title": "hello",
+            "summary": "hi",
+            "created_by": "5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93",
+            "created_at": 1778267006000,
+            "blocks": [
+              {
+                "type": "text",
+                "body": "world"
+              }
+            ],
+            "tags": [
+              "sonata-studio",
+              "room:rt-test"
+            ],
+            "related_to": []
+          }
+        ]
+      }
+    },
+    "card_list_staging": {
+      "ok": true,
+      "result": {
+        "cards": [
+          {
+            "event_id": "8c87f9e03a575e6ed15f20af6fc06734fe64094d101853f8a7edac91e6eec48b",
+            "d_tag": "stage-only-8e15f69e",
+            "track": "staging",
+            "kind": "note",
+            "title": "stage-only",
+            "summary": "from staging",
+            "created_by": "5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93",
+            "created_at": 1778267012000,
+            "blocks": [
+              {
+                "type": "text",
+                "body": "stage body"
+              }
+            ],
+            "tags": [
+              "sonata-studio",
+              "room:rt-test"
+            ],
+            "related_to": []
+          }
+        ]
+      }
+    }
+  },
+  "plugin_log_tail": [
+    "[stdout] [sonata-studio 2026-05-08T19:03:22.176Z] sonata-studio booting {\"pid\":23732,\"port\":59605}",
+    "[stdout] [sonata-studio 2026-05-08T19:03:22.185Z] Sonata reachable {\"host\":\"http://127.0.0.1:59604\"}",
+    "[stdout] [sonata-studio 2026-05-08T19:03:22.198Z] Generating plugin keypair on first run {\"plugin_pub\":\"5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93\"}",
+    "[stdout] [sonata-studio 2026-05-08T19:03:22.199Z] Config loaded {\"plugin_pub\":\"5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:59604\"}",
+    "[stdout] [sonata-studio 2026-05-08T19:03:22.203Z] [sse] manager started {\"rooms\":0}",
+    "[stdout] [sonata-studio 2026-05-08T19:03:22.204Z] HTTP server listening {\"port\":59605,\"actions\":13}",
+    "[log] {\"ts\":\"2026-05-08T19:03:22.176Z\",\"level\":\"info\",\"msg\":\"sonata-studio booting\",\"pid\":23732,\"port\":59605}",
+    "[log] {\"ts\":\"2026-05-08T19:03:22.185Z\",\"level\":\"info\",\"msg\":\"Sonata reachable\",\"host\":\"http://127.0.0.1:59604\"}",
+    "[log] {\"ts\":\"2026-05-08T19:03:22.198Z\",\"level\":\"info\",\"msg\":\"Generating plugin keypair on first run\",\"plugin_pub\":\"5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93\"}",
+    "[log] {\"ts\":\"2026-05-08T19:03:22.199Z\",\"level\":\"info\",\"msg\":\"Config loaded\",\"plugin_pub\":\"5b2c0d300c9997b281e770182dac55852780ccff5f8cea8b0b1dd6a91f82ce93\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:59604\"}",
+    "[log] {\"ts\":\"2026-05-08T19:03:22.203Z\",\"level\":\"info\",\"msg\":\"[sse] manager started\",\"rooms\":0}",
+    "[log] {\"ts\":\"2026-05-08T19:03:22.204Z\",\"level\":\"info\",\"msg\":\"HTTP server listening\",\"port\":59605,\"actions\":13}"
+  ],
+  "attempts": 1
+}

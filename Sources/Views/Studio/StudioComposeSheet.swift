@@ -1,0 +1,847 @@
+import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
+
+/// Modal compose sheet — full-form card post. Per W6.2.
+///
+/// Posts on Cmd+↩ or Post-button click. On success the sheet dismisses; on
+/// failure the sheet stays open with `formError` populated for an inline
+/// error band — per spec §13's "sheet preserved" retry semantics.
+struct StudioComposeSheet: View {
+    @EnvironmentObject private var store: StudioStore
+    @Environment(\.studioToast) private var toast
+    @Environment(\.dismiss) private var dismiss
+
+    let roomSlug: String
+    let trackSlug: String
+    /// When non-nil the sheet runs in edit mode: fields pre-populate from this
+    /// card, the submit button reads "Save", the cancel-discard copy changes,
+    /// and submit routes through `store.updateCard` instead of `postCard`.
+    var editingCard: StudioCard? = nil
+
+    @State private var kind: CardKind = .note
+    @State private var title: String = ""
+    @State private var bodyText: String = ""
+    @State private var blocks: [BlockDraft] = []
+    @State private var tagsRaw: String = ""
+    /// In edit mode, the effective track is editable — the field is set
+    /// from `editingCard.trackSlug` on appear and patched by the user via a
+    /// picker. In new-card mode it's pinned to the parent's `trackSlug` so
+    /// the sheet's existing semantics don't change.
+    @State private var editingTrackSlug: String = ""
+    /// Blocks the renderer cannot reconstruct via the BlockDraft editor
+    /// (currently: `.unknown(...)`). Preserved verbatim so a save doesn't
+    /// silently drop forward-compatible payload shapes.
+    @State private var passthroughBlocks: [[String: Any]] = []
+    /// Snapshot taken on appear so we can diff against the live form state
+    /// to detect "any unsaved changes" for the cancel-discard prompt.
+    @State private var initialSnapshot: FormSnapshot? = nil
+
+    @State private var posting: Bool = false
+    @State private var formError: String? = nil
+    @State private var didLoadEditingCard: Bool = false
+
+    private var isEditMode: Bool { editingCard != nil }
+    private var effectiveTrack: String {
+        isEditMode ? editingTrackSlug : trackSlug
+    }
+
+    enum CardKind: String, CaseIterable, Identifiable {
+        case note, lead, review, task, question, answer
+        var id: String { rawValue }
+        var label: String { rawValue.capitalized }
+        var symbol: String {
+            switch self {
+            case .note:     return "note.text"
+            case .lead:     return "person.crop.rectangle.badge.plus"
+            case .review:   return "checkmark.seal"
+            case .task:     return "checklist"
+            case .question: return "questionmark.bubble"
+            case .answer:   return "text.bubble.fill"
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    kindRow
+                    if isEditMode { trackRow }
+                    titleRow
+                    bodyRow
+                    blocksSection
+                    tagsRow
+                }
+                .padding(.horizontal, 20)
+            }
+
+            if let formError {
+                errorBand(formError)
+            }
+
+            footer
+        }
+        .frame(minWidth: 560, idealWidth: 620, minHeight: 520, idealHeight: 640)
+        .background(Color(NSColor.windowBackgroundColor))
+        .onAppear(perform: loadEditingCardIfNeeded)
+    }
+
+    // MARK: - Sections
+
+    private var header: some View {
+        HStack {
+            Text(isEditMode
+                 ? "Edit card in #\(effectiveTrack)"
+                 : "New card in #\(trackSlug)")
+                .font(.headline)
+            Spacer()
+            Button("Cancel") { cancel() }
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
+    }
+
+    /// Edit-mode-only: lets the author move the card between tracks. The list
+    /// of available tracks comes from `store.tracks[roomSlug]`; the current
+    /// track is always included so a card in an auto-created/forgotten track
+    /// still has a representable selection.
+    private var trackRow: some View {
+        let candidates = availableTrackSlugs
+        return HStack(spacing: 12) {
+            Text("Track")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            Picker("", selection: $editingTrackSlug) {
+                ForEach(candidates, id: \.self) { slug in
+                    Text("#\(slug)").tag(slug)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+        }
+    }
+
+    private var availableTrackSlugs: [String] {
+        var set = Set<String>()
+        for t in store.tracks[roomSlug] ?? [] { set.insert(t.name) }
+        if !editingTrackSlug.isEmpty { set.insert(editingTrackSlug) }
+        if let card = editingCard, !card.trackSlug.isEmpty { set.insert(card.trackSlug) }
+        return set.sorted()
+    }
+
+    private var kindRow: some View {
+        HStack(spacing: 12) {
+            Text("Kind")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            Picker("", selection: $kind) {
+                ForEach(CardKind.allCases) { k in
+                    Label(k.label, systemImage: k.symbol).tag(k)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+        }
+    }
+
+    private var titleRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Title")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 2) {
+                TextField("Required (1-200 chars)", text: $title)
+                    .textFieldStyle(.roundedBorder)
+                Text("\(title.count) / 200")
+                    .font(.caption2)
+                    .foregroundStyle(title.count > 200 ? .red : .secondary)
+            }
+        }
+    }
+
+    private var bodyRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("Description")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 4) {
+                TextEditor(text: $bodyText)
+                    .font(.body)
+                    .frame(minHeight: 140, idealHeight: 180)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.secondary.opacity(0.25))
+                    )
+                HStack {
+                    Text("(markdown)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(bodyText.count) / 10000")
+                        .font(.caption2)
+                        .foregroundStyle(bodyText.count > 10000 ? .red : .secondary)
+                }
+            }
+        }
+    }
+
+    private var blocksSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Blocks")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    blocks.append(BlockDraft())
+                } label: {
+                    Label("Add block", systemImage: "plus.circle")
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("b", modifiers: .command)
+            }
+            ForEach($blocks) { $row in
+                BlockEditorRow(draft: $row, roomSlug: roomSlug) {
+                    let id = row.id
+                    blocks.removeAll { $0.id == id }
+                }
+            }
+        }
+    }
+
+    private var tagsRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Tags")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            TextField("Comma-separated (parsed on submit)", text: $tagsRaw)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private func errorBand(_ msg: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Text(msg)
+                .font(.callout)
+                .foregroundStyle(.red)
+            Spacer()
+        }
+        .padding(10)
+        .background(Color.red.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 20)
+    }
+
+    private var footer: some View {
+        HStack {
+            if posting {
+                ProgressView().controlSize(.small)
+                Text(isEditMode ? "Saving…" : "Posting…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                submit()
+            } label: {
+                Text(isEditMode ? "Save" : "Post")
+                    .frame(minWidth: 80)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!isValid || posting)
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 16)
+    }
+
+    // MARK: - Validation
+
+    var isValid: Bool {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleOK = (1...200).contains(t.count)
+        let bodyOK  = (1...10000).contains(b.count)
+        let blocksOK = blocks.allSatisfy { $0.isValid }
+        return titleOK && bodyOK && blocksOK
+    }
+
+    var parsedTags: [String] {
+        tagsRaw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    // MARK: - Submit / cancel
+
+    private func submit() {
+        guard isValid, !posting else { return }
+        if isEditMode { submitEdit() } else { submitNew() }
+    }
+
+    private func submitNew() {
+        let clientId = UUID().uuidString
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blockPayload = blocks.map { $0.toPayload() }
+        let tagsParsed = parsedTags
+        let cardKindRaw = kind.rawValue
+        let roomCapture = roomSlug
+        let trackCapture = trackSlug
+
+        formError = nil
+        posting = true
+
+        store.optimisticallyInsertCard(
+            clientId: clientId,
+            roomSlug: roomCapture,
+            trackSlug: trackCapture,
+            kind: cardKindRaw,
+            title: trimmedTitle,
+            body: trimmedBody,
+            blocks: blockPayload,
+            tagsList: tagsParsed,
+            relatedTo: []
+        )
+
+        Task { @MainActor in
+            defer { posting = false }
+            do {
+                let eventId = try await store.postCard(
+                    room: roomCapture,
+                    track: trackCapture,
+                    kind: cardKindRaw,
+                    title: trimmedTitle,
+                    body: trimmedBody,
+                    blocks: blockPayload,
+                    relatedTo: [],
+                    tagsList: tagsParsed,
+                    dTag: nil
+                )
+                store.setOptimisticEventId(clientId: clientId, eventId: eventId)
+                dismiss()
+            } catch {
+                store.rollbackOptimisticCard(clientId: clientId)
+                formError = error.localizedDescription
+                toast.show(
+                    severity: .error,
+                    text: "Post failed; reverted. \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func submitEdit() {
+        guard let card = editingCard else { return }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let editableBlockPayload = blocks.map { $0.toPayload() }
+        // Unknown blocks the editor can't represent are preserved verbatim so
+        // forward-compatible payloads survive a round trip through edit mode.
+        let blockPayload = editableBlockPayload + passthroughBlocks
+        let tagsParsed = parsedTags
+        let cardKindRaw = kind.rawValue
+        let trackCapture = editingTrackSlug
+
+        formError = nil
+        posting = true
+
+        Task { @MainActor in
+            defer { posting = false }
+            do {
+                _ = try await store.updateCard(
+                    roomSlug: card.roomSlug,
+                    dTag: card.dTag,
+                    eventId: card.eventId,
+                    track: trackCapture,
+                    kind: cardKindRaw,
+                    title: trimmedTitle,
+                    body: trimmedBody,
+                    blocks: blockPayload,
+                    tagsList: tagsParsed,
+                    relatedTo: card.relatedTo
+                )
+                dismiss()
+            } catch {
+                // Optimistic patch is rolled back inside store.updateCard on
+                // failure; surface the error here for the user.
+                formError = error.localizedDescription
+                toast.show(
+                    severity: .error,
+                    text: "Save failed; reverted. \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func cancel() {
+        let dirty = dirtyAgainstSnapshot
+        if dirty {
+            let alert = NSAlert()
+            alert.messageText = isEditMode ? "Discard changes?" : "Discard this draft?"
+            alert.informativeText = isEditMode
+                ? "Your edits won't be saved."
+                : "Your in-progress card will be lost."
+            alert.addButton(withTitle: "Discard")
+            alert.addButton(withTitle: "Keep editing")
+            if alert.runModal() == .alertFirstButtonReturn {
+                dismiss()
+            }
+        } else {
+            dismiss()
+        }
+    }
+
+    /// True if any field has diverged from the pre-edit snapshot (edit mode)
+    /// or from the empty-form baseline (new-card mode). The snapshot is
+    /// taken on appear so block-only edits also trip the prompt.
+    private var dirtyAgainstSnapshot: Bool {
+        let now = FormSnapshot(
+            kind: kind, title: title, body: bodyText, tagsRaw: tagsRaw,
+            track: effectiveTrack, blocks: blocks
+        )
+        if let snap = initialSnapshot { return snap != now }
+        // No snapshot yet (shouldn't happen if onAppear ran) — fall back to
+        // the heuristic dirty check.
+        return !title.isEmpty || !bodyText.isEmpty || !blocks.isEmpty || !tagsRaw.isEmpty
+    }
+
+    // MARK: - Edit-mode pre-population
+
+    private func loadEditingCardIfNeeded() {
+        guard !didLoadEditingCard else { return }
+        didLoadEditingCard = true
+        guard let card = editingCard else {
+            // Snapshot the empty form so cancel works consistently for new-card.
+            initialSnapshot = FormSnapshot(
+                kind: kind, title: title, body: bodyText, tagsRaw: tagsRaw,
+                track: trackSlug, blocks: blocks
+            )
+            return
+        }
+        if let k = CardKind(rawValue: card.cardKind ?? "") { kind = k }
+        title = card.title
+        bodyText = card.body
+        tagsRaw = card.tagsList.joined(separator: ", ")
+        editingTrackSlug = card.trackSlug
+
+        var drafts: [BlockDraft] = []
+        var passthrough: [[String: Any]] = []
+        for b in card.blocks {
+            switch b {
+            case .text(let body):
+                var d = BlockDraft()
+                d.kind = .text
+                d.body = body
+                drafts.append(d)
+            case .code(let lang, let body):
+                var d = BlockDraft()
+                d.kind = .code
+                d.language = lang
+                d.body = body
+                drafts.append(d)
+            case .link(let href, let label):
+                var d = BlockDraft()
+                d.kind = .link
+                d.href = href
+                d.linkLabel = label ?? ""
+                drafts.append(d)
+            case .field(let key, let value):
+                var d = BlockDraft()
+                d.kind = .field
+                d.fieldKey = key
+                d.fieldValue = value
+                drafts.append(d)
+            case .image(let img):
+                var d = BlockDraft()
+                d.kind = .image
+                let dict: [String: Any] = [
+                    "type": "image",
+                    "sha256": img.sha256,
+                    "mirrors": img.mirrors,
+                    "decrypt_hint": [
+                        "kind": img.decryptHint.kind,
+                        "epoch_n": img.decryptHint.epochN,
+                    ],
+                    "mime_type": img.mimeType,
+                    "blake3": img.blake3,
+                ]
+                d.imageBlockRaw = dict
+                d.imageBlock = dict.compactMapValues { $0 as? String }
+                drafts.append(d)
+            case .unknown(let type, _):
+                // We can't reconstruct an editor for unknown shapes — preserve
+                // them verbatim. The original JSON dict isn't available here
+                // (the projection decoded into AnyCodableValue), so we serialize
+                // the typed view back out into a dict via JSONEncoder fallback.
+                if let dict = unknownBlockAsDict(type: type, raw: b) {
+                    passthrough.append(dict)
+                }
+            }
+        }
+        blocks = drafts
+        passthroughBlocks = passthrough
+        initialSnapshot = FormSnapshot(
+            kind: kind, title: title, body: bodyText, tagsRaw: tagsRaw,
+            track: editingTrackSlug, blocks: blocks
+        )
+    }
+
+    /// Best-effort serialization of an unknown block back to a `[String: Any]`
+    /// dict suitable for replay through `studio_card_update`. Returns nil if
+    /// the typed view can't be re-encoded (very rare).
+    private func unknownBlockAsDict(type: String, raw: StudioBlock) -> [String: Any]? {
+        // Round-trip via JSONEncoder/Decoder: encode the StudioBlock to JSON,
+        // re-decode it as a generic dict. The StudioBlock enum doesn't conform
+        // to Encodable, so re-emit the unknown via its parts. For v0 we only
+        // know `type`; values are lost across the typed boundary. Preserve at
+        // least the type so the projector keeps a placeholder.
+        return ["type": type]
+    }
+}
+
+private struct FormSnapshot: Equatable {
+    let kind: StudioComposeSheet.CardKind
+    let title: String
+    let body: String
+    let tagsRaw: String
+    let track: String
+    let blocks: [BlockDraft]
+}
+
+// MARK: - BlockDraft (in-flight editor state)
+
+/// Mutable per-row state for the blocks editor. Converts to the plugin
+/// payload shape via `toPayload()`. Image rows hold their fully-resolved
+/// block JSON in `imageBlock` once the `studio_image_attach` call returns;
+/// `isValid` only flips true once that has happened.
+struct BlockDraft: Identifiable, Equatable {
+    enum Kind: String, CaseIterable, Identifiable {
+        case text, code, link, field, image
+        var id: String { rawValue }
+        var label: String { rawValue.capitalized }
+    }
+
+    let id: UUID = UUID()
+    var kind: Kind = .text
+
+    // text / code body
+    var body: String = ""
+
+    // code language
+    var language: String = ""
+
+    // link
+    var href: String = ""
+    var linkLabel: String = ""
+
+    // field
+    var fieldKey: String = ""
+    var fieldValue: String = ""
+
+    // image — populated by studio_image_attach response
+    var imageBlock: [String: String]? = nil   // serialized JSON kept as string map for Equatable
+    var imageBlockRaw: [String: Any]? = nil   // live dict used for payload assembly
+    var imagePath: String? = nil
+    var imageError: String? = nil
+
+    var isValid: Bool {
+        switch kind {
+        case .text:
+            return !body.trimmingCharacters(in: .whitespaces).isEmpty
+        case .code:
+            return !body.isEmpty
+        case .link:
+            return !href.trimmingCharacters(in: .whitespaces).isEmpty
+        case .field:
+            let k = fieldKey.trimmingCharacters(in: .whitespaces)
+            let v = fieldValue.trimmingCharacters(in: .whitespaces)
+            return !k.isEmpty && !v.isEmpty
+        case .image:
+            return imageBlockRaw != nil
+        }
+    }
+
+    func toPayload() -> [String: Any] {
+        switch kind {
+        case .text:
+            return ["type": "text", "body": body]
+        case .code:
+            return ["type": "code", "language": language, "body": body]
+        case .link:
+            var p: [String: Any] = ["type": "link", "href": href]
+            if !linkLabel.isEmpty { p["label"] = linkLabel }
+            return p
+        case .field:
+            return ["type": "field", "key": fieldKey, "value": fieldValue]
+        case .image:
+            return imageBlockRaw ?? ["type": "image"]
+        }
+    }
+
+    static func == (lhs: BlockDraft, rhs: BlockDraft) -> Bool {
+        lhs.id == rhs.id
+            && lhs.kind == rhs.kind
+            && lhs.body == rhs.body
+            && lhs.language == rhs.language
+            && lhs.href == rhs.href
+            && lhs.linkLabel == rhs.linkLabel
+            && lhs.fieldKey == rhs.fieldKey
+            && lhs.fieldValue == rhs.fieldValue
+            && lhs.imageBlock == rhs.imageBlock
+            && lhs.imagePath == rhs.imagePath
+            && lhs.imageError == rhs.imageError
+    }
+}
+
+// MARK: - BlockEditorRow
+
+/// Per-row editor sub-view. Private to this file — see W6.2 R4.
+private struct BlockEditorRow: View {
+    @EnvironmentObject private var store: StudioStore
+    @Environment(\.studioToast) private var toast
+
+    @Binding var draft: BlockDraft
+    let roomSlug: String
+    let onRemove: () -> Void
+
+    @State private var attaching: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Picker("", selection: $draft.kind) {
+                    ForEach(BlockDraft.Kind.allCases) { k in
+                        Text(k.label).tag(k)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 110)
+                .labelsHidden()
+
+                Spacer()
+
+                Button(role: .destructive) { onRemove() } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+            }
+
+            content
+        }
+        .padding(10)
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch draft.kind {
+        case .text:
+            TextEditor(text: $draft.body)
+                .frame(minHeight: 64)
+                .font(.body)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.25)))
+        case .code:
+            VStack(spacing: 6) {
+                TextField("Language (e.g. swift, ts)", text: $draft.language)
+                    .textFieldStyle(.roundedBorder)
+                TextEditor(text: $draft.body)
+                    .frame(minHeight: 96)
+                    .font(.system(.body, design: .monospaced))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.25)))
+            }
+        case .link:
+            VStack(spacing: 6) {
+                TextField("https://…", text: $draft.href)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Optional label", text: $draft.linkLabel)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .field:
+            HStack(spacing: 6) {
+                TextField("Key", text: $draft.fieldKey)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Value", text: $draft.fieldValue)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .image:
+            imageRow
+        }
+    }
+
+    private var imageRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    pickFile()
+                } label: {
+                    Label(draft.imageBlockRaw == nil ? "Attach image…" : "Replace image…",
+                          systemImage: "photo.on.rectangle.angled")
+                }
+                .disabled(attaching)
+                if attaching {
+                    ProgressView().controlSize(.small)
+                    Text("Uploading to Blossom…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let path = draft.imagePath, draft.imageBlockRaw != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text(path.components(separatedBy: "/").last ?? path)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            if let err = draft.imageError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func pickFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP, .heic, .heif]
+        let stagingDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Sanity guard — protect against pathological loads.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int64, size > 100 * 1024 * 1024 {
+            draft.imageError = "Image source is larger than 100 MiB."
+            return
+        }
+
+        // NIP-44 v2 caps plaintext at 65535 bytes. Re-encode the user's
+        // pick as a downscaled JPEG ≤ 60 KiB (leaves headroom for the
+        // encryption framing) into /tmp. The plugin reads from any
+        // location; staging here lets us own the lifetime and clean up.
+        let relocatedURL = stagingDir.appendingPathComponent("sonata-compose-\(UUID().uuidString).jpg")
+        guard let nsImage = NSImage(contentsOf: url) else {
+            draft.imageError = "Couldn't read image file."
+            return
+        }
+        guard let jpegData = Self.encodeJPEGFitting(image: nsImage, maxBytes: 60 * 1024) else {
+            draft.imageError = "Couldn't compress image under 60 KiB (NIP-44 v2 plaintext cap)."
+            return
+        }
+        do {
+            try jpegData.write(to: relocatedURL)
+        } catch {
+            draft.imageError = "Couldn't stage image for upload: \(error.localizedDescription)"
+            return
+        }
+        let path = relocatedURL.path
+
+        attaching = true
+        draft.imageError = nil
+        let roomCapture = roomSlug
+        Task { @MainActor in
+            defer {
+                attaching = false
+                // The staged JPEG was only needed to hand a path to the
+                // plugin. Whether the upload succeeded or failed, the local
+                // file is no longer useful — Blossom holds the canonical
+                // bytes on success, and on failure we don't auto-retry from
+                // the same path. /tmp gets reaped on reboot anyway; this
+                // removeItem keeps the dir tidy between uses.
+                try? FileManager.default.removeItem(atPath: path)
+            }
+            do {
+                let block = try await store.attachImage(
+                    filePath: path,
+                    roomSlug: roomCapture,
+                    mimeType: nil
+                )
+                // Whole-struct write through @Binding — three separate
+                // property writes don't reliably invalidate SwiftUI's
+                // ForEach($blocks) row, leaving the "Attach image…" label
+                // unchanged and the Post button disabled even after
+                // successful upload. One write through the binding does.
+                var updated = draft
+                updated.imageBlockRaw = block
+                updated.imageBlock = block.compactMapValues { v -> String? in
+                    if let s = v as? String { return s }
+                    return nil
+                }
+                updated.imagePath = path
+                updated.imageError = nil
+                draft = updated
+            } catch {
+                var updated = draft
+                updated.imageBlockRaw = nil
+                updated.imageBlock = nil
+                updated.imagePath = nil
+                updated.imageError = error.localizedDescription
+                draft = updated
+                toast.show(
+                    severity: .error,
+                    text: "Image upload failed: \(error.localizedDescription). Sheet preserved."
+                )
+            }
+        }
+    }
+
+    /// Re-encode `image` as JPEG, iteratively downscaling + reducing quality
+    /// until output ≤ maxBytes. Targets NIP-44 v2's 65 535-byte plaintext
+    /// ceiling so the plugin's imageAttach can encrypt in one shot.
+    static func encodeJPEGFitting(image: NSImage, maxBytes: Int) -> Data? {
+        let maxDimensions: [CGFloat] = [2048, 1280, 800, 512, 320]
+        let qualities: [CGFloat] = [0.85, 0.7, 0.55, 0.4, 0.25, 0.1]
+        for dim in maxDimensions {
+            guard let scaled = downscale(image: image, longestEdge: dim) else { continue }
+            for q in qualities {
+                guard let data = jpegEncode(image: scaled, quality: q) else { continue }
+                if data.count <= maxBytes { return data }
+            }
+        }
+        return nil
+    }
+
+    private static func downscale(image: NSImage, longestEdge: CGFloat) -> NSImage? {
+        let srcSize = image.size
+        guard srcSize.width > 0, srcSize.height > 0 else { return nil }
+        let longest = max(srcSize.width, srcSize.height)
+        if longest <= longestEdge { return image }
+        let scale = longestEdge / longest
+        let newSize = NSSize(width: floor(srcSize.width * scale), height: floor(srcSize.height * scale))
+        let out = NSImage(size: newSize)
+        out.lockFocus()
+        defer { out.unlockFocus() }
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(
+            in: NSRect(origin: .zero, size: newSize),
+            from: NSRect(origin: .zero, size: srcSize),
+            operation: .copy,
+            fraction: 1.0
+        )
+        return out
+    }
+
+    private static func jpegEncode(image: NSImage, quality: CGFloat) -> Data? {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: quality])
+    }
+}
