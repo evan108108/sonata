@@ -244,22 +244,32 @@ actor StudioImageFetcher {
 
     // MARK: - Epoch key lookup
 
-    /// One-shot read of the room's local-only `epoch_keys` attribute. Returns
-    /// nil if the room entity isn't on disk or `epoch_keys[epochN]` is absent.
+    /// One-shot read of the room's epoch private key for `epochN`. The plugin
+    /// stores epoch keys in Sonata's secret store at
+    /// `studio:room:<slug>:epoch_keys` as JSON of shape
+    /// `{"epochs": {"<n>": {"priv_hex": "<64-hex>", ...}}}`. Reading the
+    /// secret via HTTP keeps the renderer decoupled from the SQLite schema
+    /// and matches how the plugin reads it.
     private func epochKey(room slug: String, epochN: Int) async throws -> Data? {
-        let name = "studio:room:\(slug)"
-        let attrJSON: String? = try await dbPool.read { db in
-            try String.fetchOne(db, sql: """
-                SELECT attributes FROM entities WHERE type='studio_room' AND name = ?
-                """, arguments: [name])
-        }
-        guard let raw = attrJSON,
-              let data = raw.data(using: .utf8),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let keys = obj["epoch_keys"] as? [String: String] else {
+        let secretName = "studio:room:\(slug):epoch_keys"
+        // Sonata's /api/secrets/:name route does NOT URL-decode `:`, so we
+        // pass the name raw (it's already URL-path-safe: alpha + digits +
+        // dashes + literal colons).
+        guard let url = URL(string: "http://127.0.0.1:3211/api/secrets/\(secretName)") else {
             return nil
         }
-        guard let hex = keys[String(epochN)], let bytes = Hex.decode(hex), bytes.count == 32 else {
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            return nil
+        }
+        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let valueStr = envelope["value"] as? String,
+              let valueData = valueStr.data(using: .utf8),
+              let outer = (try? JSONSerialization.jsonObject(with: valueData)) as? [String: Any],
+              let epochs = outer["epochs"] as? [String: Any],
+              let entry = epochs[String(epochN)] as? [String: Any],
+              let priv = entry["priv_hex"] as? String,
+              let bytes = Hex.decode(priv), bytes.count == 32 else {
             return nil
         }
         return bytes
