@@ -23,6 +23,7 @@ struct StudioRoomDetail: View {
     @State private var admitInFlight: Bool = false
     @State private var admitToast: InlineToast? = nil
     @State private var showProfileSheet: Bool = false
+    @State private var showAdmitSheet: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -79,6 +80,13 @@ struct StudioRoomDetail: View {
         }
         .sheet(isPresented: $showProfileSheet) {
             StudioRoomProfileSheet(
+                store: store,
+                roomSlug: room.slug,
+                roomTitle: room.title
+            )
+        }
+        .sheet(isPresented: $showAdmitSheet) {
+            StudioAdmitSheet(
                 store: store,
                 roomSlug: room.slug,
                 roomTitle: room.title
@@ -191,9 +199,9 @@ struct StudioRoomDetail: View {
                     Label("Invite people…", systemImage: "person.crop.circle.badge.plus")
                 }
                 Button {
-                    Task { await runAdmit() }
+                    showAdmitSheet = true
                 } label: {
-                    Label(admitInFlight ? "Admitting…" : "Admit pending member(s)",
+                    Label("Admit pending member(s)…",
                           systemImage: "checkmark.seal")
                 }
                 .disabled(admitInFlight)

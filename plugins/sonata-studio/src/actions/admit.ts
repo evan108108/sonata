@@ -30,6 +30,8 @@ import {
   audienceAddress,
   buildAudienceDeclaration,
   buildKeyGrant,
+  parseClaimProfile,
+  type ClaimProfile,
 } from "../audience-events";
 import { encrypt as nip44Encrypt } from "../crypto/nip44";
 import { __signEvent, type NostrEvent } from "../crypto/nip17";
@@ -52,6 +54,12 @@ interface RoomAdmitRequest {
 interface AdmittedEntry {
   claim_pubkey: string;
   key_grant_event_id: string;
+  /**
+   * Optional profile preview parsed from the claim event's `content`. The
+   * gateway must include the raw `content` field on the claim for this to
+   * be populated; older gateways omit it and this stays nil.
+   */
+  profile?: ClaimProfile;
 }
 
 interface FailedRecipient {
@@ -129,7 +137,12 @@ async function admitRoomInner(
     audience_address: room.audienceAddress,
   });
   const memberSet = new Set(room.members.map((m) => m.toLowerCase()));
-  const fresh: { invite_pub: string; claim_pubkey: string; claim_event_id: string }[] = [];
+  const fresh: {
+    invite_pub: string;
+    claim_pubkey: string;
+    claim_event_id: string;
+    profile: ClaimProfile | null;
+  }[] = [];
   for (const c of claimsRes.claimed ?? []) {
     if (typeof c.claim_pubkey !== "string") continue;
     const cp = c.claim_pubkey.toLowerCase();
@@ -139,6 +152,7 @@ async function admitRoomInner(
       invite_pub: c.invite_pub,
       claim_pubkey: cp,
       claim_event_id: c.claim_event_id,
+      profile: parseClaimProfile(c.content ?? null),
     });
     if (maxAdmit !== null && fresh.length >= maxAdmit) break;
   }
@@ -277,10 +291,12 @@ async function admitRoomInner(
           : "all relays rejected the grant (or zero relay acks)",
       });
     } else {
-      admitted.push({
+      const entry: AdmittedEntry = {
         claim_pubkey: recipient,
         key_grant_event_id: g.event_id,
-      });
+      };
+      if (claim.profile) entry.profile = claim.profile;
+      admitted.push(entry);
     }
   }
 
@@ -429,8 +445,78 @@ export const __admitInternals = {
 // have a canonical shape to import from this module's neighborhood.
 export type { StudioRoomCtx };
 
+// ── Pending-claims listing ──────────────────────────────────────────────────
+//
+// The admit dialog needs to show the founder *who* is asking to join before
+// they commit to a rotate. The data plumbing belongs here because the gateway
+// claim list is the same source admit() consumes — listing-only is the cheap
+// preview shape (no rotate, no fan-out).
+//
+// Returned profiles are derived from each claim event's `content` field via
+// `parseClaimProfile`. Older gateways that don't surface claim content in the
+// process-claims response yield `profile: null` per row, which the renderer
+// renders as "pubkey-prefix only" — same as the pre-existing UX.
+
+interface RoomPendingRequest {
+  room_slug?: unknown;
+}
+
+export interface PendingClaimEntry {
+  claim_pubkey: string;
+  claim_event_id: string;
+  /**
+   * Optional profile preview parsed from the claim event's `content`. Always
+   * either non-empty or omitted from the wire — never a present-but-empty
+   * object, so renderers can lean on "if entry.profile" as a presence check.
+   */
+  profile?: ClaimProfile;
+}
+
+export interface RoomPendingResult {
+  ok: true;
+  pending: PendingClaimEntry[];
+}
+
+export async function listPendingClaims(
+  body: RoomPendingRequest,
+  ctx: ActionCtx,
+): Promise<RoomPendingResult> {
+  const slug = ensureSlug(body.room_slug, "room_slug");
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (!room.audIdPrivHex) {
+    throw new HttpError(
+      403,
+      "not_founder",
+      `only the founder can list pending claims for "${slug}"`,
+    );
+  }
+
+  const claimsRes = await ctx.gateway.rawProcessClaims({
+    audience_address: room.audienceAddress,
+  });
+  const memberSet = new Set(room.members.map((m) => m.toLowerCase()));
+  const pending: PendingClaimEntry[] = [];
+  for (const c of claimsRes.claimed ?? []) {
+    if (typeof c.claim_pubkey !== "string") continue;
+    const cp = c.claim_pubkey.toLowerCase();
+    if (!isHex64(cp)) continue;
+    if (memberSet.has(cp)) continue;
+    const entry: PendingClaimEntry = {
+      claim_pubkey: cp,
+      claim_event_id: c.claim_event_id,
+    };
+    const profile = parseClaimProfile(c.content ?? null);
+    if (profile) entry.profile = profile;
+    pending.push(entry);
+  }
+  return { ok: true, pending };
+}
+
 export const room_admit = {
   admit(body: unknown, ctx: ActionCtx): Promise<RoomAdmitResult> {
     return admitRoom((body ?? {}) as RoomAdmitRequest, ctx);
+  },
+  pending(body: unknown, ctx: ActionCtx): Promise<RoomPendingResult> {
+    return listPendingClaims((body ?? {}) as RoomPendingRequest, ctx);
   },
 };

@@ -106,6 +106,20 @@ export function buildKeyGrant(input: BuildKeyGrantInput): EventTemplate {
   };
 }
 
+/**
+ * Optional profile preview embedded in a claim. Avatar is deliberately
+ * excluded at claim-time: the joiner has no room-epoch key yet, so it
+ * can't encrypt to the room's Blossom server, and using a public Blossom
+ * would defeat audience-level privacy. Nickname + bio are exposed in
+ * plain JSON because anyone holding the invite URL can read the claim
+ * content — joiner is opting into that visibility by attaching a profile.
+ * Avatar lands ~2s after admit via the auto-publish `_profile` card.
+ */
+export interface ClaimProfile {
+  nickname?: string;
+  bio?: string;
+}
+
 export interface BuildAudienceClaimInput {
   audIdPub: string;
   slug: string;
@@ -116,6 +130,13 @@ export interface BuildAudienceClaimInput {
   note?: string;
   expiration?: number;
   createdAt?: number;
+  /**
+   * Optional profile preview the joiner volunteers so the founder can
+   * recognize them in the admit dialog before clicking Admit. See
+   * `ClaimProfile` for the visibility tradeoff — anyone with the invite
+   * URL can read this; only attach if you're OK with that.
+   */
+  profile?: ClaimProfile;
 }
 
 export function buildAudienceClaim(input: BuildAudienceClaimInput): EventTemplate {
@@ -141,12 +162,55 @@ export function buildAudienceClaim(input: BuildAudienceClaimInput): EventTemplat
     claimPubkey: input.claimPub,
   };
   if (input.note !== undefined) contentObj.note = input.note;
+  if (input.profile !== undefined) {
+    const cleaned: Record<string, string> = {};
+    if (typeof input.profile.nickname === "string" && input.profile.nickname.trim().length > 0) {
+      cleaned.nickname = input.profile.nickname.trim().slice(0, 200);
+    }
+    if (typeof input.profile.bio === "string" && input.profile.bio.trim().length > 0) {
+      cleaned.bio = input.profile.bio.trim().slice(0, 500);
+    }
+    if (Object.keys(cleaned).length > 0) {
+      contentObj.profile = cleaned;
+    }
+  }
   return {
     kind: KIND_CLAIM,
     created_at: input.createdAt ?? nowSec(),
     tags,
     content: JSON.stringify(contentObj),
   };
+}
+
+/**
+ * Best-effort parse of the `profile` field from a serialized claim event's
+ * content. Tolerates malformed JSON, missing fields, and non-string values.
+ * Returns null when no parseable profile is present so callers can keep
+ * the pre-existing "no preview, just pubkey" UI for old claims.
+ */
+export function parseClaimProfile(content: string | undefined | null): ClaimProfile | null {
+  if (typeof content !== "string" || content.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  const raw = obj["profile"];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const rec = raw as Record<string, unknown>;
+  const out: ClaimProfile = {};
+  if (typeof rec["nickname"] === "string") {
+    const t = (rec["nickname"] as string).trim();
+    if (t.length > 0) out.nickname = t.slice(0, 200);
+  }
+  if (typeof rec["bio"] === "string") {
+    const t = (rec["bio"] as string).trim();
+    if (t.length > 0) out.bio = t.slice(0, 500);
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 export function audienceAddress(audIdPub: string, slug: string): string {

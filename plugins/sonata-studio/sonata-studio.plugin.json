@@ -27,7 +27,8 @@
       "method": "post",
       "path": "/api/room/join",
       "params": [
-        { "name": "invite_url", "type": "string", "required": true, "description": "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token." }
+        { "name": "invite_url", "type": "string", "required": true, "description": "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token." },
+        { "name": "profile", "type": "object", "description": "Optional volunteered profile preview {nickname?: string, bio?: string} embedded in the claim event content so the founder can identify the joiner before admitting. PRIVACY: anyone holding the invite URL can read claim content — joiner is opting into exposing these strings to invite holders. Avatar is deliberately excluded (no room epoch key yet to encrypt against)." }
       ]
     },
     {
@@ -48,6 +49,15 @@
       "params": [
         { "name": "room_slug", "type": "string", "required": true, "description": "Slug of the room to admit pending claims for (founder-only)." },
         { "name": "max_admit", "type": "integer", "description": "Cap admissions per call (default unlimited)." }
+      ]
+    },
+    {
+      "name": "studio_room_pending",
+      "description": "Founder-only. List pending kind:30522 claims for a room without rotating, with each claim's volunteered profile preview (nickname + bio) parsed from the claim's content. Used by the admit dialog to render per-row identity previews.",
+      "method": "post",
+      "path": "/api/room/pending",
+      "params": [
+        { "name": "room_slug", "type": "string", "required": true, "description": "Slug of the room to list pending claims for (founder-only)." }
       ]
     },
     {

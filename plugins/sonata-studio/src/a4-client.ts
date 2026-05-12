@@ -115,7 +115,19 @@ export interface RawProcessClaimsRequest {
 
 export interface RawProcessClaimsResponse {
   ok: true;
-  claimed: { invite_pub: string; claim_pubkey: string; claim_event_id: string }[];
+  claimed: {
+    invite_pub: string;
+    claim_pubkey: string;
+    claim_event_id: string;
+    /**
+     * Optional raw `content` field from the kind:30522 claim event. Gateway
+     * implementations MAY include it so callers can parse the joiner's
+     * volunteered profile preview (see `parseClaimProfile`). Older
+     * gateways omit this field; callers must treat its absence as "no
+     * preview available, fall back to pubkey-prefix only."
+     */
+    content?: string;
+  }[];
 }
 
 export interface RawPublishWrapsRequest {

@@ -126,7 +126,16 @@ struct StudioJoinRoomSheet: View {
         isSubmitting = true
         submitError = nil
         do {
-            let room = try await store.joinRoom(inviteURL: trimmedURL)
+            // Pass the default nickname as the volunteered profile preview so
+            // the room founder sees identity in the admit dialog. Avatar is
+            // intentionally omitted — joiner has no room epoch key yet (see
+            // §"privacy" doc-comment on the plugin's room.join handler).
+            let nick = store.defaultNickname.trimmingCharacters(in: .whitespacesAndNewlines)
+            let room = try await store.joinRoom(
+                inviteURL: trimmedURL,
+                profileNickname: nick.isEmpty ? nil : nick,
+                profileBio: nil
+            )
             isSubmitting = false
             onJoined(room.slug, room.state)
             dismiss()

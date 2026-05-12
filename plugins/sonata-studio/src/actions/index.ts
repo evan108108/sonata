@@ -56,6 +56,12 @@ const ROOM_JOIN_PARAMS: ActionParam[] = [
     required: true,
     description: "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token.",
   },
+  {
+    name: "profile",
+    type: "object",
+    description:
+      "Optional volunteered profile preview {nickname?: string, bio?: string} embedded in the claim event content so the founder can identify the joiner before admitting. PRIVACY: anyone holding the invite URL can read claim content — joiner is opting into exposing these strings to invite holders. Avatar is deliberately excluded (no room epoch key yet to encrypt against).",
+  },
 ];
 
 const ROOM_INVITE_PARAMS: ActionParam[] = [
@@ -74,6 +80,10 @@ const ROOM_ADMIT_PARAMS: ActionParam[] = [
     type: "integer",
     description: "Cap admissions per call (default unlimited).",
   },
+];
+
+const ROOM_PENDING_PARAMS: ActionParam[] = [
+  { name: "room_slug", type: "string", required: true, description: "Slug of the room to list pending claims for (founder-only)." },
 ];
 
 const ROOM_LIST_PARAMS: ActionParam[] = [];
@@ -233,6 +243,14 @@ export const ACTIONS: ActionDef[] = [
     params: ROOM_ADMIT_PARAMS,
   },
   {
+    name: "studio_room_pending",
+    description:
+      "Founder-only. List pending kind:30522 claims for a room without rotating, with each claim's volunteered profile preview (nickname + bio) parsed from the claim's content. Used by the admit dialog to render per-row identity previews.",
+    method: "post",
+    path: "/api/room/pending",
+    params: ROOM_PENDING_PARAMS,
+  },
+  {
     name: "studio_room_list",
     description: "List all Studio rooms this Sonata is a member of.",
     method: "get",
@@ -361,6 +379,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/room/admit": {
     method: "post",
     handler: async (body, _q, ctx) => room_admit.admit(body, ctx),
+  },
+  "/api/room/pending": {
+    method: "post",
+    handler: async (body, _q, ctx) => room_admit.pending(body, ctx),
   },
   "/api/room/list": {
     method: "get",

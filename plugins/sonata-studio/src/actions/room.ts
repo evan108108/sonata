@@ -74,6 +74,17 @@ interface RoomCreateResult {
 
 interface RoomJoinRequest {
   invite_url?: unknown;
+  /**
+   * Optional profile preview embedded in the kind:30522 claim event's
+   * `content` so the founder can recognize the joiner in the admit
+   * dialog. Privacy: anyone with the invite URL can read this — joiner
+   * is opting into exposing nickname + bio to invite-URL holders. This
+   * is acceptable since they're choosing to join.
+   */
+  profile?: {
+    nickname?: unknown;
+    bio?: unknown;
+  };
 }
 
 interface RoomJoinResult {
@@ -492,6 +503,12 @@ export async function joinRoom(
   const audIdPub = declRes.declaration.pubkey.toLowerCase();
   const inviterPub = pickFirstP(declTags) ?? ctx.cfg.pluginPub;
 
+  // Sanitize the optional profile preview. Anyone with the invite URL can
+  // read claim.content, so we cap lengths and reject non-strings — joiner
+  // is opting in by attaching this, but we still protect against an
+  // accidentally-huge bio.
+  const claimProfile = sanitizeClaimProfileBody(body.profile);
+
   // Build claim signed by invite_priv with claim_pubkey = plugin_pub.
   const claimTemplate = buildAudienceClaim({
     audIdPub,
@@ -500,6 +517,7 @@ export async function joinRoom(
     invitePub: parsed.invitePub,
     inviterPub,
     claimPub: ctx.cfg.pluginPub,
+    profile: claimProfile ?? undefined,
   });
   const invitePub = bytesToHex(schnorr.getPublicKey(invitePrivBytes));
   const claimUnsigned = {
@@ -569,6 +587,22 @@ export async function joinRoom(
     claim_event_id: claimRes.claim_event_id,
     state: "pending-grant",
   };
+}
+
+function sanitizeClaimProfileBody(
+  raw: RoomJoinRequest["profile"],
+): { nickname?: string; bio?: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const out: { nickname?: string; bio?: string } = {};
+  if (typeof raw.nickname === "string") {
+    const t = raw.nickname.trim();
+    if (t.length > 0) out.nickname = t.slice(0, 200);
+  }
+  if (typeof raw.bio === "string") {
+    const t = raw.bio.trim();
+    if (t.length > 0) out.bio = t.slice(0, 500);
+  }
+  return out.nickname || out.bio ? out : null;
 }
 
 function pickFirstP(tags: string[][]): string | null {

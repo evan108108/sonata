@@ -1152,18 +1152,41 @@ final class StudioStore: ObservableObject {
     /// The caller is expected to trim/sanity-check the URL prefix before
     /// passing it in; this method forwards whatever it gets to the plugin.
     @discardableResult
-    func joinRoom(inviteURL: String) async throws -> StudioRoom {
+    func joinRoom(
+        inviteURL: String,
+        profileNickname: String? = nil,
+        profileBio: String? = nil
+    ) async throws -> StudioRoom {
+        struct Profile: Encodable {
+            let nickname: String?
+            let bio: String?
+        }
         struct Req: Encodable {
             let inviteUrl: String
-            enum CodingKeys: String, CodingKey { case inviteUrl = "invite_url" }
+            let profile: Profile?
+            enum CodingKeys: String, CodingKey {
+                case inviteUrl = "invite_url"
+                case profile
+            }
         }
+        let nick = profileNickname?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bio = profileBio?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nickValue = (nick?.isEmpty ?? true) ? nil : nick
+        let bioValue = (bio?.isEmpty ?? true) ? nil : bio
+        let profile: Profile? = (nickValue != nil || bioValue != nil)
+            ? Profile(nickname: nickValue, bio: bioValue)
+            : nil
         let response: StudioRoomJoinResponse = try await EntityHTTP.postPluginAction(
             path: "sonata-studio/room/join",
-            body: Req(inviteUrl: inviteURL)
+            body: Req(inviteUrl: inviteURL, profile: profile)
         )
         // Auto-federate the default nickname into the room we just joined.
         // Fire-and-forget; no-op if defaultNickname is empty. Other members
-        // pick up the _profile card via SSE within ~2s.
+        // pick up the _profile card via SSE within ~2s. When the join lands in
+        // `pending-grant`, the federate-on-join attempt no-ops harmlessly:
+        // postCard fails until the founder admits us, and the picker sheet's
+        // deferred publish (subscribed on state→active transition) carries
+        // the chosen profile in instead.
         autoPublishProfileIfNeeded(roomSlug: response.roomSlug)
         return StudioRoom.placeholder(
             id: "studio:room:\(response.roomSlug)",
@@ -1194,6 +1217,21 @@ final class StudioStore: ObservableObject {
         return try await EntityHTTP.postPluginAction(
             path: "sonata-studio/room/invite",
             body: Req(roomSlug: slug, ttlSeconds: ttlSeconds)
+        )
+    }
+
+    /// Founder-only: list pending kind:30522 claims for `slug` along with each
+    /// joiner's volunteered profile preview (nickname + bio), without
+    /// rotating. The admit dialog uses this to render per-row identity
+    /// previews before the founder commits to the rotate.
+    func listPendingClaims(slug: String) async throws -> StudioPendingClaimsResult {
+        struct Req: Encodable {
+            let roomSlug: String
+            enum CodingKeys: String, CodingKey { case roomSlug = "room_slug" }
+        }
+        return try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/pending",
+            body: Req(roomSlug: slug)
         )
     }
 
@@ -1359,10 +1397,16 @@ struct StudioAdmitResult: Decodable, Equatable {
     struct Admitted: Decodable, Equatable {
         let claimPubkey: String
         let keyGrantEventId: String
+        /// Optional profile preview parsed by the plugin from the joiner's
+        /// kind:30522 claim event content. Nil when the gateway doesn't
+        /// surface raw claim content (older gateways) or when the joiner
+        /// chose not to volunteer a profile preview.
+        let profile: StudioClaimProfile?
 
         enum CodingKeys: String, CodingKey {
             case claimPubkey = "claim_pubkey"
             case keyGrantEventId = "key_grant_event_id"
+            case profile
         }
     }
 
@@ -1416,6 +1460,38 @@ struct CommentPostResponse: Decodable {
     enum CodingKeys: String, CodingKey {
         case rumorEventId = "rumor_event_id"
         case dTag = "d_tag"
+    }
+}
+
+/// Optional volunteered profile preview from a kind:30522 claim. Avatar is
+/// deliberately absent — joiners can't encrypt an image to a room they
+/// haven't been admitted to yet, so claim-time identity is text-only.
+struct StudioClaimProfile: Decodable, Equatable {
+    let nickname: String?
+    let bio: String?
+}
+
+/// Response from `POST /api/plugins/sonata-studio/room/pending`. Each entry
+/// is a kind:30522 claim awaiting founder rotation. `profile` is nil when
+/// the gateway omits raw claim content (older gateways) or when the joiner
+/// didn't volunteer a profile preview. Renderer falls back to pubkey-prefix
+/// for nil entries.
+struct StudioPendingClaimsResult: Decodable, Equatable {
+    let ok: Bool
+    let pending: [Pending]
+
+    struct Pending: Decodable, Equatable, Identifiable {
+        let claimPubkey: String
+        let claimEventId: String
+        let profile: StudioClaimProfile?
+
+        var id: String { claimEventId }
+
+        enum CodingKeys: String, CodingKey {
+            case claimPubkey = "claim_pubkey"
+            case claimEventId = "claim_event_id"
+            case profile
+        }
     }
 }
 
