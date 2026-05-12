@@ -764,17 +764,27 @@ private struct BlockEditorRow: View {
                     roomSlug: roomCapture,
                     mimeType: nil
                 )
-                draft.imageBlockRaw = block
-                draft.imageBlock = block.compactMapValues { v -> String? in
+                // Whole-struct write through @Binding — three separate
+                // property writes don't reliably invalidate SwiftUI's
+                // ForEach($blocks) row, leaving the "Attach image…" label
+                // unchanged and the Post button disabled even after
+                // successful upload. One write through the binding does.
+                var updated = draft
+                updated.imageBlockRaw = block
+                updated.imageBlock = block.compactMapValues { v -> String? in
                     if let s = v as? String { return s }
                     return nil
                 }
-                draft.imagePath = path
+                updated.imagePath = path
+                updated.imageError = nil
+                draft = updated
             } catch {
-                draft.imageBlockRaw = nil
-                draft.imageBlock = nil
-                draft.imagePath = nil
-                draft.imageError = error.localizedDescription
+                var updated = draft
+                updated.imageBlockRaw = nil
+                updated.imageBlock = nil
+                updated.imagePath = nil
+                updated.imageError = error.localizedDescription
+                draft = updated
                 toast.show(
                     severity: .error,
                     text: "Image upload failed: \(error.localizedDescription). Sheet preserved."
