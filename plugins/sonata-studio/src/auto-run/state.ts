@@ -260,10 +260,15 @@ export function consentDecision(
   founderPub: string,
 ): "allowed" | "needs_consent" | "blocked" | "auto_run_off" {
   if (roomOverride === "off") return "blocked";
-  if (!profile.enabled && roomOverride !== "on") return "auto_run_off";
   const founder = founderPub.toLowerCase();
   const decision = profile.founder_decisions[founder];
+  // A `never` decision is the user's explicit refusal for this founder, even
+  // in a room that's globally trusted — honour it regardless of room override.
   if (decision === "never") return "blocked";
+  // Room override "on" is a deliberate per-room trust grant — treat every
+  // assigner in the room as allow-listed for the duration of the override.
+  if (roomOverride === "on") return "allowed";
+  if (!profile.enabled) return "auto_run_off";
   if (profile.allowed_founders.includes(founder)) return "allowed";
   if (decision === "always") return "allowed";
   if (decision === "once") return "allowed"; // consumed by caller after dispatch
