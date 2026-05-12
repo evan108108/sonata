@@ -12,6 +12,9 @@ struct StudioCardList: View {
     let dispatchTrace: Bool
     @ObservedObject var store: StudioStore
     @Binding var selectedCard: StudioCard?
+    /// Threaded through to each StudioCardRow's pencil button. Parent owns
+    /// the editing-card sheet presentation.
+    var onEditCard: ((StudioCard) -> Void)? = nil
 
     var body: some View {
         ScrollView {
@@ -50,7 +53,8 @@ struct StudioCardList: View {
                     commentCount: store.comments(forCard: card.eventId).count,
                     isOptimistic: optimistic,
                     selectedCard: $selectedCard,
-                    store: store
+                    store: store,
+                    onEdit: onEditCard
                 )
                 Divider().opacity(0.4)
             }

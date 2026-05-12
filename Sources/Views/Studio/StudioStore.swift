@@ -21,6 +21,18 @@ final class StudioStore: ObservableObject {
     /// already filtered out as `isDeleted`) or by `rollbackOptimisticDelete`
     /// on POST failure.
     @Published private(set) var optimisticDeletes: Set<String> = []
+    /// Edit-mode optimistic patches, keyed by entity id (stable across the
+    /// kind-30530 republish). The values are the user-visible card with the
+    /// new fields applied; the `cards(in:track:)` accessor merges these on
+    /// top of the projected baseline so the UI updates instantly. Reconcile
+    /// drops entries once the SSE-delivered rumor (with a matching expected
+    /// event id) overwrites the entity body — see
+    /// `reconcileOptimisticUpdates(realCards:)`.
+    @Published private(set) var optimisticCardUpdates: [String: StudioCard] = [:]
+    /// Tracks the rumor `event_id` we expect the next SSE projection to
+    /// carry for each in-flight optimistic update. Populated once the
+    /// plugin POST returns. Cleared together with the optimistic entry.
+    private var optimisticUpdateExpectedEventIds: [String: String] = [:]
 
     /// The local plugin pubkey — populated lazily the first time we see a
     /// projected card or comment in the local DB authored by us. Used as the
@@ -166,6 +178,7 @@ final class StudioStore: ObservableObject {
                     self.cardsByRoomTrack = next
                     self.reconcileOptimisticAgainstReal(realCards: cards)
                     self.reconcileOptimisticDeletes(realCards: cards)
+                    self.reconcileOptimisticUpdates(realCards: cards)
                 }
             }
         )
@@ -215,8 +228,34 @@ final class StudioStore: ObservableObject {
 
     func cards(in room: String, track: String) -> [StudioCard] {
         let raw = cardsByRoomTrack["\(room)|\(track)"] ?? []
-        if optimisticDeletes.isEmpty { return raw }
-        return raw.filter { !optimisticDeletes.contains($0.eventId) }
+        var byId: [String: StudioCard] = [:]
+        for c in raw { byId[c.id] = c }
+
+        // Apply edit-mode optimistic patches. If the patched copy now lives
+        // in a different track, it should disappear from this track (the
+        // other-track call will pull it in via the same merge).
+        if !optimisticCardUpdates.isEmpty {
+            for (id, opt) in optimisticCardUpdates where opt.roomSlug == room {
+                if opt.trackSlug == track {
+                    byId[id] = opt
+                } else if byId[id] != nil {
+                    byId.removeValue(forKey: id)
+                }
+            }
+            // A patched card may have moved INTO this track from elsewhere —
+            // include it even if the projector hasn't seen it yet.
+            for (id, opt) in optimisticCardUpdates
+            where opt.roomSlug == room && opt.trackSlug == track && byId[id] == nil {
+                byId[id] = opt
+            }
+        }
+
+        var out = Array(byId.values)
+        if !optimisticDeletes.isEmpty {
+            out = out.filter { !optimisticDeletes.contains($0.eventId) }
+        }
+        out.sort { $0.createdAtSeconds > $1.createdAtSeconds }
+        return out
     }
 
     func comments(forCard eventId: String) -> [StudioComment] {
@@ -285,6 +324,162 @@ final class StudioStore: ObservableObject {
                 optimisticDeletes.remove(eventId)
             }
             throw error
+        }
+    }
+
+    // MARK: - Author-only edit
+
+    /// Republish the card as kind-30530 with merged fields. Any `nil` argument
+    /// means "preserve the existing value"; non-nil overrides. Mirrors the
+    /// plugin's `card.update` body contract.
+    ///
+    /// Optimistic update: an immediate patch lands in `optimisticCardUpdates`
+    /// so the UI reflects the edit before the SSE round trip. On success the
+    /// expected new `event_id` is stamped; once the projector overwrites the
+    /// entity with that id, reconcile drops the patch. On failure, the patch
+    /// is rolled back and the original card resurfaces.
+    ///
+    /// Returns the new rumor `event_id`. Throws `StudioPluginError` on
+    /// 404 (card_not_found), 403 (not_author), or other plugin errors.
+    @discardableResult
+    func updateCard(
+        roomSlug: String,
+        dTag: String,
+        eventId: String,
+        track: String? = nil,
+        kind: String? = nil,
+        title: String? = nil,
+        summary: String? = nil,
+        blocks: [[String: Any]]? = nil,
+        tagsList: [String]? = nil,
+        relatedTo: [String]? = nil
+    ) async throws -> String {
+        guard let original = findCard(roomSlug: roomSlug, dTag: dTag, eventId: eventId) else {
+            throw StudioPluginError(
+                status: 404,
+                code: "card_not_found",
+                message: "no local card \(dTag) in room \(roomSlug)"
+            )
+        }
+
+        let patched = patchCard(
+            original: original,
+            track: track,
+            kind: kind,
+            title: title,
+            summary: summary,
+            blocksRaw: blocks,
+            tagsList: tagsList,
+            relatedTo: relatedTo
+        )
+        optimisticCardUpdates[original.id] = patched
+
+        var body: [String: Any] = ["room": roomSlug, "d_tag": dTag]
+        if let t = track { body["track"] = t }
+        if let k = kind { body["kind"] = k }
+        if let t = title { body["title"] = t }
+        if let s = summary { body["summary"] = s }
+        if let b = blocks { body["blocks"] = b }
+        if let r = relatedTo { body["related_to"] = r }
+        if let t = tagsList { body["tags"] = t }
+
+        do {
+            struct Resp: Decodable {
+                let rumorEventId: String
+                let dTag: String
+                enum CodingKeys: String, CodingKey {
+                    case rumorEventId = "rumor_event_id"
+                    case dTag = "d_tag"
+                }
+            }
+            let result: Resp = try await EntityHTTP.postPluginActionRaw(
+                path: "sonata-studio/card/update",
+                body: body
+            )
+            optimisticUpdateExpectedEventIds[original.id] = result.rumorEventId
+            return result.rumorEventId
+        } catch {
+            optimisticCardUpdates.removeValue(forKey: original.id)
+            optimisticUpdateExpectedEventIds.removeValue(forKey: original.id)
+            throw error
+        }
+    }
+
+    /// Find the projected card for a given (room, d_tag, eventId). The
+    /// eventId disambiguates if the same d_tag has been republished — but
+    /// in practice the projected entity is unique on (room, author, d_tag),
+    /// so any of the three keys suffice.
+    private func findCard(roomSlug: String, dTag: String, eventId: String) -> StudioCard? {
+        for key in cardsByRoomTrack.keys where key.hasPrefix("\(roomSlug)|") {
+            for c in cardsByRoomTrack[key] ?? [] {
+                if c.dTag == dTag && c.roomSlug == roomSlug {
+                    if eventId.isEmpty || c.eventId == eventId { return c }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Build a patched `StudioCard` from `original` overlaying any non-nil
+    /// edit fields. Blocks override is the raw `[[String: Any]]` shape that
+    /// the plugin expects; we decode it into typed `StudioBlock`s via the
+    /// existing JSON path so the in-memory model stays consistent.
+    private func patchCard(
+        original: StudioCard,
+        track: String?,
+        kind: String?,
+        title: String?,
+        summary: String?,
+        blocksRaw: [[String: Any]]?,
+        tagsList: [String]?,
+        relatedTo: [String]?
+    ) -> StudioCard {
+        let newBlocks: [StudioBlock] = {
+            guard let raw = blocksRaw else { return original.blocks }
+            guard !raw.isEmpty,
+                  let data = try? JSONSerialization.data(withJSONObject: raw),
+                  let decoded = try? JSONDecoder().decode([StudioBlock].self, from: data)
+            else { return [] }
+            return decoded
+        }()
+        return StudioCard(
+            id: original.id,
+            eventId: original.eventId,
+            cardKind: kind ?? original.cardKind,
+            trackSlug: track ?? original.trackSlug,
+            roomSlug: original.roomSlug,
+            title: title ?? original.title,
+            summary: summary ?? original.summary,
+            blocks: newBlocks,
+            relatedTo: relatedTo ?? original.relatedTo,
+            tagsList: tagsList ?? original.tagsList,
+            createdByPubkey: original.createdByPubkey,
+            createdAtSeconds: original.createdAtSeconds,
+            dTag: original.dTag,
+            status: original.status
+        )
+    }
+
+    /// Drop optimistic edit patches whose underlying entity has been
+    /// projected with the expected new rumor `event_id` — or whose entity
+    /// row is no longer present at all (e.g. concurrent delete). Called
+    /// from the cards onChange after the SSE round trip lands.
+    private func reconcileOptimisticUpdates(realCards: [StudioCard]) {
+        guard !optimisticCardUpdates.isEmpty else { return }
+        let realById = Dictionary(uniqueKeysWithValues: realCards.map { ($0.id, $0) })
+        var nextPatches = optimisticCardUpdates
+        for (id, _) in optimisticCardUpdates {
+            if let expected = optimisticUpdateExpectedEventIds[id],
+               let real = realById[id], real.eventId == expected {
+                nextPatches.removeValue(forKey: id)
+                optimisticUpdateExpectedEventIds.removeValue(forKey: id)
+            } else if realById[id] == nil {
+                nextPatches.removeValue(forKey: id)
+                optimisticUpdateExpectedEventIds.removeValue(forKey: id)
+            }
+        }
+        if nextPatches != optimisticCardUpdates {
+            optimisticCardUpdates = nextPatches
         }
     }
 

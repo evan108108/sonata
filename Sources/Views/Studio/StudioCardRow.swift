@@ -11,6 +11,10 @@ struct StudioCardRow: View {
     var isOptimistic: Bool = false
     @Binding var selectedCard: StudioCard?
     var store: StudioStore? = nil
+    /// Called when the user clicks the row's pencil icon. The parent owns the
+    /// edit-sheet presentation so it can survive row re-creation across the
+    /// list's ValueObservation cycle.
+    var onEdit: ((StudioCard) -> Void)? = nil
 
     @State private var hovering: Bool = false
     @State private var showDeleteConfirm: Bool = false
@@ -20,13 +24,16 @@ struct StudioCardRow: View {
         selectedCard?.eventId == card.eventId && !card.eventId.isEmpty
     }
 
-    private var canDelete: Bool {
+    private var canMutate: Bool {
         guard let store else { return false }
         return !card.createdByPubkey.isEmpty &&
             card.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased() &&
             !card.dTag.isEmpty &&
             !isOptimistic
     }
+
+    private var canDelete: Bool { canMutate }
+    private var canEdit: Bool { canMutate }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -69,6 +76,36 @@ struct StudioCardRow: View {
             }
 
             Spacer(minLength: 0)
+
+            // Trailing icon strip — visible on hover. Pencil opens the edit
+            // sheet (callback owned by the parent); trash opens the delete
+            // confirm. Both gate on `canMutate` so non-authors see a greyed
+            // affordance with an explanatory tooltip.
+            HStack(spacing: 8) {
+                if hovering && !isOptimistic && !card.eventId.isEmpty {
+                    Button {
+                        if canEdit { onEdit?(card) }
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(canEdit ? Color.accentColor : Color.secondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canEdit)
+                    .help(canEdit ? "Edit card" : "Only the author can edit this card")
+
+                    Button {
+                        if canDelete { showDeleteConfirm = true }
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(canDelete ? Color.red : Color.secondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canDelete)
+                    .help(canDelete ? "Delete card" : "Only the author can delete this card")
+                }
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -91,6 +128,13 @@ struct StudioCardRow: View {
             selectedCard = card
         }
         .contextMenu {
+            if canEdit {
+                Button {
+                    onEdit?(card)
+                } label: {
+                    Label("Edit card…", systemImage: "pencil")
+                }
+            }
             if canDelete {
                 Button(role: .destructive) {
                     showDeleteConfirm = true

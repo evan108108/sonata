@@ -115,6 +115,18 @@ const CARD_DELETE_PARAMS: ActionParam[] = [
   { name: "d_tag", type: "string", required: true, description: "d_tag of the card to soft-delete (from CardPostResult)." },
 ];
 
+const CARD_UPDATE_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+  { name: "d_tag", type: "string", required: true, description: "d_tag of the card to update." },
+  { name: "track", type: "string", description: "Override track slug. Omit to preserve." },
+  { name: "kind", type: "string", description: "Override card kind. Omit to preserve." },
+  { name: "title", type: "string", description: "Override title (≤200 chars). Omit to preserve." },
+  { name: "summary", type: "string", description: "Override summary (≤240 chars). Omit to preserve." },
+  { name: "blocks", type: "array", description: "Override blocks array. Omit to preserve." },
+  { name: "related_to", type: "array", description: "Override related_to list. Omit to preserve." },
+  { name: "tags", type: "array", description: "Override tags list. Omit to preserve." },
+];
+
 const TRACK_CREATE_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "name", type: "string", required: true, description: "Track slug, [A-Za-z0-9-]+." },
@@ -248,6 +260,14 @@ export const ACTIONS: ActionDef[] = [
     params: CARD_DELETE_PARAMS,
   },
   {
+    name: "studio_card_update",
+    description:
+      "Author-only edit: republishes the card (kind 30530) with merged fields. Omitted fields preserve the existing value from the local entity; present fields overwrite. Replaceable d_tag overwrites the prior rumor at every member.",
+    method: "post",
+    path: "/api/card/update",
+    params: CARD_UPDATE_PARAMS,
+  },
+  {
     name: "studio_track_create",
     description: "Create a track within a room (kind 30531).",
     method: "post",
@@ -343,6 +363,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/card/delete": {
     method: "post",
     handler: async (body, _q, ctx) => card.delete(body, ctx),
+  },
+  "/api/card/update": {
+    method: "post",
+    handler: async (body, _q, ctx) => card.update(body, ctx),
   },
   "/api/track/create": {
     method: "post",

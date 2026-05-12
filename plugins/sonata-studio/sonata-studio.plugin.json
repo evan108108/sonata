@@ -106,6 +106,23 @@
       ]
     },
     {
+      "name": "studio_card_update",
+      "description": "Author-only edit: republishes the card (kind 30530) with merged fields. Omitted fields preserve the existing value from the local entity; present fields overwrite. Replaceable d_tag overwrites the prior rumor at every member.",
+      "method": "post",
+      "path": "/api/card/update",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "d_tag", "type": "string", "required": true, "description": "d_tag of the card to update." },
+        { "name": "track", "type": "string", "description": "Override track slug. Omit to preserve." },
+        { "name": "kind", "type": "string", "description": "Override card kind. Omit to preserve." },
+        { "name": "title", "type": "string", "description": "Override title (≤200 chars). Omit to preserve." },
+        { "name": "summary", "type": "string", "description": "Override summary (≤240 chars). Omit to preserve." },
+        { "name": "blocks", "type": "array", "description": "Override blocks array. Omit to preserve." },
+        { "name": "related_to", "type": "array", "description": "Override related_to list. Omit to preserve." },
+        { "name": "tags", "type": "array", "description": "Override tags list. Omit to preserve." }
+      ]
+    },
+    {
       "name": "studio_track_create",
       "description": "Create a track within a room (kind 30531).",
       "method": "post",

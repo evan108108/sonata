@@ -15,6 +15,10 @@ struct StudioRoomDetail: View {
     @State private var showDispatchTrace: Bool = false
     @State private var selectedCard: StudioCard? = nil
     @State private var showComposeSheet: Bool = false
+    /// Non-nil while the edit-mode compose sheet is presented. Distinct from
+    /// `showComposeSheet` so the "+ new card" path and the pencil-edit path
+    /// don't clobber each other if a user opens both in quick succession.
+    @State private var editingCard: StudioCard? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +38,8 @@ struct StudioRoomDetail: View {
                 track: selectedTrack,
                 dispatchTrace: dispatchTraceActive,
                 store: store,
-                selectedCard: $selectedCard
+                selectedCard: $selectedCard,
+                onEditCard: { card in editingCard = card }
             )
             if let trackForCompose = effectiveTrackForCompose {
                 Divider()
@@ -50,6 +55,16 @@ struct StudioRoomDetail: View {
                 StudioComposeSheet(roomSlug: room.slug, trackSlug: trackForCompose)
                     .environmentObject(store)
             }
+        }
+        .sheet(item: $editingCard) { card in
+            // Edit-mode sheet — `trackSlug` is the seed value; the picker in
+            // edit mode lets the user pick a different track on save.
+            StudioComposeSheet(
+                roomSlug: room.slug,
+                trackSlug: card.trackSlug,
+                editingCard: card
+            )
+                .environmentObject(store)
         }
         .animation(.easeOut(duration: 0.18), value: selectedCard?.eventId)
         .onChange(of: room.slug) { _, _ in selectedCard = nil }
@@ -193,7 +208,8 @@ struct StudioRoomDetail: View {
                     selectedCard: $selectedCard,
                     onEnrich: { _ in /* T5 */ },
                     onOpenPR: { c in openPRLink(card: c) },
-                    onAnswer: { _ in /* T5 */ }
+                    onAnswer: { _ in /* T5 */ },
+                    onEdit: { c in editingCard = c }
                 )
             }
         }

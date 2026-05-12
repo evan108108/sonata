@@ -14,15 +14,21 @@ struct StudioCardDetailDrawer: View {
     var onEnrich: ((StudioCard) -> Void)? = nil
     var onOpenPR: ((StudioCard) -> Void)? = nil
     var onAnswer: ((StudioCard) -> Void)? = nil
+    /// Called when the user clicks the drawer-header pencil. The parent
+    /// dismisses the drawer first, then opens the edit sheet on the same card.
+    var onEdit: ((StudioCard) -> Void)? = nil
 
     @State private var showDeleteConfirm: Bool = false
     @State private var deleteErrorMessage: String? = nil
 
-    private var canDelete: Bool {
+    private var canMutate: Bool {
         !card.createdByPubkey.isEmpty &&
             card.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased() &&
             !card.dTag.isEmpty
     }
+
+    private var canDelete: Bool { canMutate }
+    private var canEdit: Bool { canMutate }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -68,6 +74,19 @@ struct StudioCardDetailDrawer: View {
             Spacer(minLength: 8)
 
             kindActionButtons
+
+            if canEdit {
+                Button {
+                    let captured = card
+                    selectedCard = nil
+                    onEdit?(captured)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help("Edit card")
+            }
 
             if canDelete {
                 Menu {
