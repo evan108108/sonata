@@ -4,9 +4,8 @@
 // type, deferred-blob storage via Blossom).
 //
 // Pipeline:
-//   1. Validate file_path is under ~/Library/Caches/com.sonata/ or ~/Downloads/
-//      (Plan §12 Pass A9 — path-traversal guard). Reject symlinks so a
-//      symlink inside an allowed root cannot escape to /etc, etc.
+//   1. Resolve file_path and reject symlinks. The plugin runs under the
+//      user's UID with full home-dir read access; no allowlist guard.
 //   2. Read file bytes; reject > 20 MiB (blossom.band free-tier hard limit).
 //   3. Compute plaintext sha256 (diagnostic only — NOT the storage key).
 //   4. Load the room's current epoch via loadRoomCtx (gives pluginPub +
@@ -29,7 +28,6 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import { createHash } from "node:crypto";
 
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -60,13 +58,6 @@ const BLOSSOM_AUTH_KIND = 24242;
 // Settings → Blossom server URL).
 const DEFAULT_BLOSSOM_URL = "https://blossom.primal.net";
 
-function allowedRoots(): string[] {
-  return [
-    path.resolve(os.homedir(), "Library/Caches/com.sonata"),
-    path.resolve(os.homedir(), "Downloads"),
-  ];
-}
-
 interface ImageAttachRequest {
   file_path?: unknown;
   room_slug?: unknown;
@@ -92,20 +83,13 @@ export async function attachImage(
       ? ensureString(body.mime_type, "mime_type")
       : undefined;
 
-  // 1. Path-traversal guard. Resolve first, then check against allowlist;
-  //    reject symlinks (a symlink inside an allowed root could point out).
+  // 1. Resolve path + reject symlinks. The plugin runs under the user's own
+  //    UID with full home-dir access, so an allowlist of "approved roots"
+  //    was security theatre — the user already has read access to anything
+  //    they can point us at. Symlink rejection stays because the bytes are
+  //    going to be uploaded to a remote Blossom server and we'd rather not
+  //    surprise the user by silently following a link to elsewhere.
   const resolved = path.resolve(filePathRaw);
-  const roots = allowedRoots();
-  const inRoot = roots.some(
-    (r) => resolved === r || resolved.startsWith(r + path.sep),
-  );
-  if (!inRoot) {
-    throw new HttpError(
-      400,
-      "path_outside_allowed_roots",
-      `file_path must be under ~/Library/Caches/com.sonata/ or ~/Downloads/`,
-    );
-  }
   let stat;
   try {
     const lstat = await fs.lstat(resolved);

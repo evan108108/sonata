@@ -204,7 +204,7 @@ const MEMBER_SET_NICKNAME_PARAMS: ActionParam[] = [
 ];
 
 const IMAGE_ATTACH_PARAMS: ActionParam[] = [
-  { name: "file_path", type: "string", required: true, description: "Absolute path under ~/Library/Caches/com.sonata/ or ~/Downloads/." },
+  { name: "file_path", type: "string", required: true, description: "Absolute path to the source image file (any readable location)." },
   { name: "room_slug", type: "string", required: true, description: "Room slug — used to look up the current epoch." },
   { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
 ];

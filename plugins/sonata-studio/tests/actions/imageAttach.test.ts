@@ -44,51 +44,7 @@ describe("studio_image_attach", () => {
     tmpFiles.length = 0;
   });
 
-  it("rejects paths outside the allowed roots", async () => {
-    const seed = seedActiveRoom("alpha");
-    try {
-      const outsidePath = path.join(os.tmpdir(), "not-allowed-img.png");
-      await fs.writeFile(outsidePath, Buffer.from([1, 2, 3]));
-      tmpFiles.push(outsidePath);
-
-      let caught: unknown;
-      try {
-        await imageAttach.attach(
-          { file_path: outsidePath, room_slug: "alpha" },
-          seed.ctx,
-        );
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(HttpError);
-      expect((caught as HttpError).code).toBe("path_outside_allowed_roots");
-    } finally {
-      seed.restore();
-    }
-  });
-
-  it("rejects path-traversal '..' segments that escape the allowlist", async () => {
-    const seed = seedActiveRoom("alpha");
-    try {
-      // ~/Downloads/../etc/passwd resolves outside the allowed root.
-      const traversal = path.join(DOWNLOADS, "..", "etc", "passwd");
-      let caught: unknown;
-      try {
-        await imageAttach.attach(
-          { file_path: traversal, room_slug: "alpha" },
-          seed.ctx,
-        );
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(HttpError);
-      expect((caught as HttpError).code).toBe("path_outside_allowed_roots");
-    } finally {
-      seed.restore();
-    }
-  });
-
-  it("rejects symlinks even inside an allowed root", async () => {
+  it("rejects symlinks", async () => {
     const seed = seedActiveRoom("alpha");
     try {
       const target = await writeTmpFile(

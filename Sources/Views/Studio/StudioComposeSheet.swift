@@ -723,9 +723,7 @@ private struct BlockEditorRow: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.png, .jpeg, .gif, .webP, .heic, .heif]
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let cacheDir = home.appendingPathComponent("Library/Caches/com.sonata")
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        let stagingDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         // Sanity guard — protect against pathological loads.
@@ -737,9 +735,9 @@ private struct BlockEditorRow: View {
 
         // NIP-44 v2 caps plaintext at 65535 bytes. Re-encode the user's
         // pick as a downscaled JPEG ≤ 60 KiB (leaves headroom for the
-        // encryption framing) and write it into the plugin's allowlisted
-        // cache dir so imageAttach's path-traversal guard accepts the path.
-        let relocatedURL = cacheDir.appendingPathComponent("\(UUID().uuidString).jpg")
+        // encryption framing) into /tmp. The plugin reads from any
+        // location; staging here lets us own the lifetime and clean up.
+        let relocatedURL = stagingDir.appendingPathComponent("sonata-compose-\(UUID().uuidString).jpg")
         guard let nsImage = NSImage(contentsOf: url) else {
             draft.imageError = "Couldn't read image file."
             return
@@ -766,8 +764,8 @@ private struct BlockEditorRow: View {
                 // plugin. Whether the upload succeeded or failed, the local
                 // file is no longer useful — Blossom holds the canonical
                 // bytes on success, and on failure we don't auto-retry from
-                // the same path. Clean up so ~/Library/Caches/com.sonata/
-                // doesn't accumulate.
+                // the same path. /tmp gets reaped on reboot anyway; this
+                // removeItem keeps the dir tidy between uses.
                 try? FileManager.default.removeItem(atPath: path)
             }
             do {
