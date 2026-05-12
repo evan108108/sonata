@@ -1,5 +1,8 @@
 import Foundation
 import GRDB
+import Logging
+
+private let afkLogger = Logger(label: "sonata.afk")
 
 // AFK channel-push routing: replaces inbox polling.
 //
@@ -102,18 +105,38 @@ let afkActions: [SonataAction] = [
 
     SonataAction(
         name: "afk_register",
-        description: "Register a session as the AFK target for a token. EmailHandler will route [AFK:<token>] replies here.",
+        description: "Register this session as the AFK target for a token. EmailHandler will route [AFK:<token>] replies here, and the sibling sonata-bridge process will deliver them as channel notifications. When called via mcp__memory__, the sessionId is auto-injected from the sibling bridge; direct HTTP callers must pass sessionId explicitly.",
         group: "/api/afk",
         path: "/register",
         method: .post,
         params: [
             ActionParam("token", .string, required: true, description: "The AFK token (also embedded in the email subject)"),
-            ActionParam("sessionId", .string, required: true, description: "Bridge session ID — the routing target for the reply"),
+            ActionParam("sessionId", .string, required: true, description: "Bridge session ID — the routing target for the reply. Auto-injected by mem-server.ts when not provided by the caller."),
         ],
         handler: { ctx in
             let token = try ctx.params.require("token")
             let sessionId = try ctx.params.require("sessionId")
             AFKRegistry.shared.register(token: token, sessionId: sessionId)
+
+            // Sanity check: warn (but still register) if no live bridge is
+            // polling for this sessionId. Workers are tracked in the workers
+            // table; interactive bridges in ExternalBridgeRegistry. A miss in
+            // both means the reply will sit in pendingReplies forever — the
+            // exact footgun this whole unification is meant to prevent.
+            let isLiveWorker: Bool = (try? await ctx.dbPool.read { db -> Bool in
+                let sql = "SELECT 1 FROM workers WHERE sessionId = ? LIMIT 1"
+                return try Row.fetchOne(db, sql: sql, arguments: [sessionId]) != nil
+            }) ?? false
+            let isLiveBridge = ExternalBridgeRegistry.shared.contains(sessionId: sessionId)
+            if !isLiveWorker && !isLiveBridge {
+                afkLogger.warning("""
+                    afk_register: sessionId \(sessionId) is not a known live worker \
+                    or external bridge. The token \(token) was stored, but no bridge \
+                    appears to be polling — AFK replies may never be delivered. \
+                    Verify the calling session has the sonata-bridge MCP server \
+                    configured and that the bridge process is alive.
+                    """)
+            }
             return SuccessResponse()
         }
     ),

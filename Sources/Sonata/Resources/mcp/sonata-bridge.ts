@@ -13,7 +13,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -30,13 +30,14 @@ const AFK_POLL_INTERVAL_MS = 5_000;
 const DM_POLL_INTERVAL_MS = 5_000;
 let lastProgressMs = Date.now();
 
-// Stable per-bridge-process identity for AFK routing. Worker bridges already
-// have a WORKER_ID; non-worker (interactive) sessions get a fresh UUID at boot
-// so the server has something to address replies to. When the bridge dies, the
-// AFK registration dies with it — that's fine, AFK is transient.
-const BRIDGE_SESSION_ID = WORKER_ID || SONA_SESSION_ID || randomUUID();
+// Stable per-bridge-process identity for AFK and DM routing. Worker bridges
+// already have a WORKER_ID; sessions launched by Sonata.app get SONA_SESSION_ID;
+// everything else falls back to a deterministic `claude-<ppid>` so the sibling
+// mem-server.ts (same Claude Code parent) can compute the same value without
+// any IPC. Determinism matters because mem-server auto-injects sessionId into
+// afk_register calls — see mem-server.ts.
+const BRIDGE_SESSION_ID = WORKER_ID || SONA_SESSION_ID || `claude-${process.ppid}`;
 let afkPollTimer: ReturnType<typeof setInterval> | null = null;
-const registeredAFKTokens = new Set<string>();
 
 // DM (Sonar session-addressable direct messages) — single registration per
 // bridge process keyed by BRIDGE_SESSION_ID. The poll loop only runs while
@@ -337,28 +338,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: "afk_register",
-      description: "Register this session as the AFK target for a token. After calling this, end your turn — replies tagged [AFK:<token>] will arrive as channel notifications instead of needing inbox polling.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          token: { type: "string", description: "The AFK token (also embedded in the email subject as [AFK:<token>])" },
-        },
-        required: ["token"],
-      },
-    },
-    {
-      name: "afk_unregister",
-      description: "Unregister an AFK token. Call this on AFK exit so replies stop being routed.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          token: { type: "string", description: "The AFK token to unregister" },
-        },
-        required: ["token"],
-      },
-    },
-    {
       name: "sonar_dm_register",
       description: "Register this bridge session as a Sonar DM target. Subsequent DMs addressed to this session arrive as channel notifications (event_type=sonar_dm). Idempotent.",
       inputSchema: {
@@ -427,42 +406,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     } finally {
       inFlight = null;
       usageBaseline = null;
-    }
-  }
-
-  if (name === "afk_register") {
-    const { token } = args as { token: string };
-    try {
-      const res = await fetch(`${SONATA_API}/api/afk/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, sessionId: BRIDGE_SESSION_ID }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      registeredAFKTokens.add(token);
-      ensureAFKPollLoop();
-      return { content: [{ type: "text" as const, text: `AFK token ${token} registered. Replies will arrive as channel notifications.` }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
-    }
-  }
-
-  if (name === "afk_unregister") {
-    const { token } = args as { token: string };
-    try {
-      await fetch(`${SONATA_API}/api/afk/unregister`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token }),
-      });
-      registeredAFKTokens.delete(token);
-      if (registeredAFKTokens.size === 0 && afkPollTimer) {
-        clearInterval(afkPollTimer);
-        afkPollTimer = null;
-      }
-      return { content: [{ type: "text" as const, text: `AFK token ${token} unregistered.` }] };
-    } catch (err: any) {
-      return { content: [{ type: "text" as const, text: `Error: ${err.message}` }], isError: true };
     }
   }
 
@@ -650,13 +593,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 // --- AFK polling ---
 
-/** Start the AFK reply poller if it isn't already running. We share this loop
- * with the worker poll where possible, but in non-worker (interactive) sessions
- * the worker poll never starts, so AFK has its own. */
+/** Start the AFK reply poller if it isn't already running.
+ *
+ * The loop runs unconditionally for every bridge process (passive, worker,
+ * supervisor) once boot completes. This makes `mcp__memory__afk_register` the
+ * single safe registration call: as long as a bridge process is alive for the
+ * registered sessionId, replies arrive as channel notifications. Servers do
+ * the gating; we just drain. */
 function ensureAFKPollLoop(): void {
   if (afkPollTimer) return;
   afkPollTimer = setInterval(async () => {
-    if (registeredAFKTokens.size === 0) return;
     try {
       const url = `${SONATA_API}/api/afk/poll?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}`;
       const res = await fetch(url);
@@ -885,6 +831,12 @@ if (import.meta.main) {
     // Auto-register as a DM target now that this bridge is known to Sonata.
     await autoRegisterDM();
 
+    // AFK poll loop is always on. mcp__memory__afk_register stores a token →
+    // sessionId mapping; this loop drains replies for our BRIDGE_SESSION_ID
+    // and pushes them as channel notifications. Workers' WORKER_ID is the
+    // same sessionId mem-server.ts injects, so this just works.
+    ensureAFKPollLoop();
+
     // Heartbeat — different endpoint for supervisor
     setInterval(async () => {
       try {
@@ -1028,8 +980,21 @@ if (import.meta.main) {
     // Interactive bridges still need to be reachable as DM targets so any plain
     // `claude` session can receive session-addressed messages.
     await autoRegisterDM();
+
+    // Announce ourselves as a live external bridge so the dashboard and the
+    // memory-namespace afk_register action can see we exist (and so AFK
+    // registration through mem-server can validate routing).
+    await announceExternalBridge();
+    setInterval(heartbeatExternalBridge, BRIDGE_HEARTBEAT_INTERVAL_MS);
+
+    // AFK poll loop runs in passive mode too — interactive `claude` sessions
+    // (including the orchestrator) can call mcp__memory__afk_register and rely
+    // on this loop to deliver replies.
+    ensureAFKPollLoop();
+
     const passiveCleanup = async () => {
       await unregisterDMOnShutdown();
+      await unregisterExternalBridge();
       process.exit(0);
     };
     process.on("SIGTERM", passiveCleanup);
