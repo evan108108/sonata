@@ -96,6 +96,16 @@
       ]
     },
     {
+      "name": "studio_card_delete",
+      "description": "Author-only soft-delete: republishes the card (kind 30530) with status='deleted'. The replaceable d_tag overwrites the original; renderers filter status=deleted out.",
+      "method": "post",
+      "path": "/api/card/delete",
+      "params": [
+        { "name": "room", "type": "string", "required": true, "description": "Room slug." },
+        { "name": "d_tag", "type": "string", "required": true, "description": "d_tag of the card to soft-delete (from CardPostResult)." }
+      ]
+    },
+    {
       "name": "studio_track_create",
       "description": "Create a track within a room (kind 30531).",
       "method": "post",

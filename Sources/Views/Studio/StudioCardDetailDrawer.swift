@@ -15,6 +15,15 @@ struct StudioCardDetailDrawer: View {
     var onOpenPR: ((StudioCard) -> Void)? = nil
     var onAnswer: ((StudioCard) -> Void)? = nil
 
+    @State private var showDeleteConfirm: Bool = false
+    @State private var deleteErrorMessage: String? = nil
+
+    private var canDelete: Bool {
+        !card.createdByPubkey.isEmpty &&
+            card.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased() &&
+            !card.dTag.isEmpty
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -60,6 +69,23 @@ struct StudioCardDetailDrawer: View {
 
             kindActionButtons
 
+            if canDelete {
+                Menu {
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        Label("Delete card…", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More actions")
+            }
+
             Button {
                 selectedCard = nil
             } label: {
@@ -69,6 +95,41 @@ struct StudioCardDetailDrawer: View {
             .buttonStyle(.borderless)
             .keyboardShortcut(.escape, modifiers: [])
             .help("Close drawer (Esc)")
+        }
+        .confirmationDialog(
+            "Delete this card?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                let eventId = card.eventId
+                let dTag = card.dTag
+                let roomSlug = card.roomSlug
+                Task {
+                    do {
+                        try await store.deleteCard(roomSlug: roomSlug, dTag: dTag, eventId: eventId)
+                        await MainActor.run { selectedCard = nil }
+                    } catch {
+                        await MainActor.run {
+                            deleteErrorMessage = (error as? StudioPluginError)?.message ?? error.localizedDescription
+                        }
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Deleted cards can't be restored.")
+        }
+        .alert(
+            "Couldn't delete card",
+            isPresented: Binding(
+                get: { deleteErrorMessage != nil },
+                set: { if !$0 { deleteErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { deleteErrorMessage = nil }
+        } message: {
+            Text(deleteErrorMessage ?? "")
         }
     }
 

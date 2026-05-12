@@ -49,7 +49,8 @@ struct StudioCardList: View {
                     authorName: store.displayName(for: card.createdByPubkey),
                     commentCount: store.comments(forCard: card.eventId).count,
                     isOptimistic: optimistic,
-                    selectedCard: $selectedCard
+                    selectedCard: $selectedCard,
+                    store: store
                 )
                 Divider().opacity(0.4)
             }

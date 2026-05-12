@@ -29,6 +29,9 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
     ? relatedToRaw.filter((v): v is string => typeof v === "string")
     : [];
 
+  const status =
+    typeof payload["status"] === "string" ? (payload["status"] as string) : "active";
+
   const attributes: Record<string, unknown> = {
     _studio_kind: 30530,
     _studio_type: "Card",
@@ -38,6 +41,7 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
     summary: typeof payload["summary"] === "string" ? payload["summary"] : "",
     blocks: Array.isArray(payload["blocks"]) ? payload["blocks"] : [],
     related_to: relatedTo,
+    status,
     created_by_pubkey: createdByPubkey,
     room_slug: roomSlug,
     created_at_seconds: rumor.created_at,

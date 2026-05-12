@@ -110,6 +110,11 @@ const CARD_LIST_PARAMS: ActionParam[] = [
   { name: "limit", type: "integer", description: "Page size, default 50, max 200." },
 ];
 
+const CARD_DELETE_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+  { name: "d_tag", type: "string", required: true, description: "d_tag of the card to soft-delete (from CardPostResult)." },
+];
+
 const TRACK_CREATE_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "name", type: "string", required: true, description: "Track slug, [A-Za-z0-9-]+." },
@@ -235,6 +240,14 @@ export const ACTIONS: ActionDef[] = [
     params: CARD_LIST_PARAMS,
   },
   {
+    name: "studio_card_delete",
+    description:
+      "Author-only soft-delete: republishes the card (kind 30530) with status='deleted'. The replaceable d_tag overwrites the original; renderers filter status=deleted out.",
+    method: "post",
+    path: "/api/card/delete",
+    params: CARD_DELETE_PARAMS,
+  },
+  {
     name: "studio_track_create",
     description: "Create a track within a room (kind 30531).",
     method: "post",
@@ -326,6 +339,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/card/list": {
     method: "get",
     handler: async (_b, query, ctx) => card.list(query, ctx),
+  },
+  "/api/card/delete": {
+    method: "post",
+    handler: async (body, _q, ctx) => card.delete(body, ctx),
   },
   "/api/track/create": {
     method: "post",

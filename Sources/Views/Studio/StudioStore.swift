@@ -14,6 +14,13 @@ final class StudioStore: ObservableObject {
     @Published private(set) var members: [String: StudioMember] = [:]
     @Published private(set) var optimisticCards: [String: StudioCard] = [:]
     @Published private(set) var optimisticComments: [String: StudioComment] = [:]
+    /// Card eventIds the local user just asked to delete. Drives an instant
+    /// fade from the published `cards` list while we wait for SSE to deliver
+    /// the new `status: "deleted"` rumor and the projector to overwrite the
+    /// entity body. Cleared either by SSE reconcile (the projected card is
+    /// already filtered out as `isDeleted`) or by `rollbackOptimisticDelete`
+    /// on POST failure.
+    @Published private(set) var optimisticDeletes: Set<String> = []
 
     /// The local plugin pubkey — populated lazily the first time we see a
     /// projected card or comment in the local DB authored by us. Used as the
@@ -147,7 +154,7 @@ final class StudioStore: ObservableObject {
                 MainActor.assumeIsolated {
                     guard let self = self else { return }
                     var grouped: [String: [StudioCard]] = [:]
-                    for c in cards {
+                    for c in cards where !c.isDeleted {
                         let track = c.trackSlug.isEmpty ? "inbox" : c.trackSlug
                         grouped["\(slug)|\(track)", default: []].append(c)
                     }
@@ -158,6 +165,7 @@ final class StudioStore: ObservableObject {
                     for (k, v) in grouped { next[k] = v }
                     self.cardsByRoomTrack = next
                     self.reconcileOptimisticAgainstReal(realCards: cards)
+                    self.reconcileOptimisticDeletes(realCards: cards)
                 }
             }
         )
@@ -206,7 +214,9 @@ final class StudioStore: ObservableObject {
     // MARK: - Accessors
 
     func cards(in room: String, track: String) -> [StudioCard] {
-        cardsByRoomTrack["\(room)|\(track)"] ?? []
+        let raw = cardsByRoomTrack["\(room)|\(track)"] ?? []
+        if optimisticDeletes.isEmpty { return raw }
+        return raw.filter { !optimisticDeletes.contains($0.eventId) }
     }
 
     func comments(forCard eventId: String) -> [StudioComment] {
@@ -232,10 +242,69 @@ final class StudioStore: ObservableObject {
         var n = 0
         for key in cardsByRoomTrack.keys where key.hasPrefix("\(slug)|") {
             for c in cardsByRoomTrack[key] ?? [] where c.createdAtSeconds > cutoffSec {
+                if optimisticDeletes.contains(c.eventId) { continue }
                 n += 1
             }
         }
         return n
+    }
+
+    // MARK: - Soft-delete (author-only)
+
+    /// Republish the card as `status: "deleted"` via the plugin. The local
+    /// card optimistically vanishes from `cards(in:track:)`; SSE will deliver
+    /// the new rumor a moment later and projection overwrites the entity body
+    /// with `isDeleted == true`, at which point reconcile clears the
+    /// optimistic flag (the real row is now filtered too).
+    ///
+    /// Throws `StudioPluginError` on 404 (card_not_found) or 403 (not_author).
+    func deleteCard(roomSlug: String, dTag: String, eventId: String) async throws {
+        if !eventId.isEmpty {
+            optimisticDeletes.insert(eventId)
+        }
+        struct Req: Encodable {
+            let room: String
+            let dTag: String
+            enum CodingKeys: String, CodingKey { case room; case dTag = "d_tag" }
+        }
+        struct Resp: Decodable {
+            let rumorEventId: String
+            let dTag: String
+            enum CodingKeys: String, CodingKey {
+                case rumorEventId = "rumor_event_id"
+                case dTag = "d_tag"
+            }
+        }
+        do {
+            let _: Resp = try await EntityHTTP.postPluginAction(
+                path: "sonata-studio/card/delete",
+                body: Req(room: roomSlug, dTag: dTag)
+            )
+        } catch {
+            if !eventId.isEmpty {
+                optimisticDeletes.remove(eventId)
+            }
+            throw error
+        }
+    }
+
+    /// Clear optimistic delete flags whose underlying card has been projected
+    /// with `isDeleted == true` (the SSE round trip completed) — or whose row
+    /// is no longer present at all. Called from the cards onChange.
+    private func reconcileOptimisticDeletes(realCards: [StudioCard]) {
+        if optimisticDeletes.isEmpty { return }
+        let realById = Dictionary(uniqueKeysWithValues: realCards.map { ($0.eventId, $0) })
+        var next = optimisticDeletes
+        for id in optimisticDeletes {
+            if let real = realById[id], real.isDeleted {
+                next.remove(id)
+            } else if realById[id] == nil {
+                next.remove(id)
+            }
+        }
+        if next != optimisticDeletes {
+            optimisticDeletes = next
+        }
     }
 
     // MARK: - Local-only mutations (T1)

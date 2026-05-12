@@ -184,6 +184,9 @@ struct StudioCard: Equatable, Identifiable {
     let createdByPubkey: String
     let createdAtSeconds: Int64
     let dTag: String
+    let status: String?
+
+    var isDeleted: Bool { status == "deleted" }
 
     init(row: Row) throws {
         guard let id = row["id"] as String? else {
@@ -207,6 +210,7 @@ struct StudioCard: Equatable, Identifiable {
         self.createdAtSeconds = (raw["created_at_seconds"] as? Int64)
             ?? Int64((raw["created_at_seconds"] as? Int) ?? 0)
         self.dTag = (raw["d_tag"] as? String) ?? ""
+        self.status = raw["status"] as? String
 
         if let rawBlocks = raw["blocks"] as? [Any], !rawBlocks.isEmpty,
            let blockData = try? JSONSerialization.data(withJSONObject: rawBlocks) {
@@ -229,7 +233,8 @@ struct StudioCard: Equatable, Identifiable {
         tagsList: [String],
         createdByPubkey: String,
         createdAtSeconds: Int64,
-        dTag: String
+        dTag: String,
+        status: String? = nil
     ) {
         self.id = id
         self.eventId = eventId
@@ -244,6 +249,7 @@ struct StudioCard: Equatable, Identifiable {
         self.createdByPubkey = createdByPubkey
         self.createdAtSeconds = createdAtSeconds
         self.dTag = dTag
+        self.status = status
     }
 }
 

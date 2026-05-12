@@ -10,11 +10,22 @@ struct StudioCardRow: View {
     let commentCount: Int
     var isOptimistic: Bool = false
     @Binding var selectedCard: StudioCard?
+    var store: StudioStore? = nil
 
     @State private var hovering: Bool = false
+    @State private var showDeleteConfirm: Bool = false
+    @State private var deleteErrorMessage: String? = nil
 
     private var isSelected: Bool {
         selectedCard?.eventId == card.eventId && !card.eventId.isEmpty
+    }
+
+    private var canDelete: Bool {
+        guard let store else { return false }
+        return !card.createdByPubkey.isEmpty &&
+            card.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased() &&
+            !card.dTag.isEmpty &&
+            !isOptimistic
     }
 
     var body: some View {
@@ -78,6 +89,50 @@ struct StudioCardRow: View {
             // suppress the selection until reconcile lands the real card.
             guard !isOptimistic else { return }
             selectedCard = card
+        }
+        .contextMenu {
+            if canDelete {
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Label("Delete card", systemImage: "trash")
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete this card?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                guard let store else { return }
+                let eventId = card.eventId
+                let dTag = card.dTag
+                let roomSlug = card.roomSlug
+                Task {
+                    do {
+                        try await store.deleteCard(roomSlug: roomSlug, dTag: dTag, eventId: eventId)
+                    } catch {
+                        await MainActor.run {
+                            deleteErrorMessage = (error as? StudioPluginError)?.message ?? error.localizedDescription
+                        }
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Deleted cards can't be restored.")
+        }
+        .alert(
+            "Couldn't delete card",
+            isPresented: Binding(
+                get: { deleteErrorMessage != nil },
+                set: { if !$0 { deleteErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { deleteErrorMessage = nil }
+        } message: {
+            Text(deleteErrorMessage ?? "")
         }
     }
 

@@ -57,6 +57,7 @@ interface CardListEntry {
   blocks: unknown[];
   tags: string[];
   related_to: string[];
+  status: string;
 }
 
 interface CardListResult {
@@ -196,6 +197,7 @@ export async function listCards(
       related_to: Array.isArray(attrs["related_to"])
         ? (attrs["related_to"] as string[])
         : [],
+      status: typeof attrs["status"] === "string" ? (attrs["status"] as string) : "active",
     });
   }
   out.sort((a, b) => b.created_at - a.created_at);
@@ -213,6 +215,82 @@ function parseAttrs(raw: string | null | undefined): Record<string, unknown> {
   return {};
 }
 
+// ── delete ──────────────────────────────────────────────────────────────────
+
+interface CardDeleteRequest {
+  room?: unknown;
+  d_tag?: unknown;
+}
+
+interface CardDeleteResult {
+  rumor_event_id: string;
+  d_tag: string;
+}
+
+export async function deleteCard(
+  body: CardDeleteRequest,
+  ctx: ActionCtx,
+): Promise<CardDeleteResult> {
+  const roomSlug = ensureSlug(body.room, "room");
+  const dTag = ensureString(body.d_tag, "d_tag");
+
+  const pluginPubLower = ctx.cfg.pluginPub.toLowerCase();
+  const entityName = `studio:card:${roomSlug}:${pluginPubLower}:${dTag}`;
+  const existing = await entity.byNameOrNull(entityName);
+  if (!existing) {
+    throw new HttpError(404, "card_not_found", `no card ${dTag} in room ${roomSlug} by this author`);
+  }
+  const attrs = parseAttrs(existing.attributes);
+  const createdBy = String(attrs["created_by_pubkey"] ?? "").toLowerCase();
+  if (createdBy !== pluginPubLower) {
+    throw new HttpError(403, "not_author", `only the card author may delete this card`);
+  }
+
+  const room = await loadRoomCtx(roomSlug, ctx.cfg.pluginPub);
+
+  const trackSlug = String(attrs["track_slug"] ?? "");
+  const title = String(attrs["title"] ?? "");
+  const summary = String(attrs["summary"] ?? "");
+  const cardKind = String(attrs["card_kind"] ?? "note");
+  const blocks = Array.isArray(attrs["blocks"]) ? (attrs["blocks"] as unknown[]) : [];
+  const relatedTo = Array.isArray(attrs["related_to"]) ? (attrs["related_to"] as string[]) : [];
+  const cardTags = Array.isArray(attrs["tags"]) ? (attrs["tags"] as string[]) : [];
+
+  const payload: Record<string, unknown> = {
+    "@context": STUDIO_CONTEXT_V0,
+    "@type": "Card",
+    kind: cardKind,
+    track: trackSlug,
+    title,
+    summary,
+    blocks,
+    createdBy: pluginPubLower,
+    status: "deleted",
+  };
+  if (relatedTo.length > 0) payload["relatedTo"] = relatedTo;
+  if (cardTags.length > 0) payload["tags"] = cardTags;
+  validatePayload(STUDIO_KIND_CARD, payload);
+
+  const rumor = buildSignedRumor({
+    kind: STUDIO_KIND_CARD,
+    payload,
+    room,
+    publisherPriv: ctx.cfg.pluginPriv,
+    publisherPub: ctx.cfg.pluginPub,
+    dTag,
+    alt: "Studio card: deleted",
+  });
+  const { rumorEventId } = await publishRumor({
+    rumor,
+    payload,
+    room,
+    publisherPriv: ctx.cfg.pluginPriv,
+    gateway: ctx.gateway,
+  });
+
+  return { rumor_event_id: rumorEventId, d_tag: dTag };
+}
+
 // ── exports ─────────────────────────────────────────────────────────────────
 
 export const card = {
@@ -221,5 +299,8 @@ export const card = {
   },
   list(query: unknown, ctx: ActionCtx): Promise<CardListResult> {
     return listCards((query ?? {}) as CardListRequest, ctx);
+  },
+  delete(body: unknown, ctx: ActionCtx): Promise<CardDeleteResult> {
+    return deleteCard((body ?? {}) as CardDeleteRequest, ctx);
   },
 };
