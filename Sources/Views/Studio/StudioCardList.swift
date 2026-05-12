@@ -49,7 +49,7 @@ struct StudioCardList: View {
                 let optimistic = optimisticIds.contains(card.id)
                 StudioCardRow(
                     card: card,
-                    authorName: store.displayName(for: card.createdByPubkey),
+                    authorName: store.displayName(for: card.createdByPubkey, in: card.roomSlug),
                     commentCount: store.comments(forCard: card.eventId).count,
                     isOptimistic: optimistic,
                     selectedCard: $selectedCard,

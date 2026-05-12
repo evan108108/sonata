@@ -11,7 +11,19 @@ final class StudioStore: ObservableObject {
     @Published private(set) var cardsByRoomTrack: [String: [StudioCard]] = [:]
     @Published private(set) var comments: [String: [StudioComment]] = [:]
     @Published private(set) var dispatchIntents: [String: [StudioDispatchIntent]] = [:]
+    /// Cross-room members keyed by pubkey hex (auto-stubbed by `ensureMember`
+    /// in the projector, optional local nickname set via studio_member_set_nickname).
+    /// Fallback only — federated per-room nicknames live in `roomMembers`.
     @Published private(set) var members: [String: StudioMember] = [:]
+    /// Per-room members keyed by `"<roomSlug>|<pubkey>"`. Populated by the
+    /// projector when it sees a `_profile` card — see plugin
+    /// `projection/card.ts` upsertRoomMember(). Used by `displayName(for:in:)`
+    /// as the primary source for member nicknames.
+    @Published private(set) var roomMembers: [String: StudioMember] = [:]
+    /// Local-only default nickname (the machine's "who am I"). Federated to
+    /// each room via auto-publish of a `_profile` card. Empty until the user
+    /// sets one in Settings → Studio.
+    @Published private(set) var defaultNickname: String = ""
     @Published private(set) var optimisticCards: [String: StudioCard] = [:]
     @Published private(set) var optimisticComments: [String: StudioComment] = [:]
     /// Card eventIds the local user just asked to delete. Drives an instant
@@ -131,21 +143,34 @@ final class StudioStore: ObservableObject {
     }
 
     private func startMembersObservation() {
-        let observation = ValueObservation.tracking { db -> [String: StudioMember] in
+        let observation = ValueObservation.tracking { db -> (cross: [String: StudioMember], perRoom: [String: StudioMember]) in
             let rows = try Row.fetchAll(db, sql: Self.SQL_MEMBERS_ALL)
-            var out: [String: StudioMember] = [:]
+            var cross: [String: StudioMember] = [:]
+            var perRoom: [String: StudioMember] = [:]
             for row in rows {
-                if let m = try? StudioMember(row: row) {
-                    out[m.pubkeyHex] = m
+                guard let m = try? StudioMember(row: row) else { continue }
+                // Per-room entities are named `studio:member:<room>:<pubkey>`
+                // and carry a non-empty `room_slug` attribute. Cross-room
+                // entities are named `studio:member:<pubkey>` (no room_slug)
+                // and are the legacy ensureMember() shape.
+                if !m.roomSlug.isEmpty {
+                    perRoom["\(m.roomSlug)|\(m.pubkeyHex)"] = m
+                } else {
+                    cross[m.pubkeyHex] = m
                 }
             }
-            return out
+            return (cross, perRoom)
         }
         cancellables["members"] = observation.start(
             in: requirePool(),
             scheduling: .async(onQueue: .main),
             onError: { error in NSLog("[StudioStore] members observation error: \(error)") },
-            onChange: { [weak self] m in MainActor.assumeIsolated { self?.members = m } }
+            onChange: { [weak self] grouped in
+                MainActor.assumeIsolated {
+                    self?.members = grouped.cross
+                    self?.roomMembers = grouped.perRoom
+                }
+            }
         )
     }
 
@@ -193,7 +218,7 @@ final class StudioStore: ObservableObject {
                 MainActor.assumeIsolated {
                     guard let self = self else { return }
                     var grouped: [String: [StudioCard]] = [:]
-                    for c in cards where !c.isDeleted {
+                    for c in cards where !c.isDeleted && !Self.isReservedCardKind(c.cardKind) {
                         let track = c.trackSlug.isEmpty ? "inbox" : c.trackSlug
                         grouped["\(slug)|\(track)", default: []].append(c)
                     }
@@ -289,8 +314,32 @@ final class StudioStore: ObservableObject {
         comments[eventId] ?? []
     }
 
-    func displayName(for pubkeyHex: String) -> String {
-        members[pubkeyHex]?.displayName ?? Hex.npubShort(pubkeyHex)
+    /// Reserved-kind detector. Any cardKind starting with `_` is hidden
+    /// metadata; the projector still writes the row but the UI never lists
+    /// it. Mirrors plugin `projection/card.ts` §"Reserved card kinds".
+    nonisolated static func isReservedCardKind(_ kind: String?) -> Bool {
+        guard let kind = kind, !kind.isEmpty else { return false }
+        return kind.hasPrefix("_")
+    }
+
+    /// Resolve the display name for `pubkeyHex` in (optional) `roomSlug`.
+    /// Order: per-room federated nickname → local cross-room nickname
+    /// (studio_member_set_nickname) → defaultNickname (only if pubkey ==
+    /// self, so I see my own name before my _profile card lands) → short hex.
+    func displayName(for pubkeyHex: String, in roomSlug: String? = nil) -> String {
+        let lower = pubkeyHex.lowercased()
+        if let room = roomSlug, !room.isEmpty,
+           let perRoom = roomMembers["\(room)|\(lower)"],
+           let nick = perRoom.nickname, !nick.isEmpty {
+            return nick
+        }
+        if let cross = members[lower], let nick = cross.nickname, !nick.isEmpty {
+            return nick
+        }
+        if !defaultNickname.isEmpty, lower == currentPubkeyHex.lowercased() {
+            return defaultNickname
+        }
+        return Hex.npubShort(lower)
     }
 
     func epochKey(room slug: String, epoch n: Int) -> Data? {

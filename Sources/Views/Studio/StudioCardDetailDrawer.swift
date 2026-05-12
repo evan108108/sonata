@@ -232,7 +232,7 @@ struct StudioCardDetailDrawer: View {
                 ForEach(merged) { comment in
                     CommentRow(
                         comment: comment,
-                        authorName: store.displayName(for: comment.createdByPubkey),
+                        authorName: store.displayName(for: comment.createdByPubkey, in: comment.roomSlug),
                         isOptimistic: optimisticIds.contains(comment.id)
                     )
                 }

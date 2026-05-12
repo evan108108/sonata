@@ -410,6 +410,10 @@ struct StudioMember: Equatable, Identifiable {
     let id: String
     let pubkeyHex: String
     let nickname: String?
+    /// Empty string for legacy cross-room `studio:member:<pubkey>` entities;
+    /// non-empty for per-room `studio:member:<room>:<pubkey>` entities written
+    /// by the projector when it sees a `_profile` card.
+    let roomSlug: String
 
     init(row: Row) throws {
         guard let id = row["id"] as String? else {
@@ -420,6 +424,7 @@ struct StudioMember: Equatable, Identifiable {
         let raw = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
         self.pubkeyHex = (raw["pubkey_hex"] as? String) ?? ""
         self.nickname = raw["nickname"] as? String
+        self.roomSlug = (raw["room_slug"] as? String) ?? ""
     }
 
     var displayName: String { nickname ?? Hex.npubShort(pubkeyHex) }
