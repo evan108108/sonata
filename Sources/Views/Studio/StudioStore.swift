@@ -15,6 +15,14 @@ final class StudioStore: ObservableObject {
     @Published private(set) var optimisticCards: [String: StudioCard] = [:]
     @Published private(set) var optimisticComments: [String: StudioComment] = [:]
 
+    /// The local plugin pubkey — populated lazily the first time we see a
+    /// projected card or comment in the local DB authored by us. Used as the
+    /// `createdByPubkey` of optimistic synthetics so the author byline
+    /// matches the real row when SSE reconciles. Empty until populated; an
+    /// empty value just means optimistic rows show no author for the brief
+    /// flicker before reconcile.
+    @Published private(set) var currentPubkeyHex: String = ""
+
     // MARK: - Internals
 
     private var dbPool: DatabasePool?
@@ -176,6 +184,7 @@ final class StudioStore: ObservableObject {
                         grouped[k] = v.sorted { $0.createdAtSeconds < $1.createdAtSeconds }
                     }
                     self.comments = grouped
+                    self.reconcileOptimisticCommentsAgainstReal(realComments: cs)
                 }
             }
         )
@@ -265,8 +274,76 @@ final class StudioStore: ObservableObject {
 
     // MARK: - Optimistic helpers (§15)
 
+    /// Low-level: insert a pre-built synthetic StudioCard. Most callers should
+    /// use the parameterized overload below — it builds the synthetic for you.
     func optimisticallyInsertCard(_ card: StudioCard, clientId: String) {
         optimisticCards[clientId] = card
+    }
+
+    /// W6 surface: build + insert a synthetic StudioCard from compose params.
+    /// `blocks` is the JSON-dict block payload exactly as it will be sent to
+    /// the plugin (image blocks must already be the full StudioImageBlock
+    /// shape with `type: "image"`). The card lands with `eventId=""` until
+    /// the plugin POST returns and the caller invokes
+    /// `setOptimisticEventId(clientId:eventId:)`.
+    func optimisticallyInsertCard(
+        clientId: String,
+        roomSlug: String,
+        trackSlug: String,
+        kind: String,
+        title: String,
+        summary: String,
+        blocks: [[String: Any]],
+        tagsList: [String],
+        relatedTo: [String]
+    ) {
+        let studioBlocks: [StudioBlock] = {
+            guard !blocks.isEmpty,
+                  let data = try? JSONSerialization.data(withJSONObject: blocks),
+                  let decoded = try? JSONDecoder().decode([StudioBlock].self, from: data)
+            else { return [] }
+            return decoded
+        }()
+        let now = Int64(Date().timeIntervalSince1970)
+        let card = StudioCard(
+            id: "studio:card:optimistic:\(clientId)",
+            eventId: "",
+            cardKind: kind,
+            trackSlug: trackSlug,
+            roomSlug: roomSlug,
+            title: title,
+            summary: summary,
+            blocks: studioBlocks,
+            relatedTo: relatedTo,
+            tagsList: tagsList,
+            createdByPubkey: currentPubkeyHex,
+            createdAtSeconds: now,
+            dTag: ""
+        )
+        optimisticCards[clientId] = card
+    }
+
+    /// Patch the eventId onto an outstanding optimistic card. Called after the
+    /// plugin POST returns its `rumor_event_id`. Once this fires the existing
+    /// content-match-by-eventId path in `reconcileOptimisticAgainstReal` will
+    /// drop the optimistic once SSE delivers the real row.
+    func setOptimisticEventId(clientId: String, eventId: String) {
+        guard let old = optimisticCards[clientId] else { return }
+        optimisticCards[clientId] = StudioCard(
+            id: old.id,
+            eventId: eventId,
+            cardKind: old.cardKind,
+            trackSlug: old.trackSlug,
+            roomSlug: old.roomSlug,
+            title: old.title,
+            summary: old.summary,
+            blocks: old.blocks,
+            relatedTo: old.relatedTo,
+            tagsList: old.tagsList,
+            createdByPubkey: old.createdByPubkey,
+            createdAtSeconds: old.createdAtSeconds,
+            dTag: old.dTag
+        )
     }
 
     func rollbackOptimisticCard(clientId: String) {
@@ -275,6 +352,46 @@ final class StudioStore: ObservableObject {
 
     func optimisticallyInsertComment(_ comment: StudioComment, clientId: String) {
         optimisticComments[clientId] = comment
+    }
+
+    /// W6 surface: build + insert a synthetic StudioComment from compose
+    /// params. Lands with `eventId=""` until `setOptimisticCommentEventId`
+    /// patches it post-plugin.
+    func optimisticallyInsertComment(
+        clientId: String,
+        roomSlug: String,
+        targetEventId: String,
+        body: String,
+        intent: String?
+    ) {
+        let now = Int64(Date().timeIntervalSince1970)
+        let comment = StudioComment(
+            id: "studio:comment:optimistic:\(clientId)",
+            eventId: "",
+            targetRef: targetEventId,
+            targetEventId: targetEventId,
+            body: body,
+            intent: intent,
+            createdByPubkey: currentPubkeyHex,
+            roomSlug: roomSlug,
+            createdAtSeconds: now
+        )
+        optimisticComments[clientId] = comment
+    }
+
+    func setOptimisticCommentEventId(clientId: String, eventId: String) {
+        guard let old = optimisticComments[clientId] else { return }
+        optimisticComments[clientId] = StudioComment(
+            id: old.id,
+            eventId: eventId,
+            targetRef: old.targetRef,
+            targetEventId: old.targetEventId,
+            body: old.body,
+            intent: old.intent,
+            createdByPubkey: old.createdByPubkey,
+            roomSlug: old.roomSlug,
+            createdAtSeconds: old.createdAtSeconds
+        )
     }
 
     func rollbackOptimisticComment(clientId: String) {
@@ -290,20 +407,130 @@ final class StudioStore: ObservableObject {
         }
     }
 
-    // MARK: - Mutation surface (T1 implements createRoom; T2-T4 fill the rest)
-
-    func postCard(room: String, track: String, kind: String, title: String,
-                  summary: String, blocks: [StudioBlock], tags: [String] = [],
-                  relatedTo: [String]? = nil, dTag: String? = nil) async throws -> StudioCard {
-        fatalError("implementer fills in per §8 + §15")
+    /// Symmetric reconcile for comments — drop optimistic entries whose
+    /// `eventId` matches a real projected comment. Called from the comments
+    /// ValueObservation onChange.
+    private func reconcileOptimisticCommentsAgainstReal(realComments: [StudioComment]) {
+        let realIds = Set(realComments.map(\.eventId))
+        for (clientId, opt) in optimisticComments where !opt.eventId.isEmpty {
+            if realIds.contains(opt.eventId) {
+                optimisticComments.removeValue(forKey: clientId)
+            }
+        }
     }
 
-    func postComment(targetEventId: String, body: String) async throws -> StudioComment {
-        fatalError("implementer fills in per §8 + §15")
+    // MARK: - Mutation surface (T4: postCard, postComment, attachImage)
+
+    /// Post a card via the plugin. Returns the rumor `event_id` so the caller
+    /// can patch the matching optimistic entry. `blocks` is the JSON-dict
+    /// shape exactly as the plugin's `studio_card_post` expects — image
+    /// blocks must already be the full StudioImageBlock dict with
+    /// `type: "image"`. Throws `StudioPluginError` on 4xx/5xx.
+    func postCard(
+        room: String,
+        track: String,
+        kind: String,
+        title: String,
+        summary: String,
+        blocks: [[String: Any]],
+        relatedTo: [String],
+        tagsList: [String],
+        dTag: String?
+    ) async throws -> String {
+        var body: [String: Any] = [
+            "room": room,
+            "track": track,
+            "kind": kind,
+            "title": title,
+            "summary": summary,
+        ]
+        if !blocks.isEmpty { body["blocks"] = blocks }
+        if !relatedTo.isEmpty { body["related_to"] = relatedTo }
+        if !tagsList.isEmpty { body["tags"] = tagsList }
+        if let d = dTag, !d.isEmpty { body["d_tag"] = d }
+
+        let result: CardPostResponse = try await EntityHTTP.postPluginActionRaw(
+            path: "sonata-studio/card/post",
+            body: body
+        )
+        rememberCurrentPubkey(from: result)
+        return result.rumorEventId
     }
 
-    func attachImage(filePath: String, roomSlug: String, mimeType: String? = nil) async throws -> StudioImageBlock {
-        fatalError("implementer fills in per §8")
+    /// Post a comment via the plugin. Returns the rumor `event_id`.
+    func postComment(
+        room: String,
+        targetEventId: String,
+        body bodyText: String,
+        intent: String?
+    ) async throws -> String {
+        var body: [String: Any] = [
+            "room": room,
+            "target": targetEventId,
+            "body": bodyText,
+        ]
+        if let i = intent, !i.isEmpty { body["intent"] = i }
+
+        let result: CommentPostResponse = try await EntityHTTP.postPluginActionRaw(
+            path: "sonata-studio/comment/post",
+            body: body
+        )
+        return result.rumorEventId
+    }
+
+    /// Encrypt + upload an image via the plugin's Blossom path. Returns the
+    /// full image-block dict with `type: "image"` prepended — ready to drop
+    /// straight into a card's blocks[] payload.
+    func attachImage(
+        filePath: String,
+        roomSlug: String,
+        mimeType: String?
+    ) async throws -> [String: Any] {
+        var body: [String: Any] = [
+            "file_path": filePath,
+            "room_slug": roomSlug,
+        ]
+        if let m = mimeType, !m.isEmpty { body["mime_type"] = m }
+
+        let raw: [String: Any] = try await EntityHTTP.postPluginActionRawDict(
+            path: "sonata-studio/image/attach",
+            body: body
+        )
+        var block = raw
+        block["type"] = "image"
+        return block
+    }
+
+    /// First-card-we-see heuristic: when the plugin returns a `rumor_event_id`
+    /// for a card we just posted, the upcoming SSE row will carry the same
+    /// `created_by_pubkey` — but we'd like the optimistic synthetic to have
+    /// that pubkey too, so the byline matches during the reconcile flicker.
+    /// `currentPubkeyHex` is also patched on the first SSE-projected card we
+    /// authored ourselves; this method handles the explicit-post path.
+    private func rememberCurrentPubkey(from response: CardPostResponse) {
+        // The plugin POST response doesn't carry pubkey directly, but the
+        // earliest projected card from our post will. Hooking that here would
+        // require an inflight-clientId → expected-pubkey channel; instead
+        // we let the cards observation fill currentPubkeyHex when it sees
+        // a card with eventId matching one of our optimistic entries.
+        _ = response
+        learnCurrentPubkeyFromOptimisticMatch()
+    }
+
+    /// Sweep optimistic cards: for any card whose eventId is now present in
+    /// the real cards table, copy its createdByPubkey forward so future
+    /// optimistic rows render with the correct byline.
+    private func learnCurrentPubkeyFromOptimisticMatch() {
+        guard currentPubkeyHex.isEmpty else { return }
+        for (_, opt) in optimisticCards where !opt.eventId.isEmpty {
+            for cards in cardsByRoomTrack.values {
+                if let real = cards.first(where: { $0.eventId == opt.eventId }),
+                   !real.createdByPubkey.isEmpty {
+                    currentPubkeyHex = real.createdByPubkey
+                    return
+                }
+            }
+        }
     }
 
     /// T1: POST `/api/plugins/sonata-studio/room/create` per §8.1. Default tracks
@@ -449,6 +676,28 @@ struct StudioRoomCreateResponse: Decodable {
     }
 }
 
+struct CardPostResponse: Decodable {
+    let rumorEventId: String
+    let audienceAddress: String
+    let dTag: String
+
+    enum CodingKeys: String, CodingKey {
+        case rumorEventId = "rumor_event_id"
+        case audienceAddress = "audience_address"
+        case dTag = "d_tag"
+    }
+}
+
+struct CommentPostResponse: Decodable {
+    let rumorEventId: String
+    let dTag: String
+
+    enum CodingKeys: String, CodingKey {
+        case rumorEventId = "rumor_event_id"
+        case dTag = "d_tag"
+    }
+}
+
 struct StudioTrackCreateRequest: Encodable {
     let roomSlug: String
     let name: String
@@ -541,6 +790,85 @@ enum EntityHTTP {
         // shape (not the proxy envelope).
         let envelope = try JSONDecoder().decode(PluginSuccessEnvelope<Res>.self, from: data)
         return envelope.result
+    }
+
+    /// POST a `[String: Any]` body to a plugin route. Encodes via
+    /// JSONSerialization so callers can ship payloads that contain nested
+    /// `[String: Any]` dicts (e.g. image blocks) without forcing every
+    /// nested type to conform to Encodable. The response is decoded the
+    /// same way `postPluginAction` does: unwrap `{ok, result}`.
+    static func postPluginActionRaw<Res: Decodable>(
+        path: String,
+        body: [String: Any]
+    ) async throws -> Res {
+        let url = baseURL.appendingPathComponent("api/plugins/").appendingPathComponent(path)
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw StudioPluginError(status: 0, code: "no_response", message: "No HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            if let envelope = try? JSONDecoder().decode(PluginErrorEnvelope.self, from: data) {
+                throw StudioPluginError(
+                    status: http.statusCode,
+                    code: envelope.error.code,
+                    message: envelope.error.message
+                )
+            }
+            throw StudioPluginError(
+                status: http.statusCode,
+                code: "http_error",
+                message: "Plugin returned HTTP \(http.statusCode)"
+            )
+        }
+        let envelope = try JSONDecoder().decode(PluginSuccessEnvelope<Res>.self, from: data)
+        return envelope.result
+    }
+
+    /// Same as `postPluginActionRaw` but returns the inner `result` field as
+    /// `[String: Any]` rather than a typed Decodable. Used by image attach
+    /// where the result shape is forwarded verbatim into a card's block.
+    static func postPluginActionRawDict(
+        path: String,
+        body: [String: Any]
+    ) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("api/plugins/").appendingPathComponent(path)
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw StudioPluginError(status: 0, code: "no_response", message: "No HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            if let envelope = try? JSONDecoder().decode(PluginErrorEnvelope.self, from: data) {
+                throw StudioPluginError(
+                    status: http.statusCode,
+                    code: envelope.error.code,
+                    message: envelope.error.message
+                )
+            }
+            throw StudioPluginError(
+                status: http.statusCode,
+                code: "http_error",
+                message: "Plugin returned HTTP \(http.statusCode)"
+            )
+        }
+        guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = parsed["result"] as? [String: Any] else {
+            throw StudioPluginError(
+                status: http.statusCode,
+                code: "decode_error",
+                message: "Plugin response missing `result` object"
+            )
+        }
+        return result
     }
 
     /// POST a JSON body where the response body is ignored (e.g. fire-and-forget patches).

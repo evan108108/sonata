@@ -31,9 +31,8 @@ struct StudioCardDetailDrawer: View {
                 .padding(16)
             }
             Divider()
-            composeStub
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+            StudioCommentCompose(roomSlug: card.roomSlug, targetEventId: card.eventId)
+                .environmentObject(store)
         }
         .frame(width: 420)
         .background(Color(NSColor.windowBackgroundColor))
@@ -134,43 +133,33 @@ struct StudioCardDetailDrawer: View {
 
     @ViewBuilder
     private var commentThread: some View {
-        let comments = store.comments(forCard: card.eventId)
+        let real = store.comments(forCard: card.eventId)
+        let optimisticIds = Set(optimisticCommentsForCard.map(\.id))
+        let merged = (optimisticCommentsForCard + real)
             .sorted(by: { $0.createdAtSeconds < $1.createdAtSeconds })
-        if comments.isEmpty {
+        if merged.isEmpty {
             Text("No comments yet.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else {
             VStack(alignment: .leading, spacing: 12) {
-                ForEach(comments) { comment in
+                ForEach(merged) { comment in
                     CommentRow(
                         comment: comment,
-                        authorName: store.displayName(for: comment.createdByPubkey)
+                        authorName: store.displayName(for: comment.createdByPubkey),
+                        isOptimistic: optimisticIds.contains(comment.id)
                     )
                 }
             }
         }
     }
 
-    // MARK: - Compose stub (W6 ships StudioCommentCompose)
-
-    @ViewBuilder
-    private var composeStub: some View {
-        HStack(spacing: 8) {
-            TextField("Reply…", text: .constant(""))
-                .textFieldStyle(.roundedBorder)
-                .disabled(true)
-            Button {
-                // W6: StudioCommentCompose.submit
-            } label: {
-                Image(systemName: "paperplane.fill")
-            }
-            .buttonStyle(.borderless)
-            .disabled(true)
+    private var optimisticCommentsForCard: [StudioComment] {
+        store.optimisticComments.values.filter { c in
+            c.roomSlug == card.roomSlug && c.targetEventId == card.eventId
         }
-        .opacity(0.55)
-        .help("Comment compose ships in W6")
     }
+
 }
 
 // MARK: - FoldableBlock
@@ -273,6 +262,7 @@ struct StudioBlockView: View {
 struct CommentRow: View {
     let comment: StudioComment
     let authorName: String
+    var isOptimistic: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -286,8 +276,13 @@ struct CommentRow: View {
                 Text(StudioCardRow.relativeTime(from: comment.createdAtSeconds))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if isOptimistic {
+                    Spacer(minLength: 4)
+                    ProgressView().controlSize(.small)
+                }
             }
             TextBlockView(text: comment.body)
         }
+        .opacity(isOptimistic ? 0.55 : 1.0)
     }
 }

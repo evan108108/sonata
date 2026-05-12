@@ -14,6 +14,7 @@ struct StudioRoomDetail: View {
     @State private var selectedTrack: String? = nil
     @State private var showDispatchTrace: Bool = false
     @State private var selectedCard: StudioCard? = nil
+    @State private var showComposeSheet: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,10 +36,21 @@ struct StudioRoomDetail: View {
                 store: store,
                 selectedCard: $selectedCard
             )
+            if let trackForCompose = effectiveTrackForCompose {
+                Divider()
+                StudioComposeInline(roomSlug: room.slug, trackSlug: trackForCompose)
+                    .environmentObject(store)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(NSColor.textBackgroundColor))
         .overlay(alignment: .trailing) { drawerOverlay }
+        .sheet(isPresented: $showComposeSheet) {
+            if let trackForCompose = effectiveTrackForCompose {
+                StudioComposeSheet(roomSlug: room.slug, trackSlug: trackForCompose)
+                    .environmentObject(store)
+            }
+        }
         .animation(.easeOut(duration: 0.18), value: selectedCard?.eventId)
         .onChange(of: room.slug) { _, _ in selectedCard = nil }
         .onAppear {
@@ -78,10 +90,37 @@ struct StudioRoomDetail: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 12)
+            newCardButton
             settingsMenu
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    private var newCardButton: some View {
+        Button {
+            showComposeSheet = true
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .semibold))
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(effectiveTrackForCompose == nil)
+        .keyboardShortcut("n", modifiers: .command)
+        .help(effectiveTrackForCompose == nil
+              ? "Pick a track to compose into"
+              : "New card (⌘N)")
+    }
+
+    /// Compose surfaces only render when a real track is selected — empty
+    /// state ("all tracks") and the dispatch-trace pseudo-tab both suppress
+    /// the strip + button, since "what track does this drop into?" has no
+    /// answer in either case.
+    private var effectiveTrackForCompose: String? {
+        guard let t = selectedTrack else { return nil }
+        if t == StudioTrackBar.dispatchTraceTag { return nil }
+        return t
     }
 
     private var pendingPill: some View {

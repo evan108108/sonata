@@ -8,6 +8,7 @@ struct StudioCardRow: View {
     let card: StudioCard
     let authorName: String
     let commentCount: Int
+    var isOptimistic: Bool = false
     @Binding var selectedCard: StudioCard?
 
     @State private var hovering: Bool = false
@@ -62,8 +63,22 @@ struct StudioCardRow: View {
         .padding(.vertical, 10)
         .background(rowFill)
         .contentShape(Rectangle())
+        .opacity(isOptimistic ? 0.55 : 1.0)
+        .overlay(alignment: .trailing) {
+            if isOptimistic {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.trailing, 16)
+            }
+        }
         .onHover { hovering = $0 }
-        .onTapGesture { selectedCard = card }
+        .onTapGesture {
+            // Optimistic rows have no eventId yet; tapping into the drawer
+            // with an empty eventId would break comment-thread lookup, so
+            // suppress the selection until reconcile lands the real card.
+            guard !isOptimistic else { return }
+            selectedCard = card
+        }
     }
 
     @ViewBuilder

@@ -43,10 +43,12 @@ struct StudioCardList: View {
             )
         } else {
             ForEach(cards, id: \.id) { card in
+                let optimistic = optimisticIds.contains(card.id)
                 StudioCardRow(
                     card: card,
                     authorName: store.displayName(for: card.createdByPubkey),
                     commentCount: store.comments(forCard: card.eventId).count,
+                    isOptimistic: optimistic,
                     selectedCard: $selectedCard
                 )
                 Divider().opacity(0.4)
@@ -54,16 +56,34 @@ struct StudioCardList: View {
         }
     }
 
+    /// IDs of optimistic cards currently being merged into the list. Used to
+    /// flag rows with a spinner + opacity treatment until SSE reconciles.
+    private var optimisticIds: Set<String> {
+        Set(optimisticCardsForView.map(\.id))
+    }
+
+    private var optimisticCardsForView: [StudioCard] {
+        store.optimisticCards.values.filter { c in
+            guard c.roomSlug == room.slug else { return false }
+            if let track { return c.trackSlug == track }
+            return true
+        }
+    }
+
     private var sourceCards: [StudioCard] {
+        let real: [StudioCard]
         if let track {
-            return store.cards(in: room.slug, track: track)
+            real = store.cards(in: room.slug, track: track)
+        } else {
+            let prefix = "\(room.slug)|"
+            var union: [StudioCard] = []
+            for (key, slice) in store.cardsByRoomTrack where key.hasPrefix(prefix) {
+                union.append(contentsOf: slice)
+            }
+            real = union
         }
-        let prefix = "\(room.slug)|"
-        var union: [StudioCard] = []
-        for (key, slice) in store.cardsByRoomTrack where key.hasPrefix(prefix) {
-            union.append(contentsOf: slice)
-        }
-        return union.sorted { $0.createdAtSeconds > $1.createdAtSeconds }
+        let optimistic = optimisticCardsForView
+        return (optimistic + real).sorted { $0.createdAtSeconds > $1.createdAtSeconds }
     }
 
     // MARK: - Dispatch rows
