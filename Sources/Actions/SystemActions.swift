@@ -194,6 +194,23 @@ let systemActions: [SonataAction] = [
                     }
                     let nextEvent: NextEventInfo? = upcomingEvents.first
 
+                    // Same shape for recurring scheduledJobs. nextRunAt is stored
+                    // as a Double (epoch ms) so we cast to Int64 for the response.
+                    let nowDouble = Double(now)
+                    let upcomingJobRows = try Row.fetchAll(db, sql: """
+                        SELECT id, name, nextRunAt FROM scheduledJobs
+                        WHERE enabled = 1 AND nextRunAt > ? ORDER BY nextRunAt ASC LIMIT 3
+                    """, arguments: [nowDouble])
+                    let upcomingJobs: [NextEventInfo] = upcomingJobRows.map { r in
+                        let nextRun: Double = r["nextRunAt"]
+                        return NextEventInfo(
+                            id: r["id"],
+                            title: r["name"],
+                            startTime: Int64(nextRun)
+                        )
+                    }
+                    let nextJob: NextEventInfo? = upcomingJobs.first
+
                     // Worker liveness: a row is "alive" only with fresh heartbeat (<90s)
                     // and a non-offline status. A row with status='idle' but a stale
                     // heartbeat is treated as 'stale' (zombie).
@@ -254,6 +271,8 @@ let systemActions: [SonataAction] = [
                         emailsByStatus: emailsByStatus,
                         nextCalendarEvent: nextEvent,
                         upcomingCalendarEvents: upcomingEvents,
+                        nextScheduledJob: nextJob,
+                        upcomingScheduledJobs: upcomingJobs,
                         workerCount: workerCount,
                         workersByStatus: workersByStatus,
                         externalBridgeCount: externalBridgeCount,

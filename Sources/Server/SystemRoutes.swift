@@ -23,6 +23,11 @@ struct SystemStatusResponse: Encodable {
     let emailsByStatus: [String: Int]  // breakdown by email status (unread/read/replied/error/...)
     let nextCalendarEvent: NextEventInfo?
     let upcomingCalendarEvents: [NextEventInfo]  // top 3 by scheduledAt ASC
+    // Recurring scheduledJobs surfaced alongside calendarEvents so the dashboard
+    // can show the soonest of either system. Calendar = one-off reminders;
+    // scheduler = recurring shell/cron jobs.
+    let nextScheduledJob: NextEventInfo?
+    let upcomingScheduledJobs: [NextEventInfo]  // top 3 by nextRunAt ASC
     let workerCount: Int               // alive: not offline, fresh heartbeat
     let workersByStatus: [String: Int] // breakdown by effective status (idle/busy/starting/.../stale/offline)
     let externalBridgeCount: Int       // sonata-bridge.ts processes that aren't pool workers (e.g. claude/claude-patched sessions)

@@ -133,6 +133,42 @@ func ensureRoleDirectories() {
     }
 }
 
+/// Deploy Sona's bundled Claude Code skills to ~/.claude/skills/. Currently
+/// just the `/afk` skill because that's the one tied directly to Sonata
+/// runtime (channel-push from EmailHandler). Always overwrites so the skill
+/// stays in sync with the Sonata version that owns the wire format.
+///
+/// Add new skills here by:
+///   1. Drop SKILL.md (plus any sibling files) into
+///      Sources/Sonata/Resources/skills/<name>/
+///   2. Append the slug to the `skills` array below.
+func ensureBundledSkills() {
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+    let skillsRoot = home.appendingPathComponent(".claude/skills")
+    try? fm.createDirectory(at: skillsRoot, withIntermediateDirectories: true)
+
+    let skills = ["afk"]
+    for slug in skills {
+        let destDir = skillsRoot.appendingPathComponent(slug)
+        try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let destFile = destDir.appendingPathComponent("SKILL.md")
+        guard let sourceURL = Bundle.module.url(
+            forResource: "SKILL", withExtension: "md", subdirectory: "skills/\(slug)"
+        ) else {
+            sonataFileLog("Skill setup: SKILL.md not found in bundle for skills/\(slug)")
+            continue
+        }
+        try? fm.removeItem(at: destFile)
+        do {
+            try fm.copyItem(at: sourceURL, to: destFile)
+            sonataFileLog("Skill setup: deployed skills/\(slug)/SKILL.md to ~/.claude/skills/")
+        } catch {
+            sonataFileLog("Skill setup: failed to copy skills/\(slug)/SKILL.md — \(error)")
+        }
+    }
+}
+
 /// Redirect stdout + stderr to ~/Library/Logs/Sonata.log so any `print(...)`,
 /// FileHandle.standardError write, or runtime crash trace lands in the same
 /// file the in-app Logs viewer tails. Without this, Finder-launched Sonata
@@ -278,6 +314,9 @@ struct SonataApp: App {
 
         // Ensure worker + supervisor role directories exist with CLAUDE.md
         ensureRoleDirectories()
+
+        // Deploy bundled Claude Code skills (currently just /afk) to ~/.claude/skills/
+        ensureBundledSkills()
 
         let pool = self.dbPool
         let port = sonataPort

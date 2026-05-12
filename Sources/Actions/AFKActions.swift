@@ -1,5 +1,8 @@
 import Foundation
 import GRDB
+import Logging
+
+private let afkLogger = Logger(label: "sonata.afk")
 
 // AFK channel-push routing: replaces inbox polling.
 //
@@ -58,6 +61,14 @@ final class AFKRegistry: @unchecked Sendable {
         return registrations.values.sorted { $0.registeredAt < $1.registeredAt }
     }
 
+    /// Number of tokens currently routed to a given sessionId. Used by the
+    /// bridge to choose fast vs idle poll cadence — when nobody has registered
+    /// for our sessionId we can back off the poll loop.
+    func tokenCount(for sessionId: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return registrations.values.reduce(0) { $0 + ($1.sessionId == sessionId ? 1 : 0) }
+    }
+
     /// Enqueue a reply for whatever session owns `token`. Returns true if a
     /// session was registered and the reply was queued.
     @discardableResult
@@ -84,6 +95,7 @@ private struct AFKLookupResponse: Encodable {
 
 private struct AFKPollResponse: Encodable {
     let replies: [AFKReply]
+    let tokensRegistered: Int
 }
 
 private struct AFKActiveEntry: Encodable {
@@ -102,18 +114,38 @@ let afkActions: [SonataAction] = [
 
     SonataAction(
         name: "afk_register",
-        description: "Register a session as the AFK target for a token. EmailHandler will route [AFK:<token>] replies here.",
+        description: "Register this session as the AFK target for a token. EmailHandler will route [AFK:<token>] replies here, and the sibling sonata-bridge process will deliver them as channel notifications. When called via mcp__memory__, the sessionId is auto-injected from the sibling bridge; direct HTTP callers must pass sessionId explicitly.",
         group: "/api/afk",
         path: "/register",
         method: .post,
         params: [
             ActionParam("token", .string, required: true, description: "The AFK token (also embedded in the email subject)"),
-            ActionParam("sessionId", .string, required: true, description: "Bridge session ID — the routing target for the reply"),
+            ActionParam("sessionId", .string, required: true, description: "Bridge session ID — the routing target for the reply. Auto-injected by mem-server.ts when not provided by the caller."),
         ],
         handler: { ctx in
             let token = try ctx.params.require("token")
             let sessionId = try ctx.params.require("sessionId")
             AFKRegistry.shared.register(token: token, sessionId: sessionId)
+
+            // Sanity check: warn (but still register) if no live bridge is
+            // polling for this sessionId. Workers are tracked in the workers
+            // table; interactive bridges in ExternalBridgeRegistry. A miss in
+            // both means the reply will sit in pendingReplies forever — the
+            // exact footgun this whole unification is meant to prevent.
+            let isLiveWorker: Bool = (try? await ctx.dbPool.read { db -> Bool in
+                let sql = "SELECT 1 FROM workers WHERE sessionId = ? LIMIT 1"
+                return try Row.fetchOne(db, sql: sql, arguments: [sessionId]) != nil
+            }) ?? false
+            let isLiveBridge = ExternalBridgeRegistry.shared.contains(sessionId: sessionId)
+            if !isLiveWorker && !isLiveBridge {
+                afkLogger.warning("""
+                    afk_register: sessionId \(sessionId) is not a known live worker \
+                    or external bridge. The token \(token) was stored, but no bridge \
+                    appears to be polling — AFK replies may never be delivered. \
+                    Verify the calling session has the sonata-bridge MCP server \
+                    configured and that the bridge process is alive.
+                    """)
+            }
             return SuccessResponse()
         }
     ),
@@ -207,7 +239,8 @@ let afkActions: [SonataAction] = [
         handler: { ctx in
             let sessionId = try ctx.params.require("sessionId")
             let replies = AFKRegistry.shared.claimReplies(sessionId: sessionId)
-            return AFKPollResponse(replies: replies)
+            let tokensRegistered = AFKRegistry.shared.tokenCount(for: sessionId)
+            return AFKPollResponse(replies: replies, tokensRegistered: tokensRegistered)
         }
     ),
 ]

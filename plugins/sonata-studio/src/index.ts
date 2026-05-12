@@ -26,6 +26,8 @@ import { loadOrInitConfig, type PluginConfig } from "./config";
 import { entity, secret, waitForSonata } from "./memory-client";
 import { log } from "./logger";
 import { SSEManager } from "./sse/manager";
+import { initAutoRunContext } from "./auto-run/context";
+import { AutoRunWatcher } from "./auto-run/watcher";
 
 const PORT = parseInt(process.env["PORT"] ?? "4200", 10);
 
@@ -69,6 +71,14 @@ function readQuery(url: URL): Record<string, string> {
 function startServer(cfg: PluginConfig, gateway: GatewayClient, sse: SSEManager): void {
   const ctx: ActionCtx = { cfg, gateway, sseManager: sse };
 
+  // Auto-run subsystem: hand the action context to the auto-run modules and
+  // boot the task watcher. The hook itself runs synchronously from
+  // projectCard() — registering the context is what unblocks it. The watcher
+  // polls Sonata's task table for completion of dispatched auto-run tasks.
+  initAutoRunContext(ctx);
+  const autoRunWatcher = new AutoRunWatcher();
+  autoRunWatcher.start();
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
     const path = url.pathname;
@@ -91,8 +101,17 @@ function startServer(cfg: PluginConfig, gateway: GatewayClient, sse: SSEManager)
         }
         const body = await readBody(req);
         const query = readQuery(url);
+        // Per-request shallow-copy of ctx with the request headers attached.
+        // Action handlers that care (cycle-break in card.post) read
+        // `ctx.headers["x-studio-source"]`; everything else ignores it.
+        const headers: Record<string, string> = {};
+        for (const [k, v] of Object.entries(req.headers)) {
+          if (typeof v === "string") headers[k.toLowerCase()] = v;
+          else if (Array.isArray(v) && v.length > 0) headers[k.toLowerCase()] = v[0]!;
+        }
+        const reqCtx: ActionCtx = { ...ctx, headers };
         try {
-          const result = await route.handler(body, query, ctx);
+          const result = await route.handler(body, query, reqCtx);
           return jsonResponse(res, 200, { ok: true, result });
         } catch (err) {
           if (err instanceof HttpError) {
@@ -123,6 +142,7 @@ function startServer(cfg: PluginConfig, gateway: GatewayClient, sse: SSEManager)
 
   const shutdown = (signal: string): void => {
     log.info("Shutting down", { signal });
+    autoRunWatcher.stop();
     void sse.stop();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 5000).unref();

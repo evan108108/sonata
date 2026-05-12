@@ -137,6 +137,24 @@ export async function postCard(
   const dTag =
     body.d_tag !== undefined ? ensureString(body.d_tag, "d_tag") : buildDTag(title);
 
+  // §6.7 cycle-break: refuse to publish a card from inside an auto-run
+  // session that self-assigns. Sonata's MCP shim sets x-studio-source on
+  // tool calls routed from auto-run worker sessions; this guard makes the
+  // refusal explicit and reportable (the worker sees a clear error code).
+  // The projection-layer recursion guard (auto-run/hook.ts) is the
+  // belt-and-suspenders fallback when the header is absent.
+  const studioSource = ctx.headers?.["x-studio-source"];
+  if (studioSource === "auto-run") {
+    const selfPub = ctx.cfg.pluginPub.toLowerCase();
+    if (assignees.length > 0 && assignees.includes(selfPub)) {
+      throw new HttpError(
+        400,
+        "auto_run_recursion_blocked",
+        "auto-run workers may not post cards that self-assign — plugin would re-spawn another worker",
+      );
+    }
+  }
+
   const room = await loadRoomCtx(roomSlug, ctx.cfg.pluginPub);
 
   const payload: Record<string, unknown> = {

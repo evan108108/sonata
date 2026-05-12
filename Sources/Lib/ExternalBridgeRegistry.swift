@@ -70,6 +70,13 @@ final class ExternalBridgeRegistry: @unchecked Sendable {
         entries.removeValue(forKey: sessionId)
     }
 
+    /// True iff the sessionId belongs to a live external bridge (heartbeat within the staleness window).
+    func contains(sessionId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        pruneLocked()
+        return entries[sessionId] != nil
+    }
+
     func currentCount() -> Int {
         lock.lock(); defer { lock.unlock() }
         pruneLocked()
