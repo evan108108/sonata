@@ -451,6 +451,9 @@ struct UpcomingEventInfo: Identifiable, Decodable, Equatable {
     let id: String
     let title: String
     let startTime: Int64
+    /// "calendar" (one-off reminders) or "scheduler" (recurring shell/cron
+    /// jobs). Optional for backward compatibility with older payloads.
+    var source: String? = nil
 }
 
 struct UpcomingEventsSection: View {
@@ -464,7 +467,7 @@ struct UpcomingEventsSection: View {
                     .foregroundStyle(.indigo)
                 Text("Upcoming")
                     .font(.headline)
-                Text("next \(events.count)")
+                Text("next \(events.count) · calendar = one-off · scheduler = recurring")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -474,13 +477,21 @@ struct UpcomingEventsSection: View {
                 ForEach(events) { event in
                     Button(action: onTap) {
                         HStack(spacing: 10) {
-                            Image(systemName: "calendar.badge.clock")
+                            Image(systemName: Self.icon(for: event.source))
                                 .font(.callout)
-                                .foregroundStyle(.indigo)
+                                .foregroundStyle(Self.tint(for: event.source))
                                 .frame(width: 18)
                             Text(event.title)
                                 .font(.callout)
                                 .lineLimit(1)
+                            if let source = event.source {
+                                Text(source)
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(Self.tint(for: source))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Self.tint(for: source).opacity(0.15), in: Capsule())
+                            }
                             Spacer()
                             Text(Self.relativeCountdown(to: event.startTime))
                                 .font(.caption.monospacedDigit())
@@ -498,6 +509,20 @@ struct UpcomingEventsSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(Color.indigo.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    static func icon(for source: String?) -> String {
+        switch source {
+        case "scheduler": return "clock.arrow.circlepath"
+        default:          return "calendar.badge.clock"
+        }
+    }
+
+    static func tint(for source: String?) -> Color {
+        switch source {
+        case "scheduler": return .teal
+        default:          return .indigo
+        }
     }
 
     /// "in 23m", "in 3h 12m", "in 2d 4h" — short and unambiguous.

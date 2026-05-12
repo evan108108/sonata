@@ -87,7 +87,7 @@ struct DashboardView: View {
                             Button { showingEmailBreakdown = true } label: {
                                 StatCard(title: "Emails", value: "\(status.totalEmails)", icon: "envelope.badge.fill", color: status.unreadEmails > 0 ? .orange : .green, detail: status.emailsBreakdown)
                             }.buttonStyle(.plain)
-                            StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo)
+                            StatCard(title: "Next Event", value: status.nextEvent, icon: "calendar", color: .indigo, detail: status.nextEventDetail)
                             PluginStatCard(vm: pluginVM) { selectedTab = .plugins }
                         }
                         .padding(.horizontal)
@@ -311,6 +311,8 @@ private struct StatusResponse: Decodable {
     let emailsByStatus: [String: Int]?
     let nextCalendarEvent: NextCalendarEvent?
     let upcomingCalendarEvents: [NextCalendarEvent]?
+    let nextScheduledJob: NextCalendarEvent?
+    let upcomingScheduledJobs: [NextCalendarEvent]?
     let status: String?
 
     struct NextCalendarEvent: Decodable {
@@ -336,7 +338,15 @@ private struct SystemStatus {
     let unreadEmails: Int
     let emailsByStatus: [String: Int]
     let nextEvent: String
+    /// Subtitle for the Next Event card: "in 14m · scheduler" / "in 2d · calendar".
+    /// Nil when there's no next item from either system.
+    let nextEventDetail: String?
+    /// Combined upcoming stream: calendar events + scheduledJobs, sorted by
+    /// startTime ASC, capped at 6. Each item carries a `source` label so the
+    /// dashboard can teach the calendar-vs-scheduler distinction inline.
     let upcomingEvents: [UpcomingEventInfo]
+    let upcomingCalendarOnly: [UpcomingEventInfo]
+    let upcomingSchedulerOnly: [UpcomingEventInfo]
     let serverStatus: String
 
     init(from r: StatusResponse) {
@@ -364,11 +374,59 @@ private struct SystemStatus {
         self.blockedTasks = r.blockedTasks ?? 0
         self.unreadEmails = r.unreadEmails ?? 0
         self.emailsByStatus = r.emailsByStatus ?? [:]
-        self.nextEvent = r.nextCalendarEvent?.title ?? "None"
-        self.upcomingEvents = (r.upcomingCalendarEvents ?? []).compactMap { e in
-            guard let id = e.id, let title = e.title, let st = e.startTime else { return nil }
-            return UpcomingEventInfo(id: id, title: title, startTime: st)
+        // Next Event card: pick the soonest of (next calendar event, next
+        // scheduler firing) so the widget reflects both systems instead of
+        // only one. Calendar = one-off reminders ("Restart Profile 3"),
+        // scheduler = recurring shell/cron jobs ("scout-rss"). Without this
+        // merge, the card reads "None" whenever calendar is empty even when
+        // dozens of scheduler jobs are healthily queued — which is the
+        // common case.
+        let calNext: (title: String, st: Int64)? = {
+            guard let title = r.nextCalendarEvent?.title, let st = r.nextCalendarEvent?.startTime else { return nil }
+            return (title, st)
+        }()
+        let jobNext: (title: String, st: Int64)? = {
+            guard let title = r.nextScheduledJob?.title, let st = r.nextScheduledJob?.startTime else { return nil }
+            return (title, st)
+        }()
+        let pickedSource: String?
+        let pickedTitle: String?
+        let pickedStart: Int64?
+        switch (calNext, jobNext) {
+        case let (.some(c), .some(j)):
+            if c.st <= j.st {
+                pickedSource = "calendar"; pickedTitle = c.title; pickedStart = c.st
+            } else {
+                pickedSource = "scheduler"; pickedTitle = j.title; pickedStart = j.st
+            }
+        case let (.some(c), .none):
+            pickedSource = "calendar"; pickedTitle = c.title; pickedStart = c.st
+        case let (.none, .some(j)):
+            pickedSource = "scheduler"; pickedTitle = j.title; pickedStart = j.st
+        case (.none, .none):
+            pickedSource = nil; pickedTitle = nil; pickedStart = nil
         }
+        self.nextEvent = pickedTitle ?? "None"
+        if let src = pickedSource, let st = pickedStart {
+            self.nextEventDetail = "\(SystemStatus.relativeCountdown(to: st)) · \(src)"
+        } else {
+            self.nextEventDetail = nil
+        }
+
+        let calItems: [UpcomingEventInfo] = (r.upcomingCalendarEvents ?? []).compactMap { e in
+            guard let id = e.id, let title = e.title, let st = e.startTime else { return nil }
+            return UpcomingEventInfo(id: id, title: title, startTime: st, source: "calendar")
+        }
+        let jobItems: [UpcomingEventInfo] = (r.upcomingScheduledJobs ?? []).compactMap { e in
+            guard let id = e.id, let title = e.title, let st = e.startTime else { return nil }
+            return UpcomingEventInfo(id: id, title: title, startTime: st, source: "scheduler")
+        }
+        self.upcomingCalendarOnly = calItems
+        self.upcomingSchedulerOnly = jobItems
+        self.upcomingEvents = (calItems + jobItems)
+            .sorted { $0.startTime < $1.startTime }
+            .prefix(6)
+            .map { $0 }
         self.serverStatus = r.status ?? "unknown"
     }
 
@@ -464,6 +522,25 @@ private struct SystemStatus {
         if hasZombieWorkers { return "Warning — stale workers" }
         if pendingTasks > 10 || unreadEmails > 20 { return "Warning" }
         return "All Systems Healthy"
+    }
+
+    /// "in 23m" / "in 3h 12m" / "in 2d 4h". Mirror of UpcomingEventsSection's
+    /// helper, exposed here so the Next Event card subtitle can format itself
+    /// without reaching across files.
+    static func relativeCountdown(to startMs: Int64) -> String {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let delta = max(0, startMs - nowMs) / 1000
+        if delta < 60 { return "now" }
+        let mins = delta / 60
+        if mins < 60 { return "in \(mins)m" }
+        let hours = mins / 60
+        let remMin = mins % 60
+        if hours < 24 {
+            return remMin == 0 ? "in \(hours)h" : "in \(hours)h \(remMin)m"
+        }
+        let days = hours / 24
+        let remHr = hours % 24
+        return remHr == 0 ? "in \(days)d" : "in \(days)d \(remHr)h"
     }
 }
 
