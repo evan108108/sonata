@@ -205,6 +205,13 @@
         { "name": "room_slug", "type": "string", "required": true, "description": "Room slug — used to look up the current epoch." },
         { "name": "mime_type", "type": "string", "description": "Optional MIME override; inferred from extension if absent." }
       ]
+    },
+    {
+      "name": "studio_identity",
+      "description": "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI without waiting on optimistic-reconcile heuristics.",
+      "method": "get",
+      "path": "/api/identity",
+      "params": []
     }
   ]
 }

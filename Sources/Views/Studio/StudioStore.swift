@@ -67,6 +67,33 @@ final class StudioStore: ObservableObject {
         if cancellables["members"] == nil {
             startMembersObservation()
         }
+        // Learn our own pubkey eagerly so author-only UI (Delete/Edit) is
+        // gated correctly on cards posted before this Sonata launch.
+        if currentPubkeyHex.isEmpty {
+            Task { @MainActor in await learnCurrentPubkeyFromPlugin() }
+        }
+    }
+
+    private func learnCurrentPubkeyFromPlugin() async {
+        struct IdentityResponse: Decodable { let pubkey: String }
+        // Retry with backoff — plugin may not have finished registering the
+        // identity endpoint at the moment Sonata launches.
+        let delays: [UInt64] = [0, 1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000]
+        for (attempt, delay) in delays.enumerated() {
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+            do {
+                let result: IdentityResponse = try await EntityHTTP.getPluginAction(
+                    path: "sonata-studio/identity"
+                )
+                let hex = result.pubkey.lowercased()
+                if !hex.isEmpty, currentPubkeyHex.isEmpty {
+                    currentPubkeyHex = hex
+                }
+                return
+            } catch {
+                NSLog("[StudioStore] learnCurrentPubkeyFromPlugin attempt \(attempt + 1) failed: \(error)")
+            }
+        }
     }
 
     func stop() {
@@ -1016,6 +1043,34 @@ enum EntityHTTP {
         } catch {
             NSLog("[EntityHTTP] patchAttributes(\(id)) failed: \(error)")
         }
+    }
+
+    /// GET a plugin action and decode the response. Used for read-only
+    /// endpoints (e.g. /api/plugins/sonata-studio/identity).
+    static func getPluginAction<Res: Decodable>(path: String) async throws -> Res {
+        let url = baseURL.appendingPathComponent("api/plugins/").appendingPathComponent(path)
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw StudioPluginError(status: 0, code: "no_response", message: "No HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            if let envelope = try? JSONDecoder().decode(PluginErrorEnvelope.self, from: data) {
+                throw StudioPluginError(
+                    status: http.statusCode,
+                    code: envelope.error.code,
+                    message: envelope.error.message
+                )
+            }
+            throw StudioPluginError(
+                status: http.statusCode,
+                code: "http_error",
+                message: "Plugin returned HTTP \(http.statusCode)"
+            )
+        }
+        let envelope = try JSONDecoder().decode(PluginSuccessEnvelope<Res>.self, from: data)
+        return envelope.result
     }
 
     /// POST a JSON body to `/api/plugins/<path>` and decode the response.

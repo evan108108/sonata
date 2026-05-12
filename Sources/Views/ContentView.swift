@@ -33,14 +33,15 @@ struct ContentView: View {
     @ObservedObject private var workerManager = WorkerManager.shared
     @StateObject private var searchVM = SearchViewModel()
     @StateObject private var unreadCounts = StudioUnreadCounts()
+    @StateObject private var railCounts = NavRailCounts()
     @Environment(\.dbPool) private var dbPool: DatabasePool?
     @FocusState private var searchFocused: Bool
 
     private var navItems: [NavRailItem] {
         [
             NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
-            NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill"),
-            NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist"),
+            NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill", badge: workerManager.workers.filter { $0.status == .busy }.count),
+            NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist", badge: railCounts.activeTaskCount),
             NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
             NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
             NavRailItem(tab: .wiki, label: "Wiki", systemImage: "book.fill"),
@@ -48,7 +49,7 @@ struct ContentView: View {
             NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
             NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
             NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
-            NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill"),
+            NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill", badge: railCounts.failedPluginCount, badgeIsAlert: true),
             NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
         ]
     }
@@ -111,11 +112,13 @@ struct ContentView: View {
         .onAppear {
             if let pool = dbPool {
                 unreadCounts.start(dbPool: pool)
+                railCounts.start(dbPool: pool)
             }
         }
         .onChange(of: dbPool.map(ObjectIdentifier.init)) { _, _ in
             if let pool = dbPool {
                 unreadCounts.start(dbPool: pool)
+                railCounts.start(dbPool: pool)
             }
         }
     }

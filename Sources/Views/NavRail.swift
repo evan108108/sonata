@@ -5,6 +5,10 @@ struct NavRailItem: Identifiable, Equatable {
     let label: String
     let systemImage: String
     var badge: Int = 0
+    /// When true, badge renders with a trailing "!" to signal "needs
+    /// attention" (e.g. failed plugins). Cosmetic only — count stays in
+    /// `badge`; the suffix lives in NavRailCell.
+    var badgeIsAlert: Bool = false
     var id: SonataTab { tab }
 }
 
@@ -141,12 +145,14 @@ private struct NavRailCell: View {
                     Image(systemName: item.systemImage)
                         .font(.system(size: 20, weight: .regular))
                     if item.badge > 0 {
-                        Text(item.badge > 99 ? "99+" : "\(item.badge)")
+                        let count = item.badge > 99 ? "99+" : "\(item.badge)"
+                        let label = item.badgeIsAlert ? "\(count)!" : count
+                        Text(label)
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
-                            .background(Color.red, in: Capsule())
+                            .background(item.badgeIsAlert ? Color.orange : Color.red, in: Capsule())
                             .offset(x: 10, y: -6)
                     }
                 }

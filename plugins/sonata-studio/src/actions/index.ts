@@ -317,6 +317,14 @@ export const ACTIONS: ActionDef[] = [
     path: "/api/image/attach",
     params: IMAGE_ATTACH_PARAMS,
   },
+  {
+    name: "studio_identity",
+    description:
+      "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI (Delete/Edit) without waiting on optimistic-reconcile heuristics.",
+    method: "get",
+    path: "/api/identity",
+    params: [],
+  },
 ];
 
 // ── Route table ─────────────────────────────────────────────────────────────
@@ -395,6 +403,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/image/attach": {
     method: "post",
     handler: async (body, _q, ctx) => imageAttach.attach(body, ctx),
+  },
+  "/api/identity": {
+    method: "get",
+    handler: async (_b, _q, ctx) => ({ pubkey: ctx.cfg.pluginPub.toLowerCase() }),
   },
 };
 
