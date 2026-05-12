@@ -252,6 +252,15 @@ struct StudioProfilePickerSheet: View {
                 nickname: nick,
                 avatarLocalPath: avatarPath
             )
+            // Remember the per-room custom path so the next open of the
+            // picker shows what the user chose. "Use default" clears the
+            // entry — the picker's Default tab is the source of truth then.
+            switch choice {
+            case .useDefault:
+                await store.setRoomAvatarLocalPath(roomSlug: roomSlug, path: nil)
+            case .custom:
+                await store.setRoomAvatarLocalPath(roomSlug: roomSlug, path: customAvatarPath)
+            }
             dismiss()
         } catch let err as StudioPluginError {
             errorMessage = err.message

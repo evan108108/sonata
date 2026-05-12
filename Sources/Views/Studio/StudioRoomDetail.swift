@@ -83,7 +83,7 @@ struct StudioRoomDetail: View {
                 roomTitle: room.title,
                 forceImmediatePublish: true,
                 initialPerRoomNickname: store.currentRoomNickname(for: room.slug),
-                initialPerRoomAvatarPath: nil
+                initialPerRoomAvatarPath: store.roomAvatarLocalPath(for: room.slug)
             )
         }
         .sheet(isPresented: $showAdmitSheet) {

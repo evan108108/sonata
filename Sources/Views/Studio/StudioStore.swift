@@ -190,7 +190,7 @@ final class StudioStore: ObservableObject {
     }
 
     private func startUserProfileObservation() {
-        let observation = ValueObservation.tracking { db -> (nickname: String, avatarPath: String?) in
+        let observation = ValueObservation.tracking { db -> (nickname: String, avatarPath: String?, roomAvatarPaths: [String: String]) in
             let rows = try Row.fetchAll(db, sql: Self.SQL_USER_PROFILE)
             for row in rows {
                 let attrsRaw = (row["attributes"] as String?) ?? "{}"
@@ -198,9 +198,10 @@ final class StudioStore: ObservableObject {
                 let nick = (raw["default_nickname"] as? String) ?? ""
                 let path = raw["default_avatar_local_path"] as? String
                 let normalized = (path?.isEmpty ?? true) ? nil : path
-                return (nick, normalized)
+                let roomPaths = (raw["room_avatar_paths"] as? [String: String]) ?? [:]
+                return (nick, normalized, roomPaths)
             }
-            return ("", nil)
+            return ("", nil, [:])
         }
         cancellables["user_profile"] = observation.start(
             in: requirePool(),
@@ -210,9 +211,23 @@ final class StudioStore: ObservableObject {
                 MainActor.assumeIsolated {
                     self?.defaultNickname = tuple.nickname
                     self?.defaultAvatarLocalPath = tuple.avatarPath
+                    self?.roomAvatarLocalPaths = tuple.roomAvatarPaths
                 }
             }
         )
+    }
+
+    /// Per-room custom avatar source paths, keyed by room slug. Populated
+    /// when the user picks "New for this room" with a custom avatar; the
+    /// picker reads this back on next open to pre-populate the preview.
+    @Published private(set) var roomAvatarLocalPaths: [String: String] = [:]
+
+    /// Convenience accessor for the per-room custom avatar local path. Returns
+    /// nil if the user has not chosen a room-specific avatar (or chose then
+    /// reverted to default).
+    func roomAvatarLocalPath(for roomSlug: String) -> String? {
+        let p = roomAvatarLocalPaths[roomSlug]
+        return (p?.isEmpty ?? true) ? nil : p
     }
 
     /// Return the current per-room nickname for the local user, if any. Used
@@ -333,7 +348,10 @@ final class StudioStore: ObservableObject {
     /// onto the wire as a `_profile` card per room.
     func setDefaultNickname(_ nickname: String) async {
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        var attrs: [String: Any] = ["default_nickname": trimmed]
+        var attrs: [String: Any] = [
+            "default_nickname": trimmed,
+            "room_avatar_paths": roomAvatarLocalPaths,
+        ]
         if let path = defaultAvatarLocalPath, !path.isEmpty {
             attrs["default_avatar_local_path"] = path
         }
@@ -352,11 +370,38 @@ final class StudioStore: ObservableObject {
     /// publish time (see `publishProfileCard`).
     func setDefaultAvatarLocalPath(_ path: String?) async {
         let cleaned = (path?.trimmingCharacters(in: .whitespaces).isEmpty ?? true) ? "" : path!
-        // Carry the nickname forward in the same upsert so we don't blow it
-        // away when the user only changes the avatar.
+        // Carry forward the nickname + per-room map so we don't blow them
+        // away when the user only changes the default avatar.
         let attrs: [String: Any] = [
             "default_nickname": defaultNickname,
             "default_avatar_local_path": cleaned,
+            "room_avatar_paths": roomAvatarLocalPaths,
+        ]
+        await EntityHTTP.upsertEntity(
+            name: "studio:user_profile",
+            type: "studio_user_profile",
+            description: "Local default profile (machine-only, not federated directly)",
+            attributes: attrs
+        )
+    }
+
+    /// Persist a per-room custom avatar source path. Pass nil to clear the
+    /// entry for that room (reverts to "use default" semantics for the
+    /// picker's preview; the federated card itself isn't touched here —
+    /// callers republish via `publishProfileCard` if they want the room's
+    /// avatar to actually change).
+    func setRoomAvatarLocalPath(roomSlug: String, path: String?) async {
+        var map = roomAvatarLocalPaths
+        let trimmed = path?.trimmingCharacters(in: .whitespaces)
+        if let p = trimmed, !p.isEmpty {
+            map[roomSlug] = p
+        } else {
+            map.removeValue(forKey: roomSlug)
+        }
+        let attrs: [String: Any] = [
+            "default_nickname": defaultNickname,
+            "default_avatar_local_path": defaultAvatarLocalPath ?? "",
+            "room_avatar_paths": map,
         ]
         await EntityHTTP.upsertEntity(
             name: "studio:user_profile",
