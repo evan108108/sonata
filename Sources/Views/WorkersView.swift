@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftTerm
 import AppKit
+import Combine
 import GRDB
 
 // MARK: - Worker Model
@@ -94,9 +95,19 @@ class WorkerManager: ObservableObject {
     @Published var selectedWorkerId: String?
     @Published var isCyclingPaused: Bool = CycleSettings.shared.pauseCycling
 
+    /// Live count of workers in `.busy` status. Kept in sync via Combine
+    /// subscriptions to each `Worker.$status` because `Worker` is a class —
+    /// mutating `workers[i].status` does NOT trigger `@Published var workers`
+    /// to re-emit. Without this, the nav-rail badge only refreshes when the
+    /// containing view re-renders for some unrelated reason (clicking any
+    /// nav-rail item triggered a re-render via the `selectedTab` change).
+    @Published var busyWorkerCount: Int = 0
+
     private var healthTimer: Timer?
     private let cycleStrategy: CycleStrategy = TaskCountStrategy()
     private var cycleFailureCount: [String: Int] = [:]  // worker label → consecutive failures
+    private var statusObservers: [String: AnyCancellable] = [:]  // worker.id → status sub
+    private var workersArraySub: AnyCancellable?
 
     /// Default number of workers to spawn on launch — stored in UserDefaults.
     static var defaultWorkerCount: Int {
@@ -169,6 +180,40 @@ class WorkerManager: ObservableObject {
         // and spawnDefaultWorkers populate the workers collection. Starting it here
         // would race the recovery: pollHealth → maintainPoolSize → addWorker(label:)
         // would spawn fresh-ID Workers in slots before the recovery workers appear.
+
+        // Re-subscribe to each Worker's @Published status whenever the workers
+        // array changes (spawn / remove / restart). Keeps busyWorkerCount in
+        // sync so the nav-rail badge updates without waiting for any other
+        // view to force a re-render of ContentView.
+        workersArraySub = $workers.sink { [weak self] newWorkers in
+            self?.reconcileWorkerStatusObservers(for: newWorkers)
+        }
+    }
+
+    private func reconcileWorkerStatusObservers(for currentWorkers: [Worker]) {
+        let liveIds = Set(currentWorkers.map(\.id))
+        // Drop subscriptions for workers that left the pool.
+        for id in statusObservers.keys where !liveIds.contains(id) {
+            statusObservers.removeValue(forKey: id)
+        }
+        // Add subscriptions for workers we haven't seen yet. Worker.$status
+        // emits on initial subscribe AND every mutation, so the first sink
+        // also seeds busyWorkerCount correctly.
+        for worker in currentWorkers where statusObservers[worker.id] == nil {
+            statusObservers[worker.id] = worker.$status
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.recomputeBusyWorkerCount()
+                }
+        }
+        recomputeBusyWorkerCount()
+    }
+
+    private func recomputeBusyWorkerCount() {
+        let next = workers.filter { $0.status == .busy }.count
+        if busyWorkerCount != next {
+            busyWorkerCount = next
+        }
     }
 
     /// Spawn the default number of workers on app launch.
