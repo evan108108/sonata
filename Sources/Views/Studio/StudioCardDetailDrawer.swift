@@ -39,6 +39,12 @@ struct StudioCardDetailDrawer: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if !card.summary.isEmpty {
+                        Text(card.summary)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     blockList
                     Divider()
                     commentThread
