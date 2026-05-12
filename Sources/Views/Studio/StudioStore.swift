@@ -1805,20 +1805,65 @@ enum EntityHTTP {
     }
 
     private static func readUserProfileAttribute(name attribute: String) async -> String? {
+        let attrs = await readUserProfileAttributes()
+        return attrs[attribute] as? String
+    }
+
+    /// Full attribute dictionary for `studio:user_profile`. Returns an empty
+    /// dictionary when the entity is absent OR when the read failed — Auto-run
+    /// Settings treats absence as the default profile.
+    static func readUserProfileAttributes() async -> [String: Any] {
         var comps = URLComponents(url: baseURL.appendingPathComponent("api/entity"), resolvingAgainstBaseURL: false)!
         comps.queryItems = [URLQueryItem(name: "name", value: "studio:user_profile")]
-        guard let url = comps.url else { return nil }
+        guard let url = comps.url else { return [:] }
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return nil
+                return [:]
             }
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let attrsRaw = (obj?["attributes"] as? String) ?? "{}"
             let attrs = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
-            return attrs[attribute] as? String
+            return attrs
         } catch {
-            return nil
+            return [:]
+        }
+    }
+
+    /// Merge-and-write a partial set of attributes into `studio:user_profile`,
+    /// preserving keys we don't touch. Last-write-wins via PATCH if the entity
+    /// already exists, falling back to upsert on first write.
+    static func mergeIntoUserProfile(_ updates: [String: Any]) async {
+        var comps = URLComponents(url: baseURL.appendingPathComponent("api/entity"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "name", value: "studio:user_profile")]
+        var existingId: String? = nil
+        var existingAttrs: [String: Any] = [:]
+        if let url = comps.url {
+            if let (data, response) = try? await URLSession.shared.data(from: url),
+               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                if let raw = obj?["attributes"] as? String,
+                   let parsed = (try? JSONSerialization.jsonObject(with: raw.data(using: .utf8) ?? Data())) as? [String: Any] {
+                    existingAttrs = parsed
+                }
+                if let id = obj?["id"] as? String {
+                    existingId = id
+                } else if let id = obj?["_id"] as? String {
+                    existingId = id
+                }
+            }
+        }
+        var merged = existingAttrs
+        for (k, v) in updates { merged[k] = v }
+        if let id = existingId {
+            await patchAttributes(id: id, attributes: merged)
+        } else {
+            await upsertEntity(
+                name: "studio:user_profile",
+                type: "studio_user_profile",
+                description: "Local default profile (machine-only, not federated directly)",
+                attributes: merged
+            )
         }
     }
 

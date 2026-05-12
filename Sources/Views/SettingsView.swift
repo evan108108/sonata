@@ -649,6 +649,14 @@ struct StudioSettingsView: View {
             }
             .padding(.horizontal)
             .padding(.bottom, 8)
+
+            // Auto-run subsection — Worker 2 of the Studio card-assignment +
+            // auto-worker plan. Reads + writes the same studio:user_profile
+            // entity as the nickname/avatar above, so a single Save call from
+            // either flow merges field-wise. Plugin's auto-run hook writes the
+            // bucket counters here too; collision-free because they touch
+            // different attribute keys.
+            StudioAutoRunSettingsView()
         }
         .onAppear(perform: load)
     }
