@@ -182,6 +182,40 @@ export async function transitionCardStatus(
     gateway: ctx.gateway,
   });
 
+  // §6.4 / §15.4 — a transition back to `open` clears the auto-run sentinel
+  // so the next eligible publish re-fires dispatch. This lets a human (or
+  // the assignee) deliberately re-run a card by toggling status. We patch
+  // the studio_card entity directly here because the comment-projection
+  // path won't strip these fields (it patches `status` only).
+  if (next === "open") {
+    const sentinelKeys = [
+      "auto_run_dispatched_event_id",
+      "auto_run_task_id",
+      "auto_run_dispatched_at_ms",
+      "auto_run_completion_status",
+      "auto_run_completion_at_ms",
+    ];
+    const hadSentinel = sentinelKeys.some((k) => k in attrs);
+    if (hadSentinel && entityName) {
+      const cleared: Record<string, unknown> = { ...attrs };
+      for (const k of sentinelKeys) delete cleared[k];
+      // Re-clear status as well so it matches the projected target (the
+      // audit-comment projection will also patch this, but doing it here
+      // keeps the entity coherent if projection lags behind).
+      cleared["status"] = "open";
+      // Locate the entity id (we didn't capture it above to keep the original
+      // lookup cheap). One additional byName fetch is acceptable for a
+      // human-driven action.
+      const row = await entity.byNameOrNull(entityName).catch(() => null);
+      if (row) {
+        await entity.patch({ id: row.id, attributes: cleared }).catch(() => {
+          // Non-fatal: dispatch will re-fire after re-projection sets a
+          // fresh sentinel if the entity-update fails here.
+        });
+      }
+    }
+  }
+
   return {
     d_tag: dTag,
     rumor_event_id: originalCardEventId,

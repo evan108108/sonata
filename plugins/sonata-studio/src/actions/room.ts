@@ -52,6 +52,15 @@ export interface ActionCtx {
    * stream being opened. Plan §7 Pass D1.
    */
   sseManager?: SSEOpener;
+  /**
+   * HTTP request headers for this call, normalised to lowercase keys.
+   * Per-request; absent when an action is invoked programmatically
+   * (e.g. dispatcher.ts calling cardStatus.transition in-process, or
+   * unit tests). The auto-run cycle-break guard (§6.7) reads
+   * `x-studio-source` to refuse card posts that originated inside an
+   * auto-run worker session and self-assign.
+   */
+  headers?: Record<string, string>;
 }
 
 interface RoomCreateRequest {

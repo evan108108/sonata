@@ -101,8 +101,17 @@ function startServer(cfg: PluginConfig, gateway: GatewayClient, sse: SSEManager)
         }
         const body = await readBody(req);
         const query = readQuery(url);
+        // Per-request shallow-copy of ctx with the request headers attached.
+        // Action handlers that care (cycle-break in card.post) read
+        // `ctx.headers["x-studio-source"]`; everything else ignores it.
+        const headers: Record<string, string> = {};
+        for (const [k, v] of Object.entries(req.headers)) {
+          if (typeof v === "string") headers[k.toLowerCase()] = v;
+          else if (Array.isArray(v) && v.length > 0) headers[k.toLowerCase()] = v[0]!;
+        }
+        const reqCtx: ActionCtx = { ...ctx, headers };
         try {
-          const result = await route.handler(body, query, ctx);
+          const result = await route.handler(body, query, reqCtx);
           return jsonResponse(res, 200, { ok: true, result });
         } catch (err) {
           if (err instanceof HttpError) {
