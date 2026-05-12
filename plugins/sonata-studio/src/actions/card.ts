@@ -32,10 +32,56 @@ interface CardPostRequest {
   related_to?: unknown;
   tags?: unknown;
   d_tag?: unknown;
+  assignees?: unknown;
+  status?: unknown;
 }
 
 // Long-form card body cap. Mirrors validators.ts MAX_CARD_BODY.
 const MAX_CARD_BODY = 10000;
+
+// Lifecycle statuses settable on post/update. `deleted` is reachable only via
+// the dedicated card_delete action (soft-tombstone). The transition action
+// further restricts status to {open, in_progress, done, archived} per §15.
+const CARD_LIFECYCLE_STATUSES = new Set(["open", "in_progress", "done", "archived"]);
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+
+function normalizeAssignees(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    throw new HttpError(400, "bad_request", `"assignees" must be an array of hex pubkeys`);
+  }
+  if (raw.length > 1) {
+    throw new HttpError(
+      400,
+      "too_many_assignees",
+      `"assignees" cardinality is 0–1 in v0 (got ${raw.length})`,
+    );
+  }
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (typeof v !== "string") {
+      throw new HttpError(400, "bad_request", `assignees[${i}] must be a lowercase 64-hex string`);
+    }
+    const lower = v.toLowerCase();
+    if (!HEX64_RE.test(lower)) {
+      throw new HttpError(400, "bad_request", `assignees[${i}] must be a 64-char hex pubkey`);
+    }
+    out.push(lower);
+  }
+  return out;
+}
+
+function normalizeLifecycleStatus(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new HttpError(400, "invalid_status", `"status" must be one of open|in_progress|done|archived`);
+  }
+  if (!CARD_LIFECYCLE_STATUSES.has(raw)) {
+    throw new HttpError(400, "invalid_status", `"status" must be one of open|in_progress|done|archived (got ${JSON.stringify(raw)})`);
+  }
+  return raw;
+}
 
 interface CardPostResult {
   rumor_event_id: string;
@@ -85,6 +131,9 @@ export async function postCard(
   const blocks = normalizeBlocks(body.blocks);
   const relatedTo = normalizeStringArray(body.related_to, "related_to");
   const cardTags = normalizeStringArray(body.tags, "tags");
+  const assignees = normalizeAssignees(body.assignees);
+  const status =
+    body.status !== undefined ? normalizeLifecycleStatus(body.status) : "open";
   const dTag =
     body.d_tag !== undefined ? ensureString(body.d_tag, "d_tag") : buildDTag(title);
 
@@ -99,6 +148,8 @@ export async function postCard(
     body: cardBody,
     blocks,
     createdBy: ctx.cfg.pluginPub.toLowerCase(),
+    assignees,
+    status,
   };
   if (relatedTo.length > 0) payload["relatedTo"] = relatedTo;
   if (cardTags.length > 0) payload["tags"] = cardTags;
@@ -341,6 +392,8 @@ interface CardUpdateRequest {
   blocks?: unknown;
   related_to?: unknown;
   tags?: unknown;
+  assignees?: unknown;
+  status?: unknown;
 }
 
 interface CardUpdateResult {
@@ -405,6 +458,19 @@ export async function updateCard(
           Array.isArray(attrs["tags"]) ? (attrs["tags"] as string[]) : [],
           roomSlug,
         );
+  const assignees =
+    body.assignees !== undefined
+      ? normalizeAssignees(body.assignees)
+      : (Array.isArray(attrs["assignees"]) ? (attrs["assignees"] as string[]) : []);
+  // status preserves the existing lifecycle value on update; transitions go
+  // through the dedicated card_status_transition action which enforces the
+  // §3 authorization matrix. If absent on the entity, default to "open".
+  const existingStatus =
+    typeof attrs["status"] === "string" && CARD_LIFECYCLE_STATUSES.has(attrs["status"] as string)
+      ? (attrs["status"] as string)
+      : "open";
+  const status =
+    body.status !== undefined ? normalizeLifecycleStatus(body.status) : existingStatus;
 
   const room = await loadRoomCtx(roomSlug, ctx.cfg.pluginPub);
 
@@ -417,6 +483,8 @@ export async function updateCard(
     body: cardBody,
     blocks,
     createdBy: pluginPubLower,
+    assignees,
+    status,
   };
   if (relatedTo.length > 0) payload["relatedTo"] = relatedTo;
   if (cardTags.length > 0) payload["tags"] = cardTags;

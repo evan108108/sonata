@@ -85,6 +85,27 @@ export async function projectComment(ctx: ProjectionContext): Promise<void> {
       });
     }
   }
+
+  // intent="status_change" comments are the wire format for card lifecycle
+  // transitions. The originating action (cardStatus.ts) cannot republish
+  // the card itself (kind-30530 is addressable by author pubkey, so the
+  // assignee re-publishing forks the addressable event). Instead, the
+  // comment carries the new state in `to_status` and the comment projector
+  // applies it to the target card here.
+  if (payload["intent"] === "status_change" && targetEventId) {
+    const toStatus = payload["to_status"];
+    const LIFECYCLE = new Set(["open", "in_progress", "done", "archived"]);
+    if (typeof toStatus === "string" && LIFECYCLE.has(toStatus)) {
+      const targetCard = await findTargetEntity(client, targetEventId);
+      if (targetCard) {
+        const cardAttrs = parseExistingAttributes(targetCard.attributes);
+        await client.entity.patch({
+          id: targetCard.id,
+          attributes: { ...cardAttrs, status: toStatus },
+        });
+      }
+    }
+  }
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {

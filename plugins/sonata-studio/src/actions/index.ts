@@ -8,6 +8,7 @@
 
 import { room_admit } from "./admit";
 import { card } from "./card";
+import { cardStatus } from "./cardStatus";
 import { comment } from "./comment";
 import { dispatch } from "./dispatch";
 import { imageAttach } from "./imageAttach";
@@ -116,6 +117,18 @@ const CARD_POST_PARAMS: ActionParam[] = [
   { name: "related_to", type: "array", description: "Optional array of related event ids or 4A addresses." },
   { name: "tags", type: "array", description: "Optional array of free-form tag strings." },
   { name: "d_tag", type: "string", description: "Override d-tag for replaceable-event addressing (default: sluggified title + 8-hex)." },
+  {
+    name: "assignees",
+    type: "array",
+    description:
+      "Optional 0-1 lowercase 64-hex pubkeys. UI enforces single-assignee; wire shape is array for future multi-assign compatibility.",
+  },
+  {
+    name: "status",
+    type: "string",
+    description:
+      "Optional lifecycle status (open|in_progress|done|archived). Defaults to 'open' on create.",
+  },
 ];
 
 const CARD_LIST_PARAMS: ActionParam[] = [
@@ -128,6 +141,18 @@ const CARD_LIST_PARAMS: ActionParam[] = [
 const CARD_DELETE_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "d_tag", type: "string", required: true, description: "d_tag of the card to soft-delete (from CardPostResult)." },
+];
+
+const CARD_STATUS_TRANSITION_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+  { name: "d_tag", type: "string", required: true, description: "d_tag of the card to transition." },
+  {
+    name: "status",
+    type: "string",
+    required: true,
+    description:
+      "Next lifecycle status: open | in_progress | done | archived. Author may set any; assignee may set in_progress or done.",
+  },
 ];
 
 const CARD_UPDATE_PARAMS: ActionParam[] = [
@@ -145,6 +170,18 @@ const CARD_UPDATE_PARAMS: ActionParam[] = [
   { name: "blocks", type: "array", description: "Override blocks array. Omit to preserve." },
   { name: "related_to", type: "array", description: "Override related_to list. Omit to preserve." },
   { name: "tags", type: "array", description: "Override tags list. Omit to preserve." },
+  {
+    name: "assignees",
+    type: "array",
+    description:
+      "Override assignee list (length 0 or 1). Pass [] to unassign, [pubkey_hex] to reassign. Omit to preserve.",
+  },
+  {
+    name: "status",
+    type: "string",
+    description:
+      "Override lifecycle status (open|in_progress|done|archived). Omit to preserve. Status transitions are normally routed through /api/card/transition for authorization checks.",
+  },
 ];
 
 const TRACK_CREATE_PARAMS: ActionParam[] = [
@@ -296,6 +333,14 @@ export const ACTIONS: ActionDef[] = [
     params: CARD_UPDATE_PARAMS,
   },
   {
+    name: "studio_card_status_transition",
+    description:
+      "Move a card through its lifecycle (open ↔ in_progress ↔ done ↔ archived). Author may set any status; assignee may set in_progress or done; other room members are rejected with not_permitted. Re-publishes the card AND emits an audit comment with intent='status_change' carrying 'status: <prev> → <next>'.",
+    method: "post",
+    path: "/api/card/transition",
+    params: CARD_STATUS_TRANSITION_PARAMS,
+  },
+  {
     name: "studio_track_create",
     description: "Create a track within a room (kind 30531).",
     method: "post",
@@ -408,6 +453,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "post",
     handler: async (body, _q, ctx) => card.update(body, ctx),
   },
+  "/api/card/transition": {
+    method: "post",
+    handler: async (body, _q, ctx) => cardStatus.transition(body, ctx),
+  },
   "/api/track/create": {
     method: "post",
     handler: async (body, _q, ctx) => track.create(body, ctx),
@@ -444,4 +493,4 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, comment, dispatch, imageAttach, member, qa, room, room_admit, track };
+export { card, cardStatus, comment, dispatch, imageAttach, member, qa, room, room_admit, track };

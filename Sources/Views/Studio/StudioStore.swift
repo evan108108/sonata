@@ -745,7 +745,8 @@ final class StudioStore: ObservableObject {
         body: String? = nil,
         blocks: [[String: Any]]? = nil,
         tagsList: [String]? = nil,
-        relatedTo: [String]? = nil
+        relatedTo: [String]? = nil,
+        assigneePubkey: String?? = nil
     ) async throws -> String {
         guard let original = findCard(roomSlug: roomSlug, dTag: dTag, eventId: eventId) else {
             throw StudioPluginError(
@@ -781,6 +782,16 @@ final class StudioStore: ObservableObject {
         if let b = blocks { requestBody["blocks"] = b }
         if let r = relatedTo { requestBody["related_to"] = r }
         if let t = tagsList { requestBody["tags"] = t }
+        if let outer = assigneePubkey {
+            // Double-optional convention: outer .some means "caller asked to
+            // change the assignment"; the inner Optional carries the new
+            // value (nil → unassign). Outer .none means "preserve existing."
+            if let pk = outer, !pk.isEmpty {
+                requestBody["assignees"] = [pk.lowercased()]
+            } else {
+                requestBody["assignees"] = [] as [String]
+            }
+        }
 
         do {
             struct Resp: Decodable {
@@ -801,6 +812,107 @@ final class StudioStore: ObservableObject {
             optimisticCardUpdates.removeValue(forKey: original.id)
             optimisticUpdateExpectedEventIds.removeValue(forKey: original.id)
             throw error
+        }
+    }
+
+    // MARK: - Lifecycle transitions + assignment
+
+    /// Move a card through its lifecycle (open ↔ in_progress ↔ done ↔ archived).
+    /// Author may set any status; assignee may set in_progress or done. The
+    /// plugin enforces the matrix server-side and emits an audit comment;
+    /// callers should expect a 403 (`not_permitted`) for disallowed cells.
+    @discardableResult
+    func transitionCardStatus(
+        roomSlug: String,
+        dTag: String,
+        status: String
+    ) async throws -> String {
+        struct Req: Encodable {
+            let room: String
+            let dTag: String
+            let status: String
+            enum CodingKeys: String, CodingKey { case room; case dTag = "d_tag"; case status }
+        }
+        struct Resp: Decodable {
+            let dTag: String
+            let rumorEventId: String
+            let auditCommentEventId: String
+            enum CodingKeys: String, CodingKey {
+                case dTag = "d_tag"
+                case rumorEventId = "rumor_event_id"
+                case auditCommentEventId = "audit_comment_event_id"
+            }
+        }
+        let resp: Resp = try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/card/transition",
+            body: Req(room: roomSlug, dTag: dTag, status: status)
+        )
+        return resp.rumorEventId
+    }
+
+    /// Reassign a card. Pass nil/empty to unassign. The plugin's
+    /// `studio_card_update` handler accepts the new `assignees` array and
+    /// republishes the card under the author's d_tag. Author-only —
+    /// reassignment from non-author callers will return 403 `not_author`.
+    @discardableResult
+    func updateCardAssignee(
+        roomSlug: String,
+        dTag: String,
+        eventId: String,
+        assigneePubkey: String?
+    ) async throws -> String {
+        let assignees: [String]
+        if let pk = assigneePubkey, !pk.isEmpty {
+            assignees = [pk.lowercased()]
+        } else {
+            assignees = []
+        }
+        let requestBody: [String: Any] = [
+            "room": roomSlug,
+            "d_tag": dTag,
+            "assignees": assignees,
+        ]
+        _ = eventId // reserved for future reconciliation parity with updateCard
+        struct Resp: Decodable {
+            let rumorEventId: String
+            let dTag: String
+            enum CodingKeys: String, CodingKey {
+                case rumorEventId = "rumor_event_id"
+                case dTag = "d_tag"
+            }
+        }
+        let result: Resp = try await EntityHTTP.postPluginActionRaw(
+            path: "sonata-studio/card/update",
+            body: requestBody
+        )
+        return result.rumorEventId
+    }
+
+    /// All members for a room (per-room federated profiles unioned with
+    /// cross-room fallbacks), sorted by display name. Powers the assignee
+    /// picker in the compose sheet and the drawer's Reassign popover.
+    /// Includes the room's declared `members[]` so members without a
+    /// `_profile` card still appear (they render with a short-hex fallback).
+    func roomMembersList(for roomSlug: String) -> [StudioMember] {
+        guard let room = rooms.first(where: { $0.slug == roomSlug }) else { return [] }
+        var seen = Set<String>()
+        var out: [StudioMember] = []
+        for pk in room.members {
+            let lower = pk.lowercased()
+            if !seen.insert(lower).inserted { continue }
+            if let m = roomMembers["\(roomSlug)|\(lower)"] {
+                out.append(m)
+            } else if let m = members[lower] {
+                out.append(m)
+            } else {
+                out.append(StudioMember(rawPubkey: lower, roomSlug: roomSlug))
+            }
+        }
+        return out.sorted { lhs, rhs in
+            displayName(for: lhs.pubkeyHex, in: roomSlug)
+                .localizedCaseInsensitiveCompare(
+                    displayName(for: rhs.pubkeyHex, in: roomSlug)
+                ) == .orderedAscending
         }
     }
 
@@ -855,7 +967,8 @@ final class StudioStore: ObservableObject {
             createdByPubkey: original.createdByPubkey,
             createdAtSeconds: original.createdAtSeconds,
             dTag: original.dTag,
-            status: original.status
+            status: original.status,
+            assigneePubkey: original.assigneePubkey
         )
     }
 
@@ -1107,7 +1220,8 @@ final class StudioStore: ObservableObject {
         blocks: [[String: Any]],
         relatedTo: [String],
         tagsList: [String],
-        dTag: String?
+        dTag: String?,
+        assigneePubkey: String? = nil
     ) async throws -> String {
         var requestBody: [String: Any] = [
             "room": room,
@@ -1124,6 +1238,9 @@ final class StudioStore: ObservableObject {
         if !relatedTo.isEmpty { requestBody["related_to"] = relatedTo }
         if !tagsList.isEmpty { requestBody["tags"] = tagsList }
         if let d = dTag, !d.isEmpty { requestBody["d_tag"] = d }
+        if let pk = assigneePubkey, !pk.isEmpty {
+            requestBody["assignees"] = [pk.lowercased()]
+        }
 
         let result: CardPostResponse = try await EntityHTTP.postPluginActionRaw(
             path: "sonata-studio/card/post",

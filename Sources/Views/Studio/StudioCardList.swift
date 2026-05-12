@@ -6,6 +6,27 @@ import SwiftUI
 ///   2. dispatchTrace == false && track != nil → just the slice for that track.
 ///   3. dispatchTrace == true → `store.dispatchIntents[room.slug]`, sorted
 ///      DESC by `createdAtMs` (falls back to `createdAtSeconds * 1000`).
+/// Per-room status filter for the card list. Persisted only in-memory on
+/// the StudioCardList view; the design doc defers per-room persistence to a
+/// follow-up.
+enum CardListFilter: String, CaseIterable, Identifiable {
+    case all
+    case open
+    case inProgress = "in_progress"
+    case done
+    case mine
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .all: return "All"
+        case .open: return "Open"
+        case .inProgress: return "In progress"
+        case .done: return "Done"
+        case .mine: return "Mine"
+        }
+    }
+}
+
 struct StudioCardList: View {
     let room: StudioRoom
     let track: String?
@@ -16,21 +37,59 @@ struct StudioCardList: View {
     /// the editing-card sheet presentation.
     var onEditCard: ((StudioCard) -> Void)? = nil
 
+    /// In-memory per-view filter. Resets when the StudioCardList view is
+    /// rebuilt (e.g. switching rooms or toggling dispatch trace), which is
+    /// good enough until the per-room persistence story (UserDefaults) lands.
+    @State private var filter: CardListFilter = .all
+
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                if dispatchTrace {
-                    dispatchRows
-                } else {
-                    cardRows
-                }
-                Color.clear.frame(height: 60) // §9.4 inline compose strip safe area
+        VStack(spacing: 0) {
+            if !dispatchTrace {
+                filterStrip
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                Divider().opacity(0.4)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if dispatchTrace {
+                        dispatchRows
+                    } else {
+                        cardRows
+                    }
+                    Color.clear.frame(height: 60) // §9.4 inline compose strip safe area
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentMargins(.bottom, 16, for: .scrollContent)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentMargins(.bottom, 16, for: .scrollContent)
+    }
+
+    @ViewBuilder
+    private var filterStrip: some View {
+        HStack(spacing: 8) {
+            ForEach(CardListFilter.allCases) { f in
+                Button {
+                    filter = f
+                } label: {
+                    Text(f.label)
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            filter == f
+                                ? Color.accentColor.opacity(0.2)
+                                : Color.primary.opacity(0.05),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(filter == f ? Color.accentColor : Color.primary)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     // MARK: - Card rows
@@ -88,7 +147,25 @@ struct StudioCardList: View {
             real = union
         }
         let optimistic = optimisticCardsForView
-        return (optimistic + real).sorted { $0.createdAtSeconds > $1.createdAtSeconds }
+        let merged = (optimistic + real).sorted { $0.createdAtSeconds > $1.createdAtSeconds }
+        return applyFilter(merged)
+    }
+
+    private func applyFilter(_ cards: [StudioCard]) -> [StudioCard] {
+        let me = store.currentPubkeyHex.lowercased()
+        switch filter {
+        case .all:
+            return cards
+        case .open:
+            return cards.filter { $0.lifecycleStatus == "open" }
+        case .inProgress:
+            return cards.filter { $0.lifecycleStatus == "in_progress" }
+        case .done:
+            return cards.filter { $0.lifecycleStatus == "done" }
+        case .mine:
+            guard !me.isEmpty else { return [] }
+            return cards.filter { ($0.assigneePubkey ?? "").lowercased() == me }
+        }
     }
 
     // MARK: - Dispatch rows

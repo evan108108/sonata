@@ -189,8 +189,22 @@ struct StudioCard: Equatable, Identifiable {
     let createdAtSeconds: Int64
     let dTag: String
     let status: String?
+    /// Single-assignee pubkey (lowercase hex) — UI enforces cardinality ≤ 1
+    /// even though the wire stores `assignees: [pubkey]` for forward-compat
+    /// with multi-assign. Nil when the card is unassigned.
+    let assigneePubkey: String?
 
     var isDeleted: Bool { status == "deleted" }
+    /// Lifecycle status normalized to one of the four assignment-tracker
+    /// states. Legacy cards with `status == "active"` or no status field map
+    /// to "open"; "deleted" stays distinct so soft-tombstoned cards continue
+    /// to filter out of the main lists.
+    var lifecycleStatus: String {
+        switch status {
+        case "in_progress", "done", "archived", "deleted": return status!
+        default: return "open"
+        }
+    }
 
     init(row: Row) throws {
         guard let id = row["id"] as String? else {
@@ -215,6 +229,11 @@ struct StudioCard: Equatable, Identifiable {
             ?? Int64((raw["created_at_seconds"] as? Int) ?? 0)
         self.dTag = (raw["d_tag"] as? String) ?? ""
         self.status = raw["status"] as? String
+        if let arr = raw["assignees"] as? [String], let first = arr.first, !first.isEmpty {
+            self.assigneePubkey = first.lowercased()
+        } else {
+            self.assigneePubkey = nil
+        }
 
         if let rawBlocks = raw["blocks"] as? [Any], !rawBlocks.isEmpty,
            let blockData = try? JSONSerialization.data(withJSONObject: rawBlocks) {
@@ -238,7 +257,8 @@ struct StudioCard: Equatable, Identifiable {
         createdByPubkey: String,
         createdAtSeconds: Int64,
         dTag: String,
-        status: String? = nil
+        status: String? = nil,
+        assigneePubkey: String? = nil
     ) {
         self.id = id
         self.eventId = eventId
@@ -254,6 +274,7 @@ struct StudioCard: Equatable, Identifiable {
         self.createdAtSeconds = createdAtSeconds
         self.dTag = dTag
         self.status = status
+        self.assigneePubkey = assigneePubkey
     }
 }
 
@@ -447,6 +468,18 @@ struct StudioMember: Equatable, Identifiable {
     }
 
     var displayName: String { nickname ?? Hex.npubShort(pubkeyHex) }
+
+    /// Synthesize a StudioMember stub for a known room member who hasn't
+    /// federated a `_profile` card yet (or whose entity hasn't projected
+    /// into the local DB). Used by the assignee picker so room declarations
+    /// surface members even without per-room profile data.
+    init(rawPubkey pubkey: String, roomSlug: String) {
+        self.id = "stub:\(roomSlug):\(pubkey)"
+        self.pubkeyHex = pubkey
+        self.nickname = nil
+        self.roomSlug = roomSlug
+        self.avatarImageBlock = nil
+    }
 }
 
 // MARK: - StudioDispatchIntent
