@@ -42,7 +42,7 @@ import {
   loadRoomCtx,
   type StudioRoomCtx,
 } from "./util";
-import type { ActionCtx } from "./room";
+import { republishRoomSnapshot, type ActionCtx } from "./room";
 
 interface RoomAdmitRequest {
   room_slug?: unknown;
@@ -281,6 +281,37 @@ async function admitRoomInner(
         claim_pubkey: recipient,
         key_grant_event_id: g.event_id,
       });
+    }
+  }
+
+  // 8. Federation history-replay (Phase 4 §federation-smoke gap). After the
+  //    key-grants are published the just-admitted recipients hold the new
+  //    epoch key, but their SSE only sees rumors published at the new
+  //    epoch — the founder's original room/track rumors stay locked behind
+  //    the previous epoch's key. Re-emit the founder's room + tracks at the
+  //    new epoch so the newly-admitted member catches them up immediately.
+  //
+  //    Replaceable d_tags mean existing members see this as a no-op LWW
+  //    overwrite (rumor.created_at > stored → body replaced, local-only
+  //    fields preserved). Members are not re-emitted — studio_member is
+  //    local-only with no federated kind in studio-v0; nickname federation
+  //    is open work for v0.1+. Comments + cards are similarly out of scope.
+  //
+  //    Skip when nothing was actually admitted; the rumor traffic would be
+  //    pure churn against the gateway for existing members.
+  if (admitted.length > 0) {
+    try {
+      await republishRoomSnapshot(slug, ctx);
+    } catch (err) {
+      // History-replay best-effort. The new member can still recover by
+      // a future founder action that re-emits the same d_tags; never let a
+      // republish failure flip the admit verdict.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.admit] republishRoomSnapshot("${slug}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   }
 

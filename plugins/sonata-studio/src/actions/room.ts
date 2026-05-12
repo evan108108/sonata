@@ -27,7 +27,9 @@ import {
   publishRumor,
   STUDIO_CONTEXT_V0,
   STUDIO_KIND_ROOM,
+  STUDIO_KIND_TRACK,
   validatePayload,
+  type StudioRoomCtx,
 } from "./util";
 import { track as trackActions } from "./track";
 
@@ -696,6 +698,181 @@ function pickTitle(attrs: Record<string, unknown>): string {
 function pickDescription(attrs: Record<string, unknown>): string | undefined {
   const d = attrs["description"];
   return typeof d === "string" && d.length > 0 ? d : undefined;
+}
+
+// ── republish snapshot ──────────────────────────────────────────────────────
+
+export interface RepublishSnapshotResult {
+  room_published: boolean;
+  tracks_published: number;
+  tracks_failed: number;
+}
+
+/**
+ * Re-emit the founder's view of a room's metadata + tracks at the current
+ * epoch. Used after `admit` rotates: every admitted recipient now holds the
+ * new epoch key, so a fresh wrap of the room+tracks lands as initial state
+ * (history-replay gap §1 of studio-phase-4 federation smoke).
+ *
+ * Treats local entities as source of truth — does NOT mutate any entity;
+ * `projectLocally` inside `publishRumor` performs an idempotent overwrite
+ * (older `created_at` is LWW-ignored, local-only fields are preserved).
+ *
+ * Each publish is wrapped in try/catch so one failure does not abort the
+ * rest. The room rumor is attempted first, then tracks in document order.
+ * Members are intentionally not republished: `studio_member` is local-only
+ * and has no federated kind in studio-v0 (nickname federation is open work
+ * for v0.1+).
+ */
+export async function republishRoomSnapshot(
+  slug: string,
+  ctx: ActionCtx,
+): Promise<RepublishSnapshotResult> {
+  // Fresh load — admit just rotated, so epoch + members differ from the
+  // pre-admit context the caller already had in hand.
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+
+  const result: RepublishSnapshotResult = {
+    room_published: false,
+    tracks_published: 0,
+    tracks_failed: 0,
+  };
+
+  // 1. Room (kind 30536).
+  try {
+    await republishRoomRumor(slug, room, ctx);
+    result.room_published = true;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.republishSnapshot] room rumor for "${slug}" failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // 2. Tracks (kind 30531) — serialized so gateway rate-limits + SSE ordering
+  //    on the receiving member stay stable.
+  const allTracks = await entity.list({ type: "studio_track", limit: 500 });
+  for (const t of allTracks) {
+    const attrs = parseAttrs(t.attributes);
+    if (attrs["room_slug"] !== slug) continue;
+    // Skip stubs auto-created by a Card referencing an unknown track —
+    // re-emitting them would assert false metadata.
+    if (attrs["auto_created"] === true) continue;
+    const trackName = typeof attrs["name"] === "string" ? (attrs["name"] as string) : null;
+    if (!trackName) continue;
+    try {
+      await republishTrackRumor(slug, room, attrs, trackName, ctx);
+      result.tracks_published += 1;
+    } catch (err) {
+      result.tracks_failed += 1;
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.republishSnapshot] track "${trackName}" rumor for "${slug}" failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  return result;
+}
+
+async function republishRoomRumor(
+  slug: string,
+  room: StudioRoomCtx,
+  ctx: ActionCtx,
+): Promise<void> {
+  const attrs = room.attributes;
+  const title =
+    typeof attrs["title"] === "string" && (attrs["title"] as string).length > 0
+      ? (attrs["title"] as string)
+      : slug;
+  const payload: Record<string, unknown> = {
+    "@context": STUDIO_CONTEXT_V0,
+    "@type": "Room",
+    slug,
+    title,
+    createdBy: ctx.cfg.pluginPub.toLowerCase(),
+  };
+  if (typeof attrs["description"] === "string" && (attrs["description"] as string).length > 0) {
+    payload["description"] = attrs["description"];
+  }
+  if (typeof attrs["project"] === "string" && (attrs["project"] as string).length > 0) {
+    payload["project"] = attrs["project"];
+  }
+  const dt = attrs["default_tracks"];
+  if (Array.isArray(dt) && dt.length > 0) {
+    const names = dt.filter((x): x is string => typeof x === "string" && x.length > 0);
+    if (names.length > 0) payload["defaultTracks"] = names;
+  }
+  validatePayload(STUDIO_KIND_ROOM, payload);
+  const rumor = buildSignedRumor({
+    kind: STUDIO_KIND_ROOM,
+    payload,
+    room,
+    publisherPriv: ctx.cfg.pluginPriv,
+    publisherPub: ctx.cfg.pluginPub,
+    dTag: slug,
+    alt: `Studio room: ${title}`,
+  });
+  await publishRumor({
+    rumor,
+    payload,
+    room,
+    publisherPriv: ctx.cfg.pluginPriv,
+    gateway: ctx.gateway,
+  });
+}
+
+async function republishTrackRumor(
+  _slug: string,
+  room: StudioRoomCtx,
+  attrs: Record<string, unknown>,
+  trackName: string,
+  ctx: ActionCtx,
+): Promise<void> {
+  const title =
+    typeof attrs["title"] === "string" && (attrs["title"] as string).length > 0
+      ? (attrs["title"] as string)
+      : trackName;
+  const layoutRaw = typeof attrs["layout"] === "string" ? (attrs["layout"] as string) : "column";
+  const layout =
+    layoutRaw === "column" || layoutRaw === "timeline" || layoutRaw === "grouped"
+      ? layoutRaw
+      : "column";
+  const closedAt =
+    typeof attrs["closed_at_seconds"] === "number" ? (attrs["closed_at_seconds"] as number) : null;
+  const payload: Record<string, unknown> = {
+    "@context": STUDIO_CONTEXT_V0,
+    "@type": "Track",
+    name: trackName,
+    title,
+    layout,
+    closedAt,
+    createdBy: ctx.cfg.pluginPub.toLowerCase(),
+  };
+  if (typeof attrs["description"] === "string" && (attrs["description"] as string).length > 0) {
+    payload["description"] = attrs["description"];
+  }
+  validatePayload(STUDIO_KIND_TRACK, payload);
+  const rumor = buildSignedRumor({
+    kind: STUDIO_KIND_TRACK,
+    payload,
+    room,
+    publisherPriv: ctx.cfg.pluginPriv,
+    publisherPub: ctx.cfg.pluginPub,
+    dTag: trackName,
+    alt: `Studio track: ${title}`,
+  });
+  await publishRumor({
+    rumor,
+    payload,
+    room,
+    publisherPriv: ctx.cfg.pluginPriv,
+    gateway: ctx.gateway,
+  });
 }
 
 // ── delete (local-only) ─────────────────────────────────────────────────────

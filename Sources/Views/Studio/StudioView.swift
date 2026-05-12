@@ -17,9 +17,16 @@ struct StudioView: View {
             .frame(minWidth: 220, idealWidth: 240, maxWidth: 320)
             .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
         } detail: {
-            if let room = selectedRoom {
-                StudioRoomDetail(room: room, store: store)
-                    .id(room.id)
+            // Resolve `selectedRoom` through the live `store.rooms` array on
+            // every render — without this, the detail pane keeps the snapshot
+            // captured at click time, so post-admit changes (members count,
+            // pending pill, refreshed title) only land after the user clicks
+            // off-and-back. The id-based lookup keeps SwiftUI's identity stable
+            // across observation ticks.
+            if let selected = selectedRoom,
+               let current = store.rooms.first(where: { $0.id == selected.id }) {
+                StudioRoomDetail(room: current, store: store)
+                    .id(current.id)
             } else {
                 StudioPickRoomPlaceholder()
             }

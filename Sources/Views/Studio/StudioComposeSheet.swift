@@ -714,31 +714,50 @@ private struct BlockEditorRow: View {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cacheDir = home.appendingPathComponent("Library/Caches/com.sonata")
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        panel.directoryURL = cacheDir
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        let path = url.path
-        let allowedPrefixes = [
-            cacheDir.path,
-            home.appendingPathComponent("Downloads").path,
-        ]
-        guard allowedPrefixes.contains(where: { path.hasPrefix($0) }) else {
-            draft.imageError = "Image must be under ~/Library/Caches/com.sonata or ~/Downloads."
+        // Sanity guard — protect against pathological loads.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int64, size > 100 * 1024 * 1024 {
+            draft.imageError = "Image source is larger than 100 MiB."
             return
         }
 
-        // 20 MiB local cap matches the plugin's defense.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-           let size = attrs[.size] as? Int64, size > 20 * 1024 * 1024 {
-            draft.imageError = "Image is larger than 20 MiB."
+        // NIP-44 v2 caps plaintext at 65535 bytes. Re-encode the user's
+        // pick as a downscaled JPEG ≤ 60 KiB (leaves headroom for the
+        // encryption framing) and write it into the plugin's allowlisted
+        // cache dir so imageAttach's path-traversal guard accepts the path.
+        let relocatedURL = cacheDir.appendingPathComponent("\(UUID().uuidString).jpg")
+        guard let nsImage = NSImage(contentsOf: url) else {
+            draft.imageError = "Couldn't read image file."
             return
         }
+        guard let jpegData = Self.encodeJPEGFitting(image: nsImage, maxBytes: 60 * 1024) else {
+            draft.imageError = "Couldn't compress image under 60 KiB (NIP-44 v2 plaintext cap)."
+            return
+        }
+        do {
+            try jpegData.write(to: relocatedURL)
+        } catch {
+            draft.imageError = "Couldn't stage image for upload: \(error.localizedDescription)"
+            return
+        }
+        let path = relocatedURL.path
 
         attaching = true
         draft.imageError = nil
         let roomCapture = roomSlug
         Task { @MainActor in
-            defer { attaching = false }
+            defer {
+                attaching = false
+                // The staged JPEG was only needed to hand a path to the
+                // plugin. Whether the upload succeeded or failed, the local
+                // file is no longer useful — Blossom holds the canonical
+                // bytes on success, and on failure we don't auto-retry from
+                // the same path. Clean up so ~/Library/Caches/com.sonata/
+                // doesn't accumulate.
+                try? FileManager.default.removeItem(atPath: path)
+            }
             do {
                 let block = try await store.attachImage(
                     filePath: path,
@@ -762,5 +781,47 @@ private struct BlockEditorRow: View {
                 )
             }
         }
+    }
+
+    /// Re-encode `image` as JPEG, iteratively downscaling + reducing quality
+    /// until output ≤ maxBytes. Targets NIP-44 v2's 65 535-byte plaintext
+    /// ceiling so the plugin's imageAttach can encrypt in one shot.
+    static func encodeJPEGFitting(image: NSImage, maxBytes: Int) -> Data? {
+        let maxDimensions: [CGFloat] = [2048, 1280, 800, 512, 320]
+        let qualities: [CGFloat] = [0.85, 0.7, 0.55, 0.4, 0.25, 0.1]
+        for dim in maxDimensions {
+            guard let scaled = downscale(image: image, longestEdge: dim) else { continue }
+            for q in qualities {
+                guard let data = jpegEncode(image: scaled, quality: q) else { continue }
+                if data.count <= maxBytes { return data }
+            }
+        }
+        return nil
+    }
+
+    private static func downscale(image: NSImage, longestEdge: CGFloat) -> NSImage? {
+        let srcSize = image.size
+        guard srcSize.width > 0, srcSize.height > 0 else { return nil }
+        let longest = max(srcSize.width, srcSize.height)
+        if longest <= longestEdge { return image }
+        let scale = longestEdge / longest
+        let newSize = NSSize(width: floor(srcSize.width * scale), height: floor(srcSize.height * scale))
+        let out = NSImage(size: newSize)
+        out.lockFocus()
+        defer { out.unlockFocus() }
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(
+            in: NSRect(origin: .zero, size: newSize),
+            from: NSRect(origin: .zero, size: srcSize),
+            operation: .copy,
+            fraction: 1.0
+        )
+        return out
+    }
+
+    private static func jpegEncode(image: NSImage, quality: CGFloat) -> Data? {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: quality])
     }
 }
