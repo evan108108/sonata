@@ -22,11 +22,13 @@ struct StudioRoomDetail: View {
     @State private var showInviteSheet: Bool = false
     @State private var showProfileSheet: Bool = false
     @State private var showAdmitSheet: Bool = false
+    @State private var autoRunOverride: StudioAutoRunOverride = .defaultValue
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            StudioAutoRunConsentBanner(roomSlug: room.slug, roomTitle: room.title)
             StudioTrackBar(
                 room: room,
                 store: store,
@@ -99,6 +101,10 @@ struct StudioRoomDetail: View {
             showDispatchTrace = room.dispatchTraceOn
             store.openRoom(room.slug)
             store.markRoomSeen(room.slug)
+            Task {
+                let v = await StudioAutoRunOverrideStore.read(roomSlug: room.slug)
+                await MainActor.run { autoRunOverride = v }
+            }
         }
         .onDisappear {
             store.closeRoom(room.slug)
@@ -215,6 +221,42 @@ struct StudioRoomDetail: View {
             Toggle(isOn: dispatchTraceBinding) {
                 Label("Show dispatch trace", systemImage: "arrow.up.right.diamond")
             }
+            Divider()
+            Menu("Auto-run for this room…") {
+                Button {
+                    Task { await setAutoRunOverride(.defaultValue) }
+                } label: {
+                    HStack {
+                        Text("Use global setting")
+                        if autoRunOverride == .defaultValue {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                Button {
+                    Task { await setAutoRunOverride(.on) }
+                } label: {
+                    HStack {
+                        Text("Always auto-run")
+                        if autoRunOverride == .on {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                Button {
+                    Task { await setAutoRunOverride(.off) }
+                } label: {
+                    HStack {
+                        Text("Never auto-run")
+                        if autoRunOverride == .off {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 14, weight: .regular))
@@ -229,6 +271,11 @@ struct StudioRoomDetail: View {
     }
 
     // MARK: - Bindings
+
+    private func setAutoRunOverride(_ value: StudioAutoRunOverride) async {
+        await StudioAutoRunOverrideStore.write(roomSlug: room.slug, override: value)
+        await MainActor.run { autoRunOverride = value }
+    }
 
     private var dispatchTraceBinding: Binding<Bool> {
         Binding(
