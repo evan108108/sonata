@@ -854,6 +854,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
 struct WorkersView: View {
     @ObservedObject private var manager = WorkerManager.shared
+    @State private var showPromptCachePopover: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -906,14 +907,24 @@ struct WorkersView: View {
             }
             .listStyle(.sidebar)
 
-            PromptCacheStatsPanel()
-
-            HStack {
+            HStack(spacing: 8) {
                 Button(action: { manager.addWorker() }) {
                     Label("Add Worker", systemImage: "plus")
                         .font(.caption)
                 }
                 .buttonStyle(.borderless)
+
+                Button(action: { showPromptCachePopover.toggle() }) {
+                    Image(systemName: "chart.bar")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Prompt cache hit rates")
+                .popover(isPresented: $showPromptCachePopover, arrowEdge: .top) {
+                    PromptCacheStatsPanel()
+                        .frame(width: 320, height: 280)
+                }
+
                 Spacer()
                 Text("\(manager.workers.count) worker\(manager.workers.count == 1 ? "" : "s")")
                     .font(.caption)
@@ -1043,6 +1054,8 @@ struct PromptCacheStatsRow: Identifiable {
     let promptHash: String
     let sampleCount: Int64
     let hitRate: Double?
+    let sessionLabel: String?
+    let cwdBasename: String?
 
     /// Threshold flag from planning doc: enough samples to trust the rate AND
     /// hit rate is below 50%. Sub-floor samples are treated as noise.
@@ -1067,7 +1080,7 @@ final class PromptCacheStatsModel: ObservableObject {
         }
     }
 
-    private func refresh() {
+    func refresh() {
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
         guard let url = URL(string: "http://localhost:\(port)/api/prompt_cache_stats") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
@@ -1083,7 +1096,9 @@ final class PromptCacheStatsModel: ObservableObject {
                     eventType: row["eventType"] as? String ?? "",
                     promptHash: row["promptHash"] as? String ?? "",
                     sampleCount: sample,
-                    hitRate: hr
+                    hitRate: hr,
+                    sessionLabel: row["sessionLabel"] as? String,
+                    cwdBasename: row["cwdBasename"] as? String
                 )
             }
             DispatchQueue.main.async { self?.rows = parsed }
@@ -1093,14 +1108,10 @@ final class PromptCacheStatsModel: ObservableObject {
 
 struct PromptCacheStatsPanel: View {
     @StateObject private var model = PromptCacheStatsModel()
-    @State private var expanded: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Divider()
             HStack(spacing: 6) {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.caption2)
                 Text("Prompt cache")
                     .font(.caption.bold())
                 Spacer()
@@ -1112,56 +1123,59 @@ struct PromptCacheStatsPanel: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .contentShape(Rectangle())
-            .onTapGesture { expanded.toggle() }
 
-            if expanded {
-                if model.rows.isEmpty {
-                    Text("No data yet")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 6)
-                } else {
-                    ScrollView {
-                        VStack(spacing: 0) {
-                            ForEach(model.rows) { row in
-                                HStack(spacing: 6) {
-                                    if row.isLeak {
-                                        Image(systemName: "exclamationmark.triangle.fill")
-                                            .font(.caption2)
-                                            .foregroundStyle(.orange)
-                                    }
-                                    Text("\(row.eventType) · \(row.promptHash)")
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text("\(row.sampleCount)")
+            if model.rows.isEmpty {
+                Text("No data yet")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.rows) { row in
+                            HStack(spacing: 6) {
+                                if row.isLeak {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                                Text(displayLabel(row))
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(row.sampleCount)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: 36, alignment: .trailing)
+                                if let hr = row.hitRate {
+                                    Text(String(format: "%.0f%%", hr * 100))
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(row.isLeak ? .orange : .secondary)
+                                        .frame(width: 36, alignment: .trailing)
+                                } else {
+                                    Text("—")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
                                         .frame(width: 36, alignment: .trailing)
-                                    if let hr = row.hitRate {
-                                        Text(String(format: "%.0f%%", hr * 100))
-                                            .font(.caption2.monospacedDigit())
-                                            .foregroundStyle(row.isLeak ? .orange : .secondary)
-                                            .frame(width: 36, alignment: .trailing)
-                                    } else {
-                                        Text("—")
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
-                                            .frame(width: 36, alignment: .trailing)
-                                    }
                                 }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 3)
                             }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 3)
                         }
                     }
-                    .frame(maxHeight: 160)
                 }
             }
         }
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+        .onAppear { model.refresh() }
+    }
+
+    private func displayLabel(_ row: PromptCacheStatsRow) -> String {
+        let primary = (row.sessionLabel?.isEmpty == false) ? row.sessionLabel! : row.promptHash
+        if let cwd = row.cwdBasename, !cwd.isEmpty {
+            return "\(row.eventType) · \(primary) @ \(cwd)"
+        }
+        return "\(row.eventType) · \(primary)"
     }
 }
