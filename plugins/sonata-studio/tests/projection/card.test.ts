@@ -164,6 +164,57 @@ describe("projectCard", () => {
     expect(memberAttrs!["room_slug"]).toBe("studio-rt");
   });
 
+  test("_profile card with image block populates studio_member.avatar_image_block", async () => {
+    const fake = new FakeMemoryClient();
+    const client = fake.asMemoryClient();
+
+    const authorPub = "b".repeat(64);
+    const rumor = cardRumor({
+      pubkey: authorPub,
+      dTag: `profile:${authorPub}`,
+      eventId: "a".repeat(64),
+    });
+    const imageBlock = {
+      type: "image",
+      sha256: "c".repeat(64),
+      mirrors: ["https://example.test/c.bin"],
+      decrypt_hint: { kind: "nip44-v2", epoch_n: 0 },
+      mime_type: "image/jpeg",
+      blake3: "",
+    };
+    const payload = cardPayload({
+      kind: "_profile",
+      title: "Sona",
+      body: "(hidden)",
+      blocks: [imageBlock],
+    });
+    await projectToMemory(rumor, payload, client);
+
+    const memberAttrs = fake.attrs(`studio:member:studio-rt:${authorPub}`);
+    expect(memberAttrs).not.toBeNull();
+    expect(memberAttrs!["nickname"]).toBe("Sona");
+    const stored = memberAttrs!["avatar_image_block"] as Record<string, unknown>;
+    expect(stored).not.toBeNull();
+    expect(stored["sha256"]).toBe(imageBlock.sha256);
+    expect(stored["mime_type"]).toBe("image/jpeg");
+    expect((stored["decrypt_hint"] as { epoch_n: number }).epoch_n).toBe(0);
+
+    // Republish without blocks clears the avatar.
+    const rumor2 = cardRumor({
+      pubkey: authorPub,
+      dTag: `profile:${authorPub}`,
+      createdAt: rumor.created_at + 10,
+      eventId: "d".repeat(64),
+    });
+    await projectToMemory(
+      rumor2,
+      cardPayload({ kind: "_profile", title: "Sona", body: "(hidden)" }),
+      client,
+    );
+    const after = fake.attrs(`studio:member:studio-rt:${authorPub}`);
+    expect(after!["avatar_image_block"]).toBeNull();
+  });
+
   test("Track event clears the auto_created flag from a stub", async () => {
     const fake = new FakeMemoryClient();
     const client = fake.asMemoryClient();

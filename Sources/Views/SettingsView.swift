@@ -589,11 +589,38 @@ private struct AddSecretSheet: View {
 /// observes the same row and picks up changes automatically.
 struct StudioSettingsView: View {
     @State private var nickname: String = ""
+    @State private var avatarPath: String? = nil
     @State private var savedFlash: Bool = false
     @State private var saving: Bool = false
+    @State private var pickerError: String? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
+                StudioLocalAvatarPreview(path: avatarPath, diameter: 56)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Default avatar")
+                        .font(.body)
+                    Text("Federated alongside your nickname on the next room you post in or join. Re-encoded as a small JPEG and re-encrypted per room.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Choose…") { pickAvatar() }
+                            .buttonStyle(.bordered)
+                        Button("Clear") { clearAvatar() }
+                            .buttonStyle(.bordered)
+                            .disabled(avatarPath == nil)
+                    }
+                    if let err = pickerError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Default nickname")
@@ -621,28 +648,50 @@ struct StudioSettingsView: View {
                 .disabled(saving)
             }
             .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.bottom, 8)
         }
         .onAppear(perform: load)
     }
 
     private func load() {
         Task {
-            if let s = await EntityHTTP.readDefaultNickname() {
-                await MainActor.run { nickname = s }
+            async let nick = EntityHTTP.readDefaultNickname()
+            async let path = EntityHTTP.readDefaultAvatarLocalPath()
+            let (n, p) = await (nick, path)
+            await MainActor.run {
+                if let n = n { nickname = n }
+                avatarPath = p
             }
         }
     }
 
+    private func pickAvatar() {
+        pickerError = nil
+        do {
+            guard let path = try StudioAvatarPicker.pickAndStage() else { return }
+            avatarPath = path
+            persistProfile()
+        } catch {
+            pickerError = error.localizedDescription
+        }
+    }
+
+    private func clearAvatar() {
+        avatarPath = nil
+        pickerError = nil
+        persistProfile()
+    }
+
     private func save() {
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        nickname = trimmed
         saving = true
         Task {
             await EntityHTTP.upsertEntity(
                 name: "studio:user_profile",
                 type: "studio_user_profile",
                 description: "Local default profile (machine-only, not federated directly)",
-                attributes: ["default_nickname": trimmed]
+                attributes: profileAttributes()
             )
             await MainActor.run {
                 saving = false
@@ -651,5 +700,26 @@ struct StudioSettingsView: View {
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             await MainActor.run { savedFlash = false }
         }
+    }
+
+    private func persistProfile() {
+        Task {
+            await EntityHTTP.upsertEntity(
+                name: "studio:user_profile",
+                type: "studio_user_profile",
+                description: "Local default profile (machine-only, not federated directly)",
+                attributes: profileAttributes()
+            )
+        }
+    }
+
+    private func profileAttributes() -> [String: Any] {
+        var attrs: [String: Any] = [
+            "default_nickname": nickname.trimmingCharacters(in: .whitespacesAndNewlines),
+        ]
+        // Persist the avatar path even when empty so a Clear action erases
+        // it server-side rather than leaving the prior value behind.
+        attrs["default_avatar_local_path"] = avatarPath ?? ""
+        return attrs
     }
 }

@@ -39,6 +39,7 @@ struct StudioCardDetailDrawer: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    authorByline
                     if !card.body.isEmpty {
                         // Render the body as markdown above the block list,
                         // reusing TextBlockView so the visual matches inline
@@ -192,6 +193,26 @@ struct StudioCardDetailDrawer: View {
         return nil
     }
 
+    @ViewBuilder
+    private var authorByline: some View {
+        HStack(spacing: 8) {
+            StudioAvatarView(
+                store: store,
+                pubkeyHex: card.createdByPubkey,
+                roomSlug: card.roomSlug,
+                diameter: 24
+            )
+            VStack(alignment: .leading, spacing: 1) {
+                Text(store.displayName(for: card.createdByPubkey, in: card.roomSlug))
+                    .font(.system(size: 12, weight: .medium))
+                Text(StudioCardRow.relativeTime(from: card.createdAtSeconds))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
     // MARK: - Block list (foldable)
 
     @ViewBuilder
@@ -233,7 +254,8 @@ struct StudioCardDetailDrawer: View {
                     CommentRow(
                         comment: comment,
                         authorName: store.displayName(for: comment.createdByPubkey, in: comment.roomSlug),
-                        isOptimistic: optimisticIds.contains(comment.id)
+                        isOptimistic: optimisticIds.contains(comment.id),
+                        store: store
                     )
                 }
             }
@@ -357,10 +379,19 @@ struct CommentRow: View {
     let comment: StudioComment
     let authorName: String
     var isOptimistic: Bool = false
+    var store: StudioStore? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
+                if let store {
+                    StudioAvatarView(
+                        store: store,
+                        pubkeyHex: comment.createdByPubkey,
+                        roomSlug: comment.roomSlug,
+                        diameter: 16
+                    )
+                }
                 Text(authorName)
                     .font(.caption)
                     .foregroundStyle(.primary)

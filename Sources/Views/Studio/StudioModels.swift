@@ -414,6 +414,18 @@ struct StudioMember: Equatable, Identifiable {
     /// non-empty for per-room `studio:member:<room>:<pubkey>` entities written
     /// by the projector when it sees a `_profile` card.
     let roomSlug: String
+    /// Parsed avatar `image` block from the per-room `_profile` card, if any.
+    /// Nil for cross-room members and for per-room members without an avatar.
+    /// Renderer fetches via `StudioImageFetcher.image(for:room:authorPubHex:)`.
+    let avatarImageBlock: StudioImageBlock?
+
+    static func == (lhs: StudioMember, rhs: StudioMember) -> Bool {
+        return lhs.id == rhs.id
+            && lhs.pubkeyHex == rhs.pubkeyHex
+            && lhs.nickname == rhs.nickname
+            && lhs.roomSlug == rhs.roomSlug
+            && lhs.avatarImageBlock == rhs.avatarImageBlock
+    }
 
     init(row: Row) throws {
         guard let id = row["id"] as String? else {
@@ -425,6 +437,13 @@ struct StudioMember: Equatable, Identifiable {
         self.pubkeyHex = (raw["pubkey_hex"] as? String) ?? ""
         self.nickname = raw["nickname"] as? String
         self.roomSlug = (raw["room_slug"] as? String) ?? ""
+        if let dict = raw["avatar_image_block"] as? [String: Any],
+           let blockData = try? JSONSerialization.data(withJSONObject: dict),
+           let parsed = try? JSONDecoder().decode(StudioImageBlock.self, from: blockData) {
+            self.avatarImageBlock = parsed
+        } else {
+            self.avatarImageBlock = nil
+        }
     }
 
     var displayName: String { nickname ?? Hex.npubShort(pubkeyHex) }

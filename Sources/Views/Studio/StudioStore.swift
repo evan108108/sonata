@@ -1,4 +1,5 @@
 import Combine
+import CoreGraphics
 import Foundation
 import GRDB
 
@@ -24,6 +25,14 @@ final class StudioStore: ObservableObject {
     /// each room via auto-publish of a `_profile` card. Empty until the user
     /// sets one in Settings → Studio.
     @Published private(set) var defaultNickname: String = ""
+    /// Local-only filesystem path to the user's default avatar source image.
+    /// Stored as a path (not encrypted-to-self bytes) for simplicity; the path
+    /// is re-uploaded via `imageAttach` against each room's epoch at publish
+    /// time. Empty/nil until the user picks one in Settings → Studio.
+    /// Lives under `~/Library/Application Support/Sonata/avatars/` so the
+    /// compose sheet's `~/Library/Caches/com.sonata` defer-cleanup doesn't
+    /// reap it.
+    @Published private(set) var defaultAvatarLocalPath: String? = nil
     @Published private(set) var optimisticCards: [String: StudioCard] = [:]
     @Published private(set) var optimisticComments: [String: StudioComment] = [:]
     /// Card eventIds the local user just asked to delete. Drives an instant
@@ -178,21 +187,27 @@ final class StudioStore: ObservableObject {
     }
 
     private func startUserProfileObservation() {
-        let observation = ValueObservation.tracking { db -> String in
+        let observation = ValueObservation.tracking { db -> (nickname: String, avatarPath: String?) in
             let rows = try Row.fetchAll(db, sql: Self.SQL_USER_PROFILE)
             for row in rows {
                 let attrsRaw = (row["attributes"] as String?) ?? "{}"
                 let raw = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
-                if let nick = raw["default_nickname"] as? String { return nick }
+                let nick = (raw["default_nickname"] as? String) ?? ""
+                let path = raw["default_avatar_local_path"] as? String
+                let normalized = (path?.isEmpty ?? true) ? nil : path
+                return (nick, normalized)
             }
-            return ""
+            return ("", nil)
         }
         cancellables["user_profile"] = observation.start(
             in: requirePool(),
             scheduling: .async(onQueue: .main),
             onError: { error in NSLog("[StudioStore] user_profile observation error: \(error)") },
-            onChange: { [weak self] nick in
-                MainActor.assumeIsolated { self?.defaultNickname = nick }
+            onChange: { [weak self] tuple in
+                MainActor.assumeIsolated {
+                    self?.defaultNickname = tuple.nickname
+                    self?.defaultAvatarLocalPath = tuple.avatarPath
+                }
             }
         )
     }
@@ -216,8 +231,17 @@ final class StudioStore: ObservableObject {
     /// `StudioPluginError` on plugin failure. The card itself is filtered
     /// out of the UI (see `isReservedCardKind`); its only effect is the
     /// projector's `studio_member` upsert.
+    ///
+    /// When `avatarLocalPath` is non-nil and the file exists, the image is
+    /// uploaded via `attachImage` (encrypted against the room's epoch) and
+    /// the returned block is included in the card's `blocks[]`. Republishing
+    /// without an avatar clears it (projector treats missing block as nil).
     @discardableResult
-    func publishProfileCard(roomSlug: String, nickname: String) async throws -> String {
+    func publishProfileCard(
+        roomSlug: String,
+        nickname: String,
+        avatarLocalPath: String? = nil
+    ) async throws -> String {
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw StudioPluginError(
@@ -234,6 +258,26 @@ final class StudioStore: ObservableObject {
                 message: "Sonata hasn't learned its own pubkey from the plugin yet."
             )
         }
+
+        var blocks: [[String: Any]] = []
+        if let path = avatarLocalPath,
+           !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            do {
+                let block = try await attachImage(
+                    filePath: path,
+                    roomSlug: roomSlug,
+                    mimeType: "image/jpeg"
+                )
+                blocks.append(block)
+            } catch {
+                // Avatar upload failure shouldn't drop the nickname republish —
+                // log it and continue with a blocks-less card. The user can
+                // retry the avatar from Settings or the room picker.
+                NSLog("[StudioStore] publishProfileCard avatar upload failed room=\(roomSlug): \(error)")
+            }
+        }
+
         // The renderer's existing `postCard` already wraps the plugin call.
         // We pin the d_tag to `profile:<pub>` so this card is replaceable
         // per-author per-room.
@@ -243,7 +287,7 @@ final class StudioStore: ObservableObject {
             kind: "_profile",
             title: trimmed,
             body: "(profile card — nickname carrier; hidden from the card list)",
-            blocks: [],
+            blocks: blocks,
             relatedTo: [],
             tagsList: [],
             dTag: "profile:\(me)"
@@ -254,6 +298,7 @@ final class StudioStore: ObservableObject {
     /// paths. No-op if defaultNickname is empty OR if this user already has
     /// a `_profile` card in the room. Errors are logged, not surfaced — the
     /// user's primary action shouldn't fail because the side-channel hiccuped.
+    /// If `defaultAvatarLocalPath` is set, the avatar is included too.
     func autoPublishProfileIfNeeded(roomSlug: String) {
         let nickname = defaultNickname.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !nickname.isEmpty else { return }
@@ -264,9 +309,14 @@ final class StudioStore: ObservableObject {
            let n = existing.nickname, !n.isEmpty {
             return
         }
+        let avatarPath = defaultAvatarLocalPath
         Task { @MainActor in
             do {
-                _ = try await publishProfileCard(roomSlug: roomSlug, nickname: nickname)
+                _ = try await publishProfileCard(
+                    roomSlug: roomSlug,
+                    nickname: nickname,
+                    avatarLocalPath: avatarPath
+                )
             } catch {
                 NSLog("[StudioStore] autoPublishProfile(\(roomSlug)) failed: \(error)")
             }
@@ -280,12 +330,59 @@ final class StudioStore: ObservableObject {
     /// onto the wire as a `_profile` card per room.
     func setDefaultNickname(_ nickname: String) async {
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        var attrs: [String: Any] = ["default_nickname": trimmed]
+        if let path = defaultAvatarLocalPath, !path.isEmpty {
+            attrs["default_avatar_local_path"] = path
+        }
         await EntityHTTP.upsertEntity(
             name: "studio:user_profile",
             type: "studio_user_profile",
             description: "Local default profile (machine-only, not federated directly)",
-            attributes: ["default_nickname": trimmed]
+            attributes: attrs
         )
+    }
+
+    /// Persist the machine-local default avatar source path. Pass nil/empty
+    /// to clear. The path is stored verbatim; the observation re-publishes
+    /// `defaultAvatarLocalPath` so the Settings preview and any open picker
+    /// sheets update. The avatar is re-encrypted and uploaded per-room at
+    /// publish time (see `publishProfileCard`).
+    func setDefaultAvatarLocalPath(_ path: String?) async {
+        let cleaned = (path?.trimmingCharacters(in: .whitespaces).isEmpty ?? true) ? "" : path!
+        // Carry the nickname forward in the same upsert so we don't blow it
+        // away when the user only changes the avatar.
+        let attrs: [String: Any] = [
+            "default_nickname": defaultNickname,
+            "default_avatar_local_path": cleaned,
+        ]
+        await EntityHTTP.upsertEntity(
+            name: "studio:user_profile",
+            type: "studio_user_profile",
+            description: "Local default profile (machine-only, not federated directly)",
+            attributes: attrs
+        )
+    }
+
+    /// Resolve the per-room avatar `image` block for `pubkeyHex` in
+    /// `roomSlug`, fetch + decrypt via the shared `StudioImageFetcher`, and
+    /// return the decoded CGImage. Returns nil for missing avatars, missing
+    /// fetchers, or any decode/fetch failure (caller shows a placeholder).
+    func avatarImage(for pubkeyHex: String, in roomSlug: String) async -> CGImage? {
+        let lower = pubkeyHex.lowercased()
+        guard let member = roomMembers["\(roomSlug)|\(lower)"],
+              let block = member.avatarImageBlock,
+              let fetcher = imageFetcher else {
+            return nil
+        }
+        do {
+            return try await fetcher.image(
+                for: block,
+                room: roomSlug,
+                authorPubHex: lower
+            )
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Per-room observations (lifecycle)
@@ -1396,6 +1493,19 @@ enum EntityHTTP {
     /// the read failed transiently — the Settings pane treats nil as empty
     /// and keeps the user's in-progress edits.
     static func readDefaultNickname() async -> String? {
+        return await readUserProfileAttribute(name: "default_nickname")
+    }
+
+    /// Companion to `readDefaultNickname` — returns the saved avatar source
+    /// path (empty string treated as nil). Same fault tolerance: any failure
+    /// resolves to nil so the Settings pane keeps the user's pending edits.
+    static func readDefaultAvatarLocalPath() async -> String? {
+        let v = await readUserProfileAttribute(name: "default_avatar_local_path")
+        guard let v = v, !v.isEmpty else { return nil }
+        return v
+    }
+
+    private static func readUserProfileAttribute(name attribute: String) async -> String? {
         var comps = URLComponents(url: baseURL.appendingPathComponent("api/entity"), resolvingAgainstBaseURL: false)!
         comps.queryItems = [URLQueryItem(name: "name", value: "studio:user_profile")]
         guard let url = comps.url else { return nil }
@@ -1407,7 +1517,7 @@ enum EntityHTTP {
             let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let attrsRaw = (obj?["attributes"] as? String) ?? "{}"
             let attrs = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
-            return attrs["default_nickname"] as? String
+            return attrs[attribute] as? String
         } catch {
             return nil
         }

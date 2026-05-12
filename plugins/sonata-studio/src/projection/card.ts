@@ -133,7 +133,8 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
   // extra entity writes on top. See §"Reserved card kinds" below.
   const cardKindStr = typeof payload["kind"] === "string" ? (payload["kind"] as string) : "";
   if (cardKindStr.startsWith("_profile")) {
-    await upsertRoomMember(ctx, attributes["title"] as string);
+    const blocksArr = Array.isArray(payload["blocks"]) ? (payload["blocks"] as unknown[]) : [];
+    await upsertRoomMember(ctx, attributes["title"] as string, blocksArr);
   }
 }
 
@@ -144,9 +145,12 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
 // projector MAY layer additional entity writes on top.
 //
 // Defined today:
-//   `_profile` — author's nickname in this room. Title field carries the
-//                nickname. d_tag MUST be `profile:<lowercase-pubkey>` so
-//                re-publishes overwrite.
+//   `_profile` — author's nickname (and optional avatar) in this room. Title
+//                field carries the nickname; `blocks[]` MAY include one
+//                `image` block, which the projector persists as the
+//                `studio_member.avatar_image_block` dict so renderers can
+//                fetch via the existing image pipeline. d_tag MUST be
+//                `profile:<lowercase-pubkey>` so re-publishes overwrite.
 //
 // New `_`-prefixed kinds should keep the contract: the original studio_card
 // projection still happens, the side-effect is additive, and the UI filter
@@ -155,10 +159,26 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
 async function upsertRoomMember(
   ctx: ProjectionContext,
   rawTitle: string | undefined,
+  blocks: unknown[],
 ): Promise<void> {
   const { client, roomSlug, createdByPubkey } = ctx;
   const nickname = typeof rawTitle === "string" ? rawTitle.trim() : "";
   if (nickname.length === 0) return;
+
+  // First image block (if any) becomes the avatar. Persisted as the full
+  // block dict so the renderer's StudioImageFetcher can fetch + decrypt via
+  // the same path it uses for in-card images. Avatar is per-room because the
+  // image block's `decrypt_hint.epoch_n` is bound to this room's epoch.
+  let avatarBlock: Record<string, unknown> | null = null;
+  for (const b of blocks) {
+    if (b && typeof b === "object") {
+      const bd = b as Record<string, unknown>;
+      if (bd["type"] === "image" && typeof bd["sha256"] === "string") {
+        avatarBlock = bd;
+        break;
+      }
+    }
+  }
 
   // Per-room member entity. Distinct from the cross-room `studio:member:<pub>`
   // used by `ensureMember()` for relation targets — those keep their existing
@@ -166,17 +186,21 @@ async function upsertRoomMember(
   const name = `studio:member:${roomSlug}:${createdByPubkey}`;
   const existing = await client.entity.byNameOrNull(name);
   const existingAttrs = parseExistingAttributes(existing?.attributes);
+  // Republish without an image clears the avatar — last-write-wins per
+  // `_profile` card, mirroring how nickname overwrites work.
+  const nextAttrs: Record<string, unknown> = {
+    ...existingAttrs,
+    pubkey_hex: createdByPubkey,
+    room_slug: roomSlug,
+    nickname,
+    avatar_image_block: avatarBlock,
+    tags: ["sonata-studio", "studio-member", `room:${roomSlug}`],
+  };
   await client.entity.upsert({
     name,
     type: "studio_member",
     description: `Studio member ${createdByPubkey.slice(0, 8)}… in ${roomSlug}`,
-    attributes: {
-      ...existingAttrs,
-      pubkey_hex: createdByPubkey,
-      room_slug: roomSlug,
-      nickname,
-      tags: ["sonata-studio", "studio-member", `room:${roomSlug}`],
-    },
+    attributes: nextAttrs,
   });
 }
 

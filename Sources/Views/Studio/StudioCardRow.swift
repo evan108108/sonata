@@ -56,6 +56,14 @@ struct StudioCardRow: View {
                 }
 
                 HStack(spacing: 6) {
+                    if let store {
+                        StudioAvatarView(
+                            store: store,
+                            pubkeyHex: card.createdByPubkey,
+                            roomSlug: card.roomSlug,
+                            diameter: 16
+                        )
+                    }
                     Text(authorName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
