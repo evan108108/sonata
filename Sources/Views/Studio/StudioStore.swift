@@ -745,7 +745,8 @@ final class StudioStore: ObservableObject {
         body: String? = nil,
         blocks: [[String: Any]]? = nil,
         tagsList: [String]? = nil,
-        relatedTo: [String]? = nil
+        relatedTo: [String]? = nil,
+        assigneePubkey: String?? = nil
     ) async throws -> String {
         guard let original = findCard(roomSlug: roomSlug, dTag: dTag, eventId: eventId) else {
             throw StudioPluginError(
@@ -781,6 +782,16 @@ final class StudioStore: ObservableObject {
         if let b = blocks { requestBody["blocks"] = b }
         if let r = relatedTo { requestBody["related_to"] = r }
         if let t = tagsList { requestBody["tags"] = t }
+        if let outer = assigneePubkey {
+            // Double-optional convention: outer .some means "caller asked to
+            // change the assignment"; the inner Optional carries the new
+            // value (nil → unassign). Outer .none means "preserve existing."
+            if let pk = outer, !pk.isEmpty {
+                requestBody["assignees"] = [pk.lowercased()]
+            } else {
+                requestBody["assignees"] = [] as [String]
+            }
+        }
 
         do {
             struct Resp: Decodable {
@@ -1209,7 +1220,8 @@ final class StudioStore: ObservableObject {
         blocks: [[String: Any]],
         relatedTo: [String],
         tagsList: [String],
-        dTag: String?
+        dTag: String?,
+        assigneePubkey: String? = nil
     ) async throws -> String {
         var requestBody: [String: Any] = [
             "room": room,
@@ -1226,6 +1238,9 @@ final class StudioStore: ObservableObject {
         if !relatedTo.isEmpty { requestBody["related_to"] = relatedTo }
         if !tagsList.isEmpty { requestBody["tags"] = tagsList }
         if let d = dTag, !d.isEmpty { requestBody["d_tag"] = d }
+        if let pk = assigneePubkey, !pk.isEmpty {
+            requestBody["assignees"] = [pk.lowercased()]
+        }
 
         let result: CardPostResponse = try await EntityHTTP.postPluginActionRaw(
             path: "sonata-studio/card/post",

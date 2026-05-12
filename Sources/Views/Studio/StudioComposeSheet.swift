@@ -24,6 +24,11 @@ struct StudioComposeSheet: View {
     @State private var bodyText: String = ""
     @State private var blocks: [BlockDraft] = []
     @State private var tagsRaw: String = ""
+    /// Selected assignee pubkey (lowercase hex); nil means unassigned. The
+    /// compose UI enforces single-assignee; the wire still stores
+    /// `assignees: [pubkey]` for forward compatibility.
+    @State private var assigneePubkey: String? = nil
+    @State private var showAssigneePicker: Bool = false
     /// In edit mode, the effective track is editable — the field is set
     /// from `editingCard.trackSlug` on appear and patched by the user via a
     /// picker. In new-card mode it's pinned to the parent's `trackSlug` so
@@ -70,6 +75,7 @@ struct StudioComposeSheet: View {
                 VStack(alignment: .leading, spacing: 14) {
                     kindRow
                     if isEditMode { trackRow }
+                    assignRow
                     titleRow
                     bodyRow
                     blocksSection
@@ -147,6 +153,56 @@ struct StudioComposeSheet: View {
             }
             .pickerStyle(.menu)
             .labelsHidden()
+        }
+    }
+
+    private var assignRow: some View {
+        HStack(spacing: 12) {
+            Text("Assign")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            Button {
+                showAssigneePicker = true
+            } label: {
+                HStack(spacing: 6) {
+                    if let pk = assigneePubkey, !pk.isEmpty {
+                        StudioAvatarView(
+                            store: store,
+                            pubkeyHex: pk,
+                            roomSlug: roomSlug,
+                            diameter: 18
+                        )
+                        Text(store.displayName(for: pk, in: roomSlug))
+                            .font(.system(size: 12, weight: .medium))
+                    } else {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .foregroundStyle(.secondary)
+                        Text("Unassigned")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.05), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showAssigneePicker, arrowEdge: .bottom) {
+                AssigneePickerPopover(
+                    store: store,
+                    roomSlug: roomSlug,
+                    currentAssignee: assigneePubkey,
+                    onPick: { pk in
+                        assigneePubkey = pk?.lowercased()
+                        showAssigneePicker = false
+                    }
+                )
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -328,7 +384,8 @@ struct StudioComposeSheet: View {
                     blocks: blockPayload,
                     relatedTo: [],
                     tagsList: tagsParsed,
-                    dTag: nil
+                    dTag: nil,
+                    assigneePubkey: assigneePubkey
                 )
                 store.setOptimisticEventId(clientId: clientId, eventId: eventId)
                 dismiss()
@@ -371,7 +428,8 @@ struct StudioComposeSheet: View {
                     body: trimmedBody,
                     blocks: blockPayload,
                     tagsList: tagsParsed,
-                    relatedTo: card.relatedTo
+                    relatedTo: card.relatedTo,
+                    assigneePubkey: .some(assigneePubkey)
                 )
                 dismiss()
             } catch {
@@ -436,6 +494,7 @@ struct StudioComposeSheet: View {
         bodyText = card.body
         tagsRaw = card.tagsList.joined(separator: ", ")
         editingTrackSlug = card.trackSlug
+        assigneePubkey = card.assigneePubkey
 
         var drafts: [BlockDraft] = []
         var passthrough: [[String: Any]] = []
