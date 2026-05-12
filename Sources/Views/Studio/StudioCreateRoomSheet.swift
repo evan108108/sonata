@@ -5,6 +5,11 @@ struct StudioCreateRoomSheet: View {
     @ObservedObject var store: StudioStore
     @Environment(\.dismiss) private var dismiss
 
+    /// Notify the parent when create succeeds. Carries the slug + final
+    /// title so the sidebar can preselect the row and surface the
+    /// profile-picker sheet for the newly-founded room.
+    var onCreated: ((_ slug: String, _ title: String) -> Void)? = nil
+
     @State private var title: String = ""
     @State private var description: String = ""
     @State private var tracks: [DraftTrack] = [DraftTrack(title: "General")]
@@ -274,14 +279,17 @@ struct StudioCreateRoomSheet: View {
         let trimmedDescription = description.isEmpty ? nil : description
 
         do {
+            let finalSlug = derivedSlug
+            let finalTitle = title
             _ = try await store.createRoom(
-                slug: derivedSlug,
-                title: title,
+                slug: finalSlug,
+                title: finalTitle,
                 description: trimmedDescription,
                 defaultTracks: payloadTracks
             )
             isSubmitting = false
             dismiss()
+            onCreated?(finalSlug, finalTitle)
         } catch {
             isSubmitting = false
             submitError = "Couldn't create room: \(error.localizedDescription)"

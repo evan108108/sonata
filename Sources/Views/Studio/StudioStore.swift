@@ -148,7 +148,10 @@ final class StudioStore: ObservableObject {
                 NSLog("[StudioStore] rooms observation error: \(error)")
             },
             onChange: { [weak self] rooms in
-                MainActor.assumeIsolated { self?.rooms = rooms }
+                MainActor.assumeIsolated {
+                    self?.rooms = rooms
+                    self?.processDeferredProfilesOnRoomChange()
+                }
             }
         )
         cancellables["rooms"] = cancellable
@@ -361,6 +364,64 @@ final class StudioStore: ObservableObject {
             description: "Local default profile (machine-only, not federated directly)",
             attributes: attrs
         )
+    }
+
+    /// Queue a profile publish to fire when `roomSlug` transitions out of
+    /// `pending-grant` into `active`. Used by the profile-picker sheet when
+    /// the user joins a room that requires founder admit — we can't publish
+    /// a `_profile` card until we have the room epoch key, but we want to
+    /// honor the user's choice once that key arrives.
+    ///
+    /// At most one deferred entry per room: a second call overwrites the
+    /// first (last-write-wins, mirroring how `_profile` itself replaces).
+    func deferProfilePublish(roomSlug: String, nickname: String, avatarLocalPath: String?) {
+        let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            deferredProfilePublishes.removeValue(forKey: roomSlug)
+            return
+        }
+        deferredProfilePublishes[roomSlug] = DeferredProfile(
+            nickname: trimmed,
+            avatarLocalPath: avatarLocalPath
+        )
+        // Best-effort opportunistic flush: if the room is already active by
+        // the time we got here (race between picker open and SSE state flip)
+        // we don't need to wait for the next ValueObservation cycle.
+        flushDeferredProfileIfActive(slug: roomSlug)
+    }
+
+    private struct DeferredProfile {
+        let nickname: String
+        let avatarLocalPath: String?
+    }
+    private var deferredProfilePublishes: [String: DeferredProfile] = [:]
+
+    private func flushDeferredProfileIfActive(slug: String) {
+        guard let deferred = deferredProfilePublishes[slug] else { return }
+        guard let room = rooms.first(where: { $0.slug == slug }), room.state == "active" else {
+            return
+        }
+        deferredProfilePublishes.removeValue(forKey: slug)
+        Task { @MainActor in
+            do {
+                _ = try await publishProfileCard(
+                    roomSlug: slug,
+                    nickname: deferred.nickname,
+                    avatarLocalPath: deferred.avatarLocalPath
+                )
+            } catch {
+                NSLog("[StudioStore] deferred publishProfileCard(\(slug)) failed: \(error)")
+            }
+        }
+    }
+
+    /// Hook called from the rooms ValueObservation onChange: scan deferred
+    /// entries and flush any whose room is now active. Kept on the main
+    /// actor since both the deferred map and `rooms` are main-isolated.
+    private func processDeferredProfilesOnRoomChange() {
+        for slug in Array(deferredProfilePublishes.keys) {
+            flushDeferredProfileIfActive(slug: slug)
+        }
     }
 
     /// Resolve the per-room avatar `image` block for `pubkeyHex` in

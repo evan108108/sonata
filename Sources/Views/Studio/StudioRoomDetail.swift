@@ -20,8 +20,6 @@ struct StudioRoomDetail: View {
     /// don't clobber each other if a user opens both in quick succession.
     @State private var editingCard: StudioCard? = nil
     @State private var showInviteSheet: Bool = false
-    @State private var admitInFlight: Bool = false
-    @State private var admitToast: InlineToast? = nil
     @State private var showProfileSheet: Bool = false
     @State private var showAdmitSheet: Bool = false
 
@@ -79,10 +77,13 @@ struct StudioRoomDetail: View {
             )
         }
         .sheet(isPresented: $showProfileSheet) {
-            StudioRoomProfileSheet(
+            StudioProfilePickerSheet(
                 store: store,
                 roomSlug: room.slug,
-                roomTitle: room.title
+                roomTitle: room.title,
+                forceImmediatePublish: true,
+                initialPerRoomNickname: store.currentRoomNickname(for: room.slug),
+                initialPerRoomAvatarPath: nil
             )
         }
         .sheet(isPresented: $showAdmitSheet) {
@@ -92,7 +93,6 @@ struct StudioRoomDetail: View {
                 roomTitle: room.title
             )
         }
-        .overlay(alignment: .top) { admitToastOverlay }
         .animation(.easeOut(duration: 0.18), value: selectedCard?.eventId)
         .onChange(of: room.slug) { _, _ in selectedCard = nil }
         .onAppear {
@@ -204,13 +204,12 @@ struct StudioRoomDetail: View {
                     Label("Admit pending member(s)…",
                           systemImage: "checkmark.seal")
                 }
-                .disabled(admitInFlight)
                 Divider()
             }
             Button {
                 showProfileSheet = true
             } label: {
-                Label("Your nickname in this room…", systemImage: "person.text.rectangle")
+                Label("Your profile in this room…", systemImage: "person.text.rectangle")
             }
             Divider()
             Toggle(isOn: dispatchTraceBinding) {
@@ -227,74 +226,6 @@ struct StudioRoomDetail: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Room settings")
-    }
-
-    @ViewBuilder
-    private var admitToastOverlay: some View {
-        if let toast = admitToast {
-            HStack(spacing: 8) {
-                Image(systemName: toast.symbol)
-                    .foregroundStyle(toast.tint)
-                Text(toast.text)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.thickMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.secondary.opacity(0.25), lineWidth: 0.5))
-            .padding(.top, 12)
-            .transition(.move(edge: .top).combined(with: .opacity))
-            .onAppear { scheduleAdmitToastDismiss(id: toast.id) }
-        }
-    }
-
-    private func runAdmit() async {
-        guard !admitInFlight else { return }
-        admitInFlight = true
-        defer { admitInFlight = false }
-        do {
-            let result = try await store.admitRoom(slug: room.slug, maxAdmit: nil)
-            let n = result.admitted.count
-            let text: String
-            let symbol: String
-            let tint: Color
-            if n == 0 {
-                text = "No pending claims to admit."
-                symbol = "info.circle"
-                tint = .secondary
-            } else {
-                text = "Admitted \(n) member\(n == 1 ? "" : "s") · epoch \(result.newEpoch)"
-                symbol = "checkmark.circle.fill"
-                tint = .green
-            }
-            showAdmitToast(InlineToast(text: text, symbol: symbol, tint: tint))
-        } catch let err as StudioPluginError {
-            showAdmitToast(InlineToast(
-                text: err.message,
-                symbol: "exclamationmark.triangle.fill",
-                tint: .red
-            ))
-        } catch {
-            showAdmitToast(InlineToast(
-                text: "Admit failed: \(error.localizedDescription)",
-                symbol: "exclamationmark.triangle.fill",
-                tint: .red
-            ))
-        }
-    }
-
-    private func showAdmitToast(_ toast: InlineToast) {
-        withAnimation(.easeOut(duration: 0.2)) { admitToast = toast }
-    }
-
-    private func scheduleAdmitToastDismiss(id: UUID) {
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            if admitToast?.id == id {
-                withAnimation(.easeIn(duration: 0.2)) { admitToast = nil }
-            }
-        }
     }
 
     // MARK: - Bindings

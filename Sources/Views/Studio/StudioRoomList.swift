@@ -11,6 +11,16 @@ struct StudioRoomList: View {
     @State private var roomPendingDelete: StudioRoom?
     @State private var showDeleteAlert: Bool = false
     @State private var joinToast: InlineToast?
+    /// Identifier+slug for the just-created-or-joined room. Drives the
+    /// profile-picker sheet that surfaces after the create/join sheet
+    /// dismisses. Non-nil ↔ picker is presented.
+    @State private var pickerContext: PickerContext? = nil
+
+    private struct PickerContext: Identifiable, Equatable {
+        let id = UUID()
+        let slug: String
+        let title: String
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,12 +33,21 @@ struct StudioRoomList: View {
         .background(Color(NSColor.windowBackgroundColor))
         .overlay(alignment: .bottom) { joinToastOverlay }
         .sheet(isPresented: $showCreateSheet) {
-            StudioCreateRoomSheet(store: store)
+            StudioCreateRoomSheet(store: store) { slug, title in
+                handleCreated(slug: slug, title: title)
+            }
         }
         .sheet(isPresented: $showJoinSheet) {
             StudioJoinRoomSheet(store: store) { slug, state in
                 handleJoined(slug: slug, state: state)
             }
+        }
+        .sheet(item: $pickerContext) { ctx in
+            StudioProfilePickerSheet(
+                store: store,
+                roomSlug: ctx.slug,
+                roomTitle: ctx.title
+            )
         }
         .alert(
             "Delete '\(roomPendingDelete?.title ?? "")'?",
@@ -135,6 +154,20 @@ struct StudioRoomList: View {
         withAnimation(.easeOut(duration: 0.2)) {
             joinToast = toast
         }
+        // Present the profile picker. For pending-grant the picker queues a
+        // deferred publish that fires when the room transitions to active.
+        let title = store.rooms.first(where: { $0.slug == slug })?.title ?? slug
+        pickerContext = PickerContext(slug: slug, title: title)
+    }
+
+    private func handleCreated(slug: String, title: String) {
+        if let room = store.rooms.first(where: { $0.slug == slug }) {
+            selectedRoom = room
+        }
+        // Founder is already active in the room they just created, so the
+        // picker publishes immediately on Save. "Skip" preserves the legacy
+        // auto-publish-on-first-post behavior.
+        pickerContext = PickerContext(slug: slug, title: title)
     }
 
     private func scheduleToastDismiss(id: UUID) {
