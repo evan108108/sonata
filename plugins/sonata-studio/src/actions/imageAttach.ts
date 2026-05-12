@@ -58,7 +58,7 @@ const BLOSSOM_AUTH_KIND = 24242;
 
 // Default Blossom server. Overridable via ctx.cfg.blossomBaseURL (renderer
 // Settings → Blossom server URL).
-const DEFAULT_BLOSSOM_URL = "https://blossom.band";
+const DEFAULT_BLOSSOM_URL = "https://blossom.primal.net";
 
 function allowedRoots(): string[] {
   return [
