@@ -197,6 +197,82 @@ final class StudioStore: ObservableObject {
         )
     }
 
+    /// Return the current per-room nickname for the local user, if any. Used
+    /// by the per-room editor sheet to pre-populate; falls back to the
+    /// default nickname (which may also be empty).
+    func currentRoomNickname(for roomSlug: String) -> String {
+        let me = currentPubkeyHex.lowercased()
+        if !me.isEmpty,
+           let m = roomMembers["\(roomSlug)|\(me)"],
+           let n = m.nickname, !n.isEmpty {
+            return n
+        }
+        return defaultNickname
+    }
+
+    /// Publish or replace this user's `_profile` card in `roomSlug`. The
+    /// d_tag is the deterministic `profile:<lowercase-pubkey>` so re-posts
+    /// overwrite the prior rumor everywhere it's been delivered. Throws
+    /// `StudioPluginError` on plugin failure. The card itself is filtered
+    /// out of the UI (see `isReservedCardKind`); its only effect is the
+    /// projector's `studio_member` upsert.
+    @discardableResult
+    func publishProfileCard(roomSlug: String, nickname: String) async throws -> String {
+        let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw StudioPluginError(
+                status: 400,
+                code: "empty_nickname",
+                message: "Nickname must not be empty."
+            )
+        }
+        let me = currentPubkeyHex.lowercased()
+        guard !me.isEmpty else {
+            throw StudioPluginError(
+                status: 412,
+                code: "identity_unknown",
+                message: "Sonata hasn't learned its own pubkey from the plugin yet."
+            )
+        }
+        // The renderer's existing `postCard` already wraps the plugin call.
+        // We pin the d_tag to `profile:<pub>` so this card is replaceable
+        // per-author per-room.
+        return try await postCard(
+            room: roomSlug,
+            track: "inbox",
+            kind: "_profile",
+            title: trimmed,
+            body: "(profile card — nickname carrier; hidden from the card list)",
+            blocks: [],
+            relatedTo: [],
+            tagsList: [],
+            dTag: "profile:\(me)"
+        )
+    }
+
+    /// Fire-and-forget auto-publish hook called from card-post / room-join
+    /// paths. No-op if defaultNickname is empty OR if this user already has
+    /// a `_profile` card in the room. Errors are logged, not surfaced — the
+    /// user's primary action shouldn't fail because the side-channel hiccuped.
+    func autoPublishProfileIfNeeded(roomSlug: String) {
+        let nickname = defaultNickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !nickname.isEmpty else { return }
+        let me = currentPubkeyHex.lowercased()
+        guard !me.isEmpty else { return }
+        // Already federated — don't republish on every post.
+        if let existing = roomMembers["\(roomSlug)|\(me)"],
+           let n = existing.nickname, !n.isEmpty {
+            return
+        }
+        Task { @MainActor in
+            do {
+                _ = try await publishProfileCard(roomSlug: roomSlug, nickname: nickname)
+            } catch {
+                NSLog("[StudioStore] autoPublishProfile(\(roomSlug)) failed: \(error)")
+            }
+        }
+    }
+
     /// Persist the machine-local default nickname into the
     /// `studio:user_profile` singleton entity. Triggers the observation above,
     /// which republishes `defaultNickname`. The value is never federated by
@@ -851,6 +927,12 @@ final class StudioStore: ObservableObject {
             body: requestBody
         )
         rememberCurrentPubkey(from: result)
+        // Auto-federate the default nickname on the first regular card the
+        // user posts in a room. Skipped for `_profile` itself so we don't
+        // recurse, and a no-op if we've already federated for this room.
+        if !kind.hasPrefix("_") {
+            autoPublishProfileIfNeeded(roomSlug: room)
+        }
         return result.rumorEventId
     }
 
@@ -982,6 +1064,10 @@ final class StudioStore: ObservableObject {
             path: "sonata-studio/room/join",
             body: Req(inviteUrl: inviteURL)
         )
+        // Auto-federate the default nickname into the room we just joined.
+        // Fire-and-forget; no-op if defaultNickname is empty. Other members
+        // pick up the _profile card via SSE within ~2s.
+        autoPublishProfileIfNeeded(roomSlug: response.roomSlug)
         return StudioRoom.placeholder(
             id: "studio:room:\(response.roomSlug)",
             slug: response.roomSlug,

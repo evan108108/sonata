@@ -22,6 +22,7 @@ struct StudioRoomDetail: View {
     @State private var showInviteSheet: Bool = false
     @State private var admitInFlight: Bool = false
     @State private var admitToast: InlineToast? = nil
+    @State private var showProfileSheet: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,6 +72,13 @@ struct StudioRoomDetail: View {
         }
         .sheet(isPresented: $showInviteSheet) {
             StudioInviteSheet(
+                store: store,
+                roomSlug: room.slug,
+                roomTitle: room.title
+            )
+        }
+        .sheet(isPresented: $showProfileSheet) {
+            StudioRoomProfileSheet(
                 store: store,
                 roomSlug: room.slug,
                 roomTitle: room.title
@@ -191,6 +199,12 @@ struct StudioRoomDetail: View {
                 .disabled(admitInFlight)
                 Divider()
             }
+            Button {
+                showProfileSheet = true
+            } label: {
+                Label("Your nickname in this room…", systemImage: "person.text.rectangle")
+            }
+            Divider()
             Toggle(isOn: dispatchTraceBinding) {
                 Label("Show dispatch trace", systemImage: "arrow.up.right.diamond")
             }
