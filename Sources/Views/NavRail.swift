@@ -152,7 +152,12 @@ private struct NavRailCell: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
-                            .background(item.badgeIsAlert ? Color.orange : Color.red, in: Capsule())
+                            // Green for informational counts ("good things
+                            // happening" — unread, busy, active); red when
+                            // badgeIsAlert flags an actual problem state
+                            // (e.g. failed plugins). Keeps the alarm color
+                            // reserved for alarms.
+                            .background(item.badgeIsAlert ? Color.red : Color.green, in: Capsule())
                             .offset(x: 10, y: -6)
                     }
                 }
