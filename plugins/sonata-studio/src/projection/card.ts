@@ -29,8 +29,22 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
     ? relatedToRaw.filter((v): v is string => typeof v === "string")
     : [];
 
-  const status =
-    typeof payload["status"] === "string" ? (payload["status"] as string) : "active";
+  // Card lifecycle status (open | in_progress | done | archived) is the
+  // canonical assignment-tracker state. `deleted` is preserved as a soft-
+  // tombstone sentinel for back-compat with the pre-card-assignment shape.
+  // `active` is the legacy default for cards posted before the lifecycle
+  // landed — it's kept on the wire so older readers don't crash, but new
+  // projector rows default to `open` per §2.2 of the assignment design doc.
+  const rawStatus = typeof payload["status"] === "string" ? (payload["status"] as string) : null;
+  const status = rawStatus ?? "open";
+
+  // Single-assignee enforced at the UI layer; wire shape stores
+  // `assignees: [pubkey]` with cardinality 0–1 (forwards-compatible with
+  // multi-assign per design §A1).
+  const rawAssignees = payload["assignees"];
+  const assignees: string[] = Array.isArray(rawAssignees)
+    ? rawAssignees.filter((v): v is string => typeof v === "string").map((s) => s.toLowerCase())
+    : [];
 
   // Body is the canonical long-form field as of 2026-05-12. The pre-cutover
   // wire shape used `summary`; fall back to it so cards posted under the old
@@ -56,6 +70,7 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
     blocks: Array.isArray(payload["blocks"]) ? payload["blocks"] : [],
     related_to: relatedTo,
     status,
+    assignees,
     created_by_pubkey: createdByPubkey,
     room_slug: roomSlug,
     created_at_seconds: rumor.created_at,
