@@ -20,7 +20,6 @@ import {
   loadRoomCtx,
   publishRumor,
   STUDIO_CONTEXT_V0,
-  STUDIO_KIND_CARD,
   STUDIO_KIND_COMMENT,
   validatePayload,
 } from "./util";
@@ -127,77 +126,45 @@ export async function transitionCardStatus(
 
   const room = await loadRoomCtx(roomSlug, ctx.cfg.pluginPub);
 
-  // Re-emit the full card payload with the new status. The author's payload
-  // shape is the source of truth here — we read fields off the entity attrs
-  // (the projector wrote them at last publish) and re-publish under the
-  // original author's signing key. Subtle: the card was authored by some
-  // other pubkey, but the transition action publishes a NEW rumor signed by
-  // the caller. Replaceable-event LWW resolves the d_tag, but the d_tag is
-  // namespaced by author pubkey in the entity name; on the wire it's just
-  // the d_tag, so peers reading the rumor see the latest by created_at.
-  // Authoring pubkey on the wire is the caller (so peers can authenticate
-  // the transition came from someone with permission).
-  const trackSlug = String(attrs["track_slug"] ?? "");
-  const cardKind = String(attrs["card_kind"] ?? "note");
+  // Status transitions cannot republish the card: kind-30530 is addressable
+  // by (kind, pubkey, d_tag), so a re-publish by the assignee (not the
+  // original author) creates a SEPARATE replaceable event under the
+  // assignee's pubkey instead of overwriting the author's card. Locally that
+  // also writes a new studio_card entity keyed on the assignee. The original
+  // card sits unchanged, the UI still reads "Open", and the transition
+  // appears to revert.
+  //
+  // Instead, publish ONLY a kind-30533 comment with intent="status_change"
+  // targeting the original card's event_id, plus a structured `to_status`
+  // field. The comment projector applies the transition to the original
+  // card entity. Comments are addressable by the transitioning party's own
+  // pubkey, so the signature is legitimate.
+  const originalCardEventId = String(attrs["event_id"] ?? "");
+  if (originalCardEventId.length === 0) {
+    throw new HttpError(500, "corrupt_card", `card ${dTag} has no event_id`);
+  }
   const title = String(attrs["title"] ?? "");
-  const cardBody = String(attrs["body"] ?? attrs["summary"] ?? "");
-  const blocks = Array.isArray(attrs["blocks"]) ? (attrs["blocks"] as unknown[]) : [];
-  const relatedTo = Array.isArray(attrs["related_to"])
-    ? (attrs["related_to"] as string[])
-    : [];
-  // Strip projector-synthesized tags (`sonata-studio`, `room:<slug>`) so they
-  // don't leak into the user-facing tags list on re-publish.
-  const rawTags = Array.isArray(attrs["tags"]) ? (attrs["tags"] as string[]) : [];
-  const roomMarker = `room:${roomSlug}`;
-  const cardTags = rawTags.filter((t) => t !== "sonata-studio" && t !== roomMarker);
 
-  const cardPayload: Record<string, unknown> = {
-    "@context": STUDIO_CONTEXT_V0,
-    "@type": "Card",
-    kind: cardKind,
-    track: trackSlug,
-    title,
-    body: cardBody,
-    blocks,
-    createdBy: authorPub,
-    assignees,
-    status: next,
-  };
-  if (relatedTo.length > 0) cardPayload["relatedTo"] = relatedTo;
-  if (cardTags.length > 0) cardPayload["tags"] = cardTags;
-  validatePayload(STUDIO_KIND_CARD, cardPayload);
-
-  const cardRumor = buildSignedRumor({
-    kind: STUDIO_KIND_CARD,
-    payload: cardPayload,
-    room,
-    publisherPriv: ctx.cfg.pluginPriv,
-    publisherPub: ctx.cfg.pluginPub,
-    dTag,
-    alt: `Studio card: ${title}`,
-  });
-  const { rumorEventId: cardRumorId } = await publishRumor({
-    rumor: cardRumor,
-    payload: cardPayload,
-    room,
-    publisherPriv: ctx.cfg.pluginPriv,
-    gateway: ctx.gateway,
-  });
-
-  // Audit-trail comment — kind 30533, intent=status_change, body documents
-  // the prev → next transition (§2.3 of the design doc).
+  // Audit-trail comment — kind 30533, intent=status_change. Body is human-
+  // readable; `to_status` is the machine-parseable target state used by
+  // the comment projector to flip the original card's status field.
   const commentBody = `status: ${prev} → ${next}`;
   const commentPayload: Record<string, unknown> = {
     "@context": STUDIO_CONTEXT_V0,
     "@type": "Comment",
-    target: { "@id": cardRumorId },
+    target: { "@id": originalCardEventId },
     body: commentBody,
     intent: "status_change",
+    to_status: next,
+    from_status: prev,
     createdBy: pluginPubLower,
   };
   validatePayload(STUDIO_KIND_COMMENT, commentPayload);
 
-  const commentDTag = buildScopedDTag(cardRumorId);
+  // Scope the comment d_tag to the target card so multiple status-change
+  // comments on the same card from the same author replace cleanly. Distinct
+  // from regular comments which scope on the target rumor + body hash.
+  const commentDTag = buildScopedDTag(`status-change:${originalCardEventId}`);
   const commentRumor = buildSignedRumor({
     kind: STUDIO_KIND_COMMENT,
     payload: commentPayload,
@@ -217,7 +184,7 @@ export async function transitionCardStatus(
 
   return {
     d_tag: dTag,
-    rumor_event_id: cardRumorId,
+    rumor_event_id: originalCardEventId,
     audit_comment_event_id: commentRumorId,
   };
 }
