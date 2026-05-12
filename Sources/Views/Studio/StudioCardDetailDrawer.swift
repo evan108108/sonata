@@ -21,6 +21,14 @@ struct StudioCardDetailDrawer: View {
     @State private var showDeleteConfirm: Bool = false
     @State private var deleteErrorMessage: String? = nil
     @State private var transitionErrorMessage: String? = nil
+    /// Optimistic local override for the segmented status while the wire
+    /// round-trip lands. The transition publishes a status_change comment,
+    /// the projector flips the card entity's status, and the SSE update
+    /// flows back here — typically within a second on local. Until then,
+    /// the segmented control needs to render the user's choice rather than
+    /// the unchanged card.lifecycleStatus, otherwise it visibly snaps back.
+    /// Cleared when the observed card status matches our pending choice.
+    @State private var pendingStatus: String? = nil
     @State private var assignErrorMessage: String? = nil
     @State private var showAssignPicker: Bool = false
     @State private var auditFoldOpen: Bool = false
@@ -277,7 +285,10 @@ struct StudioCardDetailDrawer: View {
 
     @ViewBuilder
     private var statusSegmented: some View {
-        let current = card.lifecycleStatus
+        // Render the pending optimistic value while a transition is in flight;
+        // otherwise read straight off the card. onChange below clears the
+        // pending state once the projected card catches up.
+        let current = pendingStatus ?? card.lifecycleStatus
         // Picker with three primary states. Archive is sidebar'd to keep the
         // segmented control narrow. When the card is archived, we surface it
         // as the "active" segment via a single read-only chip.
@@ -304,13 +315,20 @@ struct StudioCardDetailDrawer: View {
             .help(canTransition
                 ? "Move card through its lifecycle"
                 : "Only the author or current assignee can change status")
+            .onChange(of: card.lifecycleStatus) { _, observed in
+                if pendingStatus == observed { pendingStatus = nil }
+            }
         }
     }
 
     private func transition(to next: String) {
-        guard next != card.lifecycleStatus else { return }
+        guard next != (pendingStatus ?? card.lifecycleStatus) else { return }
         let roomSlug = card.roomSlug
         let dTag = card.dTag
+        // Optimistic UI: hold the user's pick while the publish-project-SSE
+        // round-trip lands. Cleared by the .onChange above when the observed
+        // card.lifecycleStatus catches up, or by the catch block on failure.
+        pendingStatus = next
         Task {
             do {
                 _ = try await store.transitionCardStatus(
@@ -322,6 +340,7 @@ struct StudioCardDetailDrawer: View {
             } catch {
                 await MainActor.run {
                     transitionErrorMessage = (error as? StudioPluginError)?.message ?? error.localizedDescription
+                    pendingStatus = nil
                 }
             }
         }
