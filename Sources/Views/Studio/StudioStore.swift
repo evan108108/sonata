@@ -376,7 +376,7 @@ final class StudioStore: ObservableObject {
         track: String? = nil,
         kind: String? = nil,
         title: String? = nil,
-        summary: String? = nil,
+        body: String? = nil,
         blocks: [[String: Any]]? = nil,
         tagsList: [String]? = nil,
         relatedTo: [String]? = nil
@@ -394,21 +394,27 @@ final class StudioStore: ObservableObject {
             track: track,
             kind: kind,
             title: title,
-            summary: summary,
+            body: body,
             blocksRaw: blocks,
             tagsList: tagsList,
             relatedTo: relatedTo
         )
         optimisticCardUpdates[original.id] = patched
 
-        var body: [String: Any] = ["room": roomSlug, "d_tag": dTag]
-        if let t = track { body["track"] = t }
-        if let k = kind { body["kind"] = k }
-        if let t = title { body["title"] = t }
-        if let s = summary { body["summary"] = s }
-        if let b = blocks { body["blocks"] = b }
-        if let r = relatedTo { body["related_to"] = r }
-        if let t = tagsList { body["tags"] = t }
+        var requestBody: [String: Any] = ["room": roomSlug, "d_tag": dTag]
+        if let t = track { requestBody["track"] = t }
+        if let k = kind { requestBody["kind"] = k }
+        if let t = title { requestBody["title"] = t }
+        if let b = body {
+            requestBody["body"] = b
+            // Legacy wire alias — kept in the encoded JSON for one cutover
+            // release so an unmigrated plugin still finds the prose. Remove
+            // after 2026-05-12 + one release.
+            requestBody["summary"] = b
+        }
+        if let b = blocks { requestBody["blocks"] = b }
+        if let r = relatedTo { requestBody["related_to"] = r }
+        if let t = tagsList { requestBody["tags"] = t }
 
         do {
             struct Resp: Decodable {
@@ -421,7 +427,7 @@ final class StudioStore: ObservableObject {
             }
             let result: Resp = try await EntityHTTP.postPluginActionRaw(
                 path: "sonata-studio/card/update",
-                body: body
+                body: requestBody
             )
             optimisticUpdateExpectedEventIds[original.id] = result.rumorEventId
             return result.rumorEventId
@@ -456,7 +462,7 @@ final class StudioStore: ObservableObject {
         track: String?,
         kind: String?,
         title: String?,
-        summary: String?,
+        body: String?,
         blocksRaw: [[String: Any]]?,
         tagsList: [String]?,
         relatedTo: [String]?
@@ -476,7 +482,7 @@ final class StudioStore: ObservableObject {
             trackSlug: track ?? original.trackSlug,
             roomSlug: original.roomSlug,
             title: title ?? original.title,
-            summary: summary ?? original.summary,
+            body: body ?? original.body,
             blocks: newBlocks,
             relatedTo: relatedTo ?? original.relatedTo,
             tagsList: tagsList ?? original.tagsList,
@@ -583,7 +589,7 @@ final class StudioStore: ObservableObject {
         trackSlug: String,
         kind: String,
         title: String,
-        summary: String,
+        body: String,
         blocks: [[String: Any]],
         tagsList: [String],
         relatedTo: [String]
@@ -603,7 +609,7 @@ final class StudioStore: ObservableObject {
             trackSlug: trackSlug,
             roomSlug: roomSlug,
             title: title,
-            summary: summary,
+            body: body,
             blocks: studioBlocks,
             relatedTo: relatedTo,
             tagsList: tagsList,
@@ -627,7 +633,7 @@ final class StudioStore: ObservableObject {
             trackSlug: old.trackSlug,
             roomSlug: old.roomSlug,
             title: old.title,
-            summary: old.summary,
+            body: old.body,
             blocks: old.blocks,
             relatedTo: old.relatedTo,
             tagsList: old.tagsList,
@@ -731,27 +737,31 @@ final class StudioStore: ObservableObject {
         track: String,
         kind: String,
         title: String,
-        summary: String,
+        body: String,
         blocks: [[String: Any]],
         relatedTo: [String],
         tagsList: [String],
         dTag: String?
     ) async throws -> String {
-        var body: [String: Any] = [
+        var requestBody: [String: Any] = [
             "room": room,
             "track": track,
             "kind": kind,
             "title": title,
-            "summary": summary,
+            "body": body,
+            // Legacy wire alias — kept in the encoded JSON for one cutover
+            // release so an unmigrated plugin still finds the prose. Remove
+            // after 2026-05-12 + one release.
+            "summary": body,
         ]
-        if !blocks.isEmpty { body["blocks"] = blocks }
-        if !relatedTo.isEmpty { body["related_to"] = relatedTo }
-        if !tagsList.isEmpty { body["tags"] = tagsList }
-        if let d = dTag, !d.isEmpty { body["d_tag"] = d }
+        if !blocks.isEmpty { requestBody["blocks"] = blocks }
+        if !relatedTo.isEmpty { requestBody["related_to"] = relatedTo }
+        if !tagsList.isEmpty { requestBody["tags"] = tagsList }
+        if let d = dTag, !d.isEmpty { requestBody["d_tag"] = d }
 
         let result: CardPostResponse = try await EntityHTTP.postPluginActionRaw(
             path: "sonata-studio/card/post",
-            body: body
+            body: requestBody
         )
         rememberCurrentPubkey(from: result)
         return result.rumorEventId

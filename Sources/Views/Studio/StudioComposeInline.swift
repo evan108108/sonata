@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Single-line compose strip pinned to the bottom of the active track column.
 ///
-/// Posts as `kind: "note"` with the entered text becoming the card `summary`.
-/// Title is derived as the first 60 chars of summary (trimmed of trailing
+/// Posts as `kind: "note"` with the entered text becoming the card `body`.
+/// Title is derived as the first 60 chars of body (trimmed of trailing
 /// whitespace); per W6.1 the plugin re-validates so the cheap derivation is
 /// safe client-side.
 ///
@@ -58,9 +58,9 @@ struct StudioComposeInline: View {
     }
 
     private func submit() {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty, !inFlight else { return }
-        let title = String(body.prefix(60)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bodyText.isEmpty, !inFlight else { return }
+        let title = String(bodyText.prefix(60)).trimmingCharacters(in: .whitespacesAndNewlines)
         let clientId = UUID().uuidString
         let entered = text
         text = ""
@@ -73,7 +73,7 @@ struct StudioComposeInline: View {
             trackSlug: trackSlug,
             kind: "note",
             title: title,
-            summary: body,
+            body: bodyText,
             blocks: [],
             tagsList: [],
             relatedTo: []
@@ -87,7 +87,7 @@ struct StudioComposeInline: View {
                     track: trackSlug,
                     kind: "note",
                     title: title,
-                    summary: body,
+                    body: bodyText,
                     blocks: [],
                     relatedTo: [],
                     tagsList: [],

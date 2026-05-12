@@ -109,7 +109,7 @@ final class StudioComposeTests: XCTestCase {
             trackSlug: "general",
             kind: "note",
             title: "title",
-            summary: "summary",
+            body: "summary",
             blocks: [],
             tagsList: [],
             relatedTo: []
@@ -117,7 +117,7 @@ final class StudioComposeTests: XCTestCase {
         XCTAssertEqual(store.optimisticCards.count, 1)
         let card = store.optimisticCards["c1"]
         XCTAssertEqual(card?.title, "title")
-        XCTAssertEqual(card?.summary, "summary")
+        XCTAssertEqual(card?.body, "summary")
         XCTAssertEqual(card?.roomSlug, "demo")
         XCTAssertEqual(card?.trackSlug, "general")
         XCTAssertEqual(card?.cardKind, "note")
@@ -128,7 +128,7 @@ final class StudioComposeTests: XCTestCase {
         let store = StudioStore()
         store.optimisticallyInsertCard(
             clientId: "c1", roomSlug: "demo", trackSlug: "general",
-            kind: "note", title: "t", summary: "s",
+            kind: "note", title: "t", body: "s",
             blocks: [], tagsList: [], relatedTo: []
         )
         store.setOptimisticEventId(clientId: "c1", eventId: "evtX")
@@ -140,7 +140,7 @@ final class StudioComposeTests: XCTestCase {
         let store = StudioStore()
         store.optimisticallyInsertCard(
             clientId: "c1", roomSlug: "r", trackSlug: "t",
-            kind: "note", title: "x", summary: "y",
+            kind: "note", title: "x", body: "y",
             blocks: [], tagsList: [], relatedTo: []
         )
         XCTAssertEqual(store.optimisticCards.count, 1)
@@ -174,7 +174,7 @@ final class StudioComposeTests: XCTestCase {
         ]
         store.optimisticallyInsertCard(
             clientId: "c1", roomSlug: "r", trackSlug: "t",
-            kind: "note", title: "x", summary: "y",
+            kind: "note", title: "x", body: "y",
             blocks: blockDicts, tagsList: [], relatedTo: []
         )
         let card = store.optimisticCards["c1"]

@@ -25,12 +25,17 @@ interface CardPostRequest {
   track?: unknown;
   kind?: unknown;
   title?: unknown;
+  body?: unknown;
+  // Deprecated alias for `body`, kept for one cutover release past 2026-05-12.
   summary?: unknown;
   blocks?: unknown;
   related_to?: unknown;
   tags?: unknown;
   d_tag?: unknown;
 }
+
+// Long-form card body cap. Mirrors validators.ts MAX_CARD_BODY.
+const MAX_CARD_BODY = 10000;
 
 interface CardPostResult {
   rumor_event_id: string;
@@ -51,6 +56,8 @@ interface CardListEntry {
   track: string;
   kind: string;
   title: string;
+  body: string;
+  // Deprecated alias for `body`, kept for one cutover release past 2026-05-12.
   summary: string;
   created_by: string;
   created_at: number;
@@ -74,7 +81,7 @@ export async function postCard(
   const trackSlug = ensureSlug(body.track, "track");
   const cardKind = ensureString(body.kind, "kind");
   const title = ensureString(body.title, "title");
-  const summary = ensureString(body.summary, "summary");
+  const cardBody = resolveCardBody(body.body, body.summary);
   const blocks = normalizeBlocks(body.blocks);
   const relatedTo = normalizeStringArray(body.related_to, "related_to");
   const cardTags = normalizeStringArray(body.tags, "tags");
@@ -89,7 +96,7 @@ export async function postCard(
     kind: cardKind,
     track: trackSlug,
     title,
-    summary,
+    body: cardBody,
     blocks,
     createdBy: ctx.cfg.pluginPub.toLowerCase(),
   };
@@ -119,6 +126,32 @@ export async function postCard(
     audience_address: room.audienceAddress,
     d_tag: dTag,
   };
+}
+
+// Resolve the long-form card body from request input. `body` is the canonical
+// field; `summary` is the pre-2026-05-12 alias accepted for one cutover
+// release. Throws if neither is provided, if the body exceeds 10000 chars, or
+// if both are present with conflicting content.
+function resolveCardBody(rawBody: unknown, rawSummary: unknown): string {
+  const hasBody = rawBody !== undefined;
+  const hasSummary = rawSummary !== undefined;
+  if (!hasBody && !hasSummary) {
+    throw new HttpError(400, "bad_request", `"body" is required`);
+  }
+  const bodyStr = hasBody ? ensureString(rawBody, "body") : null;
+  const summaryStr = hasSummary ? ensureString(rawSummary, "summary") : null;
+  if (bodyStr !== null && summaryStr !== null && bodyStr !== summaryStr) {
+    throw new HttpError(
+      400,
+      "bad_request",
+      `"body" and "summary" both present with different content`,
+    );
+  }
+  const resolved = bodyStr ?? summaryStr ?? "";
+  if (resolved.length > MAX_CARD_BODY) {
+    throw new HttpError(400, "bad_request", `"body" exceeds ${MAX_CARD_BODY} characters`);
+  }
+  return resolved;
 }
 
 function normalizeBlocks(raw: unknown): CardBlock[] {
@@ -183,13 +216,16 @@ export async function listCards(
     const createdSec = Number(attrs["created_at_seconds"] ?? 0);
     const createdMs = createdSec * 1000;
     if (sinceMs !== null && createdMs < sinceMs) continue;
+    const bodyStr = String(attrs["body"] ?? attrs["summary"] ?? "");
     out.push({
       event_id: String(attrs["event_id"] ?? ""),
       d_tag: String(attrs["d_tag"] ?? ""),
       track: String(attrs["track_slug"] ?? ""),
       kind: String(attrs["card_kind"] ?? ""),
       title: String(attrs["title"] ?? ""),
-      summary: String(attrs["summary"] ?? ""),
+      body: bodyStr,
+      // Deprecated alias; remove after cutover (2026-05-12 + one release).
+      summary: bodyStr,
       created_by: String(attrs["created_by_pubkey"] ?? ""),
       created_at: createdMs,
       blocks: Array.isArray(attrs["blocks"]) ? (attrs["blocks"] as unknown[]) : [],
@@ -250,7 +286,7 @@ export async function deleteCard(
 
   const trackSlug = String(attrs["track_slug"] ?? "");
   const title = String(attrs["title"] ?? "");
-  const summary = String(attrs["summary"] ?? "");
+  const cardBody = String(attrs["body"] ?? attrs["summary"] ?? "");
   const cardKind = String(attrs["card_kind"] ?? "note");
   const blocks = Array.isArray(attrs["blocks"]) ? (attrs["blocks"] as unknown[]) : [];
   const relatedTo = Array.isArray(attrs["related_to"]) ? (attrs["related_to"] as string[]) : [];
@@ -262,7 +298,7 @@ export async function deleteCard(
     kind: cardKind,
     track: trackSlug,
     title,
-    summary,
+    body: cardBody,
     blocks,
     createdBy: pluginPubLower,
     status: "deleted",
@@ -299,6 +335,8 @@ interface CardUpdateRequest {
   track?: unknown;
   kind?: unknown;
   title?: unknown;
+  body?: unknown;
+  // Deprecated alias for `body`, kept for one cutover release past 2026-05-12.
   summary?: unknown;
   blocks?: unknown;
   related_to?: unknown;
@@ -342,10 +380,13 @@ export async function updateCard(
     body.title !== undefined
       ? ensureString(body.title, "title")
       : String(attrs["title"] ?? "");
-  const summary =
-    body.summary !== undefined
-      ? ensureString(body.summary, "summary")
-      : String(attrs["summary"] ?? "");
+  // body | summary (legacy alias) — present overrides; absent preserves the
+  // existing body. The legacy `summary` attribute is read as a fallback for
+  // cards posted under the pre-2026-05-12 wire shape.
+  const cardBody =
+    body.body !== undefined || body.summary !== undefined
+      ? resolveCardBody(body.body, body.summary)
+      : String(attrs["body"] ?? attrs["summary"] ?? "");
   const blocks =
     body.blocks !== undefined
       ? normalizeBlocks(body.blocks)
@@ -373,7 +414,7 @@ export async function updateCard(
     kind: cardKind,
     track: trackSlug,
     title,
-    summary,
+    body: cardBody,
     blocks,
     createdBy: pluginPubLower,
   };

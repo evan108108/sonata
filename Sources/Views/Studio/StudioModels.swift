@@ -177,7 +177,11 @@ struct StudioCard: Equatable, Identifiable {
     let trackSlug: String
     let roomSlug: String
     let title: String
-    let summary: String
+    /// Long-form markdown body (`attributes.body`). Cards posted under the
+    /// pre-2026-05-12 wire shape only had `attributes.summary` — the decoder
+    /// falls back to it so old cards still surface. Remove the fallback once
+    /// the cutover release has shipped.
+    let body: String
     let blocks: [StudioBlock]
     let relatedTo: [String]
     let tagsList: [String]
@@ -203,7 +207,7 @@ struct StudioCard: Equatable, Identifiable {
         self.trackSlug = (raw["track_slug"] as? String) ?? ""
         self.roomSlug = (raw["room_slug"] as? String) ?? ""
         self.title = (raw["title"] as? String) ?? ""
-        self.summary = (raw["summary"] as? String) ?? ""
+        self.body = (raw["body"] as? String) ?? (raw["summary"] as? String) ?? ""
         self.relatedTo = (raw["related_to"] as? [String]) ?? []
         self.tagsList = (raw["tags"] as? [String]) ?? []
         self.createdByPubkey = (raw["created_by_pubkey"] as? String) ?? ""
@@ -227,7 +231,7 @@ struct StudioCard: Equatable, Identifiable {
         trackSlug: String,
         roomSlug: String,
         title: String,
-        summary: String,
+        body: String,
         blocks: [StudioBlock],
         relatedTo: [String],
         tagsList: [String],
@@ -242,7 +246,7 @@ struct StudioCard: Equatable, Identifiable {
         self.trackSlug = trackSlug
         self.roomSlug = roomSlug
         self.title = title
-        self.summary = summary
+        self.body = body
         self.blocks = blocks
         self.relatedTo = relatedTo
         self.tagsList = tagsList

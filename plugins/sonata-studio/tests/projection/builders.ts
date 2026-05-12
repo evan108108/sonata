@@ -64,7 +64,7 @@ export function cardPayload(over: Partial<Record<string, unknown>> = {}): Record
     kind: "note",
     track: "inbox",
     title: "hello",
-    summary: "world",
+    body: "world",
     blocks: [{ type: "text", body: "lorem" }],
     relatedTo: [],
     tags: [],

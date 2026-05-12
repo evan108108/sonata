@@ -48,7 +48,7 @@ type TrackLayout = (typeof TRACK_LAYOUTS)[number];
 
 // Field-length caps. Centralized so the spec and validators stay in sync.
 const MAX_TITLE = 200;
-const MAX_SUMMARY = 240;
+const MAX_CARD_BODY = 10000;
 const MAX_DESCRIPTION = 2000;
 const MAX_REASON = 2000;
 const MAX_BODY = 4000;
@@ -238,11 +238,29 @@ export function validateCardPayload(payload: unknown): ValidationResult {
   if (obj.title.length > MAX_TITLE) {
     return { ok: false, error: `"title" exceeds ${MAX_TITLE} characters` };
   }
-  if (!isNonEmptyString(obj.summary)) {
-    return { ok: false, error: '"summary" must be a non-empty string' };
+  // Card body (long-form markdown). `summary` is the pre-2026-05-12 alias —
+  // accept it as a legacy fallback so unmigrated publishers still validate.
+  // Cutover: remove the `summary` fallback once all known publishers have
+  // upgraded past 2026-05-12.
+  const cardBody =
+    isNonEmptyString(obj.body) ? obj.body
+    : isNonEmptyString(obj.summary) ? obj.summary
+    : null;
+  if (cardBody === null) {
+    return { ok: false, error: '"body" must be a non-empty string' };
   }
-  if (obj.summary.length > MAX_SUMMARY) {
-    return { ok: false, error: `"summary" exceeds ${MAX_SUMMARY} characters` };
+  if (cardBody.length > MAX_CARD_BODY) {
+    return { ok: false, error: `"body" exceeds ${MAX_CARD_BODY} characters` };
+  }
+  if (
+    isNonEmptyString(obj.body) &&
+    isNonEmptyString(obj.summary) &&
+    obj.body !== obj.summary
+  ) {
+    return {
+      ok: false,
+      error: '"body" and "summary" both present with different content',
+    };
   }
   if (!Array.isArray(obj.blocks)) {
     return { ok: false, error: '"blocks" must be an array' };

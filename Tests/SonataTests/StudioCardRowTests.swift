@@ -75,6 +75,56 @@ final class StudioCardRowTests: XCTestCase {
         )
     }
 
+    // MARK: - previewLine (markdown-strip helper)
+
+    func testPreviewLine_plainText_unchanged() {
+        XCTAssertEqual(
+            StudioCardRow.previewLine("plain text", limit: 150),
+            "plain text"
+        )
+    }
+
+    func testPreviewLine_collapsesNewlines() {
+        XCTAssertEqual(
+            StudioCardRow.previewLine("first paragraph\n\nsecond line", limit: 150),
+            "first paragraph second line"
+        )
+    }
+
+    func testPreviewLine_stripsBoldItalicCode() {
+        XCTAssertEqual(
+            StudioCardRow.previewLine("**bold** *italic* `code` plain", limit: 150),
+            "bold italic code plain"
+        )
+    }
+
+    func testPreviewLine_linksKeepLabelDropUrl() {
+        XCTAssertEqual(
+            StudioCardRow.previewLine("see [the docs](https://example.com) for more", limit: 150),
+            "see the docs for more"
+        )
+    }
+
+    func testPreviewLine_imageAltKept() {
+        XCTAssertEqual(
+            StudioCardRow.previewLine("![banner](https://x/y.png) caption", limit: 150),
+            "banner caption"
+        )
+    }
+
+    func testPreviewLine_stripsHeadingsListsQuotes() {
+        XCTAssertEqual(
+            StudioCardRow.previewLine("# Title\n- item one\n- item two\n> quoted", limit: 150),
+            "Title item one item two quoted"
+        )
+    }
+
+    func testPreviewLine_truncatesAtLimit() {
+        let body = String(repeating: "a", count: 300)
+        let result = StudioCardRow.previewLine(body, limit: 150)
+        XCTAssertEqual(result.count, 150)
+    }
+
     func testLinkBlockViewValidURL() {
         XCTAssertNotNil(LinkBlockView.validURL("https://example.com"))
         XCTAssertNotNil(LinkBlockView.validURL("http://example.com"))

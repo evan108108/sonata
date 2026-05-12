@@ -39,11 +39,11 @@ struct StudioCardDetailDrawer: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if !card.summary.isEmpty {
-                        Text(card.summary)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                    if !card.body.isEmpty {
+                        // Render the body as markdown above the block list,
+                        // reusing TextBlockView so the visual matches inline
+                        // text blocks (which already render markdown).
+                        TextBlockView(text: card.body)
                     }
                     blockList
                     Divider()

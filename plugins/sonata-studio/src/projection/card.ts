@@ -32,13 +32,27 @@ export async function projectCard(ctx: ProjectionContext): Promise<void> {
   const status =
     typeof payload["status"] === "string" ? (payload["status"] as string) : "active";
 
+  // Body is the canonical long-form field as of 2026-05-12. The pre-cutover
+  // wire shape used `summary`; fall back to it so cards posted under the old
+  // shape still surface their text.
+  const cardBody =
+    typeof payload["body"] === "string"
+      ? (payload["body"] as string)
+      : typeof payload["summary"] === "string"
+        ? (payload["summary"] as string)
+        : "";
+
   const attributes: Record<string, unknown> = {
     _studio_kind: 30530,
     _studio_type: "Card",
     card_kind: typeof payload["kind"] === "string" ? payload["kind"] : null,
     track_slug: trackSlug,
     title: typeof payload["title"] === "string" ? payload["title"] : "",
-    summary: typeof payload["summary"] === "string" ? payload["summary"] : "",
+    body: cardBody,
+    // DEPRECATED alias — readers should prefer `body`. Kept in sync for one
+    // cutover release so unmigrated renderers still find the text. Remove
+    // after 2026-05-12 + one release.
+    summary: cardBody,
     blocks: Array.isArray(payload["blocks"]) ? payload["blocks"] : [],
     related_to: relatedTo,
     status,

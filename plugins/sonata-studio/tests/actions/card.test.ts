@@ -63,16 +63,72 @@ describe("studio_card_post", () => {
     }
   });
 
-  it("rejects payloads that exceed the 240-char summary cap", async () => {
+  it("rejects payloads that exceed the 10000-char body cap", async () => {
     const seed = seedActiveRoom("alpha");
     try {
-      const longSummary = "x".repeat(241);
+      const longBody = "x".repeat(10001);
       await expect(
         card.post(
-          { room: "alpha", track: "t", kind: "note", title: "T", summary: longSummary },
+          { room: "alpha", track: "t", kind: "note", title: "T", body: longBody },
           seed.ctx,
         ),
-      ).rejects.toMatchObject({ code: "validator_rejected" });
+      ).rejects.toMatchObject({ code: "bad_request" });
+    } finally {
+      seed.restore();
+    }
+  });
+
+  it("legacy `summary` input still publishes (back-compat alias)", async () => {
+    const seed = seedActiveRoom("alpha");
+    try {
+      const res = await card.post(
+        {
+          room: "alpha",
+          track: "t",
+          kind: "note",
+          title: "Legacy summary input",
+          summary: "old-shape input",
+        },
+        seed.ctx,
+      );
+      const body = lastPublishWrapsBody(seed.calls);
+      const giftWrap = body.gift_wraps[0]!;
+      const { rumor } = unwrap(
+        {
+          ...giftWrap,
+          id: (giftWrap as unknown as { id: string }).id,
+          pubkey: (giftWrap as unknown as { pubkey: string }).pubkey,
+          sig: (giftWrap as unknown as { sig: string }).sig,
+          created_at: (giftWrap as unknown as { created_at: number }).created_at,
+        },
+        seed.pluginPriv,
+      );
+      const plaintext = decryptString(rumor.content, seed.epochPriv, rumor.pubkey);
+      const payload = JSON.parse(plaintext) as Record<string, unknown>;
+      expect(payload.body).toBe("old-shape input");
+      expect(payload.summary).toBeUndefined();
+      expect(res.d_tag).toMatch(/^legacy-summary-input-[0-9a-f]{8}$/);
+    } finally {
+      seed.restore();
+    }
+  });
+
+  it("rejects when both `body` and `summary` are present with different content", async () => {
+    const seed = seedActiveRoom("alpha");
+    try {
+      await expect(
+        card.post(
+          {
+            room: "alpha",
+            track: "t",
+            kind: "note",
+            title: "Conflict",
+            body: "a",
+            summary: "b",
+          },
+          seed.ctx,
+        ),
+      ).rejects.toMatchObject({ code: "bad_request" });
     } finally {
       seed.restore();
     }

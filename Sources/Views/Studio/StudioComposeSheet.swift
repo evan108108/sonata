@@ -21,7 +21,7 @@ struct StudioComposeSheet: View {
 
     @State private var kind: CardKind = .note
     @State private var title: String = ""
-    @State private var summary: String = ""
+    @State private var bodyText: String = ""
     @State private var blocks: [BlockDraft] = []
     @State private var tagsRaw: String = ""
     /// In edit mode, the effective track is editable — the field is set
@@ -71,7 +71,7 @@ struct StudioComposeSheet: View {
                     kindRow
                     if isEditMode { trackRow }
                     titleRow
-                    summaryRow
+                    bodyRow
                     blocksSection
                     tagsRow
                 }
@@ -166,18 +166,30 @@ struct StudioComposeSheet: View {
         }
     }
 
-    private var summaryRow: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text("Summary")
+    private var bodyRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("Description")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .leading)
-            VStack(alignment: .trailing, spacing: 2) {
-                TextField("Required (1-240 chars)", text: $summary)
-                    .textFieldStyle(.roundedBorder)
-                Text("\(summary.count) / 240")
-                    .font(.caption2)
-                    .foregroundStyle(summary.count > 240 ? .red : .secondary)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 4) {
+                TextEditor(text: $bodyText)
+                    .font(.body)
+                    .frame(minHeight: 140, idealHeight: 180)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.secondary.opacity(0.25))
+                    )
+                HStack {
+                    Text("(markdown)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(bodyText.count) / 10000")
+                        .font(.caption2)
+                        .foregroundStyle(bodyText.count > 10000 ? .red : .secondary)
+                }
             }
         }
     }
@@ -258,11 +270,11 @@ struct StudioComposeSheet: View {
 
     var isValid: Bool {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let s = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        let titleOK   = (1...200).contains(t.count)
-        let summaryOK = (1...240).contains(s.count)
-        let blocksOK  = blocks.allSatisfy { $0.isValid }
-        return titleOK && summaryOK && blocksOK
+        let b = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleOK = (1...200).contains(t.count)
+        let bodyOK  = (1...10000).contains(b.count)
+        let blocksOK = blocks.allSatisfy { $0.isValid }
+        return titleOK && bodyOK && blocksOK
     }
 
     var parsedTags: [String] {
@@ -282,7 +294,7 @@ struct StudioComposeSheet: View {
     private func submitNew() {
         let clientId = UUID().uuidString
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let blockPayload = blocks.map { $0.toPayload() }
         let tagsParsed = parsedTags
         let cardKindRaw = kind.rawValue
@@ -298,7 +310,7 @@ struct StudioComposeSheet: View {
             trackSlug: trackCapture,
             kind: cardKindRaw,
             title: trimmedTitle,
-            summary: trimmedSummary,
+            body: trimmedBody,
             blocks: blockPayload,
             tagsList: tagsParsed,
             relatedTo: []
@@ -312,7 +324,7 @@ struct StudioComposeSheet: View {
                     track: trackCapture,
                     kind: cardKindRaw,
                     title: trimmedTitle,
-                    summary: trimmedSummary,
+                    body: trimmedBody,
                     blocks: blockPayload,
                     relatedTo: [],
                     tagsList: tagsParsed,
@@ -334,7 +346,7 @@ struct StudioComposeSheet: View {
     private func submitEdit() {
         guard let card = editingCard else { return }
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let editableBlockPayload = blocks.map { $0.toPayload() }
         // Unknown blocks the editor can't represent are preserved verbatim so
         // forward-compatible payloads survive a round trip through edit mode.
@@ -356,7 +368,7 @@ struct StudioComposeSheet: View {
                     track: trackCapture,
                     kind: cardKindRaw,
                     title: trimmedTitle,
-                    summary: trimmedSummary,
+                    body: trimmedBody,
                     blocks: blockPayload,
                     tagsList: tagsParsed,
                     relatedTo: card.relatedTo
@@ -397,13 +409,13 @@ struct StudioComposeSheet: View {
     /// taken on appear so block-only edits also trip the prompt.
     private var dirtyAgainstSnapshot: Bool {
         let now = FormSnapshot(
-            kind: kind, title: title, summary: summary, tagsRaw: tagsRaw,
+            kind: kind, title: title, body: bodyText, tagsRaw: tagsRaw,
             track: effectiveTrack, blocks: blocks
         )
         if let snap = initialSnapshot { return snap != now }
         // No snapshot yet (shouldn't happen if onAppear ran) — fall back to
         // the heuristic dirty check.
-        return !title.isEmpty || !summary.isEmpty || !blocks.isEmpty || !tagsRaw.isEmpty
+        return !title.isEmpty || !bodyText.isEmpty || !blocks.isEmpty || !tagsRaw.isEmpty
     }
 
     // MARK: - Edit-mode pre-population
@@ -414,14 +426,14 @@ struct StudioComposeSheet: View {
         guard let card = editingCard else {
             // Snapshot the empty form so cancel works consistently for new-card.
             initialSnapshot = FormSnapshot(
-                kind: kind, title: title, summary: summary, tagsRaw: tagsRaw,
+                kind: kind, title: title, body: bodyText, tagsRaw: tagsRaw,
                 track: trackSlug, blocks: blocks
             )
             return
         }
         if let k = CardKind(rawValue: card.cardKind ?? "") { kind = k }
         title = card.title
-        summary = card.summary
+        bodyText = card.body
         tagsRaw = card.tagsList.joined(separator: ", ")
         editingTrackSlug = card.trackSlug
 
@@ -482,7 +494,7 @@ struct StudioComposeSheet: View {
         blocks = drafts
         passthroughBlocks = passthrough
         initialSnapshot = FormSnapshot(
-            kind: kind, title: title, summary: summary, tagsRaw: tagsRaw,
+            kind: kind, title: title, body: bodyText, tagsRaw: tagsRaw,
             track: editingTrackSlug, blocks: blocks
         )
     }
@@ -503,7 +515,7 @@ struct StudioComposeSheet: View {
 private struct FormSnapshot: Equatable {
     let kind: StudioComposeSheet.CardKind
     let title: String
-    let summary: String
+    let body: String
     let tagsRaw: String
     let track: String
     let blocks: [BlockDraft]

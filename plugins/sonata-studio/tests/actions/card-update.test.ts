@@ -57,7 +57,10 @@ describe("studio_card_update", () => {
       // Preserved fields carry through from the original.
       expect(payload.kind).toBe("lead");
       expect(payload.track).toBe("discoveries");
-      expect(payload.summary).toBe("first summary");
+      // Wire field renamed from `summary` to `body` (2026-05-12); `summary`
+      // input on `card.post` above is the legacy alias path.
+      expect(payload.body).toBe("first summary");
+      expect(payload.summary).toBeUndefined();
       expect(payload.blocks).toEqual([{ type: "text", body: "preserve me" }]);
       expect(payload.tags).toEqual(["urgent", "deep-dive"]);
     } finally {

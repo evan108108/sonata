@@ -47,8 +47,8 @@ struct StudioCardRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                if !card.summary.isEmpty {
-                    Text(card.summary)
+                if !card.body.isEmpty {
+                    Text(Self.previewLine(card.body, limit: 150))
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -211,6 +211,57 @@ struct StudioCardRow: View {
         case "answer":   return "checkmark.bubble.fill"
         default:         return "doc.fill"
         }
+    }
+
+    /// Single-line plain-text preview of a markdown body, truncated to `limit`
+    /// characters. The row UI only has space for one line, so newlines, common
+    /// inline markdown syntax, headings, blockquotes, and list markers are
+    /// flattened before truncation. Block-level markdown (code fences, tables)
+    /// is collapsed by virtue of the newline → space rewrite.
+    ///
+    /// Hand-rolled rather than pulled from a library so we avoid the cost of
+    /// rendering AttributedString for every off-screen row in a long list.
+    static func previewLine(_ markdown: String, limit: Int) -> String {
+        var s = markdown
+        // Collapse whitespace runs (including newlines) to single spaces.
+        s = s.replacingOccurrences(
+            of: #"[\t\n\r]+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        // Strip ATX-style heading markers and blockquote/list prefixes at the
+        // start of (now single-line) prose. Order matters — links first so we
+        // don't eat the brackets inside `[link](url)` as emphasis.
+        let regexes: [(String, String)] = [
+            // ![alt](url) → alt (image — must run before the regular link
+            // pattern; otherwise the leading `!` is stranded).
+            (#"!\[([^\]]*)\]\([^)]*\)"#, "$1"),
+            // [label](url) → label
+            (#"\[([^\]]+)\]\([^)]*\)"#, "$1"),
+            // **bold** / __bold__ → bold (greedy-safe via lazy match)
+            (#"\*\*([^*]+)\*\*"#, "$1"),
+            (#"__([^_]+)__"#, "$1"),
+            // *italic* / _italic_ → italic
+            (#"(?<!\*)\*([^*\s][^*]*?)\*(?!\*)"#, "$1"),
+            (#"(?<!_)_([^_\s][^_]*?)_(?!_)"#, "$1"),
+            // `code` → code
+            (#"`([^`]+)`"#, "$1"),
+            // Leading list / heading / blockquote markers after collapse.
+            (#"(^|\s)#{1,6}\s+"#, "$1"),
+            (#"(^|\s)>\s+"#, "$1"),
+            (#"(^|\s)[-*+]\s+"#, "$1"),
+            (#"(^|\s)\d+\.\s+"#, "$1"),
+        ]
+        for (pattern, repl) in regexes {
+            s = s.replacingOccurrences(
+                of: pattern,
+                with: repl,
+                options: .regularExpression
+            )
+        }
+        s = s.trimmingCharacters(in: .whitespaces)
+        if s.count <= limit { return s }
+        return String(s.prefix(limit))
     }
 
     /// "just now", "2m ago", "3h ago", "yesterday", "Apr 14".

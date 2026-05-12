@@ -29,6 +29,8 @@ describe("projectCard", () => {
     expect(attrs).not.toBeNull();
     expect(attrs!["_studio_kind"]).toBe(30530);
     expect(attrs!["title"]).toBe("hello");
+    expect(attrs!["body"]).toBe("world");
+    // Cutover alias — readers that still look at `summary` keep working.
     expect(attrs!["summary"]).toBe("world");
     expect(attrs!["track_slug"]).toBe("inbox");
     expect(attrs!["created_by_pubkey"]).toBe(rumor.pubkey);
@@ -40,6 +42,22 @@ describe("projectCard", () => {
     const audit = attrs!["_studio_event_audit"] as Array<{ event_id: string }>;
     expect(audit).toHaveLength(1);
     expect(audit[0]!.event_id).toBe(rumor.id);
+  });
+
+  test("legacy `summary` payload maps to body (regression)", async () => {
+    const fake = new FakeMemoryClient();
+    const client = fake.asMemoryClient();
+
+    // Pre-cutover wire shape: only `summary`, no `body`.
+    const legacy = cardPayload({ body: undefined, summary: "legacy text" });
+    delete legacy["body"];
+    const rumor = cardRumor({ dTag: "legacy-001" });
+    await projectToMemory(rumor, legacy, client);
+
+    const attrs = fake.attrs(`studio:card:studio-rt:${rumor.pubkey}:legacy-001`);
+    expect(attrs).not.toBeNull();
+    expect(attrs!["body"]).toBe("legacy text");
+    expect(attrs!["summary"]).toBe("legacy text");
   });
 
   test("auto-creates studio_track stub and relates --in_track-->", async () => {
