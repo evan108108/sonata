@@ -254,7 +254,15 @@ struct FoldableBlock<Content: View>: View {
     @State private var measuredHeight: CGFloat = 0
     @State private var folded: Bool = false
 
-    private var needsFold: Bool { measuredHeight > 200 }
+    /// Image blocks are visual — never auto-fold them, so the picture is
+    /// the first thing the reader sees. Long text/code/etc. still collapse
+    /// past 200pt so the drawer stays scannable.
+    private var isImage: Bool {
+        if case .image = block { return true }
+        return false
+    }
+
+    private var needsFold: Bool { !isImage && measuredHeight > 200 }
 
     var body: some View {
         Group {
@@ -278,7 +286,7 @@ struct FoldableBlock<Content: View>: View {
                     )
                     .onPreferenceChange(BlockHeightKey.self) { h in
                         measuredHeight = h
-                        if h > 200 { folded = true }
+                        if h > 200 && !isImage { folded = true }
                     }
             }
         }
