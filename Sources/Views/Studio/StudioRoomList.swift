@@ -6,9 +6,11 @@ struct StudioRoomList: View {
     @Binding var selectedRoom: StudioRoom?
 
     @State private var showCreateSheet: Bool = false
+    @State private var showJoinSheet: Bool = false
     @State private var filterText: String = ""
     @State private var roomPendingDelete: StudioRoom?
     @State private var showDeleteAlert: Bool = false
+    @State private var joinToast: InlineToast?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,8 +21,14 @@ struct StudioRoomList: View {
             filterField
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .overlay(alignment: .bottom) { joinToastOverlay }
         .sheet(isPresented: $showCreateSheet) {
             StudioCreateRoomSheet(store: store)
+        }
+        .sheet(isPresented: $showJoinSheet) {
+            StudioJoinRoomSheet(store: store) { slug, state in
+                handleJoined(slug: slug, state: state)
+            }
         }
         .alert(
             "Delete '\(roomPendingDelete?.title ?? "")'?",
@@ -53,19 +61,89 @@ struct StudioRoomList: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
             Spacer(minLength: 0)
-            Button {
-                showCreateSheet = true
+            // Hidden ⌘N captor: SwiftUI's Menu drops keyboard shortcuts on
+            // its items, so the shortcut lives on a sibling 0×0 button that
+            // mirrors the "New Room" action.
+            Button("New Room") { showCreateSheet = true }
+                .keyboardShortcut("n", modifiers: [.command])
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
+            Menu {
+                Button {
+                    showCreateSheet = true
+                } label: {
+                    Label("New Room…", systemImage: "plus.rectangle.on.rectangle")
+                }
+                Button {
+                    showJoinSheet = true
+                } label: {
+                    Label("Join Room…", systemImage: "person.crop.circle.badge.plus")
+                }
             } label: {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 16, weight: .regular))
                     .foregroundStyle(Color.accentColor)
             }
-            .buttonStyle(.plain)
-            .help("New Room (⌘N)")
-            .keyboardShortcut("n", modifiers: [.command])
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("New or Join (⌘N for New)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var joinToastOverlay: some View {
+        if let toast = joinToast {
+            HStack(spacing: 8) {
+                Image(systemName: toast.symbol)
+                    .foregroundStyle(toast.tint)
+                Text(toast.text)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.thickMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.secondary.opacity(0.25), lineWidth: 0.5))
+            .padding(.bottom, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .onAppear { scheduleToastDismiss(id: toast.id) }
+        }
+    }
+
+    private func handleJoined(slug: String, state: String) {
+        if let room = store.rooms.first(where: { $0.slug == slug }) {
+            selectedRoom = room
+        }
+        let toast: InlineToast
+        if state == "pending-grant" {
+            toast = InlineToast(
+                text: "Joined room. Waiting for the owner to admit you.",
+                symbol: "hourglass",
+                tint: .yellow
+            )
+        } else {
+            toast = InlineToast(
+                text: "Joined!",
+                symbol: "checkmark.circle.fill",
+                tint: .green
+            )
+        }
+        withAnimation(.easeOut(duration: 0.2)) {
+            joinToast = toast
+        }
+    }
+
+    private func scheduleToastDismiss(id: UUID) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if joinToast?.id == id {
+                withAnimation(.easeIn(duration: 0.2)) { joinToast = nil }
+            }
+        }
     }
 
     private var visibleRooms: [StudioRoom] {
@@ -243,3 +321,15 @@ private struct StudioRoomRow: View {
         return Color.clear
     }
 }
+
+/// Bottom-of-sidebar transient pill. Auto-dismisses 4s after appearing.
+/// Lives here (not in StudioToast.swift) because the env-keyed toast client
+/// is a logger passthrough today and the room-list needed something visible
+/// without spinning up a renderer-wide toast surface.
+struct InlineToast: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let symbol: String
+    let tint: Color
+}
+

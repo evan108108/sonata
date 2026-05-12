@@ -19,6 +19,9 @@ struct StudioRoomDetail: View {
     /// `showComposeSheet` so the "+ new card" path and the pencil-edit path
     /// don't clobber each other if a user opens both in quick succession.
     @State private var editingCard: StudioCard? = nil
+    @State private var showInviteSheet: Bool = false
+    @State private var admitInFlight: Bool = false
+    @State private var admitToast: InlineToast? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,6 +69,14 @@ struct StudioRoomDetail: View {
             )
                 .environmentObject(store)
         }
+        .sheet(isPresented: $showInviteSheet) {
+            StudioInviteSheet(
+                store: store,
+                roomSlug: room.slug,
+                roomTitle: room.title
+            )
+        }
+        .overlay(alignment: .top) { admitToastOverlay }
         .animation(.easeOut(duration: 0.18), value: selectedCard?.eventId)
         .onChange(of: room.slug) { _, _ in selectedCard = nil }
         .onAppear {
@@ -153,8 +164,33 @@ struct StudioRoomDetail: View {
         return n == 1 ? "1 member" : "\(n) members"
     }
 
+    /// Founder gate per task spec: `currentPubkeyHex == room.createdByPubkey`.
+    /// While we don't yet know our own pubkey (e.g. plugin identity endpoint
+    /// hadn't responded at launch) we suppress founder affordances entirely
+    /// rather than show disabled buttons.
+    private var isFounder: Bool {
+        let me = store.currentPubkeyHex.lowercased()
+        let creator = room.createdByPubkey.lowercased()
+        return !me.isEmpty && !creator.isEmpty && me == creator
+    }
+
     private var settingsMenu: some View {
         Menu {
+            if isFounder {
+                Button {
+                    showInviteSheet = true
+                } label: {
+                    Label("Invite people…", systemImage: "person.crop.circle.badge.plus")
+                }
+                Button {
+                    Task { await runAdmit() }
+                } label: {
+                    Label(admitInFlight ? "Admitting…" : "Admit pending member(s)",
+                          systemImage: "checkmark.seal")
+                }
+                .disabled(admitInFlight)
+                Divider()
+            }
             Toggle(isOn: dispatchTraceBinding) {
                 Label("Show dispatch trace", systemImage: "arrow.up.right.diamond")
             }
@@ -169,6 +205,74 @@ struct StudioRoomDetail: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Room settings")
+    }
+
+    @ViewBuilder
+    private var admitToastOverlay: some View {
+        if let toast = admitToast {
+            HStack(spacing: 8) {
+                Image(systemName: toast.symbol)
+                    .foregroundStyle(toast.tint)
+                Text(toast.text)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.thickMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.secondary.opacity(0.25), lineWidth: 0.5))
+            .padding(.top, 12)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .onAppear { scheduleAdmitToastDismiss(id: toast.id) }
+        }
+    }
+
+    private func runAdmit() async {
+        guard !admitInFlight else { return }
+        admitInFlight = true
+        defer { admitInFlight = false }
+        do {
+            let result = try await store.admitRoom(slug: room.slug, maxAdmit: nil)
+            let n = result.admitted.count
+            let text: String
+            let symbol: String
+            let tint: Color
+            if n == 0 {
+                text = "No pending claims to admit."
+                symbol = "info.circle"
+                tint = .secondary
+            } else {
+                text = "Admitted \(n) member\(n == 1 ? "" : "s") · epoch \(result.newEpoch)"
+                symbol = "checkmark.circle.fill"
+                tint = .green
+            }
+            showAdmitToast(InlineToast(text: text, symbol: symbol, tint: tint))
+        } catch let err as StudioPluginError {
+            showAdmitToast(InlineToast(
+                text: err.message,
+                symbol: "exclamationmark.triangle.fill",
+                tint: .red
+            ))
+        } catch {
+            showAdmitToast(InlineToast(
+                text: "Admit failed: \(error.localizedDescription)",
+                symbol: "exclamationmark.triangle.fill",
+                tint: .red
+            ))
+        }
+    }
+
+    private func showAdmitToast(_ toast: InlineToast) {
+        withAnimation(.easeOut(duration: 0.2)) { admitToast = toast }
+    }
+
+    private func scheduleAdmitToastDismiss(id: UUID) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if admitToast?.id == id {
+                withAnimation(.easeIn(duration: 0.2)) { admitToast = nil }
+            }
+        }
     }
 
     // MARK: - Bindings

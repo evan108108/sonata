@@ -858,8 +858,73 @@ final class StudioStore: ObservableObject {
         )
     }
 
+    /// T1: POST `/api/plugins/sonata-studio/room/join`. Returns a placeholder
+    /// `StudioRoom` synthesized from the response; the real row arrives via
+    /// the SSE projector shortly. Response `state` is either `"active"` (we
+    /// already had a grant — e.g. re-joining a room we were a member of) or
+    /// `"pending-grant"` (waiting for the founder to admit our claim).
+    ///
+    /// The caller is expected to trim/sanity-check the URL prefix before
+    /// passing it in; this method forwards whatever it gets to the plugin.
+    @discardableResult
     func joinRoom(inviteURL: String) async throws -> StudioRoom {
-        fatalError("implementer fills in per §8")
+        struct Req: Encodable {
+            let inviteUrl: String
+            enum CodingKeys: String, CodingKey { case inviteUrl = "invite_url" }
+        }
+        let response: StudioRoomJoinResponse = try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/join",
+            body: Req(inviteUrl: inviteURL)
+        )
+        return StudioRoom.placeholder(
+            id: "studio:room:\(response.roomSlug)",
+            slug: response.roomSlug,
+            title: response.roomSlug,
+            description: nil,
+            createdByPubkey: "",
+            createdAtSeconds: Int64(Date().timeIntervalSince1970),
+            eventId: response.claimEventId,
+            members: [],
+            currentEpoch: response.epoch,
+            state: response.state
+        )
+    }
+
+    /// Founder-only: mint a fresh invite URL for `slug`. `ttlSeconds` defaults
+    /// to the plugin's 7-day default when nil. Throws `StudioPluginError` with
+    /// code `not_founder` (403) if the local pubkey isn't the audience creator.
+    func inviteRoom(slug: String, ttlSeconds: Int? = nil) async throws -> StudioInviteResponse {
+        struct Req: Encodable {
+            let roomSlug: String
+            let ttlSeconds: Int?
+            enum CodingKeys: String, CodingKey {
+                case roomSlug = "room_slug"
+                case ttlSeconds = "ttl_seconds"
+            }
+        }
+        return try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/invite",
+            body: Req(roomSlug: slug, ttlSeconds: ttlSeconds)
+        )
+    }
+
+    /// Founder-only: rotate the epoch and mint key-grants for any pending
+    /// claims on `slug`. `maxAdmit` caps the number processed (nil = no cap).
+    /// Returns an empty `admitted` list if there are no pending claims —
+    /// that's the cheap "are there pending claims?" probe shape.
+    func admitRoom(slug: String, maxAdmit: Int? = nil) async throws -> StudioAdmitResult {
+        struct Req: Encodable {
+            let roomSlug: String
+            let maxAdmit: Int?
+            enum CodingKeys: String, CodingKey {
+                case roomSlug = "room_slug"
+                case maxAdmit = "max_admit"
+            }
+        }
+        return try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/admit",
+            body: Req(roomSlug: slug, maxAdmit: maxAdmit)
+        )
     }
 
     /// Local-only delete. Removes the room entity + aud_id/epoch secrets and
@@ -946,6 +1011,75 @@ struct StudioRoomCreateRequest: Encodable {
 struct StudioDefaultTrack: Encodable {
     let name: String
     let title: String
+}
+
+/// Response from `POST /api/plugins/sonata-studio/room/join`. `state` is
+/// either `"active"` (we re-joined a room we still had a valid grant for)
+/// or `"pending-grant"` (waiting for the founder to admit the claim).
+struct StudioRoomJoinResponse: Decodable {
+    let audienceAddress: String
+    let roomSlug: String
+    let epoch: Int
+    let claimEventId: String
+    let state: String
+
+    enum CodingKeys: String, CodingKey {
+        case audienceAddress = "audience_address"
+        case roomSlug = "room_slug"
+        case epoch
+        case claimEventId = "claim_event_id"
+        case state
+    }
+}
+
+/// Response from `POST /api/plugins/sonata-studio/room/invite`. The
+/// renderer shows `https_url` (more shareable across apps) and stamps
+/// `expires_at` (Unix seconds) into the UI.
+struct StudioInviteResponse: Decodable, Equatable {
+    let fourAUrl: String
+    let httpsUrl: String
+    let invitePub: String
+    let expiresAt: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case fourAUrl = "four_a_url"
+        case httpsUrl = "https_url"
+        case invitePub = "invite_pub"
+        case expiresAt = "expires_at"
+    }
+}
+
+/// Response from `POST /api/plugins/sonata-studio/room/admit`. `admitted`
+/// is the list of newly granted members; if empty, no pending claims were
+/// available to process. `failed` carries any per-recipient errors
+/// (decryption / publish problems); the action still succeeds overall.
+struct StudioAdmitResult: Decodable, Equatable {
+    let ok: Bool
+    let admitted: [Admitted]
+    let newEpoch: Int
+    let declarationEventId: String?
+    let failed: [Failure]?
+
+    struct Admitted: Decodable, Equatable {
+        let claimPubkey: String
+        let keyGrantEventId: String
+
+        enum CodingKeys: String, CodingKey {
+            case claimPubkey = "claim_pubkey"
+            case keyGrantEventId = "key_grant_event_id"
+        }
+    }
+
+    struct Failure: Decodable, Equatable {
+        let recipient: String
+        let reason: String
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ok, admitted, failed
+        case newEpoch = "new_epoch"
+        case declarationEventId = "declaration_event_id"
+    }
 }
 
 struct StudioRoomCreateResponse: Decodable {
@@ -1223,7 +1357,8 @@ extension StudioRoom {
         createdAtSeconds: Int64,
         eventId: String,
         members: [String],
-        currentEpoch: Int
+        currentEpoch: Int,
+        state: String = "active"
     ) -> StudioRoom {
         let attrs: [String: Any] = [
             "slug": slug,
@@ -1233,7 +1368,7 @@ extension StudioRoom {
             "created_by_pubkey": createdByPubkey,
             "created_at_seconds": createdAtSeconds,
             "event_id": eventId,
-            "state": "active",
+            "state": state,
             "current_epoch": currentEpoch,
             "members": members,
         ]
