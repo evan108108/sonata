@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var mcpExpanded = false
     @State private var workerExpanded = false
     @State private var supervisorExpanded = false
+    @State private var studioExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -214,6 +215,11 @@ struct SettingsView: View {
                     // MARK: - Workers Section
                     collapsibleSection("Workers", icon: "arrow.triangle.2.circlepath", expanded: $workerExpanded) {
                         WorkerCyclingSettingsView()
+                    }
+
+                    // MARK: - Studio Section
+                    collapsibleSection("Studio", icon: "rectangle.split.3x1.fill", expanded: $studioExpanded) {
+                        StudioSettingsView()
                     }
 
                     // MARK: - Supervisor Schedule Section
@@ -570,5 +576,80 @@ private struct AddSecretSheet: View {
         }
         .padding()
         .frame(width: 420)
+    }
+}
+
+// MARK: - Studio Settings
+
+/// Settings pane for Studio. Today: just the default nickname surfaced to
+/// other members. Persisted in the `studio:user_profile` singleton entity;
+/// the per-room `_profile` card auto-publishes from it on first post / join
+/// (see StudioStore). Reads + writes through EntityHTTP directly so this
+/// pane doesn't need a shared `StudioStore` env object — the live store
+/// observes the same row and picks up changes automatically.
+struct StudioSettingsView: View {
+    @State private var nickname: String = ""
+    @State private var savedFlash: Bool = false
+    @State private var saving: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Default nickname")
+                        .font(.body)
+                    Text("How you appear to other members in new rooms. Federated via the next card you post or room you join.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                TextField("e.g. Sona", text: $nickname)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 220)
+                    .onSubmit { save() }
+                Button(action: save) {
+                    if saving {
+                        ProgressView().controlSize(.small)
+                    } else if savedFlash {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("Save")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(saving)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        Task {
+            if let s = await EntityHTTP.readDefaultNickname() {
+                await MainActor.run { nickname = s }
+            }
+        }
+    }
+
+    private func save() {
+        let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        saving = true
+        Task {
+            await EntityHTTP.upsertEntity(
+                name: "studio:user_profile",
+                type: "studio_user_profile",
+                description: "Local default profile (machine-only, not federated directly)",
+                attributes: ["default_nickname": trimmed]
+            )
+            await MainActor.run {
+                saving = false
+                savedFlash = true
+            }
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            await MainActor.run { savedFlash = false }
+        }
     }
 }

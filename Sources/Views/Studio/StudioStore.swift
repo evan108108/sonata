@@ -79,6 +79,9 @@ final class StudioStore: ObservableObject {
         if cancellables["members"] == nil {
             startMembersObservation()
         }
+        if cancellables["user_profile"] == nil {
+            startUserProfileObservation()
+        }
         // Learn our own pubkey eagerly so author-only UI (Delete/Edit) is
         // gated correctly on cards posted before this Sonata launch.
         if currentPubkeyHex.isEmpty {
@@ -171,6 +174,41 @@ final class StudioStore: ObservableObject {
                     self?.roomMembers = grouped.perRoom
                 }
             }
+        )
+    }
+
+    private func startUserProfileObservation() {
+        let observation = ValueObservation.tracking { db -> String in
+            let rows = try Row.fetchAll(db, sql: Self.SQL_USER_PROFILE)
+            for row in rows {
+                let attrsRaw = (row["attributes"] as String?) ?? "{}"
+                let raw = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
+                if let nick = raw["default_nickname"] as? String { return nick }
+            }
+            return ""
+        }
+        cancellables["user_profile"] = observation.start(
+            in: requirePool(),
+            scheduling: .async(onQueue: .main),
+            onError: { error in NSLog("[StudioStore] user_profile observation error: \(error)") },
+            onChange: { [weak self] nick in
+                MainActor.assumeIsolated { self?.defaultNickname = nick }
+            }
+        )
+    }
+
+    /// Persist the machine-local default nickname into the
+    /// `studio:user_profile` singleton entity. Triggers the observation above,
+    /// which republishes `defaultNickname`. The value is never federated by
+    /// itself — `auto-publish on first post / on join` is what carries it
+    /// onto the wire as a `_profile` card per room.
+    func setDefaultNickname(_ nickname: String) async {
+        let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        await EntityHTTP.upsertEntity(
+            name: "studio:user_profile",
+            type: "studio_user_profile",
+            description: "Local default profile (machine-only, not federated directly)",
+            attributes: ["default_nickname": trimmed]
         )
     }
 
@@ -1059,6 +1097,13 @@ final class StudioStore: ObservableObject {
         FROM entities
         WHERE type = 'studio_member'
         """
+
+    nonisolated static let SQL_USER_PROFILE = """
+        SELECT id, name, description, attributes
+        FROM entities
+        WHERE type = 'studio_user_profile'
+        LIMIT 1
+        """
 }
 
 // MARK: - Plugin envelopes (§8.1)
@@ -1233,6 +1278,54 @@ enum EntityHTTP {
         let port = ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "3211"
         return URL(string: "http://127.0.0.1:\(port)")!
     }()
+
+    /// Idempotent name-keyed upsert. Used for the local `studio:user_profile`
+    /// singleton; logs and swallows errors because Settings UI shouldn't
+    /// surface transient memory-server hiccups (the next save retries).
+    static func upsertEntity(
+        name: String,
+        type: String,
+        description: String,
+        attributes: [String: Any]
+    ) async {
+        var req = URLRequest(url: baseURL.appendingPathComponent("api/entity"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "name": name,
+            "type": type,
+            "description": description,
+            "attributes": attributes,
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            _ = try await URLSession.shared.data(for: req)
+        } catch {
+            NSLog("[EntityHTTP] upsertEntity(\(name)) failed: \(error)")
+        }
+    }
+
+    /// One-shot read of the `studio:user_profile` singleton's
+    /// `default_nickname`. Returns nil if the entity doesn't exist yet OR if
+    /// the read failed transiently — the Settings pane treats nil as empty
+    /// and keeps the user's in-progress edits.
+    static func readDefaultNickname() async -> String? {
+        var comps = URLComponents(url: baseURL.appendingPathComponent("api/entity"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "name", value: "studio:user_profile")]
+        guard let url = comps.url else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return nil
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let attrsRaw = (obj?["attributes"] as? String) ?? "{}"
+            let attrs = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
+            return attrs["default_nickname"] as? String
+        } catch {
+            return nil
+        }
+    }
 
     static func patchAttributes(id: String, attributes: [String: Any]) async {
         var req = URLRequest(url: baseURL.appendingPathComponent("api/entity"))
