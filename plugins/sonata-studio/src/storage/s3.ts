@@ -299,6 +299,18 @@ export interface S3StorageConfig {
   s3_path_style: boolean;
   s3_access_key_id_keychain_ref: string;
   s3_secret_access_key_keychain_ref: string;
+  /**
+   * Optional public URL base — the prefix used to construct the mirror URL
+   * the *renderer* uses to fetch the ciphertext (no auth). Without it, the
+   * mirror URL is the signed PUT URL on the S3 API endpoint, which requires
+   * SigV4 auth on GET even when the bucket is public.
+   *
+   * R2: bucket public access → e.g. https://pub-<hash>.r2.dev
+   * AWS S3 with public-read: https://<bucket>.s3.<region>.amazonaws.com
+   * (Set if the bucket allows public reads. If unset we fall back to the
+   * signed S3 API URL — works only when readers also have credentials.)
+   */
+  s3_public_url_base?: string;
 }
 
 export type StorageConfig = BlossomStorageConfig | S3StorageConfig;
@@ -387,6 +399,21 @@ export function validateStorageConfig(
         },
       };
     }
+    const publicBaseRaw = obj["s3_public_url_base"];
+    let publicBase: string | undefined;
+    if (publicBaseRaw !== undefined && publicBaseRaw !== null && publicBaseRaw !== "") {
+      if (typeof publicBaseRaw !== "string") {
+        return {
+          ok: false,
+          error: {
+            code: "invalid_storage_config",
+            field: "s3_public_url_base",
+            reason: "must be a string when provided",
+          },
+        };
+      }
+      publicBase = publicBaseRaw.replace(/\/+$/, "");
+    }
     return {
       ok: true,
       config: {
@@ -397,6 +424,7 @@ export function validateStorageConfig(
         s3_path_style: pathStyle,
         s3_access_key_id_keychain_ref: keyRef,
         s3_secret_access_key_keychain_ref: secRef,
+        ...(publicBase !== undefined ? { s3_public_url_base: publicBase } : {}),
       },
     };
   }

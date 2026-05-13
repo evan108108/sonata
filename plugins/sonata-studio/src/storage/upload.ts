@@ -227,5 +227,12 @@ async function uploadToS3(
     );
   }
 
-  return { mirror_url: signed.url, backend: "s3" };
+  // If the bucket has a public-read URL configured, use that as the mirror —
+  // it's what room members hit on download (no SigV4 auth). The signed URL
+  // is the API endpoint and requires auth on GET even with a public bucket.
+  const publicBase = cfg.s3_public_url_base;
+  const mirrorURL = publicBase
+    ? `${publicBase}/${objectKey}`
+    : signed.url;
+  return { mirror_url: mirrorURL, backend: "s3" };
 }

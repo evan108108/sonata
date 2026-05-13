@@ -45,7 +45,10 @@ struct StudioStorageConfigEditor: View {
     /// already labels the block.
     var showHeader: Bool = false
 
-    @State private var mode: StudioStorageMode = .useDefault
+    // Initial value is overwritten by load() — but the user-wide editor never
+    // wants .useDefault (no upstream to inherit). Defaulting to .blossom here
+    // keeps the dropdown from rendering empty during the load round-trip.
+    @State private var mode: StudioStorageMode = .blossom
     @State private var blossomURL: String = "https://api.4a4.ai/blossom"
 
     // S3 fields
@@ -55,6 +58,7 @@ struct StudioStorageConfigEditor: View {
     @State private var s3PathStyle: Bool = true
     @State private var s3AccessKeyId: String = ""
     @State private var s3SecretAccessKey: String = ""
+    @State private var s3PublicURLBase: String = ""
 
     @State private var setAsDefault: Bool = false
 
@@ -72,6 +76,13 @@ struct StudioStorageConfigEditor: View {
 
     private var isRoomScoped: Bool { roomSlug != nil }
 
+    /// Modes shown in the picker. The "Default (inherit)" mode only makes
+    /// sense for per-room overrides — in the user-wide editor there is no
+    /// upstream default to fall back to.
+    private var availableModes: [StudioStorageMode] {
+        isRoomScoped ? StudioStorageMode.allCases : [.blossom, .s3]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if showHeader {
@@ -81,14 +92,33 @@ struct StudioStorageConfigEditor: View {
                     .font(.title2.bold())
             }
 
-            Picker("Backend", selection: $mode) {
-                ForEach(StudioStorageMode.allCases) { mode in
-                    Text(mode.displayName).tag(mode)
+            if isRoomScoped {
+                // Per-room editor: 3 modes including "Default (inherit)".
+                // Segmented picker fits the modal layout.
+                Picker("Backend", selection: $mode) {
+                    ForEach(availableModes) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 480, alignment: .leading)
+            } else {
+                // User-wide editor: there's nothing to "inherit" — the user
+                // is *setting* the default. Single dropdown that swaps the
+                // fields below.
+                HStack(spacing: 10) {
+                    Text("Backend")
+                    Picker("", selection: $mode) {
+                        ForEach(availableModes) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 240, alignment: .leading)
+                    Spacer()
                 }
             }
-            .pickerStyle(.segmented)
-            .disabled(!isRoomScoped && mode == .useDefault)
-            .frame(maxWidth: 480, alignment: .leading)
 
             Group {
                 switch mode {
@@ -205,6 +235,16 @@ struct StudioStorageConfigEditor: View {
                     SecureField("Stored in macOS Keychain", text: $s3SecretAccessKey)
                         .textFieldStyle(.roundedBorder)
                 }
+                GridRow {
+                    Text("Public URL base")
+                    VStack(alignment: .leading, spacing: 2) {
+                        TextField("https://pub-<hash>.r2.dev", text: $s3PublicURLBase)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Where other room members fetch attachments (the S3 API endpoint requires auth even on a public bucket).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             publicReadNotice
@@ -290,7 +330,19 @@ struct StudioStorageConfigEditor: View {
             applyToFields(cfg)
             mode = .useDefault
         } else {
-            mode = .useDefault
+            // No config yet. Room-scoped editor defaults to "inherit"; the
+            // user-wide editor has no such mode, so land on Blossom with the
+            // hosted URL pre-filled — saving as-is preserves "use hosted".
+            mode = isRoomScoped ? .useDefault : .blossom
+        }
+        // User-wide editor must never sit in .useDefault — there is no
+        // upstream default to inherit. Snap to Blossom (hosted URL is
+        // pre-filled) so the dropdown always shows a concrete selection.
+        if !isRoomScoped, mode == .useDefault {
+            mode = .blossom
+            if blossomURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                blossomURL = "https://api.4a4.ai/blossom"
+            }
         }
     }
 
@@ -305,6 +357,7 @@ struct StudioStorageConfigEditor: View {
             s3Region = cfg.s3_region ?? "auto"
             s3Bucket = cfg.s3_bucket ?? ""
             s3PathStyle = cfg.s3_path_style ?? true
+            s3PublicURLBase = cfg.s3_public_url_base ?? ""
             // Load Keychain creds when refs are present
             let scope = roomSlug.map { StudioKeychain.roomAccessKeyAccount(roomSlug: $0) }
                 ?? StudioKeychain.defaultAccessKeyAccount()
@@ -326,13 +379,20 @@ struct StudioStorageConfigEditor: View {
             guard !trimmed.isEmpty else { return nil }
             return ["kind": "blossom", "blossom_url": trimmed]
         case .s3:
-            return ["kind": "s3",
-                    "s3_endpoint": s3Endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
-                    "s3_region": s3Region.trimmingCharacters(in: .whitespacesAndNewlines),
-                    "s3_bucket": s3Bucket.trimmingCharacters(in: .whitespacesAndNewlines),
-                    "s3_path_style": s3PathStyle,
-                    "s3_access_key_id_keychain_ref": accessKeyAccount(),
-                    "s3_secret_access_key_keychain_ref": secretAccount()]
+            var p: [String: Any] = [
+                "kind": "s3",
+                "s3_endpoint": s3Endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+                "s3_region": s3Region.trimmingCharacters(in: .whitespacesAndNewlines),
+                "s3_bucket": s3Bucket.trimmingCharacters(in: .whitespacesAndNewlines),
+                "s3_path_style": s3PathStyle,
+                "s3_access_key_id_keychain_ref": accessKeyAccount(),
+                "s3_secret_access_key_keychain_ref": secretAccount(),
+            ]
+            let publicBase = s3PublicURLBase.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !publicBase.isEmpty {
+                p["s3_public_url_base"] = publicBase
+            }
+            return p
         }
     }
 
@@ -397,11 +457,16 @@ struct StudioStorageConfigEditor: View {
         }
 
         let payload = buildConfigPayload()
-        // ANSWER body shape: { room?, config: <payload>|null }
+        // Body shape: { room?, config? }. When `payload` is nil we want to
+        // clear the override — omit `config` entirely (the Sonata proxy
+        // reconstructs the body from typed params and treats `null` as
+        // missing-or-malformed, so the plugin sees an empty config object
+        // and 400s on validation. Omitting the key passes `undefined` to
+        // the plugin handler which is its documented "clear" signal.)
         do {
             if let slug = roomSlug {
                 var body: [String: Any] = ["room": slug]
-                body["config"] = payload as Any? ?? NSNull()
+                if let payload { body["config"] = payload }
                 let _ = try await EntityHTTP.postPluginActionRawDict(
                     path: "sonata-studio/storage/config/set",
                     body: body
@@ -416,7 +481,7 @@ struct StudioStorageConfigEditor: View {
                 }
             } else {
                 var defBody: [String: Any] = [:]
-                defBody["config"] = payload as Any? ?? NSNull()
+                if let payload { defBody["config"] = payload }
                 let _ = try await EntityHTTP.postPluginActionRawDict(
                     path: "sonata-studio/storage/default/set",
                     body: defBody
@@ -467,6 +532,7 @@ struct StudioStorageConfig: Codable, Equatable {
     let s3_path_style: Bool?
     let s3_access_key_id_keychain_ref: String?
     let s3_secret_access_key_keychain_ref: String?
+    let s3_public_url_base: String?
 }
 
 struct StudioStorageGetResponse: Decodable {
