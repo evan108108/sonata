@@ -55,7 +55,7 @@ const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const BLOSSOM_AUTH_KIND = 24242;
 
 // Default Blossom server; overridable via ctx.cfg.blossomBaseURL.
-const DEFAULT_BLOSSOM_URL = "https://blossom.primal.net";
+const DEFAULT_BLOSSOM_URL = "https://api.4a4.ai/blossom";
 
 interface FileAttachRequest {
   file_path?: unknown;
