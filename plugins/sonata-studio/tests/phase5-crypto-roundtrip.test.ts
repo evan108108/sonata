@@ -9,9 +9,11 @@
 //   3. NIP-44-wrap the 32-byte file_key under each recipient's identity key
 //      (or, in the audience case, under aud_epoch_n_pub).
 //
-// This file covers the building-block round-trips (bulk AEAD on its own,
-// NIP-44 wrap of a 32-byte key on its own). The combined hybrid pattern and
-// the multi-recipient fan-out land in a follow-up commit.
+// These tests verify the cryptography works end-to-end for the sizes Phase 5
+// targets (up to 100 MB per Phase 5 §3.3 default). They live alongside the
+// existing NIP-44 / NIP-17 parity tests so any regression in either layer
+// (the @noble/ciphers chacha20poly1305 or the gateway-mirrored nip44.ts) is
+// caught at `bun test` time before file-attach code lands.
 //
 // Audit doc: /Users/evan/memory/claude/documents/evenflow/sonata-studio-phase5-plumbing-audit.md
 
@@ -42,6 +44,12 @@ const SENDER = fixedKeypair(
 );
 const RECIPIENT_A = fixedKeypair(
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+);
+const RECIPIENT_B = fixedKeypair(
+  "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+);
+const RECIPIENT_C = fixedKeypair(
+  "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 );
 const ATTACKER = fixedKeypair(
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -141,5 +149,59 @@ describe("phase5 — NIP-44 wrap of 32-byte file_key", () => {
     const wireBytes = wireB64.length; // base64 char count == byte count for ASCII transport
     expect(wireBytes).toBeGreaterThan(120);
     expect(wireBytes).toBeLessThan(160);
+  });
+});
+
+describe("phase5 — combined hybrid encrypt (file_key + NIP-44 wrap)", () => {
+  it("single recipient: 1 MB plaintext round-trips through wrap + bulk encrypt", () => {
+    // Sender side.
+    const fileKey = randomBytes(32);
+    const nonce = randomBytes(12);
+    const plaintext = randomBytes(1024 * 1024);
+
+    const ciphertext = chacha20poly1305(fileKey, nonce).encrypt(plaintext);
+    const wrappedKeyB64 = nip44Encrypt(fileKey, SENDER.priv, RECIPIENT_A.pub);
+
+    // Wire shape: ciphertext goes to Blossom; wrappedKeyB64 + nonce ride on
+    // the card block. Simulate transport by zeroing `fileKey` post-wrap.
+    fileKey.fill(0);
+
+    // Recipient side.
+    const recoveredKey = nip44Decrypt(wrappedKeyB64, RECIPIENT_A.priv, SENDER.pub);
+    expect(recoveredKey.length).toBe(32);
+    const recovered = chacha20poly1305(recoveredKey, nonce).decrypt(ciphertext);
+    expect(recovered).toEqual(plaintext);
+  });
+
+  it("multi-recipient: 1 MB plaintext, 3 recipients, 3 separate wraps", () => {
+    const fileKey = randomBytes(32);
+    const nonce = randomBytes(12);
+    const plaintext = randomBytes(1024 * 1024);
+
+    const ciphertext = chacha20poly1305(fileKey, nonce).encrypt(plaintext);
+
+    // Build per-recipient wraps — exactly the audience-fanout pattern
+    // we'd run inside fileAttach for N members of an audience.
+    const wraps = [RECIPIENT_A, RECIPIENT_B, RECIPIENT_C].map((r) =>
+      nip44Encrypt(fileKey, SENDER.priv, r.pub),
+    );
+    // All three wraps must be distinct ciphertexts (different conversation keys).
+    expect(new Set(wraps).size).toBe(3);
+
+    // Each recipient unwraps independently and recovers byte-equal plaintext.
+    for (const [idx, r] of [RECIPIENT_A, RECIPIENT_B, RECIPIENT_C].entries()) {
+      const wrappedB64 = wraps[idx]!;
+      const k = nip44Decrypt(wrappedB64, r.priv, SENDER.pub);
+      const pt = chacha20poly1305(k, nonce).decrypt(ciphertext);
+      expect(pt).toEqual(plaintext);
+    }
+
+    // Sanity: an outsider with none of the three priv keys cannot decrypt
+    // any of the wraps.
+    for (const wrappedB64 of wraps) {
+      expect(() =>
+        nip44Decrypt(wrappedB64, ATTACKER.priv, SENDER.pub),
+      ).toThrow(/MAC verification failed/);
+    }
   });
 });
