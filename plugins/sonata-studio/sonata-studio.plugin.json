@@ -84,7 +84,7 @@
       "params": [
         { "name": "room", "type": "string", "required": true, "description": "Room slug." },
         { "name": "track", "type": "string", "required": true, "description": "Track slug within the room." },
-        { "name": "kind", "type": "string", "required": true, "description": "Card kind (lead | review | finding | observation | task | note | other)." },
+        { "name": "kind", "type": "string", "required": true, "description": "Card kind (lead | review | finding | observation | task | note | document | other)." },
         { "name": "title", "type": "string", "required": true, "description": "Title (≤200 chars)." },
         { "name": "body", "type": "string", "required": true, "description": "Long-form markdown body (≤10000 chars)." },
         { "name": "summary", "type": "string", "description": "DEPRECATED alias for `body`. Accepted for one cutover release past 2026-05-12; new clients should send `body`." },

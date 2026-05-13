@@ -52,12 +52,13 @@ struct StudioComposeSheet: View {
     }
 
     enum CardKind: String, CaseIterable, Identifiable {
-        case note, lead, review, task, question, answer
+        case note, document, lead, review, task, question, answer
         var id: String { rawValue }
         var label: String { rawValue.capitalized }
         var symbol: String {
             switch self {
             case .note:     return "note.text"
+            case .document: return "doc.text.fill"
             case .lead:     return "person.crop.rectangle.badge.plus"
             case .review:   return "checkmark.seal"
             case .task:     return "checklist"

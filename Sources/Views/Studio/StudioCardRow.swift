@@ -270,6 +270,7 @@ struct StudioCardRow: View {
     static func symbol(for kind: String?) -> String {
         switch kind {
         case "note":     return "bubble.left.fill"
+        case "document": return "doc.text.fill"
         case "lead":     return "target"
         case "review":   return "checkmark.seal.fill"
         case "task":     return "checklist"

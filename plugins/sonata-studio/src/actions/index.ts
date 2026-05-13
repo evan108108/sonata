@@ -100,7 +100,7 @@ const CARD_POST_PARAMS: ActionParam[] = [
     name: "kind",
     type: "string",
     required: true,
-    description: 'Card kind ("lead" | "review" | "finding" | "observation" | "task" | "note" | other).',
+    description: 'Card kind ("lead" | "review" | "finding" | "observation" | "task" | "note" | "document" | other).',
   },
   { name: "title", type: "string", required: true, description: "Title (≤200 chars)." },
   { name: "body", type: "string", required: true, description: "Long-form markdown body (≤10000 chars)." },
