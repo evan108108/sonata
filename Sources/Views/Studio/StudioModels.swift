@@ -286,6 +286,7 @@ enum StudioBlock: Equatable {
     case link(href: String, label: String?)
     case field(key: String, value: String)
     case image(StudioImageBlock)
+    case file(StudioFileBlock)
     case unknown(type: String, raw: [String: AnyCodableValue])
 }
 
@@ -321,6 +322,8 @@ extension StudioBlock: Decodable {
             self = .field(key: key, value: value)
         case "image":
             self = .image(try StudioImageBlock(from: decoder))
+        case "file":
+            self = .file(try StudioFileBlock(from: decoder))
         default:
             let raw = (try? decoder.singleValueContainer().decode([String: AnyCodableValue].self)) ?? [:]
             self = .unknown(type: type, raw: raw)
@@ -352,6 +355,43 @@ struct StudioImageBlock: Equatable, Decodable {
         case decryptHint = "decrypt_hint"
         case mimeType = "mime_type"
         case blake3
+    }
+}
+
+// MARK: - StudioFileBlock
+
+/// Phase 5 file-attachment block: hybrid-encrypted blob stored on Blossom.
+/// `decrypt_hint.wrapped_key` is the NIP-44 v2 base64 wrap of the 44-byte
+/// `(file_key || nonce)` plaintext, addressed to the audience-epoch pubkey.
+/// The renderer fetches ciphertext from `mirrors[]`, unwraps the wrapped_key
+/// via the room's current epoch priv, then ChaCha20-Poly1305-decrypts.
+struct StudioFileBlock: Equatable, Decodable {
+    let filename: String
+    let mimeType: String
+    let sizeBytes: Int64
+    let sha256: String
+    let blake3: String
+    let mirrors: [String]
+    let decryptHint: DecryptHint
+
+    struct DecryptHint: Equatable, Decodable {
+        let kind: String
+        let epochN: Int
+        let wrappedKey: String
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case epochN = "epoch_n"
+            case wrappedKey = "wrapped_key"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case filename
+        case mimeType = "mime_type"
+        case sizeBytes = "size_bytes"
+        case sha256, blake3, mirrors
+        case decryptHint = "decrypt_hint"
     }
 }
 
