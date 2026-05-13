@@ -1290,6 +1290,9 @@ final class StudioStore: ObservableObject {
             "room_slug": roomSlug,
         ]
         if let m = mimeType, !m.isEmpty { body["mime_type"] = m }
+        if let creds = StudioStorageCredentials.lookup(forRoom: roomSlug) {
+            body["s3_credentials"] = creds.body
+        }
 
         let raw: [String: Any] = try await EntityHTTP.postPluginActionRawDict(
             path: "sonata-studio/image/attach",
@@ -1316,6 +1319,9 @@ final class StudioStore: ObservableObject {
             "room_slug": roomSlug,
         ]
         if let m = mimeType, !m.isEmpty { body["mime_type"] = m }
+        if let creds = StudioStorageCredentials.lookup(forRoom: roomSlug) {
+            body["s3_credentials"] = creds.body
+        }
 
         let raw: [String: Any] = try await EntityHTTP.postPluginActionRawDict(
             path: "sonata-studio/file/attach",

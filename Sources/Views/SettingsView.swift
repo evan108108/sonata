@@ -650,6 +650,22 @@ struct StudioSettingsView: View {
             .padding(.horizontal)
             .padding(.bottom, 8)
 
+            // Default storage subsection — inline editor (roomSlug=nil edits
+            // the user-wide default). Per-room overrides live on each room's
+            // gear menu; here is where the default for ALL new rooms is set.
+            // The editor handles its own load/save against the
+            // `studio:user_profile.default_storage_config` attribute.
+            Divider().padding(.horizontal)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Default storage").bold()
+                Text("Backend used for new rooms (Blossom URL or S3-compatible). Each room can override in its gear menu.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                StudioStorageConfigEditor(roomSlug: nil)
+                    .padding(.top, 6)
+            }
+            .padding(.horizontal)
+
             // Auto-run subsection — Worker 2 of the Studio card-assignment +
             // auto-worker plan. Reads + writes the same studio:user_profile
             // entity as the nickname/avatar above, so a single Save call from
