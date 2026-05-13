@@ -72,6 +72,21 @@ describe("consentDecision", () => {
     expect(consentDecision(p, "default", founder)).toBe("blocked");
   });
 
+  // Regression: 2026-05-12 — second card from the same unknown founder must
+  // still be `needs_consent`. The smoke test observed a second card slip past
+  // the gate and auto-dispatch despite an empty allow-list and empty
+  // decisions; pin down the invariant so future refactors can't regress it.
+  test("repeated calls with empty allow-list stay needs_consent (no state drift)", () => {
+    const founder = "4d".repeat(32);
+    const p = freshProfile();
+    for (let i = 0; i < 5; i++) {
+      expect(consentDecision(p, "default", founder)).toBe("needs_consent");
+    }
+    // Profile shape is unchanged after pure decision calls.
+    expect(p.allowed_founders).toEqual([]);
+    expect(p.founder_decisions).toEqual({});
+  });
+
   test("consumeOnceDecision clears `once` only", () => {
     const founder = "3c".repeat(32);
     const p = freshProfile({
