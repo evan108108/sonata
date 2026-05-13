@@ -11,6 +11,7 @@ import { card } from "./card";
 import { cardStatus } from "./cardStatus";
 import { comment } from "./comment";
 import { dispatch } from "./dispatch";
+import { fileAttach } from "./fileAttach";
 import { imageAttach } from "./imageAttach";
 import { member } from "./member";
 import { qa } from "./qa";
@@ -246,6 +247,12 @@ const IMAGE_ATTACH_PARAMS: ActionParam[] = [
   { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
 ];
 
+const FILE_ATTACH_PARAMS: ActionParam[] = [
+  { name: "file_path", type: "string", required: true, description: "Absolute path to the source file (any readable location). Symlinks are rejected." },
+  { name: "room_slug", type: "string", required: true, description: "Room slug — used to look up the current epoch the wrap is bound to." },
+  { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
+];
+
 // ── Action definitions ──────────────────────────────────────────────────────
 
 export const ACTIONS: ActionDef[] = [
@@ -391,6 +398,14 @@ export const ACTIONS: ActionDef[] = [
     params: IMAGE_ATTACH_PARAMS,
   },
   {
+    name: "studio_file_attach",
+    description:
+      "Encrypt + upload an arbitrary file to Blossom via hybrid encryption (random ChaCha20-Poly1305 file_key, NIP-44-wrapped to the room's current audience-epoch). Returns a file-block payload for embedding in a card's blocks[]. 256 MiB hard cap.",
+    method: "post",
+    path: "/api/file/attach",
+    params: FILE_ATTACH_PARAMS,
+  },
+  {
     name: "studio_identity",
     description:
       "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI (Delete/Edit) without waiting on optimistic-reconcile heuristics.",
@@ -485,6 +500,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "post",
     handler: async (body, _q, ctx) => imageAttach.attach(body, ctx),
   },
+  "/api/file/attach": {
+    method: "post",
+    handler: async (body, _q, ctx) => fileAttach.attach(body, ctx),
+  },
   "/api/identity": {
     method: "get",
     handler: async (_b, _q, ctx) => ({ pubkey: ctx.cfg.pluginPub.toLowerCase() }),
@@ -493,4 +512,4 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, cardStatus, comment, dispatch, imageAttach, member, qa, room, room_admit, track };
+export { card, cardStatus, comment, dispatch, fileAttach, imageAttach, member, qa, room, room_admit, track };
