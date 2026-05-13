@@ -22,6 +22,7 @@ struct StudioRoomDetail: View {
     @State private var showInviteSheet: Bool = false
     @State private var showProfileSheet: Bool = false
     @State private var showAdmitSheet: Bool = false
+    @State private var showStorageSheet: Bool = false
     @State private var autoRunOverride: StudioAutoRunOverride = .defaultValue
 
     var body: some View {
@@ -94,6 +95,9 @@ struct StudioRoomDetail: View {
                 roomSlug: room.slug,
                 roomTitle: room.title
             )
+        }
+        .sheet(isPresented: $showStorageSheet) {
+            StudioStorageSettingsSheet(roomSlug: room.slug)
         }
         .animation(.easeOut(duration: 0.18), value: selectedCard?.eventId)
         .onChange(of: room.slug) { _, _ in selectedCard = nil }
@@ -216,6 +220,11 @@ struct StudioRoomDetail: View {
                 showProfileSheet = true
             } label: {
                 Label("Your profile in this room…", systemImage: "person.text.rectangle")
+            }
+            Button {
+                showStorageSheet = true
+            } label: {
+                Label("Storage settings…", systemImage: "externaldrive.connected.to.line.below")
             }
             Divider()
             Toggle(isOn: dispatchTraceBinding) {
