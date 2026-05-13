@@ -538,7 +538,9 @@ struct StudioCardDetailDrawer: View {
                     comment: comment,
                     authorName: store.displayName(for: comment.createdByPubkey, in: comment.roomSlug),
                     isOptimistic: optimisticIds.contains(comment.id),
-                    store: store
+                    store: store,
+                    fetcher: fetcher,
+                    dispatchTraceOn: dispatchTraceOn
                 )
             }
             if !audits.isEmpty {
@@ -558,7 +560,9 @@ struct StudioCardDetailDrawer: View {
                         comment: comment,
                         authorName: store.displayName(for: comment.createdByPubkey, in: comment.roomSlug),
                         isOptimistic: false,
-                        store: store
+                        store: store,
+                        fetcher: fetcher,
+                        dispatchTraceOn: dispatchTraceOn
                     )
                 }
             }
@@ -712,6 +716,11 @@ struct CommentRow: View {
     let authorName: String
     var isOptimistic: Bool = false
     var store: StudioStore? = nil
+    /// Image fetcher used to render image/file blocks attached to the comment.
+    /// Nil-safe: blocks lacking media still render via StudioBlockView when a
+    /// fetcher is unavailable (text/code/link/field), but image blocks need it.
+    var fetcher: StudioImageFetcher? = nil
+    var dispatchTraceOn: Bool = false
 
     private var isAudit: Bool { comment.intent == "status_change" }
 
@@ -749,7 +758,22 @@ struct CommentRow: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            TextBlockView(text: comment.body)
+            if !comment.body.isEmpty {
+                TextBlockView(text: comment.body)
+            }
+            if !comment.blocks.isEmpty, let fetcher {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(comment.blocks.enumerated()), id: \.offset) { _, block in
+                        StudioBlockView(
+                            block: block,
+                            roomSlug: comment.roomSlug,
+                            authorPubHex: comment.createdByPubkey,
+                            fetcher: fetcher,
+                            dispatchTraceOn: dispatchTraceOn
+                        )
+                    }
+                }
+            }
         }
         .opacity(isOptimistic ? 0.55 : 1.0)
     }

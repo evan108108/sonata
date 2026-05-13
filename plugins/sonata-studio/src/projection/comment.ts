@@ -35,6 +35,7 @@ export async function projectComment(ctx: ProjectionContext): Promise<void> {
     target_ref: targetRef,
     body: typeof payload["body"] === "string" ? payload["body"] : "",
     intent: typeof payload["intent"] === "string" ? payload["intent"] : null,
+    blocks: Array.isArray(payload["blocks"]) ? payload["blocks"] : [],
     created_by_pubkey: createdByPubkey,
     room_slug: roomSlug,
     created_at_seconds: rumor.created_at,
