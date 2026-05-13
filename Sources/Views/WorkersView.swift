@@ -878,19 +878,18 @@ struct WorkersView: View {
                 .background(Color.yellow.opacity(0.1))
             }
 
-            HStack(spacing: 0) {
+            NavigationSplitView {
                 workerSidebar
-                    .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
-                Divider()
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 480)
+            } detail: {
                 if manager.workers.isEmpty {
                     emptyState
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     TerminalContainerView()
                         .environmentObject(manager)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .navigationSplitViewStyle(.balanced)
         }
     }
 
@@ -1196,3 +1195,4 @@ struct PromptCacheStatsPanel: View {
         return "\(row.eventType) · \(primary)"
     }
 }
+

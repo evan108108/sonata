@@ -616,7 +616,7 @@ struct SonataApp: App {
     // once at the WindowGroup boundary below.
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("") {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
                 .environment(\.dbPool, dbPool)
