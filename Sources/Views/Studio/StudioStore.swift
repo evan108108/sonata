@@ -1300,6 +1300,35 @@ final class StudioStore: ObservableObject {
         return block
     }
 
+    /// Phase 5 — Encrypt + upload an arbitrary file via the plugin's
+    /// `studio_file_attach` action. Hybrid encryption (random per-file
+    /// ChaCha20-Poly1305 key, NIP-44-wrapped to the audience epoch). Returns
+    /// the full file-block dict ready to drop into a card's blocks[] payload.
+    /// The plugin enforces the 256 MiB hard cap; callers may apply softer
+    /// caps at pick time.
+    func attachFile(
+        filePath: String,
+        roomSlug: String,
+        mimeType: String?
+    ) async throws -> [String: Any] {
+        var body: [String: Any] = [
+            "file_path": filePath,
+            "room_slug": roomSlug,
+        ]
+        if let m = mimeType, !m.isEmpty { body["mime_type"] = m }
+
+        let raw: [String: Any] = try await EntityHTTP.postPluginActionRawDict(
+            path: "sonata-studio/file/attach",
+            body: body
+        )
+        var block = raw
+        // The plugin already sets type:"file" on the response, but mirror the
+        // attachImage convention of ensuring it survives any future server
+        // shape changes.
+        block["type"] = "file"
+        return block
+    }
+
     /// First-card-we-see heuristic: when the plugin returns a `rumor_event_id`
     /// for a card we just posted, the upcoming SSE row will carry the same
     /// `created_by_pubkey` — but we'd like the optimistic synthetic to have

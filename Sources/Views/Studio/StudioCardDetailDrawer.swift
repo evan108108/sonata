@@ -399,11 +399,118 @@ struct StudioCardDetailDrawer: View {
                         roomSlug: card.roomSlug,
                         authorPubHex: card.createdByPubkey,
                         fetcher: fetcher,
-                        dispatchTraceOn: dispatchTraceOn
+                        dispatchTraceOn: dispatchTraceOn,
+                        canReshareFile: canMutate,
+                        onReshareFile: { f in reshareFile(f) }
                     )
                 }
             }
         }
+    }
+
+    /// Re-share path for a file block. The plugin doesn't keep the original
+    /// plaintext on disk — Blossom holds the canonical ciphertext bytes — so
+    /// "Re-share" requires the author to re-pick the same file with
+    /// NSOpenPanel. The new fileAttach result replaces the matched block in
+    /// the card's blocks[] (by filename + sha256), and we publish via
+    /// studio_card_update keeping the same d_tag.
+    private func reshareFile(_ original: StudioFileBlock) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Re-share \(original.filename): pick the same file to re-wrap its key to the current room epoch."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let captureCard = card
+        let captureRoom = card.roomSlug
+        Task { @MainActor in
+            do {
+                let block = try await store.attachFile(
+                    filePath: url.path,
+                    roomSlug: captureRoom,
+                    mimeType: original.mimeType
+                )
+                let newBlocks = Self.replaceFileBlock(
+                    in: captureCard.blocks,
+                    matching: original,
+                    with: block
+                )
+                _ = try await store.updateCard(
+                    roomSlug: captureCard.roomSlug,
+                    dTag: captureCard.dTag,
+                    eventId: captureCard.eventId,
+                    track: nil,
+                    kind: nil,
+                    title: nil,
+                    body: nil,
+                    blocks: newBlocks,
+                    tagsList: nil,
+                    relatedTo: nil,
+                    assigneePubkey: nil
+                )
+            } catch {
+                transitionErrorMessage = "Re-share failed: \((error as? StudioPluginError)?.message ?? error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Build a fresh blocks[] payload for `studio_card_update` by replacing
+    /// the file block matching `original` (by filename + sha256) with the
+    /// freshly-uploaded `replacement` dict. Other blocks round-trip back to
+    /// their on-the-wire dict shape so the update preserves card content.
+    static func replaceFileBlock(
+        in blocks: [StudioBlock],
+        matching original: StudioFileBlock,
+        with replacement: [String: Any]
+    ) -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        for b in blocks {
+            switch b {
+            case .file(let f) where f.filename == original.filename && f.sha256 == original.sha256:
+                out.append(replacement)
+            case .text(let body):
+                out.append(["type": "text", "body": body])
+            case .code(let lang, let body):
+                out.append(["type": "code", "language": lang, "body": body])
+            case .link(let href, let label):
+                var p: [String: Any] = ["type": "link", "href": href]
+                if let l = label, !l.isEmpty { p["label"] = l }
+                out.append(p)
+            case .field(let k, let v):
+                out.append(["type": "field", "key": k, "value": v])
+            case .image(let img):
+                out.append([
+                    "type": "image",
+                    "sha256": img.sha256,
+                    "mirrors": img.mirrors,
+                    "decrypt_hint": [
+                        "kind": img.decryptHint.kind,
+                        "epoch_n": img.decryptHint.epochN,
+                    ],
+                    "mime_type": img.mimeType,
+                    "blake3": img.blake3,
+                ])
+            case .file(let f):
+                out.append([
+                    "type": "file",
+                    "filename": f.filename,
+                    "mime_type": f.mimeType,
+                    "size_bytes": f.sizeBytes,
+                    "sha256": f.sha256,
+                    "blake3": f.blake3,
+                    "mirrors": f.mirrors,
+                    "decrypt_hint": [
+                        "kind": f.decryptHint.kind,
+                        "epoch_n": f.decryptHint.epochN,
+                        "wrapped_key": f.decryptHint.wrappedKey,
+                    ],
+                ])
+            case .unknown(let t, _):
+                out.append(["type": t])
+            }
+        }
+        return out
     }
 
     private var dispatchTraceOn: Bool {
@@ -488,15 +595,18 @@ struct FoldableBlock<Content: View>: View {
     @State private var measuredHeight: CGFloat = 0
     @State private var folded: Bool = false
 
-    /// Image blocks are visual — never auto-fold them, so the picture is
-    /// the first thing the reader sees. Long text/code/etc. still collapse
-    /// past 200pt so the drawer stays scannable.
-    private var isImage: Bool {
-        if case .image = block { return true }
-        return false
+    /// Image and file blocks are interactive widgets — never auto-fold them,
+    /// so the picture / download button is the first thing the reader sees.
+    /// Long text/code/etc. still collapse past 200pt so the drawer stays
+    /// scannable.
+    private var isCompactWidget: Bool {
+        switch block {
+        case .image, .file: return true
+        default: return false
+        }
     }
 
-    private var needsFold: Bool { !isImage && measuredHeight > 200 }
+    private var needsFold: Bool { !isCompactWidget && measuredHeight > 200 }
 
     var body: some View {
         Group {
@@ -520,7 +630,7 @@ struct FoldableBlock<Content: View>: View {
                     )
                     .onPreferenceChange(BlockHeightKey.self) { h in
                         measuredHeight = h
-                        if h > 200 && !isImage { folded = true }
+                        if h > 200 && !isCompactWidget { folded = true }
                     }
             }
         }
@@ -533,6 +643,7 @@ struct FoldableBlock<Content: View>: View {
         case .link:    return "Link"
         case .field(let k, _):   return "Field: \(k)"
         case .image:   return "Image"
+        case .file(let f):       return "File: \(f.filename)"
         case .unknown(let t, _): return "Unsupported: \(t)"
         }
     }
@@ -555,6 +666,13 @@ struct StudioBlockView: View {
     let authorPubHex: String
     let fetcher: StudioImageFetcher
     let dispatchTraceOn: Bool
+    /// True when the current user is the card's author — gates the file
+    /// block's Re-share button so non-authors don't see an action they can't
+    /// usefully perform.
+    var canReshareFile: Bool = false
+    /// Invoked when the user taps Re-share on a file block. Carries the
+    /// originating block so the handler knows which file_key to replace.
+    var onReshareFile: ((StudioFileBlock) -> Void)? = nil
 
     var body: some View {
         switch block {
@@ -572,6 +690,14 @@ struct StudioBlockView: View {
                 room: roomSlug,
                 authorPubHex: authorPubHex,
                 fetcher: fetcher
+            )
+        case .file(let f):
+            FileBlockView(
+                block: f,
+                room: roomSlug,
+                authorPubHex: authorPubHex,
+                canReshare: canReshareFile,
+                onReshare: onReshareFile.map { cb in { cb(f) } }
             )
         case .unknown(let type, let raw):
             UnknownBlockView(type: type, raw: raw, dispatchTraceOn: dispatchTraceOn)

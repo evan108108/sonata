@@ -270,6 +270,164 @@ struct ImageFullscreen: View {
     }
 }
 
+// MARK: - FileBlockView
+
+/// Phase 5 file-attachment block view. Renders the filename + human-readable
+/// size, a download button that triggers the decrypt path via
+/// `StudioFileFetcher`, and (for authors) a Re-share button that re-wraps the
+/// file_key to the room's current epoch so newly-admitted members can decrypt.
+struct FileBlockView: View {
+    let block: StudioFileBlock
+    let room: String
+    let authorPubHex: String
+    /// True when the local user is the card's author, gating the Re-share UI.
+    let canReshare: Bool
+    /// Invoked when the user taps Re-share. The drawer's handler triggers the
+    /// re-pick-file flow + studio_card_update path.
+    var onReshare: (() -> Void)? = nil
+
+    @Environment(\.studioToast) private var toast
+    @State private var downloading: Bool = false
+    @State private var lastError: String? = nil
+    @State private var lastSavedPath: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: Self.icon(for: block.mimeType))
+                    .font(.system(size: 22))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(block.filename)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Text(Self.humanSize(block.sizeBytes))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await runDownload() }
+                } label: {
+                    if downloading {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Decrypting…")
+                        }
+                    } else {
+                        Label("Download", systemImage: "arrow.down.circle")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(downloading)
+
+                if canReshare, let cb = onReshare {
+                    Button {
+                        cb()
+                    } label: {
+                        Label("Re-share", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Re-share by picking the file again from your machine; this re-wraps the encryption key to the current room epoch.")
+                }
+                Spacer(minLength: 0)
+            }
+
+            if let saved = lastSavedPath {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text("Saved to \(saved)")
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            if let err = lastError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+            }
+        }
+        .padding(10)
+        .background(Color.gray.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    @MainActor
+    private func runDownload() async {
+        downloading = true
+        lastError = nil
+        defer { downloading = false }
+        do {
+            let url = try await StudioFileFetcher.shared.download(
+                block: block,
+                room: room,
+                authorPubHex: authorPubHex
+            )
+            lastSavedPath = url.path
+            toast.show(severity: .info, text: "Saved \(block.filename).")
+        } catch StudioFileError.userCancelled {
+            // No-op: user closed the save panel.
+        } catch let e as StudioFileError {
+            let msg = Self.errorText(for: e)
+            lastError = msg
+            toast.show(severity: .error, text: msg)
+        } catch {
+            lastError = error.localizedDescription
+            toast.show(severity: .error, text: error.localizedDescription)
+        }
+    }
+
+    static func icon(for mime: String) -> String {
+        let lower = mime.lowercased()
+        if lower.hasPrefix("image/") { return "photo.fill" }
+        if lower.hasPrefix("video/") { return "film.fill" }
+        if lower.hasPrefix("audio/") { return "music.note" }
+        if lower == "application/pdf" { return "doc.richtext.fill" }
+        if lower == "application/zip" || lower == "application/gzip" || lower == "application/x-tar" {
+            return "archivebox.fill"
+        }
+        if lower.hasPrefix("text/") || lower == "application/json" { return "doc.text.fill" }
+        return "doc.fill"
+    }
+
+    static func humanSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
+    static func errorText(for err: StudioFileError) -> String {
+        switch err {
+        case .allMirrorsFailed:
+            return "File unavailable on any mirror."
+        case .integrityMismatch(let host):
+            return "File integrity check failed on \(host)."
+        case .wrappedKeyDecryptFailed:
+            return "Couldn't decrypt — ask the room to re-share."
+        case .fileDecryptFailed:
+            return "File contents could not be decrypted."
+        case .missingEpochKey(let n):
+            return "File references epoch \(n); key not yet received."
+        case .userCancelled:
+            return ""
+        case .saveFailed(let reason):
+            return "Couldn't save: \(reason)"
+        }
+    }
+}
+
 // MARK: - UnknownBlockView
 
 /// "Unsupported block: <type>" line; debug disclosure visible when the room's
