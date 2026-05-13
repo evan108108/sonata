@@ -39,20 +39,27 @@ struct ContentView: View {
     @FocusState private var searchFocused: Bool
 
     private var navItems: [NavRailItem] {
-        [
+        var items: [NavRailItem] = [
             NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
             NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill", badge: workerManager.busyWorkerCount),
             NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist", badge: railCounts.activeTaskCount),
             NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
             NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
             NavRailItem(tab: .wiki, label: "Wiki", systemImage: "book.fill"),
-            NavRailItem(tab: .studio, label: "Studio", systemImage: "rectangle.3.group.bubble.fill", badge: unreadCounts.studioTotal),
+        ]
+        if railCounts.studioPluginEnabled {
+            items.append(
+                NavRailItem(tab: .studio, label: "Studio", systemImage: "rectangle.3.group.bubble.fill", badge: unreadCounts.studioTotal)
+            )
+        }
+        items.append(contentsOf: [
             NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
             NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
             NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
             NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill", badge: railCounts.failedPluginCount, badgeIsAlert: true),
             NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
-        ]
+        ])
+        return items
     }
 
     var body: some View {
@@ -136,6 +143,14 @@ struct ContentView: View {
             inTransit = true
             DispatchQueue.main.async {
                 inTransit = false
+            }
+        }
+        // If the Studio plugin gets disabled while the Studio tab is open,
+        // bounce back to Dashboard so the user isn't stuck on a view whose
+        // tab just disappeared from the rail.
+        .onChange(of: railCounts.studioPluginEnabled) { _, enabled in
+            if !enabled && selectedTab == .studio {
+                selectedTab = .dashboard
             }
         }
     }
