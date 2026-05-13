@@ -620,6 +620,17 @@ struct SonataApp: App {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
                 .environment(\.dbPool, dbPool)
+                // 4a:// URL scheme handler. The Info.plist registers the
+                // scheme with macOS LaunchServices; .onOpenURL is what
+                // SwiftUI hands the resulting URL through. Boot-time pending
+                // URLs (Sonata wasn't running when the user clicked the
+                // link) replay through here automatically after launch
+                // finishes — no manual queueing needed.
+                .onOpenURL { url in
+                    if StudioDeepLinkRouter.isInviteURL(url) {
+                        StudioDeepLinkRouter.shared.handle(url: url)
+                    }
+                }
         }
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0

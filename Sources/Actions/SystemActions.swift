@@ -962,6 +962,29 @@ let systemActions: [SonataAction] = [
                 }
             }
 
+            // 2c. Sync Info.plist from App/Info.plist (source-of-truth) so
+            //     CFBundleURLTypes (the 4a:// scheme registration) survives
+            //     every binary swap. Without this, an Xcode-less SPM build
+            //     leaves the bundle's plist out of sync with the repo and the
+            //     URL handler registration silently drops the next time
+            //     someone hand-edits Contents/Info.plist for unrelated reasons.
+            let plistSrc = "\(sourceDir)/App/Info.plist"
+            let plistDst = "\(appPath)/Contents/Info.plist"
+            if FileManager.default.fileExists(atPath: plistSrc) {
+                do {
+                    if FileManager.default.fileExists(atPath: plistDst) {
+                        try FileManager.default.removeItem(atPath: plistDst)
+                    }
+                    try FileManager.default.copyItem(atPath: plistSrc, toPath: plistDst)
+                } catch {
+                    return DeployResponse(
+                        success: false, step: "copy-plist",
+                        error: "Info.plist copy failed: \(error.localizedDescription)",
+                        message: nil
+                    )
+                }
+            }
+
             // 3. codesign (30s timeout)
             let sign = await Task.detached {
                 runDeployProcess(

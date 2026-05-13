@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Canonical Info.plist for /Applications/Sonata.app.
+
+  Sonata is an SPM executable, not an Xcode app — there is no project-level
+  plist generation. This file is the source-of-truth; the system_deploy action
+  (Sources/Actions/SystemActions.swift) copies it onto Sonata.app/Contents on
+  every deploy so the URL scheme registration survives binary swaps. To change
+  bundle metadata or register a new scheme, edit this file and redeploy.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Sonata</string>
+    <key>CFBundleDisplayName</key><string>Sonata</string>
+    <key>CFBundleIdentifier</key><string>com.sona.sonata</string>
+    <key>CFBundleVersion</key><string>0.2.0</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleExecutable</key><string>Sonata</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>LSUIElement</key><false/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.sona.sonata.4a-invite</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>4a</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+        </dict>
+    </array>
+</dict>
+</plist>
