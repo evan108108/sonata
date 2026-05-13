@@ -31,12 +31,19 @@ enum StudioStorageMode: String, CaseIterable, Identifiable {
     }
 }
 
-struct StudioStorageSettingsSheet: View {
+/// Inline editor for a single storage config — used both inside the Settings
+/// pane (no header, no modal chrome) and wrapped in a sheet for the per-room
+/// gear menu. Has no `dismiss()` calls: Save flashes a checkmark and leaves
+/// the editor mounted. The sheet wrapper supplies its own Cancel/Done chrome.
+struct StudioStorageConfigEditor: View {
     /// Pass nil for "edit the user-wide default"; pass a slug to edit the
     /// per-room override for that room.
     let roomSlug: String?
 
-    @Environment(\.dismiss) private var dismiss
+    /// When true, render an inline title (e.g. when used inside a sheet).
+    /// Inline use inside Settings omits it because the surrounding section
+    /// already labels the block.
+    var showHeader: Bool = false
 
     @State private var mode: StudioStorageMode = .useDefault
     @State private var blossomURL: String = "https://api.4a4.ai/blossom"
@@ -54,6 +61,7 @@ struct StudioStorageSettingsSheet: View {
     @State private var testStatus: TestStatus = .idle
     @State private var loading: Bool = true
     @State private var saving: Bool = false
+    @State private var savedFlash: Bool = false
 
     enum TestStatus: Equatable {
         case idle
@@ -66,10 +74,12 @@ struct StudioStorageSettingsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(isRoomScoped
-                 ? "Storage settings — room “\(roomSlug ?? "")”"
-                 : "Default storage settings")
-                .font(.title2.bold())
+            if showHeader {
+                Text(isRoomScoped
+                     ? "Storage settings — room “\(roomSlug ?? "")”"
+                     : "Default storage settings")
+                    .font(.title2.bold())
+            }
 
             Picker("Backend", selection: $mode) {
                 ForEach(StudioStorageMode.allCases) { mode in
@@ -78,6 +88,7 @@ struct StudioStorageSettingsSheet: View {
             }
             .pickerStyle(.segmented)
             .disabled(!isRoomScoped && mode == .useDefault)
+            .frame(maxWidth: 480, alignment: .leading)
 
             Group {
                 switch mode {
@@ -112,16 +123,20 @@ struct StudioStorageSettingsSheet: View {
 
                 Spacer()
 
-                Button("Cancel") { dismiss() }
-                Button(saving ? "Saving…" : "Save") {
-                    Task { await save() }
+                Button(action: { Task { await save() } }) {
+                    if saving {
+                        ProgressView().controlSize(.small)
+                    } else if savedFlash {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("Save")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(saving || loading)
             }
         }
-        .padding(20)
-        .frame(width: 540)
         .task { await load() }
     }
 
@@ -407,12 +422,37 @@ struct StudioStorageSettingsSheet: View {
                     body: defBody
                 )
             }
-            dismiss()
+            savedFlash = true
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            savedFlash = false
         } catch let err as StudioPluginError {
             testStatus = .error("Save failed: \(err.code) \(err.message)")
         } catch {
             testStatus = .error("Save failed: \(error)")
         }
+    }
+}
+
+/// Modal sheet wrapper used by the per-room gear menu. Wraps the inline
+/// editor in the same 540pt frame the previous design used and adds a Cancel
+/// button so the user can close without saving. Settings → Studio uses the
+/// editor directly without this wrapper.
+struct StudioStorageSettingsSheet: View {
+    let roomSlug: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            StudioStorageConfigEditor(roomSlug: roomSlug, showHeader: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 540)
     }
 }
 
