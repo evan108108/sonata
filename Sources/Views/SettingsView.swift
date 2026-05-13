@@ -593,6 +593,7 @@ struct StudioSettingsView: View {
     @State private var savedFlash: Bool = false
     @State private var saving: Bool = false
     @State private var pickerError: String? = nil
+    @State private var showDefaultStorageSheet: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -650,6 +651,25 @@ struct StudioSettingsView: View {
             .padding(.horizontal)
             .padding(.bottom, 8)
 
+            // Default storage subsection — opens the storage settings sheet in
+            // user-wide-default mode (roomSlug=nil). Per-room overrides live on
+            // each room's gear menu; here is where the default for ALL new rooms
+            // is set. The sheet handles its own load/save against the
+            // `studio:user_profile.default_storage_config` attribute.
+            Divider().padding(.horizontal)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Default storage").bold()
+                    Spacer()
+                    Button("Configure…") { showDefaultStorageSheet = true }
+                        .buttonStyle(.bordered)
+                }
+                Text("Backend used for new rooms (Blossom URL or S3-compatible). Each room can override in its gear menu.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal)
+
             // Auto-run subsection — Worker 2 of the Studio card-assignment +
             // auto-worker plan. Reads + writes the same studio:user_profile
             // entity as the nickname/avatar above, so a single Save call from
@@ -659,6 +679,9 @@ struct StudioSettingsView: View {
             StudioAutoRunSettingsView()
         }
         .onAppear(perform: load)
+        .sheet(isPresented: $showDefaultStorageSheet) {
+            StudioStorageSettingsSheet(roomSlug: nil)
+        }
     }
 
     private func load() {

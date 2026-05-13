@@ -135,6 +135,11 @@ struct StudioStorageSettingsSheet: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if isRoomScoped {
+                Text("Set the user-wide default in Settings → Studio → Default storage.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
