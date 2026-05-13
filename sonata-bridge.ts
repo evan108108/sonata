@@ -98,6 +98,8 @@ let usageBaseline: { totalTokens: number; inputTokens: number; cacheReadTokens: 
  * the per-event token deltas read from the running transcript JSONL. */
 async function pushLiveHeartbeat(): Promise<void> {
   const body: any = { workerId: WORKER_ID, lastProgressAt: lastProgressMs };
+  body.sessionLabel = SESSION_LABEL || null;
+  body.cwdBasename = process.cwd().split("/").pop() || null;
   if (inFlight) {
     body.currentSlug = inFlight.eventType;
     body.promptHash = inFlight.promptHash;

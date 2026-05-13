@@ -429,6 +429,11 @@ func createSchema(in db: Database) throws {
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentInputTokens INTEGER") } catch { /* column exists */ }
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentPromptHash TEXT") } catch { /* column exists */ }
 
+    // Migration: readable-name carry for prompt cache panel — bridge ships these in heartbeat,
+    // roll-up writes them into promptCacheStats for display alongside the promptHash.
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentSessionLabel TEXT") } catch { /* column exists */ }
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentCwdBasename TEXT") } catch { /* column exists */ }
+
     // MARK: promptCacheStats — per-prompt-template cache hit-rate aggregation
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS promptCacheStats (
@@ -442,6 +447,10 @@ func createSchema(in db: Database) throws {
         )
     """)
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS promptCacheStats_eventType ON promptCacheStats(eventType)")
+
+    // Migration: readable-name display fields (sticky via COALESCE at roll-up time).
+    do { try db.execute(sql: "ALTER TABLE promptCacheStats ADD COLUMN sessionLabel TEXT") } catch { /* column exists */ }
+    do { try db.execute(sql: "ALTER TABLE promptCacheStats ADD COLUMN cwdBasename TEXT") } catch { /* column exists */ }
 
     // MARK: workerEvents
     try db.execute(sql: """
@@ -762,6 +771,18 @@ extension DatabaseMigrator {
                 CREATE INDEX IF NOT EXISTS dm_messages_target_received
                     ON dm_messages(targetSessionId, receivedAtMs DESC)
             """)
+        }
+
+        // v10: readable-name carry for the prompt cache panel. Bridge ships
+        // sessionLabel + cwdBasename in every heartbeat; the server stores the
+        // live values on workers and rolls them into promptCacheStats so the UI
+        // can render "task · sona-worker-6 @ memory" instead of an opaque hash.
+        // Purely additive; rolls forward by leaving NULL for historical rows.
+        registerMigration("v10_prompt_cache_readable_names") { db in
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentSessionLabel TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentCwdBasename TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE promptCacheStats ADD COLUMN sessionLabel TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE promptCacheStats ADD COLUMN cwdBasename TEXT") } catch { /* column exists */ }
         }
     }
 }

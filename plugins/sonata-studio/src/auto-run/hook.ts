@@ -168,6 +168,22 @@ export async function maybeDispatch(ctx: HookContext): Promise<EligibilityResult
     }
     case "allowed":
       break;
+    default: {
+      // Defensive: an unexpected decision value would otherwise fall through
+      // to the dispatch path. Treat unknown values as needs_consent so the
+      // safety rail never opens by accident.
+      log.warn("[auto-run] unexpected consent decision — treating as needs_consent", {
+        room: ctx.roomSlug,
+        decision: String(decision),
+      });
+      await writePendingConsent(
+        ctx.roomSlug,
+        assignerPub,
+        String(ctx.cardAttrs["event_id"] ?? ""),
+        String(ctx.cardAttrs["title"] ?? "(untitled)"),
+      );
+      return { outcome: "needs_consent" };
+    }
   }
 
   const daily = tryReserveDailyQuota(profile);
@@ -192,6 +208,46 @@ export async function maybeDispatch(ctx: HookContext): Promise<EligibilityResult
       "rate limit reached (10 cards/hour per room)",
     );
     return { outcome: "rate_limited" };
+  }
+
+  // Defense in depth: re-read the profile and re-check consent right before
+  // we touch the dispatcher. The outer switch above bails on `needs_consent`,
+  // but profile state could in principle have moved between then and now —
+  // e.g., a concurrent projection saving the profile, a settings write from
+  // the renderer, or a stale-attribute read on the first load. The bug
+  // observed on 2026-05-12 was a second card slipping through despite an
+  // empty allow-list; even though static analysis couldn't pin the upstream
+  // path, this re-check makes the safety rail TOCTOU-proof: the dispatch
+  // call is gated by a fresh read.
+  const freshLoaded = await loadProfile();
+  const freshOverride = await loadRoomOverride(ctx.roomSlug);
+  const freshDecision = consentDecision(freshLoaded.profile, freshOverride, assignerPub);
+  if (freshDecision !== "allowed") {
+    // Roll the daily count back — we charged it under the first (now-stale)
+    // decision. Leave the bucket consumption; it self-refills.
+    if (profile.today_count > 0) profile.today_count -= 1;
+    await saveProfile(profile, loaded.rawAttrs, loaded.entityId);
+    log.warn("[auto-run] consent re-check changed verdict — aborting dispatch", {
+      room: ctx.roomSlug,
+      first_decision: "allowed",
+      fresh_decision: freshDecision,
+      assigner: assignerPub.slice(0, 16),
+    });
+    if (freshDecision === "needs_consent") {
+      await writePendingConsent(
+        ctx.roomSlug,
+        assignerPub,
+        String(ctx.cardAttrs["event_id"] ?? ""),
+        String(ctx.cardAttrs["title"] ?? "(untitled)"),
+      );
+      return { outcome: "needs_consent" };
+    }
+    if (freshDecision === "blocked") {
+      return freshOverride === "off"
+        ? { outcome: "room_disabled" }
+        : { outcome: "founder_blocked" };
+    }
+    return { outcome: "auto_run_off" };
   }
 
   // Consume the "once" decision after we've decided to dispatch — the next

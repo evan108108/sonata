@@ -30,6 +30,7 @@ extension FocusedValues {
 
 struct ContentView: View {
     @State private var selectedTab: SonataTab = .dashboard
+    @State private var inTransit: Bool = false
     @ObservedObject private var workerManager = WorkerManager.shared
     @StateObject private var searchVM = SearchViewModel()
     @StateObject private var unreadCounts = StudioUnreadCounts()
@@ -121,10 +122,39 @@ struct ContentView: View {
                 railCounts.start(dbPool: pool)
             }
         }
+        // FB15513599 workaround: swapping one NavigationSplitView for another
+        // corrupts the window's NSToolbar (sidebar-toggle item gets lost).
+        // Hitting a non-NavigationSplitView view in between clears the state,
+        // which is what users noticed manually. We do that automatically: when
+        // switching Workers <-> Studio, flash an empty view for one runloop
+        // tick so the NSToolbar can fully tear down before the next mount.
+        .onChange(of: selectedTab) { oldValue, newValue in
+            let isWorkersStudioSwap =
+                (oldValue == .workers && newValue == .studio) ||
+                (oldValue == .studio && newValue == .workers)
+            guard isWorkersStudioSwap else { return }
+            inTransit = true
+            DispatchQueue.main.async {
+                inTransit = false
+            }
+        }
     }
 
     @ViewBuilder
     private var destinationView: some View {
+        if inTransit {
+            // One-frame clear pass that owns no NSToolbar items, so the
+            // outgoing NavigationSplitView can fully unregister before the
+            // incoming one mounts. Background matches the window so the
+            // flicker is invisible.
+            Color(NSColor.windowBackgroundColor)
+        } else {
+            actualDestinationView
+        }
+    }
+
+    @ViewBuilder
+    private var actualDestinationView: some View {
         switch selectedTab {
         case .workers:
             WorkersView()

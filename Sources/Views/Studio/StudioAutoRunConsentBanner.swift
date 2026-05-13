@@ -31,21 +31,26 @@ struct StudioAutoRunConsentBanner: View {
 
     @State private var pending: [PendingConsent] = []
     @State private var notifiedTokens: Set<String> = []
-    @State private var pollTask: Task<Void, Never>? = nil
 
     var body: some View {
+        // When `pending` is empty we still need the view to occupy a real slot
+        // in the layout tree — SwiftUI elides a `Group` whose only child is
+        // `EmptyView`, and modifiers like `.onAppear` / `.task` on an elided
+        // view never fire. A zero-height `Color.clear` keeps the view present
+        // (invisible) so the lifecycle modifier actually runs and the poller
+        // can start. See bug 2026-05-12: banner stayed hidden because the
+        // first poll never fired.
         Group {
             if let first = pending.first {
                 bannerContent(for: first)
             } else {
-                EmptyView()
+                Color.clear.frame(height: 0)
             }
         }
-        .onAppear {
-            startPolling()
+        .task(id: roomSlug) {
             requestNotificationAuth()
+            await pollLoop()
         }
-        .onDisappear { pollTask?.cancel() }
     }
 
     private func bannerContent(for prompt: PendingConsent) -> some View {
@@ -74,13 +79,13 @@ struct StudioAutoRunConsentBanner: View {
         .overlay(Divider(), alignment: .bottom)
     }
 
-    private func startPolling() {
-        pollTask?.cancel()
-        pollTask = Task {
-            while !Task.isCancelled {
-                await loadPending()
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-            }
+    /// Run the 3-second polling loop until the enclosing `.task(id:)` is
+    /// cancelled (room change or view disappearance). Structured concurrency
+    /// handles cancellation — no manual Task handle bookkeeping required.
+    private func pollLoop() async {
+        while !Task.isCancelled {
+            await loadPending()
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
         }
     }
 

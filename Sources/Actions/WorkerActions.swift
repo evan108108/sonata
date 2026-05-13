@@ -57,6 +57,8 @@ private struct PromptCacheStatsItem: Encodable {
     let sampleCount: Int64
     let lastSeenAt: Int64
     let hitRate: Double?
+    let sessionLabel: String?
+    let cwdBasename: String?
 }
 
 // MARK: - Helpers
@@ -139,7 +141,9 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
                             currentSlug = NULL,
                             currentCacheReadTokens = NULL,
                             currentInputTokens = NULL,
-                            currentPromptHash = NULL
+                            currentPromptHash = NULL,
+                            currentSessionLabel = NULL,
+                            currentCwdBasename = NULL
                         WHERE workerId = ?
                     """, arguments: [workerId])
                     continue
@@ -184,7 +188,9 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
                     currentSlug = NULL,
                     currentCacheReadTokens = NULL,
                     currentInputTokens = NULL,
-                    currentPromptHash = NULL
+                    currentPromptHash = NULL,
+                    currentSessionLabel = NULL,
+                    currentCwdBasename = NULL
                 WHERE workerId = ?
             """, arguments: [workerId])
         } catch {
@@ -284,6 +290,8 @@ let workerActions: [SonataAction] = [
             ActionParam("currentCacheReadTokens", .integer, description: "Cumulative cache_read_input_tokens for in-flight event"),
             ActionParam("currentInputTokens", .integer, description: "Cumulative input-side tokens for in-flight event"),
             ActionParam("promptHash", .string, description: "8-char sha256 prefix of the event's prompt prefix"),
+            ActionParam("sessionLabel", .string, description: "Human-readable worker-pool label (display for prompt cache panel)"),
+            ActionParam("cwdBasename", .string, description: "Last path segment of worker cwd (display suffix)"),
         ],
         handler: { ctx in
             let workerId = try ctx.params.require("workerId")
@@ -293,6 +301,8 @@ let workerActions: [SonataAction] = [
             let currentCacheReadTokens = ctx.params.int("currentCacheReadTokens").map { Int64($0) }
             let currentInputTokens = ctx.params.int("currentInputTokens").map { Int64($0) }
             let promptHash = ctx.params.string("promptHash")
+            let sessionLabel = ctx.params.string("sessionLabel")
+            let cwdBasename = ctx.params.string("cwdBasename")
 
             let now = nowMs()
             do {
@@ -314,6 +324,8 @@ let workerActions: [SonataAction] = [
                             currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
                             currentInputTokens = COALESCE(?, currentInputTokens),
                             currentPromptHash = COALESCE(?, currentPromptHash),
+                            currentSessionLabel = COALESCE(?, currentSessionLabel),
+                            currentCwdBasename = COALESCE(?, currentCwdBasename),
                             status = CASE
                                 WHEN status IN ('offline', 'draining') THEN status
                                 WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
@@ -324,7 +336,7 @@ let workerActions: [SonataAction] = [
                         arguments: [now, lastProgressAt,
                                     currentEventTokens, currentSlug,
                                     currentCacheReadTokens, currentInputTokens,
-                                    promptHash, workerId]
+                                    promptHash, sessionLabel, cwdBasename, workerId]
                     )
                     let count = db.changesCount
                     try sweepStaleWorkersForActions(in: db)
@@ -526,7 +538,8 @@ let workerActions: [SonataAction] = [
                     try Row.fetchAll(db, sql: """
                         SELECT promptKey, eventType, promptHash,
                                totalInputTokens, totalCacheReadTokens,
-                               sampleCount, lastSeenAt
+                               sampleCount, lastSeenAt,
+                               sessionLabel, cwdBasename
                         FROM promptCacheStats
                         ORDER BY sampleCount DESC, lastSeenAt DESC
                     """)
@@ -543,7 +556,9 @@ let workerActions: [SonataAction] = [
                         totalCacheReadTokens: cacheRead,
                         sampleCount: row["sampleCount"] as? Int64 ?? 0,
                         lastSeenAt: row["lastSeenAt"] as? Int64 ?? 0,
-                        hitRate: hitRate
+                        hitRate: hitRate,
+                        sessionLabel: row["sessionLabel"] as? String,
+                        cwdBasename: row["cwdBasename"] as? String
                     )
                 }
             } catch {
@@ -583,7 +598,9 @@ let workerActions: [SonataAction] = [
                                 currentSlug = NULL,
                                 currentCacheReadTokens = NULL,
                                 currentInputTokens = NULL,
-                                currentPromptHash = NULL
+                                currentPromptHash = NULL,
+                                currentSessionLabel = NULL,
+                                currentCwdBasename = NULL
                             WHERE workerId = ?
                         """, arguments: [status, workerId])
                     } else {
@@ -855,13 +872,16 @@ let workerEventActions: [SonataAction] = [
                     if let workerId = row?.assignedTo {
                         captured = workerId
                         let workerRow = try Row.fetchOne(db, sql: """
-                            SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash
+                            SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash,
+                                   currentSessionLabel, currentCwdBasename
                             FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
                         let workerStatus = workerRow?["status"] as? String
                         let inputTokens = workerRow?["currentInputTokens"] as? Int64
                         let cacheReadTokens = workerRow?["currentCacheReadTokens"] as? Int64
                         let promptHash = workerRow?["currentPromptHash"] as? String
+                        let sessionLabel = workerRow?["currentSessionLabel"] as? String
+                        let cwdBasename = workerRow?["currentCwdBasename"] as? String
 
                         // Roll up into promptCacheStats when we have enough data.
                         if let eventType = row?.type,
@@ -871,14 +891,18 @@ let workerEventActions: [SonataAction] = [
                             let promptKey = "\(eventType):\(promptHash)"
                             try db.execute(sql: """
                                 INSERT INTO promptCacheStats
-                                    (promptKey, eventType, promptHash, totalInputTokens, totalCacheReadTokens, sampleCount, lastSeenAt)
-                                VALUES (?, ?, ?, ?, ?, 1, ?)
+                                    (promptKey, eventType, promptHash, sessionLabel, cwdBasename,
+                                     totalInputTokens, totalCacheReadTokens, sampleCount, lastSeenAt)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
                                 ON CONFLICT(promptKey) DO UPDATE SET
                                     totalInputTokens = totalInputTokens + excluded.totalInputTokens,
                                     totalCacheReadTokens = totalCacheReadTokens + excluded.totalCacheReadTokens,
                                     sampleCount = sampleCount + 1,
+                                    sessionLabel = COALESCE(excluded.sessionLabel, sessionLabel),
+                                    cwdBasename = COALESCE(excluded.cwdBasename, cwdBasename),
                                     lastSeenAt = excluded.lastSeenAt
-                            """, arguments: [promptKey, eventType, promptHash, inputTokens, cacheReadTokens, now])
+                            """, arguments: [promptKey, eventType, promptHash, sessionLabel, cwdBasename,
+                                             inputTokens, cacheReadTokens, now])
                         }
 
                         let newStatus = workerStatus == "draining" ? "draining" : "idle"
@@ -890,7 +914,9 @@ let workerEventActions: [SonataAction] = [
                                 currentSlug = NULL,
                                 currentCacheReadTokens = NULL,
                                 currentInputTokens = NULL,
-                                currentPromptHash = NULL
+                                currentPromptHash = NULL,
+                                currentSessionLabel = NULL,
+                                currentCwdBasename = NULL
                             WHERE workerId = ?
                         """, arguments: [newStatus, workerId])
                     }
@@ -992,13 +1018,16 @@ let workerEventActions: [SonataAction] = [
                     if let workerId = row?.assignedTo {
                         captured = workerId
                         let workerRow = try Row.fetchOne(db, sql: """
-                            SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash
+                            SELECT status, currentInputTokens, currentCacheReadTokens, currentPromptHash,
+                                   currentSessionLabel, currentCwdBasename
                             FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
                         let workerStatus = workerRow?["status"] as? String
                         let inputTokens = workerRow?["currentInputTokens"] as? Int64
                         let cacheReadTokens = workerRow?["currentCacheReadTokens"] as? Int64
                         let promptHash = workerRow?["currentPromptHash"] as? String
+                        let sessionLabel = workerRow?["currentSessionLabel"] as? String
+                        let cwdBasename = workerRow?["currentCwdBasename"] as? String
 
                         // Roll up into promptCacheStats — failures still consumed tokens.
                         if let eventType = row?.type,
@@ -1008,14 +1037,18 @@ let workerEventActions: [SonataAction] = [
                             let promptKey = "\(eventType):\(promptHash)"
                             try db.execute(sql: """
                                 INSERT INTO promptCacheStats
-                                    (promptKey, eventType, promptHash, totalInputTokens, totalCacheReadTokens, sampleCount, lastSeenAt)
-                                VALUES (?, ?, ?, ?, ?, 1, ?)
+                                    (promptKey, eventType, promptHash, sessionLabel, cwdBasename,
+                                     totalInputTokens, totalCacheReadTokens, sampleCount, lastSeenAt)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
                                 ON CONFLICT(promptKey) DO UPDATE SET
                                     totalInputTokens = totalInputTokens + excluded.totalInputTokens,
                                     totalCacheReadTokens = totalCacheReadTokens + excluded.totalCacheReadTokens,
                                     sampleCount = sampleCount + 1,
+                                    sessionLabel = COALESCE(excluded.sessionLabel, sessionLabel),
+                                    cwdBasename = COALESCE(excluded.cwdBasename, cwdBasename),
                                     lastSeenAt = excluded.lastSeenAt
-                            """, arguments: [promptKey, eventType, promptHash, inputTokens, cacheReadTokens, now])
+                            """, arguments: [promptKey, eventType, promptHash, sessionLabel, cwdBasename,
+                                             inputTokens, cacheReadTokens, now])
                         }
 
                         let newStatus = workerStatus == "draining" ? "draining" : "idle"
@@ -1027,7 +1060,9 @@ let workerEventActions: [SonataAction] = [
                                 currentSlug = NULL,
                                 currentCacheReadTokens = NULL,
                                 currentInputTokens = NULL,
-                                currentPromptHash = NULL
+                                currentPromptHash = NULL,
+                                currentSessionLabel = NULL,
+                                currentCwdBasename = NULL
                             WHERE workerId = ?
                         """, arguments: [newStatus, workerId])
                     }
