@@ -541,6 +541,26 @@ struct StudioComposeSheet: View {
                 d.imageBlockRaw = dict
                 d.imageBlock = dict.compactMapValues { $0 as? String }
                 drafts.append(d)
+            case .file(let f):
+                var d = BlockDraft()
+                d.kind = .file
+                let dict: [String: Any] = [
+                    "type": "file",
+                    "filename": f.filename,
+                    "mime_type": f.mimeType,
+                    "size_bytes": f.sizeBytes,
+                    "sha256": f.sha256,
+                    "blake3": f.blake3,
+                    "mirrors": f.mirrors,
+                    "decrypt_hint": [
+                        "kind": f.decryptHint.kind,
+                        "epoch_n": f.decryptHint.epochN,
+                        "wrapped_key": f.decryptHint.wrappedKey,
+                    ],
+                ]
+                d.fileBlockRaw = dict
+                d.fileBlock = dict.compactMapValues { $0 as? String }
+                drafts.append(d)
             case .unknown(let type, _):
                 // We can't reconstruct an editor for unknown shapes — preserve
                 // them verbatim. The original JSON dict isn't available here
@@ -589,7 +609,7 @@ private struct FormSnapshot: Equatable {
 /// `isValid` only flips true once that has happened.
 struct BlockDraft: Identifiable, Equatable {
     enum Kind: String, CaseIterable, Identifiable {
-        case text, code, link, field, image
+        case text, code, link, field, image, file
         var id: String { rawValue }
         var label: String { rawValue.capitalized }
     }
@@ -617,6 +637,12 @@ struct BlockDraft: Identifiable, Equatable {
     var imagePath: String? = nil
     var imageError: String? = nil
 
+    // file — populated by studio_file_attach response (Phase 5)
+    var fileBlock: [String: String]? = nil
+    var fileBlockRaw: [String: Any]? = nil
+    var filePath: String? = nil
+    var fileError: String? = nil
+
     var isValid: Bool {
         switch kind {
         case .text:
@@ -631,6 +657,8 @@ struct BlockDraft: Identifiable, Equatable {
             return !k.isEmpty && !v.isEmpty
         case .image:
             return imageBlockRaw != nil
+        case .file:
+            return fileBlockRaw != nil
         }
     }
 
@@ -648,6 +676,8 @@ struct BlockDraft: Identifiable, Equatable {
             return ["type": "field", "key": fieldKey, "value": fieldValue]
         case .image:
             return imageBlockRaw ?? ["type": "image"]
+        case .file:
+            return fileBlockRaw ?? ["type": "file"]
         }
     }
 
@@ -663,6 +693,9 @@ struct BlockDraft: Identifiable, Equatable {
             && lhs.imageBlock == rhs.imageBlock
             && lhs.imagePath == rhs.imagePath
             && lhs.imageError == rhs.imageError
+            && lhs.fileBlock == rhs.fileBlock
+            && lhs.filePath == rhs.filePath
+            && lhs.fileError == rhs.fileError
     }
 }
 
@@ -739,6 +772,8 @@ private struct BlockEditorRow: View {
             }
         case .image:
             imageRow
+        case .file:
+            fileRow
         }
     }
 
@@ -861,6 +896,149 @@ private struct BlockEditorRow: View {
                 )
             }
         }
+    }
+
+    // MARK: - File attach (Phase 5)
+
+    /// Hosted Blossom soft-cap above which we warn the user. The plugin's
+    /// hard cap is 256 MiB and is enforced both here at pick time and again
+    /// inside the action (file_too_big).
+    private static let FILE_HARD_CAP_BYTES: Int64 = 256 * 1024 * 1024
+    /// Hosted-tier quota — anything > this triggers a "likely fail" prompt
+    /// when the backend is blossom.primal.net.
+    private static let HOSTED_BLOSSOM_SOFT_CAP_BYTES: Int64 = 100 * 1024 * 1024
+
+    private var fileRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    pickFileForAttach()
+                } label: {
+                    Label(draft.fileBlockRaw == nil ? "Attach file…" : "Replace file…",
+                          systemImage: "paperclip")
+                }
+                .disabled(attaching)
+                if attaching {
+                    ProgressView().controlSize(.small)
+                    Text("Uploading to Blossom…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let path = draft.filePath, draft.fileBlockRaw != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text(path.components(separatedBy: "/").last ?? path)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            if let err = draft.fileError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func pickFileForAttach() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        // No type filter — file attachments accept anything.
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Hard cap (matches plugin's MAX_FILE_BYTES).
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? Int64) ?? 0
+        if size > Self.FILE_HARD_CAP_BYTES {
+            draft.fileError = "Files cannot exceed 256 MiB."
+            toast.show(severity: .error, text: "Files cannot exceed 256 MiB.")
+            return
+        }
+
+        // Hosted-Blossom soft warning. Heuristic per the brief: detect the
+        // default hosted backend by URL substring; BYO backends skip this.
+        let usingHostedBlossom = currentBlossomURL().contains("blossom.primal.net")
+        if usingHostedBlossom && size > Self.HOSTED_BLOSSOM_SOFT_CAP_BYTES {
+            let alert = NSAlert()
+            alert.messageText = "Large file"
+            alert.informativeText = "Your hosted Blossom quota is 100 MB. This upload will likely fail. Continue?"
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Try anyway")
+            if alert.runModal() == .alertFirstButtonReturn {
+                return
+            }
+        }
+
+        // Stage a copy in /tmp — gives us ownership of the lifetime so the
+        // /tmp reaper or the deferred cleanup below can clear it after the
+        // upload returns. Matches the image attach pattern.
+        let stagingURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("sonata-fileattach-\(UUID().uuidString)-\(url.lastPathComponent)")
+        do {
+            try FileManager.default.copyItem(at: url, to: stagingURL)
+        } catch {
+            draft.fileError = "Couldn't stage file for upload: \(error.localizedDescription)"
+            return
+        }
+        let stagedPath = stagingURL.path
+        let originalName = url.lastPathComponent
+
+        attaching = true
+        draft.fileError = nil
+        let roomCapture = roomSlug
+        Task { @MainActor in
+            defer {
+                attaching = false
+                try? FileManager.default.removeItem(atPath: stagedPath)
+            }
+            do {
+                var block = try await store.attachFile(
+                    filePath: stagedPath,
+                    roomSlug: roomCapture,
+                    mimeType: nil
+                )
+                // The plugin reports `filename` as the basename of the staged
+                // path (sonata-fileattach-…-original.ext). Override with the
+                // user's actual filename so the file-block surfaces the
+                // recognizable name on every renderer.
+                block["filename"] = originalName
+                var updated = draft
+                updated.fileBlockRaw = block
+                updated.fileBlock = block.compactMapValues { v -> String? in
+                    if let s = v as? String { return s }
+                    return nil
+                }
+                updated.filePath = stagedPath
+                updated.fileError = nil
+                draft = updated
+            } catch {
+                var updated = draft
+                updated.fileBlockRaw = nil
+                updated.fileBlock = nil
+                updated.filePath = nil
+                updated.fileError = error.localizedDescription
+                draft = updated
+                toast.show(
+                    severity: .error,
+                    text: "File upload failed: \(error.localizedDescription). Sheet preserved."
+                )
+            }
+        }
+    }
+
+    /// Resolve the active Blossom URL from local settings, falling back to
+    /// the hosted default. Used to drive the hosted-quota warning heuristic.
+    private func currentBlossomURL() -> String {
+        if let cfg = UserDefaults.standard.string(forKey: "studio.blossom_base_url"),
+           !cfg.isEmpty {
+            return cfg
+        }
+        return "https://blossom.primal.net"
     }
 
     /// Re-encode `image` as JPEG, iteratively downscaling + reducing quality
