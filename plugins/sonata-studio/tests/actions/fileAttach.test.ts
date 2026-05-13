@@ -165,7 +165,7 @@ describe("studio_file_attach", () => {
     }
   });
 
-  it("throws upload_failed when Blossom returns 413", async () => {
+  it("throws blossom_rejected when Blossom returns 413", async () => {
     const { ctx, pluginPub } = makeCtx();
 
     const epochPriv = hexToBytes("00".repeat(31) + "02");
@@ -198,7 +198,7 @@ describe("studio_file_attach", () => {
         caught = err;
       }
       expect(caught).toBeInstanceOf(HttpError);
-      expect((caught as HttpError).code).toBe("upload_failed");
+      expect((caught as HttpError).code).toBe("blossom_rejected");
     } finally {
       env.restore();
     }

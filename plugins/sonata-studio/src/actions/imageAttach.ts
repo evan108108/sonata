@@ -35,7 +35,8 @@ import { blake3 } from "@noble/hashes/blake3.js";
 import { base64 } from "@scure/base";
 
 import { encrypt as nip44Encrypt } from "../crypto/nip44";
-import { __signEvent, type NostrEvent } from "../crypto/nip17";
+import { uploadCiphertext, StorageUploadError } from "../storage/upload";
+import { resolveRoomStorageConfig } from "./storage";
 import {
   HttpError,
   ensureSlug,
@@ -48,12 +49,6 @@ import type { ActionCtx } from "./room";
 // file-pick time and again here for defense in depth.
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
-// BUD-01 authorization event kind. NIP-98 defines kind 27235 for generic
-// HTTP-auth; BUD-01 specializes to 24242 with a `t` tag of
-// "upload"|"get"|"list"|"delete". See
-// https://github.com/hzrd149/blossom/blob/master/buds/01.md.
-const BLOSSOM_AUTH_KIND = 24242;
-
 // Default Blossom server. Overridable via ctx.cfg.blossomBaseURL (renderer
 // Settings → Blossom server URL).
 const DEFAULT_BLOSSOM_URL = "https://api.4a4.ai/blossom";
@@ -62,6 +57,7 @@ interface ImageAttachRequest {
   file_path?: unknown;
   room_slug?: unknown;
   mime_type?: unknown;
+  s3_credentials?: unknown;
 }
 
 interface ImageAttachResult {
@@ -138,75 +134,35 @@ export async function attachImage(
   const ciphertextSha = sha256Hex(ciphertextBytes);
   const ciphertextBlake = bytesToHex(blake3(ciphertextBytes));
 
-  // 7. BUD-01 auth event.
-  const blossomURL = blossomBaseURL(ctx);
-  const authEvent = signBlossomAuthEvent({
-    pluginPriv: ctx.cfg.pluginPriv,
-    pluginPub: ctx.cfg.pluginPub,
-    sha256: ciphertextSha,
-    action: "upload",
-  });
-  const authB64 = base64Encode(JSON.stringify(authEvent));
+  // 7. Resolve storage backend: per-room override > user default > hosted Blossom.
+  const storageConfig = await resolveRoomStorageConfig(roomSlug);
 
-  // 8. PUT ciphertext to /upload.
-  const uploadURL = `${blossomURL.replace(/\/+$/, "")}/upload`;
-  // Parent §12 E16 — 5-min timeout (system sleep tolerance).
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000);
-
-  let response: Response;
+  // 8. Dispatch upload (Blossom or BYO-S3).
+  let uploadResult;
   try {
-    response = await fetch(uploadURL, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Authorization": `Nostr ${authB64}`,
-      },
-      body: ciphertextBytes,
-      signal: controller.signal,
+    uploadResult = await uploadCiphertext({
+      config: storageConfig,
+      defaultBlossomURL: blossomBaseURL(ctx),
+      ciphertext: ciphertextBytes,
+      ciphertextSha256Hex: ciphertextSha,
+      pluginPriv: ctx.cfg.pluginPriv,
+      pluginPub: ctx.cfg.pluginPub,
+      roomSlug,
+      s3Credentials: body.s3_credentials,
     });
   } catch (err) {
-    clearTimeout(timeout);
-    throw new HttpError(
-      502,
-      "blossom_unreachable",
-      `failed to PUT ${uploadURL}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    if (err instanceof StorageUploadError) {
+      throw new HttpError(err.status, err.code, err.message);
+    }
+    throw err;
   }
-  clearTimeout(timeout);
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "<no body>");
-    throw new HttpError(
-      response.status >= 500 ? 502 : 400,
-      "blossom_rejected",
-      `Blossom ${response.status}: ${text}`,
-    );
-  }
-
-  // 9. Verify server-reported sha256.
-  const respJson = (await response.json()) as { sha256?: string; url?: string };
-  if (
-    typeof respJson.sha256 !== "string" ||
-    respJson.sha256.toLowerCase() !== ciphertextSha
-  ) {
-    throw new HttpError(
-      502,
-      "blossom_response_invalid",
-      `Blossom returned sha256=${respJson.sha256} but we sent sha256=${ciphertextSha}`,
-    );
-  }
-  const mirrorURL =
-    typeof respJson.url === "string" && respJson.url.length > 0
-      ? respJson.url
-      : `${blossomURL.replace(/\/+$/, "")}/${ciphertextSha}`;
 
   void plaintextSha; // currently diagnostic-only; reserved for future log line.
 
-  // 10. Image-block content.
+  // 9. Image-block content.
   return {
     sha256: ciphertextSha,
-    mirrors: [mirrorURL],
+    mirrors: [uploadResult.mirror_url],
     decrypt_hint: { kind: "audience-epoch", epoch_n: room.currentEpoch },
     mime_type: mimeOverride ?? inferMime(resolved),
     blake3: ciphertextBlake,
@@ -219,44 +175,10 @@ function sha256Hex(data: Buffer | Uint8Array): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
-interface BlossomAuthArgs {
-  pluginPriv: Uint8Array;
-  pluginPub: string;
-  sha256: string;
-  action: "upload" | "get" | "list" | "delete";
-}
-
-function signBlossomAuthEvent(args: BlossomAuthArgs): NostrEvent {
-  const createdAt = Math.floor(Date.now() / 1000);
-  // BUD-01 "Authorization Event": kind 24242, tags include `t`, `x` (sha256),
-  // and `expiration` (unix-seconds, ≤ 60s ahead). `content` is human-readable.
-  const tags: string[][] = [
-    ["t", args.action],
-    ["x", args.sha256],
-    ["expiration", String(createdAt + 60)],
-  ];
-  return __signEvent(
-    {
-      pubkey: args.pluginPub.toLowerCase(),
-      kind: BLOSSOM_AUTH_KIND,
-      created_at: createdAt,
-      tags,
-      content: `Sonata Studio ${args.action}`,
-    },
-    args.pluginPriv,
-  );
-}
-
 function blossomBaseURL(ctx: ActionCtx): string {
   const cfgUrl = (ctx.cfg as unknown as { blossomBaseURL?: string }).blossomBaseURL;
   if (typeof cfgUrl === "string" && cfgUrl.length > 0) return cfgUrl;
   return DEFAULT_BLOSSOM_URL;
-}
-
-function base64Encode(s: string): string {
-  // Bun exposes globalThis.btoa; the encoded JSON is ASCII so it round-trips
-  // through atob on the verifier side.
-  return btoa(s);
 }
 
 function inferMime(filePath: string): string {

@@ -16,6 +16,7 @@ import { imageAttach } from "./imageAttach";
 import { member } from "./member";
 import { qa } from "./qa";
 import { room } from "./room";
+import { storage } from "./storage";
 import { track } from "./track";
 import type { ActionCtx } from "./room";
 
@@ -245,13 +246,60 @@ const IMAGE_ATTACH_PARAMS: ActionParam[] = [
   { name: "file_path", type: "string", required: true, description: "Absolute path to the source image file (any readable location)." },
   { name: "room_slug", type: "string", required: true, description: "Room slug — used to look up the current epoch." },
   { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
+  {
+    name: "s3_credentials",
+    type: "object",
+    description:
+      "Required when the resolved storage backend is S3: {access_key_id, secret_access_key}. Renderer reads from Keychain and passes per-call; plugin never persists raw credentials.",
+  },
 ];
 
 const FILE_ATTACH_PARAMS: ActionParam[] = [
   { name: "file_path", type: "string", required: true, description: "Absolute path to the source file (any readable location). Symlinks are rejected." },
   { name: "room_slug", type: "string", required: true, description: "Room slug — used to look up the current epoch the wrap is bound to." },
   { name: "mime_type", type: "string", description: "Optional MIME override; inferred from extension if absent." },
+  {
+    name: "s3_credentials",
+    type: "object",
+    description:
+      "Required when the resolved storage backend is S3: {access_key_id, secret_access_key}. Renderer reads from Keychain and passes per-call; plugin never persists raw credentials.",
+  },
 ];
+
+const STORAGE_CONFIG_SET_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+  {
+    name: "config",
+    type: "object",
+    description:
+      "Storage backend config, or null to clear the per-room override and fall back to the user default. Shape: {kind: 'blossom', blossom_url} | {kind: 's3', s3_endpoint, s3_region, s3_bucket, s3_path_style, s3_access_key_id_keychain_ref, s3_secret_access_key_keychain_ref}.",
+  },
+];
+
+const STORAGE_CONFIG_GET_PARAMS: ActionParam[] = [
+  { name: "room", type: "string", required: true, description: "Room slug." },
+];
+
+const STORAGE_TEST_PARAMS: ActionParam[] = [
+  { name: "config", type: "object", required: true, description: "Storage config to test (same shape as set)." },
+  {
+    name: "credentials",
+    type: "object",
+    description:
+      "Required for kind=s3: {access_key_id, secret_access_key}. Renderer fetches from Keychain before calling; plugin uses them in-memory only.",
+  },
+];
+
+const STORAGE_DEFAULT_SET_PARAMS: ActionParam[] = [
+  {
+    name: "config",
+    type: "object",
+    description:
+      "User-wide default storage backend config, or null to clear (falls back to hosted Blossom).",
+  },
+];
+
+const STORAGE_DEFAULT_GET_PARAMS: ActionParam[] = [];
 
 // ── Action definitions ──────────────────────────────────────────────────────
 
@@ -413,6 +461,46 @@ export const ACTIONS: ActionDef[] = [
     path: "/api/identity",
     params: [],
   },
+  {
+    name: "studio_storage_config_set",
+    description:
+      "Set or clear the per-room storage backend (Blossom URL or BYO S3-compatible). Pass config=null to clear the override and fall back to the user default. Secrets are stored in macOS Keychain on the renderer; this entity carries only Keychain references.",
+    method: "post",
+    path: "/api/storage/config/set",
+    params: STORAGE_CONFIG_SET_PARAMS,
+  },
+  {
+    name: "studio_storage_config_get",
+    description:
+      "Get the resolved storage backend for a room: per-room override, user-default fallback, and effective config with source.",
+    method: "post",
+    path: "/api/storage/config/get",
+    params: STORAGE_CONFIG_GET_PARAMS,
+  },
+  {
+    name: "studio_storage_test",
+    description:
+      "Test a storage_config by uploading and retrieving a 19-byte probe object. For s3, requires credentials in the body. Probe is deleted after a successful round-trip.",
+    method: "post",
+    path: "/api/storage/test",
+    params: STORAGE_TEST_PARAMS,
+  },
+  {
+    name: "studio_storage_default_set",
+    description:
+      "Set or clear the user-wide default storage backend used by rooms without a per-room override. Persists on the studio:user_profile singleton entity.",
+    method: "post",
+    path: "/api/storage/default/set",
+    params: STORAGE_DEFAULT_SET_PARAMS,
+  },
+  {
+    name: "studio_storage_default_get",
+    description:
+      "Get the user-wide default storage backend (null when none is configured — uploads fall through to hosted Blossom).",
+    method: "get",
+    path: "/api/storage/default/get",
+    params: STORAGE_DEFAULT_GET_PARAMS,
+  },
 ];
 
 // ── Route table ─────────────────────────────────────────────────────────────
@@ -508,8 +596,28 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "get",
     handler: async (_b, _q, ctx) => ({ pubkey: ctx.cfg.pluginPub.toLowerCase() }),
   },
+  "/api/storage/config/set": {
+    method: "post",
+    handler: async (body, _q, ctx) => storage.set(body, ctx),
+  },
+  "/api/storage/config/get": {
+    method: "post",
+    handler: async (body, _q, ctx) => storage.get(body, ctx),
+  },
+  "/api/storage/test": {
+    method: "post",
+    handler: async (body, _q, ctx) => storage.test(body, ctx),
+  },
+  "/api/storage/default/set": {
+    method: "post",
+    handler: async (body, _q, ctx) => storage.setDefault(body, ctx),
+  },
+  "/api/storage/default/get": {
+    method: "get",
+    handler: async (_b, _q, ctx) => storage.getDefault({}, ctx),
+  },
 };
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, cardStatus, comment, dispatch, fileAttach, imageAttach, member, qa, room, room_admit, track };
+export { card, cardStatus, comment, dispatch, fileAttach, imageAttach, member, qa, room, room_admit, storage, track };
