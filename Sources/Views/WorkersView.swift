@@ -878,14 +878,17 @@ struct WorkersView: View {
                 .background(Color.yellow.opacity(0.1))
             }
 
-            NavigationSplitView {
+            HStack(spacing: 0) {
                 workerSidebar
-            } detail: {
+                    .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
+                Divider()
                 if manager.workers.isEmpty {
                     emptyState
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     TerminalContainerView()
                         .environmentObject(manager)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -895,6 +898,9 @@ struct WorkersView: View {
 
     private var workerSidebar: some View {
         VStack(spacing: 0) {
+            workerSidebarHeader
+            Divider()
+
             List(selection: $manager.selectedWorkerId) {
                 ForEach(manager.workers) { worker in
                     WorkerSidebarRow(worker: worker)
@@ -908,12 +914,6 @@ struct WorkersView: View {
             .listStyle(.sidebar)
 
             HStack(spacing: 8) {
-                Button(action: { manager.addWorker() }) {
-                    Label("Add Worker", systemImage: "plus")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-
                 Button(action: { showPromptCachePopover.toggle() }) {
                     Image(systemName: "chart.bar")
                         .font(.caption)
@@ -933,7 +933,27 @@ struct WorkersView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .frame(minWidth: 220, idealWidth: 260)
+    }
+
+    private var workerSidebarHeader: some View {
+        HStack(spacing: 8) {
+            Text("Workers")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+            Button {
+                manager.addWorker()
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help("Add Worker")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Empty State
@@ -1173,9 +1193,6 @@ struct PromptCacheStatsPanel: View {
 
     private func displayLabel(_ row: PromptCacheStatsRow) -> String {
         let primary = (row.sessionLabel?.isEmpty == false) ? row.sessionLabel! : row.promptHash
-        if let cwd = row.cwdBasename, !cwd.isEmpty {
-            return "\(row.eventType) · \(primary) @ \(cwd)"
-        }
         return "\(row.eventType) · \(primary)"
     }
 }
