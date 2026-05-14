@@ -521,7 +521,7 @@ interface RoomCreateResult {
 }
 
 interface RoomInviteResult {
-  four_a_url: string;
+  s4a_url: string;
   https_url: string;
   invite_pub: string;
   expires_at: number;
@@ -764,14 +764,14 @@ async function runOnce(attempt: number): Promise<Fixture> {
     );
     logEvent("A", "studio_room_invite", inviteRaw);
     const invite = ensureOk("studio_room_invite", inviteRaw);
-    expect(invite.four_a_url.startsWith("4a://invite/")).toBe(true);
+    expect(invite.s4a_url.startsWith("s4a://invite/")).toBe(true);
 
     // Step 5: B joins via the invite URL.
     const joinRaw = await callPluginAt<RoomJoinResult>(
       baseB,
       "/api/room/join",
       "POST",
-      { invite_url: invite.four_a_url },
+      { invite_url: invite.s4a_url },
     );
     logEvent("B", "studio_room_join", joinRaw);
     const join = ensureOk("studio_room_join", joinRaw);

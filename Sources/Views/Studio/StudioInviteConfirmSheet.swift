@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-/// Sheet shown when the user clicks a `4a://invite/...` URL from anywhere
+/// Sheet shown when the user clicks a `s4a://invite/...` URL from anywhere
 /// (Messages, Mail, shell `open`, etc.). Reuses the pasted-URL join path
 /// — `store.joinRoom(inviteURL:)` — but pre-fills the URL and shows a
 /// founder-recognizable preview (slug + epoch) before the user commits.

@@ -422,6 +422,15 @@ export function validateCommentPayload(payload: unknown): ValidationResult {
   if (obj.intent !== undefined && !isNonEmptyString(obj.intent)) {
     return { ok: false, error: '"intent" must be a non-empty string when present' };
   }
+  if (obj.blocks !== undefined) {
+    if (!Array.isArray(obj.blocks)) {
+      return { ok: false, error: '"blocks" must be an array when present' };
+    }
+    for (let i = 0; i < obj.blocks.length; i++) {
+      const r = validateCardBlock(obj.blocks[i], i);
+      if (!r.ok) return r;
+    }
+  }
   return { ok: true };
 }
 

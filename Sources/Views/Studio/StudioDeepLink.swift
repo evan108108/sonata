@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Receives `4a://...` URLs handed to the app via `.onOpenURL` and queues them
+/// Receives `s4a://...` URLs handed to the app via `.onOpenURL` and queues them
 /// for a Studio-tab consumer to present.
 ///
 /// SwiftUI's `.onOpenURL` fires for both runtime opens and the boot-time
@@ -14,7 +14,7 @@ import SwiftUI
 final class StudioDeepLinkRouter: ObservableObject {
     static let shared = StudioDeepLinkRouter()
 
-    /// Set when a `4a://invite/...` URL is delivered. The Studio view tree
+    /// Set when a `s4a://invite/...` URL is delivered. The Studio view tree
     /// observes this and presents `StudioInviteConfirmSheet`. The consumer
     /// is responsible for setting this back to nil after consuming.
     @Published var pendingInvite: PendingInvite?
@@ -30,25 +30,25 @@ final class StudioDeepLinkRouter: ObservableObject {
         let id = UUID()
         /// Full original URL — exactly what gets forwarded to the plugin.
         let rawURL: String
-        /// Best-effort slug parsed from the URL (`4a://invite/<slug>/<epoch>...`).
+        /// Best-effort slug parsed from the URL (`s4a://invite/<slug>/<epoch>...`).
         let previewSlug: String?
         /// Best-effort epoch number (display-only).
         let previewEpoch: Int?
     }
 
     /// Entry point from SonataApp's `.onOpenURL`. Currently we only handle
-    /// the `4a://invite/<slug>/<epoch>...` shape — other 4a:// paths are
+    /// the `s4a://invite/<slug>/<epoch>...` shape — other s4a:// paths are
     /// dropped silently so the URL handler doesn't grow into a generic
     /// router by accident. Adding more routes means adding more explicit
     /// cases here, not pattern-matching by scheme alone.
     func handle(url: URL) {
-        guard url.scheme?.lowercased() == "4a" else { return }
+        guard url.scheme?.lowercased() == "s4a" else { return }
         let host = url.host?.lowercased() ?? ""
         let firstPathPart = url.pathComponents
             .first(where: { $0 != "/" && !$0.isEmpty })?
             .lowercased() ?? ""
         // URL parsing inserts host vs. path inconsistently depending on whether
-        // the URL has authority components. `4a://invite/foo` puts `invite` in
+        // the URL has authority components. `s4a://invite/foo` puts `invite` in
         // .host on some macOS versions and in the first path segment on others;
         // accept either.
         guard host == "invite" || firstPathPart == "invite" else { return }
@@ -61,7 +61,7 @@ final class StudioDeepLinkRouter: ObservableObject {
         )
     }
 
-    /// Pull the slug + epoch out of a `4a://invite/<slug>/<epoch>...` URL
+    /// Pull the slug + epoch out of a `s4a://invite/<slug>/<epoch>...` URL
     /// for the confirm-sheet preview. The plugin re-parses the URL itself
     /// during join (this is purely cosmetic); return `(nil, nil)` on any
     /// parse failure rather than rejecting the URL.
@@ -77,10 +77,10 @@ final class StudioDeepLinkRouter: ObservableObject {
         return (slug, epoch)
     }
 
-    /// True when the URL looks like a 4a:// invite — used as a cheap gate
+    /// True when the URL looks like a s4a:// invite — used as a cheap gate
     /// for "do anything at all" in the app receiver.
     static func isInviteURL(_ url: URL) -> Bool {
-        guard url.scheme?.lowercased() == "4a" else { return false }
+        guard url.scheme?.lowercased() == "s4a" else { return false }
         let host = url.host?.lowercased() ?? ""
         let first = url.pathComponents
             .first(where: { $0 != "/" && !$0.isEmpty })?

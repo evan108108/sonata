@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// Paste-an-invite-URL sheet launched from the sidebar's "+ ▾ Join room…"
-/// menu. Accepts both the native `4a://invite/...` scheme and the
+/// menu. Accepts both the native `s4a://invite/...` scheme and the
 /// `https://.../invite/...` web fallback; the plugin's `room/join` action
 /// resolves either form. On success the joiner's local room lands in one
 /// of two states:
@@ -61,7 +61,7 @@ struct StudioJoinRoomSheet: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Paste an invite link from the room's founder. Native scheme (4a://…) and the https:// fallback both work.")
+            Text("Paste an invite link from the room's founder. Native scheme (s4a://…) and the https:// fallback both work.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
@@ -69,12 +69,12 @@ struct StudioJoinRoomSheet: View {
                 Text("Invite URL")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                TextField("4a://invite/… or https://…/invite/…", text: $inviteURL, axis: .vertical)
+                TextField("s4a://invite/… or https://…/invite/…", text: $inviteURL, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .lineLimit(2...4)
                 if !trimmedURL.isEmpty && !urlIsValid {
-                    Text("URL must start with 4a://invite/ or https://…/invite/")
+                    Text("URL must start with s4a://invite/ or https://…/invite/")
                         .font(.system(size: 11))
                         .foregroundStyle(.red)
                 }
@@ -153,7 +153,7 @@ struct StudioJoinRoomSheet: View {
     /// without needing to spin up the plugin.
     static func isLikelyInviteURL(_ raw: String) -> Bool {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if s.hasPrefix("4a://invite/") { return s.count > "4a://invite/".count }
+        if s.hasPrefix("s4a://invite/") { return s.count > "s4a://invite/".count }
         if s.hasPrefix("https://"), s.contains("/invite/") { return true }
         return false
     }

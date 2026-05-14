@@ -1628,13 +1628,13 @@ struct StudioRoomJoinResponse: Decodable {
 /// renderer shows `https_url` (more shareable across apps) and stamps
 /// `expires_at` (Unix seconds) into the UI.
 struct StudioInviteResponse: Decodable, Equatable {
-    let fourAUrl: String
+    let s4aUrl: String
     let httpsUrl: String
     let invitePub: String
     let expiresAt: Int64
 
     enum CodingKeys: String, CodingKey {
-        case fourAUrl = "four_a_url"
+        case s4aUrl = "s4a_url"
         case httpsUrl = "https_url"
         case invitePub = "invite_pub"
         case expiresAt = "expires_at"

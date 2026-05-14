@@ -47,7 +47,7 @@ struct StudioView: View {
         .onDisappear {
             store.stop()
         }
-        // 4a:// invite arrived via the URL handler. Present a confirm sheet
+        // s4a:// invite arrived via the URL handler. Present a confirm sheet
         // bound to the router's pending invite; the sheet calls back with
         // the joined room slug + state so we can select it in the sidebar.
         .sheet(

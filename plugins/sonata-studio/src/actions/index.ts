@@ -57,7 +57,7 @@ const ROOM_JOIN_PARAMS: ActionParam[] = [
     name: "invite_url",
     type: "string",
     required: true,
-    description: "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token.",
+    description: "s4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token.",
   },
   {
     name: "profile",
@@ -314,7 +314,7 @@ export const ACTIONS: ActionDef[] = [
   },
   {
     name: "studio_room_join",
-    description: "Join a Studio room from a 4a:// or https:// invite URL.",
+    description: "Join a Studio room from a s4a:// or https:// invite URL.",
     method: "post",
     path: "/api/room/join",
     params: ROOM_JOIN_PARAMS,

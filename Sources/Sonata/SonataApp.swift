@@ -620,7 +620,7 @@ struct SonataApp: App {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
                 .environment(\.dbPool, dbPool)
-                // 4a:// URL scheme handler. The Info.plist registers the
+                // s4a:// URL scheme handler. The Info.plist registers the
                 // scheme with macOS LaunchServices; .onOpenURL is what
                 // SwiftUI hands the resulting URL through. Boot-time pending
                 // URLs (Sonata wasn't running when the user clicked the

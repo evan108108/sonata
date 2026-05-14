@@ -963,7 +963,7 @@ let systemActions: [SonataAction] = [
             }
 
             // 2c. Sync Info.plist from App/Info.plist (source-of-truth) so
-            //     CFBundleURLTypes (the 4a:// scheme registration) survives
+            //     CFBundleURLTypes (the s4a:// scheme registration) survives
             //     every binary swap. Without this, an Xcode-less SPM build
             //     leaves the bundle's plist out of sync with the repo and the
             //     URL handler registration silently drops the next time

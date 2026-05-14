@@ -139,7 +139,7 @@ struct ContentView: View {
                 inTransit = false
             }
         }
-        // Switch to the Studio tab whenever a 4a:// invite URL arrives, so
+        // Switch to the Studio tab whenever a s4a:// invite URL arrives, so
         // the confirm sheet (mounted in StudioView) is on-screen by the
         // time the user notices Sonata came forward. The router's
         // pendingInvite is cleared by the consumer (the sheet itself),

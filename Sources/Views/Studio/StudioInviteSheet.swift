@@ -16,21 +16,21 @@ struct StudioInviteSheet: View {
     @State private var isLoading: Bool = false
     @State private var loadError: String?
     @State private var didCopy: Bool = false
-    /// Which URL form to display + copy. `.fourA` is the native scheme
-    /// (`4a://invite/...`) that opens Sonata directly via the registered
+    /// Which URL form to display + copy. `.s4a` is the native scheme
+    /// (`s4a://invite/...`) that opens Sonata directly via the registered
     /// CFBundleURLTypes handler. `.https` is the web fallback shape, useful
     /// when the invitee doesn't have Sonata installed (lands on a 4a4.ai
     /// page documenting Sonata; one-click on the same machine still opens
-    /// Sonata via LaunchServices). Default to `.fourA` so the click-to-open
+    /// Sonata via LaunchServices). Default to `.s4a` so the click-to-open
     /// path is the first-class choice.
-    @State private var urlForm: URLForm = .fourA
+    @State private var urlForm: URLForm = .s4a
 
     private enum URLForm: String, CaseIterable, Identifiable {
-        case fourA, https
+        case s4a, https
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .fourA: return "4a://"
+            case .s4a: return "s4a://"
             case .https: return "https://"
             }
         }
@@ -170,8 +170,8 @@ struct StudioInviteSheet: View {
                 .buttonStyle(.bordered)
             }
 
-            if urlForm == .fourA {
-                Text("Clicking 4a:// opens Sonata directly via the system URL handler.")
+            if urlForm == .s4a {
+                Text("Clicking s4a:// opens Sonata directly via the system URL handler.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             } else {
@@ -184,7 +184,7 @@ struct StudioInviteSheet: View {
 
     private func displayedURL(for invite: StudioInviteResponse) -> String {
         switch urlForm {
-        case .fourA: return invite.fourAUrl
+        case .s4a: return invite.s4aUrl
         case .https: return invite.httpsUrl
         }
     }

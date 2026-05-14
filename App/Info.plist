@@ -27,10 +27,10 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>com.sona.sonata.4a-invite</string>
+            <string>com.sona.sonata.s4a-invite</string>
             <key>CFBundleURLSchemes</key>
             <array>
-                <string>4a</string>
+                <string>s4a</string>
             </array>
             <key>CFBundleTypeRole</key>
             <string>Viewer</string>
