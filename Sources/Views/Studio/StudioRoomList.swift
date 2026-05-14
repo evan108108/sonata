@@ -11,6 +11,7 @@ struct StudioRoomList: View {
     @State private var pendingAction: PendingRoomAction?
     @State private var joinToast: InlineToast?
     @State private var actionToast: InlineToast?
+    @State private var roomFilter: StudioRoomFilter = .active
     /// Identifier+slug for the just-created-or-joined room. Drives the
     /// profile-picker sheet that surfaces after the create/join sheet
     /// dismisses. Non-nil ↔ picker is presented.
@@ -44,6 +45,9 @@ struct StudioRoomList: View {
         VStack(spacing: 0) {
             header
             Divider()
+            StudioRoomFilterBar(selection: $roomFilter)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
             list
             Divider()
             filterField
@@ -345,9 +349,20 @@ struct StudioRoomList: View {
     }
 
     private var visibleRooms: [StudioRoom] {
+        // Apply the pill filter first; then narrow by the text filter so
+        // "search within closed only" works without surprising matches.
+        let byFilter: [StudioRoom]
+        switch roomFilter {
+        case .active:
+            byFilter = store.rooms.filter { $0.state != "closed" }
+        case .closed:
+            byFilter = store.rooms.filter { $0.state == "closed" }
+        case .all:
+            byFilter = store.rooms
+        }
         let trimmed = filterText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !trimmed.isEmpty else { return store.rooms }
-        return store.rooms.filter { room in
+        guard !trimmed.isEmpty else { return byFilter }
+        return byFilter.filter { room in
             room.slug.lowercased().contains(trimmed)
                 || room.title.lowercased().contains(trimmed)
         }
