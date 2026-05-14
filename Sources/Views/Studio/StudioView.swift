@@ -5,8 +5,10 @@ import GRDB
 struct StudioView: View {
     @Environment(\.dbPool) private var dbPool: DatabasePool?
     @StateObject private var store = StudioStore()
+    @ObservedObject private var deepLink = StudioDeepLinkRouter.shared
 
     @State private var selectedRoom: StudioRoom?
+    @State private var pendingInviteJoined: (slug: String, state: String)?
 
     var body: some View {
         NavigationSplitView {
@@ -44,6 +46,45 @@ struct StudioView: View {
         }
         .onDisappear {
             store.stop()
+        }
+        // s4a:// invite arrived via the URL handler. Present a confirm sheet
+        // bound to the router's pending invite; the sheet calls back with
+        // the joined room slug + state so we can select it in the sidebar.
+        .sheet(
+            item: Binding(
+                get: { deepLink.pendingInvite },
+                set: { newValue in
+                    if newValue == nil { deepLink.pendingInvite = nil }
+                }
+            )
+        ) { invite in
+            StudioInviteConfirmSheet(
+                store: store,
+                pending: invite,
+                onJoined: { slug, state in
+                    deepLink.pendingInvite = nil
+                    pendingInviteJoined = (slug, state)
+                },
+                onCancel: {
+                    deepLink.pendingInvite = nil
+                }
+            )
+        }
+        // After the join request returns, find the joined room (it may
+        // already be in store.rooms via the SSE projector, or it will land
+        // in the next observation tick) and select it.
+        .onChange(of: pendingInviteJoined?.slug) { _, slug in
+            guard let slug else { return }
+            if let room = store.rooms.first(where: { $0.slug == slug }) {
+                selectedRoom = room
+                pendingInviteJoined = nil
+            }
+        }
+        .onChange(of: store.rooms.map(\.slug)) { _, _ in
+            guard let pending = pendingInviteJoined,
+                  let room = store.rooms.first(where: { $0.slug == pending.slug }) else { return }
+            selectedRoom = room
+            pendingInviteJoined = nil
         }
     }
 }

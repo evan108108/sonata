@@ -110,7 +110,7 @@ interface RoomInviteRequest {
 }
 
 interface RoomInviteResult {
-  four_a_url: string;
+  s4a_url: string;
   https_url: string;
   invite_pub: string;
   expires_at: number;
@@ -354,7 +354,7 @@ export async function createRoom(
 
 // ── join ────────────────────────────────────────────────────────────────────
 
-const FOUR_A_PREFIX = "4a://invite/";
+const S4A_PREFIX = "s4a://invite/";
 const HTTPS_PREFIX_RE = /^https?:\/\/[^/]+\/invite\//;
 const INVITE_HRP = "4ainv";
 // SPEC-v0.5 §6.2 invite keys: HRP=4ainv, 32-byte payload, encodes to ~64 chars
@@ -376,13 +376,13 @@ interface ParsedInvite {
 
 /**
  * Parse an invite URL into its slug/epoch + invite keypair components.
- * Accepts three shapes:
+ * Accepts two shapes:
  *   1. Gateway-emitted current form, where the invite pubkey is *not* in the
  *      path and must be derived from the priv:
- *        4a://invite/<slug>/<epoch>?k=<bech32_priv>
+ *        s4a://invite/<slug>/<epoch>?k=<bech32_priv>
  *        https://<host>/invite/<slug>/<epoch>?k=<bech32_priv>
  *   2. Legacy form retained for back-compat with anything Phase 2 issued:
- *        4a://invite/<slug>/<epoch>/<invite_pub_hex>?priv=<bech32_priv>
+ *        s4a://invite/<slug>/<epoch>/<invite_pub_hex>?priv=<bech32_priv>
  *        https://<host>/invite/<slug>/<epoch>/<invite_pub_hex>?priv=<bech32_priv>
  *
  * Either way the priv is decoded as bech32(`4ainv`) — the gateway hands the
@@ -390,15 +390,20 @@ interface ParsedInvite {
  * Bare 64-hex priv is accepted in the legacy form too (early Phase-2 callers
  * sometimes passed hex), but the new form requires bech32 because that's
  * what the gateway's `audience-raw.ts` `runInvite` returns.
+ *
+ * The previous `4a://` scheme was RFC-invalid (URL schemes must begin with
+ * ALPHA per RFC 3986 §3.1) so macOS LaunchServices / `open` rejected it as a
+ * file path. Renamed to `s4a://`. No `4a://` data is in the wild, so the
+ * legacy scheme isn't accepted here.
  */
 export function parseInviteUrl(url: string): ParsedInvite {
   let stripped = url.trim();
-  if (stripped.startsWith(FOUR_A_PREFIX)) {
-    stripped = stripped.slice(FOUR_A_PREFIX.length);
+  if (stripped.startsWith(S4A_PREFIX)) {
+    stripped = stripped.slice(S4A_PREFIX.length);
   } else if (HTTPS_PREFIX_RE.test(stripped)) {
     stripped = stripped.replace(HTTPS_PREFIX_RE, "");
   } else {
-    throw new HttpError(400, "bad_request", `invite_url must start with 4a:// or https://...`);
+    throw new HttpError(400, "bad_request", `invite_url must start with s4a:// or https://...`);
   }
   const [path, query] = stripped.split("?");
   const parts = (path ?? "").split("/").filter((p) => p.length > 0);
@@ -463,6 +468,19 @@ export function parseInviteUrl(url: string): ParsedInvite {
  * Bare 64-hex is accepted as a back-compat fallback for the very early
  * Phase-2 invite callers that handed hex through unchanged.
  */
+/**
+ * Bech32-encode a 32-byte invite priv with HRP `4ainv`. Matches the gateway's
+ * `encodeInviteKey` (gateway/src/lib/invite-key.ts) so the result rounds-trips
+ * with `decodeInvitePriv` and is accepted by the claim page's envelope check.
+ */
+function encodeInvitePriv(bytes: Uint8Array): string {
+  if (bytes.length !== 32) {
+    throw new HttpError(500, "internal", `invite_priv must be 32 bytes, got ${bytes.length}`);
+  }
+  const words = bech32.toWords(bytes);
+  return bech32.encode(INVITE_HRP, words, BECH32_LIMIT);
+}
+
 function decodeInvitePriv(s: string): Uint8Array {
   if (isHex64(s)) return hexToBytes(s);
   let decoded: { prefix: string; words: number[] };
@@ -702,20 +720,36 @@ export async function inviteToRoom(
   };
   const declSigned = __signEvent(declUnsigned, audIdPriv);
 
+  // Bech32-encode the priv before handing it to the gateway. The gateway
+  // plops this string verbatim into both URLs' `?k=` query parameter, and
+  // the claim.4a4.ai claim page only accepts the `4ainv1…` envelope (raw
+  // hex is rejected with "This link doesn't look like a 4A invite").
+  const inviteKey = encodeInvitePriv(invitePriv);
   const res = await ctx.gateway.rawInvite({
     audience_address: room.audienceAddress,
     declaration: toEventLike(declSigned),
     invite_pub: invitePub,
-    invite_priv_4ainv: bytesToHex(invitePriv),
+    invite_priv_4ainv: inviteKey,
   });
 
+  // Construct the invite URLs locally rather than echoing whatever the
+  // gateway returned. The gateway field is in transition (`four_a_url` →
+  // `s4a_url` across the scheme rename) and we already have everything
+  // needed to build the URL — slug, epoch, and the bech32 priv. Keeping
+  // URL formation here decouples plugin behaviour from gateway deploy
+  // ordering.
+  const s4aUrl = `s4a://invite/${slug}/${room.currentEpoch}?k=${inviteKey}`;
+  const httpsUrl = `${HTTPS_CLAIM_BASE}/invite/${slug}/${room.currentEpoch}?k=${inviteKey}`;
+
   return {
-    four_a_url: res.four_a_url,
-    https_url: res.https_url,
+    s4a_url: s4aUrl,
+    https_url: httpsUrl,
     invite_pub: invitePub,
     expires_at: res.expires_at,
   };
 }
+
+const HTTPS_CLAIM_BASE = "https://claim.4a4.ai";
 
 function currentPendingInvites(
   attrs: Record<string, unknown>,

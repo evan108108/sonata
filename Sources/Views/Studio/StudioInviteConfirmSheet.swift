@@ -1,39 +1,25 @@
 import Foundation
 import SwiftUI
 
-/// Paste-an-invite-URL sheet launched from the sidebar's "+ ▾ Join room…"
-/// menu. Accepts both the native `s4a://invite/...` scheme and the
-/// `https://.../invite/...` web fallback; the plugin's `room/join` action
-/// resolves either form. On success the joiner's local room lands in one
-/// of two states:
-///   - `active` — we had a still-valid grant; select the room normally
-///     and show a "Joined!" toast.
-///   - `pending-grant` — the founder hasn't admitted us yet. Sidebar
-///     renders the row greyed with a "joining…" subtitle; the toast says
-///     "Waiting for the owner to admit you."
-struct StudioJoinRoomSheet: View {
+/// Sheet shown when the user clicks a `s4a://invite/...` URL from anywhere
+/// (Messages, Mail, shell `open`, etc.). Reuses the pasted-URL join path
+/// — `store.joinRoom(inviteURL:)` — but pre-fills the URL and shows a
+/// founder-recognizable preview (slug + epoch) before the user commits.
+///
+/// Intentionally a thin wrapper around the existing join action: we do not
+/// duplicate the plugin's URL parsing or validation. If the URL is malformed
+/// the plugin call returns a `StudioPluginError` and we surface its `message`.
+struct StudioInviteConfirmSheet: View {
     @ObservedObject var store: StudioStore
-    @Environment(\.dismiss) private var dismiss
+    let pending: StudioDeepLinkRouter.PendingInvite
 
-    /// Notify the parent when a join succeeds. Carries the slug + state so
-    /// the sidebar can preselect the row and surface the right toast.
+    /// Notify the parent when the join lands so it can mark the new room
+    /// selected in the sidebar. Mirrors `StudioJoinRoomSheet.onJoined`.
     let onJoined: (_ slug: String, _ state: String) -> Void
+    let onCancel: () -> Void
 
-    @State private var inviteURL: String = ""
     @State private var isSubmitting: Bool = false
     @State private var submitError: String?
-
-    private var trimmedURL: String {
-        inviteURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var urlIsValid: Bool {
-        StudioJoinRoomSheet.isLikelyInviteURL(trimmedURL)
-    }
-
-    private var formIsValid: Bool {
-        !trimmedURL.isEmpty && urlIsValid
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,10 +34,10 @@ struct StudioJoinRoomSheet: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "person.crop.circle.badge.plus")
+            Image(systemName: "link.badge.plus")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
-            Text("Join Room")
+            Text("Join room from link")
                 .font(.system(size: 14, weight: .semibold))
             Spacer(minLength: 0)
         }
@@ -61,23 +47,44 @@ struct StudioJoinRoomSheet: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Paste an invite link from the room's founder. Native scheme (s4a://…) and the https:// fallback both work.")
+            Text("Someone shared a Sonata Studio room with you.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+
+            if let slug = pending.previewSlug {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Room")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Image(systemName: "rectangle.3.group.bubble.fill")
+                            .foregroundStyle(.secondary)
+                        Text(slug)
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        if let epoch = pending.previewEpoch {
+                            Text("· epoch \(epoch)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                }
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Invite URL")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                TextField("s4a://invite/… or https://…/invite/…", text: $inviteURL, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .lineLimit(2...4)
-                if !trimmedURL.isEmpty && !urlIsValid {
-                    Text("URL must start with s4a://invite/ or https://…/invite/")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(pending.rawURL)
+                        .font(.system(size: 11, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
                 }
+                .frame(maxWidth: .infinity)
+                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4))
             }
 
             if let err = submitError {
@@ -101,7 +108,7 @@ struct StudioJoinRoomSheet: View {
     private var footer: some View {
         HStack(spacing: 10) {
             Spacer(minLength: 0)
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { onCancel() }
                 .keyboardShortcut(.cancelAction)
                 .disabled(isSubmitting)
             Button {
@@ -109,36 +116,31 @@ struct StudioJoinRoomSheet: View {
             } label: {
                 HStack(spacing: 6) {
                     if isSubmitting { ProgressView().controlSize(.small) }
-                    Text(isSubmitting ? "Joining…" : "Join")
+                    Text(isSubmitting ? "Joining…" : "Join room")
                 }
-                .frame(minWidth: 70)
+                .frame(minWidth: 90)
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
-            .disabled(!formIsValid || isSubmitting)
+            .disabled(isSubmitting)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
     }
 
     private func submit() async {
-        guard formIsValid, !isSubmitting else { return }
+        guard !isSubmitting else { return }
         isSubmitting = true
         submitError = nil
         do {
-            // Pass the default nickname as the volunteered profile preview so
-            // the room founder sees identity in the admit dialog. Avatar is
-            // intentionally omitted — joiner has no room epoch key yet (see
-            // §"privacy" doc-comment on the plugin's room.join handler).
             let nick = store.defaultNickname.trimmingCharacters(in: .whitespacesAndNewlines)
             let room = try await store.joinRoom(
-                inviteURL: trimmedURL,
+                inviteURL: pending.rawURL,
                 profileNickname: nick.isEmpty ? nil : nick,
                 profileBio: nil
             )
             isSubmitting = false
             onJoined(room.slug, room.state)
-            dismiss()
         } catch let err as StudioPluginError {
             isSubmitting = false
             submitError = err.message
@@ -146,15 +148,5 @@ struct StudioJoinRoomSheet: View {
             isSubmitting = false
             submitError = "Couldn't join room: \(error.localizedDescription)"
         }
-    }
-
-    /// Client-side prefix check matching what the plugin's `parseInviteUrl`
-    /// will accept. Kept pure + testable so URL validation has unit coverage
-    /// without needing to spin up the plugin.
-    static func isLikelyInviteURL(_ raw: String) -> Bool {
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if s.hasPrefix("s4a://invite/") { return s.count > "s4a://invite/".count }
-        if s.hasPrefix("https://"), s.contains("/invite/") { return true }
-        return false
     }
 }

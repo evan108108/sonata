@@ -28,9 +28,9 @@ function makeInvite(): { priv: Uint8Array; privBech: string; pubHex: string } {
 }
 
 describe("parseInviteUrl — gateway-emitted current form", () => {
-  it("parses 4a://invite/<slug>/<epoch>?k=<bech32>", () => {
+  it("parses s4a://invite/<slug>/<epoch>?k=<bech32>", () => {
     const inv = makeInvite();
-    const url = `4a://invite/test-slug/3?k=${inv.privBech}`;
+    const url = `s4a://invite/test-slug/3?k=${inv.privBech}`;
     const parsed = parseInviteUrl(url);
     expect(parsed.slug).toBe("test-slug");
     expect(parsed.epoch).toBe(3);
@@ -50,15 +50,15 @@ describe("parseInviteUrl — gateway-emitted current form", () => {
 
   it("derives invite_pub from priv when path omits it", () => {
     const inv = makeInvite();
-    const parsed = parseInviteUrl(`4a://invite/derive-test/1?k=${inv.privBech}`);
+    const parsed = parseInviteUrl(`s4a://invite/derive-test/1?k=${inv.privBech}`);
     expect(parsed.invitePub).toBe(inv.pubHex);
   });
 });
 
 describe("parseInviteUrl — legacy form (back-compat)", () => {
-  it("parses 4a://invite/<slug>/<epoch>/<invite_pub>?priv=<bech32>", () => {
+  it("parses s4a://invite/<slug>/<epoch>/<invite_pub>?priv=<bech32>", () => {
     const inv = makeInvite();
-    const url = `4a://invite/legacy-slug/5/${inv.pubHex}?priv=${inv.privBech}`;
+    const url = `s4a://invite/legacy-slug/5/${inv.pubHex}?priv=${inv.privBech}`;
     const parsed = parseInviteUrl(url);
     expect(parsed.slug).toBe("legacy-slug");
     expect(parsed.epoch).toBe(5);
@@ -77,7 +77,7 @@ describe("parseInviteUrl — legacy form (back-compat)", () => {
   it("accepts bare 64-hex priv on the legacy form", () => {
     const inv = makeInvite();
     const privHex = bytesToHex(inv.priv);
-    const url = `4a://invite/hex-priv/1/${inv.pubHex}?priv=${privHex}`;
+    const url = `s4a://invite/hex-priv/1/${inv.pubHex}?priv=${privHex}`;
     const parsed = parseInviteUrl(url);
     expect(parsed.invitePub).toBe(inv.pubHex);
     expect(bytesToHex(parsed.invitePrivBytes)).toBe(privHex);
@@ -86,7 +86,7 @@ describe("parseInviteUrl — legacy form (back-compat)", () => {
   it("rejects when path invite_pub does not match the priv", () => {
     const inv = makeInvite();
     const wrong = makeInvite();
-    const url = `4a://invite/mismatch/1/${wrong.pubHex}?priv=${inv.privBech}`;
+    const url = `s4a://invite/mismatch/1/${wrong.pubHex}?priv=${inv.privBech}`;
     expect(() => parseInviteUrl(url)).toThrow(/invite_pub does not match/);
   });
 });
@@ -94,25 +94,25 @@ describe("parseInviteUrl — legacy form (back-compat)", () => {
 describe("parseInviteUrl — rejection", () => {
   it("rejects unknown URL scheme", () => {
     expect(() => parseInviteUrl("ftp://example.com/invite/a/1?k=4ainv1xxx"))
-      .toThrow(/4a:\/\/ or https:\/\//);
+      .toThrow(/s4a:\/\/ or https:\/\//);
   });
 
   it("rejects when slug is missing", () => {
     const inv = makeInvite();
-    expect(() => parseInviteUrl(`4a://invite//1?k=${inv.privBech}`))
+    expect(() => parseInviteUrl(`s4a://invite//1?k=${inv.privBech}`))
       .toThrow(/invite_url path/);
   });
 
   it("rejects when epoch is not a positive integer", () => {
     const inv = makeInvite();
-    expect(() => parseInviteUrl(`4a://invite/slug/0?k=${inv.privBech}`))
+    expect(() => parseInviteUrl(`s4a://invite/slug/0?k=${inv.privBech}`))
       .toThrow(/epoch invalid/);
-    expect(() => parseInviteUrl(`4a://invite/slug/abc?k=${inv.privBech}`))
+    expect(() => parseInviteUrl(`s4a://invite/slug/abc?k=${inv.privBech}`))
       .toThrow(/epoch invalid/);
   });
 
   it("rejects when ?k= and ?priv= are both missing", () => {
-    expect(() => parseInviteUrl(`4a://invite/slug/1`))
+    expect(() => parseInviteUrl(`s4a://invite/slug/1`))
       .toThrow(/missing.*k.*priv/);
   });
 
@@ -123,7 +123,7 @@ describe("parseInviteUrl — rejection", () => {
       bech32.toWords(randomBytes(32)),
       BECH32_LIMIT,
     );
-    expect(() => parseInviteUrl(`4a://invite/slug/1?k=${fake}`))
+    expect(() => parseInviteUrl(`s4a://invite/slug/1?k=${fake}`))
       .toThrow(/wrong HRP/);
   });
 
@@ -131,7 +131,7 @@ describe("parseInviteUrl — rejection", () => {
     const inv = makeInvite();
     // Mangle one character of the checksum (last char).
     const broken = inv.privBech.slice(0, -1) + (inv.privBech.endsWith("q") ? "p" : "q");
-    expect(() => parseInviteUrl(`4a://invite/slug/1?k=${broken}`))
+    expect(() => parseInviteUrl(`s4a://invite/slug/1?k=${broken}`))
       .toThrow(/bech32/);
   });
 });

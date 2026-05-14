@@ -9,12 +9,12 @@ final class StudioRoomSharingTests: XCTestCase {
 
     // MARK: - URL prefix validation
 
-    func testInviteURL_accepts4ASchemeWithSlug() {
-        XCTAssertTrue(StudioJoinRoomSheet.isLikelyInviteURL("4a://invite/abc123"))
+    func testInviteURL_acceptsS4ASchemeWithSlug() {
+        XCTAssertTrue(StudioJoinRoomSheet.isLikelyInviteURL("s4a://invite/abc123"))
     }
 
-    func testInviteURL_accepts4ASchemeMixedCase() {
-        XCTAssertTrue(StudioJoinRoomSheet.isLikelyInviteURL("4A://INVITE/abc123"))
+    func testInviteURL_acceptsS4ASchemeMixedCase() {
+        XCTAssertTrue(StudioJoinRoomSheet.isLikelyInviteURL("S4A://INVITE/abc123"))
     }
 
     func testInviteURL_acceptsHttpsWithInvitePath() {
@@ -31,7 +31,7 @@ final class StudioRoomSharingTests: XCTestCase {
 
     func testInviteURL_rejectsBareScheme() {
         // empty payload — must have something after `/invite/`
-        XCTAssertFalse(StudioJoinRoomSheet.isLikelyInviteURL("4a://invite/"))
+        XCTAssertFalse(StudioJoinRoomSheet.isLikelyInviteURL("s4a://invite/"))
     }
 
     func testInviteURL_rejectsHttpsWithoutInvitePath() {
@@ -80,7 +80,7 @@ final class StudioRoomSharingTests: XCTestCase {
     func testDecodeInviteResponse() throws {
         let json = """
         {
-          "four_a_url": "4a://invite/AAA",
+          "s4a_url": "s4a://invite/AAA",
           "https_url": "https://claim.4a4.ai/invite/AAA",
           "invite_pub": "deadbeef",
           "expires_at": 1746000000
@@ -90,7 +90,7 @@ final class StudioRoomSharingTests: XCTestCase {
             StudioInviteResponse.self,
             from: json.data(using: .utf8)!
         )
-        XCTAssertEqual(resp.fourAUrl, "4a://invite/AAA")
+        XCTAssertEqual(resp.s4aUrl, "s4a://invite/AAA")
         XCTAssertEqual(resp.httpsUrl, "https://claim.4a4.ai/invite/AAA")
         XCTAssertEqual(resp.invitePub, "deadbeef")
         XCTAssertEqual(resp.expiresAt, 1_746_000_000)

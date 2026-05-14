@@ -16,6 +16,25 @@ struct StudioInviteSheet: View {
     @State private var isLoading: Bool = false
     @State private var loadError: String?
     @State private var didCopy: Bool = false
+    /// Which URL form to display + copy. `.s4a` is the native scheme
+    /// (`s4a://invite/...`) that opens Sonata directly via the registered
+    /// CFBundleURLTypes handler. `.https` is the web fallback shape, useful
+    /// when the invitee doesn't have Sonata installed (lands on a 4a4.ai
+    /// page documenting Sonata; one-click on the same machine still opens
+    /// Sonata via LaunchServices). Default to `.s4a` so the click-to-open
+    /// path is the first-class choice.
+    @State private var urlForm: URLForm = .s4a
+
+    private enum URLForm: String, CaseIterable, Identifiable {
+        case s4a, https
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .s4a: return "s4a://"
+            case .https: return "https://"
+            }
+        }
+    }
 
     private static let defaultTTLSeconds: Int = 7 * 24 * 60 * 60
 
@@ -113,31 +132,60 @@ struct StudioInviteSheet: View {
     }
 
     private func urlRow(invite: StudioInviteResponse) -> some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(invite.httpsUrl)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-            }
-            .frame(maxWidth: .infinity)
-            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-            )
-            Button {
-                copy(invite.httpsUrl)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                    Text(didCopy ? "Copied" : "Copy")
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("", selection: $urlForm) {
+                ForEach(URLForm.allCases) { form in
+                    Text(form.label).tag(form)
                 }
-                .font(.system(size: 11))
-                .frame(minWidth: 64)
             }
-            .buttonStyle(.bordered)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 220)
+            .onChange(of: urlForm) { _, _ in didCopy = false }
+
+            HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(displayedURL(for: invite))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                }
+                .frame(maxWidth: .infinity)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                )
+                Button {
+                    copy(displayedURL(for: invite))
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        Text(didCopy ? "Copied" : "Copy")
+                    }
+                    .font(.system(size: 11))
+                    .frame(minWidth: 64)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if urlForm == .s4a {
+                Text("Clicking s4a:// opens Sonata directly via the system URL handler.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text("https:// is a web fallback for invitees who don't have Sonata yet.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func displayedURL(for invite: StudioInviteResponse) -> String {
+        switch urlForm {
+        case .s4a: return invite.s4aUrl
+        case .https: return invite.httpsUrl
         }
     }
 

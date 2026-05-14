@@ -35,6 +35,7 @@ struct ContentView: View {
     @StateObject private var searchVM = SearchViewModel()
     @StateObject private var unreadCounts = StudioUnreadCounts()
     @StateObject private var railCounts = NavRailCounts()
+    @ObservedObject private var deepLink = StudioDeepLinkRouter.shared
     @Environment(\.dbPool) private var dbPool: DatabasePool?
     @FocusState private var searchFocused: Bool
 
@@ -136,6 +137,17 @@ struct ContentView: View {
             inTransit = true
             DispatchQueue.main.async {
                 inTransit = false
+            }
+        }
+        // Switch to the Studio tab whenever a s4a:// invite URL arrives, so
+        // the confirm sheet (mounted in StudioView) is on-screen by the
+        // time the user notices Sonata came forward. The router's
+        // pendingInvite is cleared by the consumer (the sheet itself),
+        // not here.
+        .onChange(of: deepLink.pendingInvite) { _, newValue in
+            guard newValue != nil else { return }
+            if selectedTab != .studio {
+                selectedTab = .studio
             }
         }
     }

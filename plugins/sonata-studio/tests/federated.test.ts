@@ -552,7 +552,7 @@ interface RoomCreateResult {
 }
 
 interface RoomInviteResult {
-  four_a_url: string;
+  s4a_url: string;
   https_url: string;
   invite_pub: string;
   expires_at: number;
@@ -880,14 +880,14 @@ async function runOnce(attempt: number): Promise<Fixture> {
     );
     logEvent("workstation", "studio_room_invite", inviteRaw);
     const invite = ensureOk("studio_room_invite", inviteRaw);
-    expect(invite.four_a_url.startsWith("4a://invite/")).toBe(true);
+    expect(invite.s4a_url.startsWith("s4a://invite/")).toBe(true);
 
-    // Step 5: Scout studio_room_join via the 4a:// invite URL.
+    // Step 5: Scout studio_room_join via the s4a:// invite URL.
     const joinRaw = await callPluginAt<RoomJoinResult>(
       SCOUT_HTTP,
       "/api/room/join",
       "POST",
-      { invite_url: invite.four_a_url },
+      { invite_url: invite.s4a_url },
     );
     logEvent("scout", "studio_room_join", joinRaw);
     const join = ensureOk("studio_room_join", joinRaw);

@@ -90,7 +90,17 @@ export interface RawInviteRequest {
 
 export interface RawInviteResponse {
   ok: true;
-  four_a_url: string;
+  /**
+   * Native-scheme URL emitted by the gateway. After the s4a:// rename the
+   * gateway returns `s4a_url`; older gateway builds return `four_a_url`.
+   * The plugin's `inviteToRoom` ignores both fields in favour of
+   * constructing the URLs locally from the bech32-encoded priv it just
+   * generated — keeping plugin behaviour stable across the gateway-deploy
+   * window. The fields stay typed here so the renderer can read the
+   * gateway's value if a future caller wants it.
+   */
+  s4a_url?: string;
+  four_a_url?: string;
   https_url: string;
   invite_pub: string;
   invite_priv_4ainv: string;
