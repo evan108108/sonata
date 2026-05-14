@@ -578,3 +578,51 @@ struct StudioDispatchIntent: Equatable, Identifiable {
             ?? Int64((raw["created_at_seconds"] as? Int) ?? 0)
     }
 }
+
+// MARK: - StudioRoomSystemEvent
+
+/// Synthetic feed entries derived by the plugin's room-system-events
+/// projector from kind:30520 republishes and kind:30522 status=left claims.
+/// Local-only (never federated); every member's renderer independently
+/// derives the same set from the same wire events.
+struct StudioRoomSystemEvent: Equatable, Identifiable {
+    enum Kind: String {
+        case joined
+        case left
+        case removed
+        case closed
+        case reopened
+    }
+
+    let id: String
+    let roomSlug: String
+    let kind: Kind
+    /// Pubkey the event is *about* (the joined / left / removed member, or
+    /// nil for status transitions).
+    let subject: String?
+    /// Pubkey of the founder who emitted the kind:30520 carrying this
+    /// transition. Nil for `left` (the subject is also the actor).
+    let actor: String?
+    let atSeconds: Int64
+    let sourceEventId: String
+
+    init(row: Row) throws {
+        guard let id = row["id"] as String? else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "studio_room_system_event: missing id"))
+        }
+        self.id = id
+        let attrsRaw = row["attributes"] as String? ?? "{}"
+        let raw = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
+        self.roomSlug = (raw["room_slug"] as? String) ?? ""
+        let kindStr = (raw["kind"] as? String) ?? ""
+        guard let parsedKind = Kind(rawValue: kindStr) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "studio_room_system_event: unknown kind \(kindStr)"))
+        }
+        self.kind = parsedKind
+        self.subject = (raw["subject"] as? String)?.lowercased()
+        self.actor = (raw["actor"] as? String)?.lowercased()
+        self.atSeconds = (raw["at"] as? Int64)
+            ?? Int64((raw["at"] as? Int) ?? 0)
+        self.sourceEventId = (raw["source_event_id"] as? String) ?? ""
+    }
+}

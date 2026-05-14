@@ -4,6 +4,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
 
+import { projectLeaveClaim } from "../projection/room-system-events";
 import { GatewayError, type GatewayClient, type NostrEventLike } from "../a4-client";
 import { MemoryClientError } from "../memory-client";
 import {
@@ -1405,6 +1406,30 @@ export async function leaveRoom(
     // eslint-disable-next-line no-console
     console.error(
       `[room.leave] entity upsert for "${slug}" failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // Emit a local "left" system event so the leaver's own feed shows the
+  // departure even before any subsequent founder republish lands. Other
+  // members observe it via the founder's roster diff later (or — if the
+  // founder never republishes — not at all; the leaver's local feed is the
+  // canonical surface for this transition). The audience-stream doesn't
+  // currently fan out kind:30522 events to peers; a future widening of
+  // that stream is the path to mirroring this row on remote renderers.
+  try {
+    await projectLeaveClaim({
+      claimEventId: leaveEventId,
+      claimPubkey: ctx.cfg.pluginPub,
+      createdAt: claimSigned.created_at,
+      roomSlug: slug,
+      entity,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.leave] local system-event projection failed: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

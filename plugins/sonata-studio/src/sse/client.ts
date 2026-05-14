@@ -23,6 +23,7 @@ import { unwrap } from "../crypto/nip17";
 import * as nip44 from "../crypto/nip44";
 import { log } from "../logger";
 import { projectToMemory } from "../projection";
+import { projectDeclarationDiff, type DeclarationSnapshot } from "../projection/room-system-events";
 import type { StudioRumor } from "../projection/types";
 import { payloadValidatorFor, STUDIO_KINDS } from "../validators";
 import { parseSSEStream } from "./parser";
@@ -50,6 +51,12 @@ export interface SSEMemoryClient {
     list(opts?: { type?: string; limit?: number }): Promise<SSEEntityRow[]>;
     patch(args: {
       id: string;
+      attributes: Record<string, unknown>;
+    }): Promise<{ id: string }>;
+    upsert(args: {
+      name: string;
+      type: string;
+      description: string;
       attributes: Record<string, unknown>;
     }): Promise<{ id: string }>;
   };
@@ -202,6 +209,12 @@ export class SSEClient implements AbortFlag {
   private state: RoomState | null = null;
   private epochKeys = new Map<number, Uint8Array>();
   private pending = new Map<number, PendingItem[]>();
+  /**
+   * Snapshot of the last-projected kind:30520 so the room-system-events
+   * projector can diff each new declaration against the previous one to
+   * emit synthetic joined/removed/closed/reopened entries.
+   */
+  private previousDeclarationSnapshot: DeclarationSnapshot | null = null;
   /**
    * Per-event-id dedup window covering BOTH gift-wraps (kind:1059) and
    * key-grants (kind:30521). The gateway emits the same event under two
@@ -809,6 +822,35 @@ export class SSEClient implements AbortFlag {
         await this.drainPending(epoch);
       }
     }
+    // Project synthetic system events (joined / removed / closed /
+    // reopened) by diffing against the previous declaration we observed
+    // on this connection. The first declaration on a fresh connect has
+    // no `prev`, so projectDeclarationDiff emits nothing — we don't want
+    // a reconnect to re-emit "joined" for every member.
+    const nextSnapshot: DeclarationSnapshot = {
+      members,
+      status,
+      createdAt: decl.created_at,
+      eventId: decl.id,
+      audIdPub: this.state.audIdPub,
+      slug: this.roomSlug,
+    };
+    try {
+      await projectDeclarationDiff({
+        prev: this.previousDeclarationSnapshot,
+        next: nextSnapshot,
+        roomSlug: this.roomSlug,
+        founderPubkey: decl.pubkey,
+        entity: this.memory.entity,
+      });
+    } catch (err) {
+      log.warn("[sse] room-system-events projector failed", {
+        room: this.roomSlug,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    this.previousDeclarationSnapshot = nextSnapshot;
+
     // Advance the cursor past this declaration so the gateway's replay
     // path (`cur.created_at > sinceUnix`, audience-stream.ts:286) stops
     // re-emitting it on every reconnect.

@@ -94,30 +94,72 @@ struct StudioCardList: View {
 
     // MARK: - Card rows
 
+    /// Tagged union of feed entries so cards and system events can sort
+    /// together by their author-side timestamp. System events come from
+    /// the room-system-events projector (kind:30520 diffs + leave claims).
+    private enum FeedItem: Identifiable {
+        case card(StudioCard)
+        case system(StudioRoomSystemEvent)
+
+        var id: String {
+            switch self {
+            case .card(let c):   return "card:\(c.id)"
+            case .system(let s): return "sys:\(s.id)"
+            }
+        }
+
+        var sortKey: Int64 {
+            switch self {
+            case .card(let c):   return c.createdAtSeconds
+            case .system(let s): return s.atSeconds
+            }
+        }
+    }
+
     @ViewBuilder
     private var cardRows: some View {
         let cards = sourceCards
-        if cards.isEmpty {
+        let items = interleavedFeed(cards: cards)
+        if items.isEmpty {
             emptyState(
                 symbol: "tray",
                 title: track == nil ? "No cards yet" : "No cards in this track",
                 subtitle: "Posts from this room will appear here in real time."
             )
         } else {
-            ForEach(cards, id: \.id) { card in
-                let optimistic = optimisticIds.contains(card.id)
-                StudioCardRow(
-                    card: card,
-                    authorName: store.displayName(for: card.createdByPubkey, in: card.roomSlug),
-                    commentCount: store.comments(forCard: card.eventId).count,
-                    isOptimistic: optimistic,
-                    selectedCard: $selectedCard,
-                    store: store,
-                    onEdit: onEditCard
-                )
-                Divider().opacity(0.4)
+            ForEach(items) { item in
+                switch item {
+                case .card(let card):
+                    let optimistic = optimisticIds.contains(card.id)
+                    StudioCardRow(
+                        card: card,
+                        authorName: store.displayName(for: card.createdByPubkey, in: card.roomSlug),
+                        commentCount: store.comments(forCard: card.eventId).count,
+                        isOptimistic: optimistic,
+                        selectedCard: $selectedCard,
+                        store: store,
+                        onEdit: onEditCard
+                    )
+                    Divider().opacity(0.4)
+                case .system(let ev):
+                    StudioSystemEventRow(event: ev, store: store)
+                    Divider().opacity(0.25)
+                }
             }
         }
+    }
+
+    /// Merge cards + system events into a single timeline. System events are
+    /// only included on the "all tracks" view — when the user is focused on
+    /// a specific track, the system rows would feel out-of-place there.
+    /// Sorted descending by timestamp to match the card-feed convention.
+    private func interleavedFeed(cards: [StudioCard]) -> [FeedItem] {
+        let events: [StudioRoomSystemEvent] = track == nil
+            ? store.systemEvents(for: room.slug)
+            : []
+        let combined: [FeedItem] =
+            cards.map { .card($0) } + events.map { .system($0) }
+        return combined.sorted { $0.sortKey > $1.sortKey }
     }
 
     /// IDs of optimistic cards currently being merged into the list. Used to

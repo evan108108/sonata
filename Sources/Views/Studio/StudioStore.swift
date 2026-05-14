@@ -12,6 +12,10 @@ final class StudioStore: ObservableObject {
     @Published private(set) var cardsByRoomTrack: [String: [StudioCard]] = [:]
     @Published private(set) var comments: [String: [StudioComment]] = [:]
     @Published private(set) var dispatchIntents: [String: [StudioDispatchIntent]] = [:]
+    /// Synthetic system events per room (joined / left / removed / closed /
+    /// reopened). Populated by the GRDB observation on the open-room
+    /// lifecycle hooks; keyed by room slug.
+    @Published private(set) var systemEvents: [String: [StudioRoomSystemEvent]] = [:]
     /// Cross-room members keyed by pubkey hex (auto-stubbed by `ensureMember`
     /// in the projector, optional local nickname set via studio_member_set_nickname).
     /// Fallback only — federated per-room nicknames live in `roomMembers`.
@@ -497,13 +501,20 @@ final class StudioStore: ObservableObject {
         startTracksObservation(forRoom: slug)
         startCardsObservation(forRoom: slug)
         startCommentsObservation(forRoom: slug)
+        startSystemEventsObservation(forRoom: slug)
         if let room = rooms.first(where: { $0.slug == slug }), room.dispatchTraceOn {
             startDispatchIntentsObservation(forRoom: slug)
         }
     }
 
     func closeRoom(_ slug: String) {
-        for key in ["tracks-\(slug)", "cards-\(slug)", "comments-\(slug)", "dispatch-\(slug)"] {
+        for key in [
+            "tracks-\(slug)",
+            "cards-\(slug)",
+            "comments-\(slug)",
+            "dispatch-\(slug)",
+            "sysevents-\(slug)",
+        ] {
             cancellables[key]?.cancel()
             cancellables.removeValue(forKey: key)
         }
@@ -578,6 +589,31 @@ final class StudioStore: ObservableObject {
                 }
             }
         )
+    }
+
+    private func startSystemEventsObservation(forRoom slug: String) {
+        let observation = ValueObservation.tracking { db -> [StudioRoomSystemEvent] in
+            try Row.fetchAll(db, sql: Self.SQL_SYSTEM_EVENTS_IN_ROOM, arguments: [slug])
+                .compactMap { try? StudioRoomSystemEvent(row: $0) }
+        }
+        cancellables["sysevents-\(slug)"] = observation.start(
+            in: requirePool(),
+            scheduling: .async(onQueue: .main),
+            onError: { error in NSLog("[StudioStore] sysevents(\(slug)) error: \(error)") },
+            onChange: { [weak self] events in
+                MainActor.assumeIsolated {
+                    guard let self = self else { return }
+                    self.systemEvents[slug] = events
+                }
+            }
+        )
+    }
+
+    /// Snapshot accessor for views that need the current events synchronously
+    /// (e.g. interleaving with cards in the feed). Returns the empty array
+    /// when the room has been observed but has no system events yet.
+    func systemEvents(for slug: String) -> [StudioRoomSystemEvent] {
+        return systemEvents[slug] ?? []
     }
 
     private func startDispatchIntentsObservation(forRoom slug: String) {
@@ -1570,10 +1606,39 @@ final class StudioStore: ObservableObject {
         var id: String { "\(kind):\(pubkey)" }
     }
 
-    /// Step 7 will derive this from observed `studio_room_system_event`
-    /// entities. For now: no system events ⇒ no removed-member rows.
+    /// Collapse the system-event log into the unique latest "no longer in
+    /// the room" status per subject pubkey. Both `left` and `removed` kinds
+    /// surface here; if the same pubkey appears under both, the latest
+    /// event wins (timestamps from the projector). Members currently in
+    /// the active roster are filtered out — a pubkey that left and
+    /// re-joined shows up only as active until the next leave/boot.
     func removedMembers(for slug: String) -> [RemovedMemberEntry] {
-        return []
+        let events = systemEvents(for: slug)
+        let room = rooms.first(where: { $0.slug == slug })
+        let activePubs = Set((room?.members ?? []).map { $0.lowercased() })
+        var latest: [String: StudioRoomSystemEvent] = [:]
+        for ev in events {
+            guard ev.kind == .left || ev.kind == .removed else { continue }
+            guard let subject = ev.subject?.lowercased(), !subject.isEmpty else { continue }
+            if activePubs.contains(subject) { continue }
+            if let prior = latest[subject], prior.atSeconds >= ev.atSeconds { continue }
+            latest[subject] = ev
+        }
+        return latest.values
+            .sorted { $0.atSeconds > $1.atSeconds }
+            .map { ev in
+                let pub = (ev.subject ?? "").lowercased()
+                let member = roomMembersList(for: slug)
+                    .first(where: { $0.pubkeyHex.lowercased() == pub })
+                let displayName = member?.displayName ?? Hex.npubShort(pub)
+                let kind: RemovedMemberEntry.Kind = ev.kind == .left ? .left : .removed
+                return RemovedMemberEntry(
+                    pubkey: pub,
+                    displayName: displayName,
+                    kind: kind,
+                    atSeconds: ev.atSeconds
+                )
+            }
     }
 
     /// Founder-only boot. Removes a member by republishing kind:30520
@@ -1697,6 +1762,14 @@ final class StudioStore: ObservableObject {
         WHERE e.type = 'studio_comment'
           AND json_extract(e.attributes, '$.room_slug') = ?
         ORDER BY json_extract(e.attributes, '$.created_at_seconds') ASC
+        """
+
+    nonisolated static let SQL_SYSTEM_EVENTS_IN_ROOM = """
+        SELECT id, name, description, attributes
+        FROM entities
+        WHERE type = 'studio_room_system_event'
+          AND json_extract(attributes, '$.room_slug') = ?
+        ORDER BY json_extract(attributes, '$.at') ASC
         """
 
     nonisolated static let SQL_DISPATCH_IN_ROOM = """
