@@ -1180,6 +1180,13 @@ final class StudioStore: ObservableObject {
             roomSlug: old.roomSlug,
             createdAtSeconds: old.createdAtSeconds
         )
+        // Same race as setOptimisticCardEventId: the projection may have
+        // already landed while eventId was empty, so the observation-driven
+        // reconcile skipped this entry. Now that we have an eventId, run a
+        // one-shot reconcile against the current materialized comments.
+        // Without this the optimistic + real comment duplicate forever.
+        let realComments = comments.values.flatMap { $0 }
+        reconcileOptimisticCommentsAgainstReal(realComments: realComments)
     }
 
     func rollbackOptimisticComment(clientId: String) {

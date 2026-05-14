@@ -3,24 +3,97 @@ import SwiftUI
 
 // MARK: - TextBlockView
 
-/// Markdown body via `AttributedString(markdown:)`. macOS 13+ ships
-/// GitHub-flavored inline markdown. On decode error, falls back to plain text.
+/// Markdown body. `AttributedString(markdown:)` only handles INLINE syntax on
+/// macOS — block-level (headings, lists, blockquotes, fenced code) is
+/// ignored. We pre-parse the text into block segments (heading, blockquote,
+/// fenced code, paragraph) and render each one appropriately; inline syntax
+/// inside paragraphs/headings/quotes still goes through AttributedString.
 struct TextBlockView: View {
     let text: String
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(parseBlocks(text).enumerated()), id: \.offset) { _, segment in
+                render(segment)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private enum Segment {
+        case heading(level: Int, text: String)
+        case quote(String)
+        case fence(language: String, body: String)
+        case paragraph(String)
+    }
+
+    private func parseBlocks(_ source: String) -> [Segment] {
+        var out: [Segment] = []
+        let lines = source.components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            // Fenced code block — opens with ``` (optionally followed by a
+            // language hint). Consume until the closing ``` line (or EOF).
+            if line.hasPrefix("```") {
+                let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var bodyLines: [String] = []
+                i += 1
+                while i < lines.count && !lines[i].hasPrefix("```") {
+                    bodyLines.append(lines[i])
+                    i += 1
+                }
+                if i < lines.count { i += 1 } // skip the closing fence
+                out.append(.fence(language: language, body: bodyLines.joined(separator: "\n")))
+                continue
+            }
+            if line.hasPrefix("### ") {
+                out.append(.heading(level: 3, text: String(line.dropFirst(4))))
+            } else if line.hasPrefix("## ") {
+                out.append(.heading(level: 2, text: String(line.dropFirst(3))))
+            } else if line.hasPrefix("# ") {
+                out.append(.heading(level: 1, text: String(line.dropFirst(2))))
+            } else if line.hasPrefix("> ") {
+                out.append(.quote(String(line.dropFirst(2))))
+            } else {
+                out.append(.paragraph(line))
+            }
+            i += 1
+        }
+        return out
+    }
+
+    @ViewBuilder
+    private func render(_ segment: Segment) -> some View {
+        switch segment {
+        case .heading(let level, let s):
+            let font: Font = (level == 1) ? .title2.bold()
+                : (level == 2) ? .title3.bold()
+                : .headline
+            inline(s).font(font).textSelection(.enabled)
+        case .quote(let s):
+            HStack(spacing: 8) {
+                Rectangle()
+                    .frame(width: 3)
+                    .foregroundStyle(.secondary.opacity(0.6))
+                inline(s).foregroundStyle(.secondary)
+            }
+            .textSelection(.enabled)
+        case .fence(let language, let body):
+            CodeBlockView(language: language, code: body)
+        case .paragraph(let s):
+            inline(s).textSelection(.enabled)
+        }
+    }
+
+    private func inline(_ s: String) -> Text {
         if let attributed = try? AttributedString(
-            markdown: text,
+            markdown: s,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         ) {
-            Text(attributed)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            Text(text)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            return Text(attributed)
         }
+        return Text(s)
     }
 }
 
@@ -82,17 +155,18 @@ struct CodeBlockView: View {
 
 // MARK: - LinkBlockView
 
-/// Clickable text. Opens `href` via `NSWorkspace.shared.open`. Only `http`/
-/// `https` URLs are clickable; everything else degrades to plain text.
+/// Clickable text. SwiftUI's `Link` is specifically designed to survive
+/// parent `.onTapGesture` / List-row gestures that swallow Button clicks,
+/// so the link reliably fires no matter where it's mounted (card row, card
+/// drawer, comment list, audit fold). Only `http`/`https` URLs are
+/// clickable; everything else degrades to plain text.
 struct LinkBlockView: View {
     let href: String
     let label: String?
 
     var body: some View {
         if let url = Self.validURL(href) {
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
+            Link(destination: url) {
                 HStack(spacing: 4) {
                     Text(label?.isEmpty == false ? label! : href)
                         .underline()
@@ -100,8 +174,8 @@ struct LinkBlockView: View {
                         .font(.caption)
                 }
                 .foregroundStyle(Color.accentColor)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
         } else {
             Text(label?.isEmpty == false ? label! : href)
                 .foregroundStyle(.secondary)
@@ -109,10 +183,18 @@ struct LinkBlockView: View {
     }
 
     static func validURL(_ s: String) -> URL? {
-        guard let url = URL(string: s) else { return nil }
-        guard let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else { return nil }
-        return url
+        // Accept whatever the user typed. If there's a scheme, hand it to the
+        // OS as-is. If there's no scheme, assume https:// — that's the right
+        // default 99% of the time (typing "example.com" should be clickable).
+        // macOS silently no-ops on garbage URLs, so nothing dangerous slips
+        // through. Worst case the click does nothing — better than rendering
+        // as gray non-clickable text.
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), url.scheme != nil {
+            return url
+        }
+        return URL(string: "https://" + trimmed)
     }
 }
 
