@@ -97,10 +97,22 @@ struct StudioComposeInline: View {
             } catch {
                 store.rollbackOptimisticCard(clientId: clientId)
                 lastFailed = entered
-                toast.show(
-                    severity: .error,
-                    text: "Post failed; reverted. \(error.localizedDescription)"
-                )
+                // Close-race per §9.1: gateway rejected the publish with
+                // closed_room (403) because the founder closed the room
+                // after we kicked off the post. Use the more specific
+                // message; renderer flips the local state via the next
+                // declaration-updated SSE event.
+                if let plug = error as? StudioPluginError, plug.code == "closed_room" {
+                    toast.show(
+                        severity: .error,
+                        text: "Room was closed before your message was sent"
+                    )
+                } else {
+                    toast.show(
+                        severity: .error,
+                        text: "Post failed; reverted. \(error.localizedDescription)"
+                    )
+                }
             }
         }
     }

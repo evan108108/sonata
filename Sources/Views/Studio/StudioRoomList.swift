@@ -22,17 +22,20 @@ struct StudioRoomList: View {
         let title: String
     }
 
-    /// Confirmation-dialog selector for room-level actions. Step 3 covers
-    /// leave + delete-locally; close / reopen / boot land in steps 4 and 5
-    /// (added incrementally so each commit ships a coherent UI).
+    /// Confirmation-dialog selector for room-level actions. Boot lives on
+    /// the Members tab and is added in step 5.
     enum PendingRoomAction: Identifiable {
         case deleteLocally(StudioRoom)
         case leave(StudioRoom)
+        case close(StudioRoom)
+        case reopen(StudioRoom)
 
         var id: String {
             switch self {
             case .deleteLocally(let r): return "delete:\(r.id)"
             case .leave(let r):         return "leave:\(r.id)"
+            case .close(let r):         return "close:\(r.id)"
+            case .reopen(let r):        return "reopen:\(r.id)"
             }
         }
     }
@@ -75,6 +78,66 @@ struct StudioRoomList: View {
     /// context menu or a Members-tab row.
     private func actionAlert(for action: PendingRoomAction) -> Alert {
         switch action {
+        case .close(let room):
+            return Alert(
+                title: Text("Close '\(room.title)'?"),
+                message: Text("Members will lose write access. You can reopen later."),
+                primaryButton: .destructive(Text("Close room")) {
+                    let target = room
+                    Task { @MainActor in
+                        do {
+                            _ = try await store.closeRoomFederated(slug: target.slug)
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                actionToast = InlineToast(
+                                    text: "Closed '\(target.title)'.",
+                                    symbol: "lock.fill",
+                                    tint: .secondary
+                                )
+                            }
+                        } catch {
+                            NSLog("[StudioRoomList] closeRoom failed slug=\(target.slug): \(error)")
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                actionToast = InlineToast(
+                                    text: "Close queued — will retry when online.",
+                                    symbol: "exclamationmark.arrow.circlepath",
+                                    tint: .yellow
+                                )
+                            }
+                        }
+                    }
+                },
+                secondaryButton: .cancel()
+            )
+        case .reopen(let room):
+            return Alert(
+                title: Text("Reopen '\(room.title)'?"),
+                message: Text("Members regain write access. The room is fully functional again."),
+                primaryButton: .default(Text("Reopen")) {
+                    let target = room
+                    Task { @MainActor in
+                        do {
+                            _ = try await store.reopenRoom(slug: target.slug)
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                actionToast = InlineToast(
+                                    text: "Reopened '\(target.title)'.",
+                                    symbol: "lock.open.fill",
+                                    tint: .green
+                                )
+                            }
+                        } catch {
+                            NSLog("[StudioRoomList] reopenRoom failed slug=\(target.slug): \(error)")
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                actionToast = InlineToast(
+                                    text: "Reopen queued — will retry when online.",
+                                    symbol: "exclamationmark.arrow.circlepath",
+                                    tint: .yellow
+                                )
+                            }
+                        }
+                    }
+                },
+                secondaryButton: .cancel()
+            )
         case .deleteLocally(let room):
             return Alert(
                 title: Text("Delete '\(room.title)' locally?"),
@@ -245,12 +308,28 @@ struct StudioRoomList: View {
     private func roomContextMenu(for room: StudioRoom) -> some View {
         let isFounder = !room.createdByPubkey.isEmpty
             && room.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased()
-        let isLeft = room.state == "left"
+        let isLeft = room.state == "left" || room.state == "removed"
+        let isClosed = room.state == "closed"
 
-        // Members of an active room get "Leave…" as the destructive primary.
-        // Founders never see Leave — they close the room instead (added in
-        // step 4). Rooms already in "left" state hide Leave too.
-        if !isFounder && !isLeft {
+        if isFounder {
+            if isClosed {
+                Button {
+                    pendingAction = .reopen(room)
+                } label: {
+                    Label("Reopen room…", systemImage: "lock.open")
+                }
+            } else {
+                Button(role: .destructive) {
+                    pendingAction = .close(room)
+                } label: {
+                    Label("Close room…", systemImage: "lock")
+                }
+            }
+            Divider()
+        } else if !isLeft && !isClosed {
+            // Members of an active room see Leave as the destructive primary.
+            // Closed-room members can only read history; Leave is hidden
+            // (still wired locally, but the surface here is "delete" only).
             Button(role: .destructive) {
                 pendingAction = .leave(room)
             } label: {
@@ -354,6 +433,14 @@ private struct StudioRoomRow: View {
     var body: some View {
         HStack(spacing: 8) {
             stateDot
+            // Lock glyph in front of the title for closed rooms — single-
+            // glance signal that the row is read-only without needing to
+            // open the room.
+            if room.state == "closed" {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayTitle)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
@@ -381,7 +468,12 @@ private struct StudioRoomRow: View {
                 isHovering = hovering
             }
         }
-        .help("\(room.members.count) member\(room.members.count == 1 ? "" : "s")")
+        .help(rowHelp)
+    }
+
+    private var rowHelp: String {
+        if room.state == "closed" { return "Closed by founder." }
+        return "\(room.members.count) member\(room.members.count == 1 ? "" : "s")"
     }
 
     private var displayTitle: String {
@@ -393,6 +485,7 @@ private struct StudioRoomRow: View {
         case "pending-grant": return "joining…"
         case "left":          return "left"
         case "removed":       return "removed"
+        case "closed":        return "closed"
         default:              return nil
         }
     }
@@ -400,7 +493,7 @@ private struct StudioRoomRow: View {
     private var titleColor: Color {
         if isSelected { return Color.accentColor }
         switch room.state {
-        case "pending-grant", "left", "removed":
+        case "pending-grant", "left", "removed", "closed":
             return .secondary
         default:
             return .primary
@@ -417,8 +510,8 @@ private struct StudioRoomRow: View {
         switch room.state {
         case "active":        return .green
         case "pending-grant": return .yellow
-        case "left":          return .gray
-        case "removed":       return .gray
+        case "left", "removed", "closed":
+            return .gray
         default:              return .secondary
         }
     }

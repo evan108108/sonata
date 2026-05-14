@@ -952,6 +952,252 @@ async function republishTrackRumor(
   });
 }
 
+// ── close / reopen (founder freeze) ─────────────────────────────────────────
+
+interface RoomCloseRequest {
+  slug?: unknown;
+}
+
+interface RoomCloseResult {
+  ok: true;
+  slug: string;
+  closed_at: number;
+  new_declaration_event_id: string;
+}
+
+interface RoomReopenRequest {
+  slug?: unknown;
+}
+
+interface RoomReopenResult {
+  ok: true;
+  slug: string;
+  new_declaration_event_id: string;
+}
+
+/**
+ * Republish kind:30520 with `fa:status=closed`. Founder-only. Roster + epoch
+ * unchanged — closing does NOT rotate keys (sonata-studio-room-lifecycle.md
+ * §4.1). On publish failure (offline, network drop), the signed declaration
+ * is parked on the local `studio_room.attributes.pending_admin_publish`
+ * field so it can be retried later (§9.13); the local state still flips to
+ * "closed" so the founder's UI reflects their expressed intent.
+ */
+export async function closeRoom(
+  body: RoomCloseRequest,
+  ctx: ActionCtx,
+): Promise<RoomCloseResult> {
+  return setRoomStatus(body, ctx, "closed");
+}
+
+export async function reopenRoom(
+  body: RoomReopenRequest,
+  ctx: ActionCtx,
+): Promise<RoomReopenResult> {
+  const result = await setRoomStatus(body, ctx, "active");
+  return {
+    ok: true,
+    slug: result.slug,
+    new_declaration_event_id: result.new_declaration_event_id,
+  };
+}
+
+async function setRoomStatus(
+  body: { slug?: unknown },
+  ctx: ActionCtx,
+  status: "closed" | "active",
+): Promise<RoomCloseResult> {
+  const slug = ensureSlug(body.slug, "slug");
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (!room.audIdPrivHex) {
+    throw new HttpError(
+      403,
+      "not_founder",
+      `only the founder can ${status === "closed" ? "close" : "reopen"} "${slug}"`,
+    );
+  }
+
+  const closedAt = Math.floor(Date.now() / 1000);
+  const buildArgs: Parameters<typeof buildAudienceDeclaration>[0] = {
+    audIdPub: room.audIdPubHex,
+    slug,
+    name: pickTitle(room.attributes),
+    epoch: room.currentEpoch,
+    epochPub: room.currentEpochPubHex,
+    members: room.members,
+    pending: currentPendingInvites(room.attributes),
+  };
+  const description = pickDescription(room.attributes);
+  if (description !== undefined) buildArgs.description = description;
+  if (status === "closed") {
+    buildArgs.status = "closed";
+    buildArgs.closedAt = closedAt;
+  } else {
+    buildArgs.status = "active";
+  }
+  const declTpl = buildAudienceDeclaration(buildArgs);
+  const audIdPriv = hexToBytes(room.audIdPrivHex);
+  const declUnsigned = {
+    pubkey: room.audIdPubHex,
+    kind: declTpl.kind,
+    created_at: declTpl.created_at,
+    tags: declTpl.tags,
+    content: declTpl.content,
+  };
+  const declSigned = __signEvent(declUnsigned, audIdPriv);
+
+  // Flip local state IMMEDIATELY (§9.13): the founder's UI must reflect
+  // their expressed intent even if the gateway POST fails. The retry queue
+  // (pending_admin_publish) reconciles later.
+  const nextAttrs: Record<string, unknown> = { ...room.attributes };
+  if (status === "closed") {
+    nextAttrs["state"] = "closed";
+    nextAttrs["closed_at_seconds"] = closedAt;
+  } else {
+    nextAttrs["state"] = "active";
+    nextAttrs["closed_at_seconds"] = null;
+  }
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: nextAttrs,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.${status === "closed" ? "close" : "reopen"}] local upsert failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  let publishedId = declSigned.id;
+  try {
+    const res = await ctx.gateway.rawPublishDeclaration({
+      audience_address: room.audienceAddress,
+      declaration: toEventLike(declSigned),
+    });
+    publishedId = res.declaration_event_id;
+    // Clear any queued retry on success.
+    await clearPendingAdminPublish(slug, nextAttrs);
+  } catch (err) {
+    // Park the signed declaration for later retry per §9.13.
+    await queuePendingAdminPublish(slug, nextAttrs, {
+      kind: status === "closed" ? "close" : "reopen",
+      declaration: toEventLike(declSigned),
+      audience_address: room.audienceAddress,
+      queued_at_ms: Date.now(),
+    });
+    throw err;
+  }
+
+  return {
+    ok: true,
+    slug,
+    closed_at: closedAt,
+    new_declaration_event_id: publishedId,
+  };
+}
+
+interface PendingAdminPublish {
+  kind: "close" | "reopen" | "boot";
+  declaration: NostrEventLike;
+  audience_address: string;
+  queued_at_ms: number;
+  attempts?: number;
+}
+
+async function queuePendingAdminPublish(
+  slug: string,
+  attrs: Record<string, unknown>,
+  entry: PendingAdminPublish,
+): Promise<void> {
+  attrs["pending_admin_publish"] = entry;
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: attrs,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room] queue pending_admin_publish for "${slug}" failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+async function clearPendingAdminPublish(
+  slug: string,
+  attrs: Record<string, unknown>,
+): Promise<void> {
+  if (!("pending_admin_publish" in attrs)) return;
+  attrs["pending_admin_publish"] = null;
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: attrs,
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Best-effort retry of any queued admin publish on this room. Called from
+ * `loadRoomCtx`-adjacent surfaces and the post-action recovery path. Caps
+ * at 5 attempts (§9.13) and gives up — leaving the queued entry in place
+ * for the user to surface as "queued; will retry when online."
+ */
+export async function retryPendingAdminPublish(
+  slug: string,
+  ctx: ActionCtx,
+): Promise<{ ok: boolean; cleared: boolean }> {
+  const ent = await entity.byNameOrNull(`studio:room:${slug}`);
+  if (!ent) return { ok: false, cleared: false };
+  const attrs = parseAttrs(ent.attributes);
+  const pending = attrs["pending_admin_publish"] as PendingAdminPublish | null;
+  if (!pending || typeof pending !== "object") return { ok: false, cleared: false };
+  const attempts = (pending.attempts ?? 0) + 1;
+  if (attempts > 5) {
+    return { ok: false, cleared: false };
+  }
+  try {
+    await ctx.gateway.rawPublishDeclaration({
+      audience_address: pending.audience_address,
+      declaration: pending.declaration,
+    });
+    attrs["pending_admin_publish"] = null;
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: attrs,
+    });
+    return { ok: true, cleared: true };
+  } catch (err) {
+    attrs["pending_admin_publish"] = { ...pending, attempts };
+    try {
+      await entity.upsert({
+        name: `studio:room:${slug}`,
+        type: "studio_room",
+        description: `Studio room ${slug}`,
+        attributes: attrs,
+      });
+    } catch {
+      // best-effort
+    }
+    return { ok: false, cleared: false };
+  }
+}
+
 // ── leave (federated self-removal) ──────────────────────────────────────────
 
 interface RoomLeaveRequest {
@@ -1233,5 +1479,11 @@ export const room = {
   },
   leave(body: unknown, ctx: ActionCtx): Promise<RoomLeaveResult> {
     return leaveRoom((body ?? {}) as RoomLeaveRequest, ctx);
+  },
+  close(body: unknown, ctx: ActionCtx): Promise<RoomCloseResult> {
+    return closeRoom((body ?? {}) as RoomCloseRequest, ctx);
+  },
+  reopen(body: unknown, ctx: ActionCtx): Promise<RoomReopenResult> {
+    return reopenRoom((body ?? {}) as RoomReopenRequest, ctx);
   },
 };

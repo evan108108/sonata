@@ -29,6 +29,11 @@ struct StudioRoomDetail: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if isClosed {
+                StudioClosedRoomBanner(room: room)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+            }
             StudioAutoRunConsentBanner(roomSlug: room.slug, roomTitle: room.title)
             StudioTrackBar(
                 room: room,
@@ -47,7 +52,7 @@ struct StudioRoomDetail: View {
                 selectedCard: $selectedCard,
                 onEditCard: { card in editingCard = card }
             )
-            if let trackForCompose = effectiveTrackForCompose {
+            if let trackForCompose = effectiveTrackForCompose, !isClosed {
                 Divider()
                 StudioComposeInline(roomSlug: room.slug, trackSlug: trackForCompose)
                     .environmentObject(store)
@@ -158,12 +163,18 @@ struct StudioRoomDetail: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .disabled(effectiveTrackForCompose == nil)
+        .disabled(effectiveTrackForCompose == nil || isClosed)
         .keyboardShortcut("n", modifiers: .command)
-        .help(effectiveTrackForCompose == nil
-              ? "Pick a track to compose into"
-              : "New card (⌘N)")
+        .help(isClosed
+              ? "Room is closed; reopen to compose"
+              : (effectiveTrackForCompose == nil
+                 ? "Pick a track to compose into"
+                 : "New card (⌘N)"))
     }
+
+    /// True when the room's authoritative state is "closed". Drives banner,
+    /// compose gating, and the settings menu's Close/Reopen branch.
+    private var isClosed: Bool { room.state == "closed" }
 
     /// Compose surfaces only render when a real track is selected — empty
     /// state ("all tracks") and the dispatch-trace pseudo-tab both suppress
@@ -203,16 +214,34 @@ struct StudioRoomDetail: View {
     private var settingsMenu: some View {
         Menu {
             if isFounder {
-                Button {
-                    showInviteSheet = true
-                } label: {
-                    Label("Invite people…", systemImage: "person.crop.circle.badge.plus")
+                // Invite + admit are roster-mutating; gate them behind an
+                // open room so the founder can't queue work that the gateway
+                // will reject anyway (§5.1).
+                if !isClosed {
+                    Button {
+                        showInviteSheet = true
+                    } label: {
+                        Label("Invite people…", systemImage: "person.crop.circle.badge.plus")
+                    }
+                    Button {
+                        showAdmitSheet = true
+                    } label: {
+                        Label("Admit pending member(s)…",
+                              systemImage: "checkmark.seal")
+                    }
                 }
-                Button {
-                    showAdmitSheet = true
-                } label: {
-                    Label("Admit pending member(s)…",
-                          systemImage: "checkmark.seal")
+                if isClosed {
+                    Button {
+                        Task { await performReopen() }
+                    } label: {
+                        Label("Reopen room…", systemImage: "lock.open")
+                    }
+                } else {
+                    Button(role: .destructive) {
+                        Task { await performClose() }
+                    } label: {
+                        Label("Close room…", systemImage: "lock")
+                    }
                 }
                 Divider()
             }
@@ -284,6 +313,26 @@ struct StudioRoomDetail: View {
     private func setAutoRunOverride(_ value: StudioAutoRunOverride) async {
         await StudioAutoRunOverrideStore.write(roomSlug: room.slug, override: value)
         await MainActor.run { autoRunOverride = value }
+    }
+
+    /// Wire close from the settings menu. Errors are surfaced to NSLog only
+    /// — the local state has already flipped to "closed" optimistically so
+    /// the UI reflects the founder's intent regardless of gateway success.
+    /// Persistent failures land on `pending_admin_publish` retry queue.
+    private func performClose() async {
+        do {
+            _ = try await store.closeRoomFederated(slug: room.slug)
+        } catch {
+            NSLog("[StudioRoomDetail] closeRoom failed slug=\(room.slug): \(error)")
+        }
+    }
+
+    private func performReopen() async {
+        do {
+            _ = try await store.reopenRoom(slug: room.slug)
+        } catch {
+            NSLog("[StudioRoomDetail] reopenRoom failed slug=\(room.slug): \(error)")
+        }
     }
 
     private var dispatchTraceBinding: Binding<Bool> {

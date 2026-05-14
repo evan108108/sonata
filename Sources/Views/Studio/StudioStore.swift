@@ -1554,6 +1554,47 @@ final class StudioStore: ObservableObject {
         }
     }
 
+    /// Founder-only close. Republishes kind:30520 with fa:status=closed,
+    /// freezing the audience to mutating operations. Local state flips to
+    /// "closed" immediately; on gateway failure the signed declaration is
+    /// queued on the room entity for retry.
+    struct StudioCloseResult: Decodable {
+        let ok: Bool
+        let slug: String
+        let closedAt: Int64
+        let newDeclarationEventId: String
+        enum CodingKeys: String, CodingKey {
+            case ok, slug
+            case closedAt = "closed_at"
+            case newDeclarationEventId = "new_declaration_event_id"
+        }
+    }
+    func closeRoomFederated(slug: String) async throws -> StudioCloseResult {
+        struct Req: Encodable { let slug: String }
+        return try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/close",
+            body: Req(slug: slug)
+        )
+    }
+
+    /// Founder-only reopen. Republishes kind:30520 with fa:status=active.
+    struct StudioReopenResult: Decodable {
+        let ok: Bool
+        let slug: String
+        let newDeclarationEventId: String
+        enum CodingKeys: String, CodingKey {
+            case ok, slug
+            case newDeclarationEventId = "new_declaration_event_id"
+        }
+    }
+    func reopenRoom(slug: String) async throws -> StudioReopenResult {
+        struct Req: Encodable { let slug: String }
+        return try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/reopen",
+            body: Req(slug: slug)
+        )
+    }
+
     /// Local-only delete. Removes the room entity + aud_id/epoch secrets and
     /// closes the SSE subscription. Does NOT publish a federated revocation —
     /// other members keep their copies of the room.
