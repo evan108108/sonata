@@ -729,6 +729,10 @@ export class SSEClient implements AbortFlag {
     const members: string[] = [];
     let pendingPubs: string[] = [];
     let epoch: number | null = null;
+    // Room-lifecycle status tags (sonata-studio-room-lifecycle.md §4.1).
+    // Absence ≡ active; unknown values fall back to active.
+    let status: "active" | "closed" = "active";
+    let closedAt: number | null = null;
     for (const t of tags) {
       if (t[0] === "p" && t[1] && HEX64.test(t[1])) {
         members.push(t[1].toLowerCase());
@@ -737,6 +741,11 @@ export class SSEClient implements AbortFlag {
       } else if (t[0] === "fa:epoch" && t[1]) {
         const n = Number(t[1]);
         if (Number.isFinite(n) && n >= 1) epoch = n;
+      } else if (t[0] === "fa:status") {
+        if (t[1] === "closed") status = "closed";
+      } else if (t[0] === "fa:closed-at" && t[1]) {
+        const n = Number(t[1]);
+        if (Number.isFinite(n) && n > 0) closedAt = n;
       }
     }
     const previousEpoch = this.state.currentEpoch;
@@ -747,6 +756,26 @@ export class SSEClient implements AbortFlag {
       pending: pendingPubs,
     };
     if (epoch !== null) attrs["current_epoch"] = epoch;
+    // Room-lifecycle status. The kind-30520 carries the authoritative room
+    // state; we only flip the local `state` field for active↔closed
+    // transitions and leave pending-grant / left untouched.
+    //   - status=closed → state=closed (always; close beats anything except
+    //     a separate self-initiated "left" which the leaveRoom action handles).
+    //   - status=active AND current state is "closed" → state=active (reopen).
+    //   - status=active otherwise → preserve existing state (pending-grant
+    //     stays until the key-grant arrives; "left" sticks until a fresh
+    //     re-join).
+    const priorState =
+      typeof this.state.state === "string" ? this.state.state : "active";
+    if (status === "closed") {
+      attrs["state"] = "closed";
+      attrs["closed_at_seconds"] = closedAt;
+      this.state.state = "closed";
+    } else if (priorState === "closed") {
+      attrs["state"] = "active";
+      attrs["closed_at_seconds"] = null;
+      this.state.state = "active";
+    }
     try {
       await this.memory.entity.patch({
         id: this.state.entityId,

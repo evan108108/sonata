@@ -42,13 +42,22 @@ export interface BuildAudienceDeclarationInput {
   pending?: { invitePub: string; expirationUnix: number }[];
   expiration?: number;
   createdAt?: number;
+  /**
+   * Room lifecycle status (sonata-studio-room-lifecycle.md §4.1). Absence
+   * means "active"; only "closed" carries a wire-level effect. Founders
+   * close the room by republishing with status="closed".
+   */
+  status?: "active" | "closed";
+  /** Unix-seconds when the founder closed the room. Required if status="closed". */
+  closedAt?: number;
 }
 
 export function buildAudienceDeclaration(
   input: BuildAudienceDeclarationInput,
 ): EventTemplate {
   const memberCount = input.members.length;
-  const altSummary = `Audience: ${input.slug} (${memberCount} member${memberCount === 1 ? "" : "s"}, epoch ${input.epoch})`;
+  const isClosed = input.status === "closed";
+  const altSummary = `Audience: ${input.slug} (${memberCount} member${memberCount === 1 ? "" : "s"}, epoch ${input.epoch}${isClosed ? ", closed" : ""})`;
   const tags: string[][] = [
     ["d", input.slug],
     ["fa:context", FA_CONTEXT_V0],
@@ -56,6 +65,14 @@ export function buildAudienceDeclaration(
     ["fa:epoch", String(input.epoch)],
     ["fa:epoch-pubkey", input.epochPub],
   ];
+  if (isClosed) {
+    tags.push(["fa:status", "closed"]);
+    const closedAt =
+      typeof input.closedAt === "number" && input.closedAt > 0
+        ? input.closedAt
+        : nowSec();
+    tags.push(["fa:closed-at", String(closedAt)]);
+  }
   for (const m of input.members) tags.push(["p", m]);
   for (const p of input.pending ?? []) {
     tags.push(["fa:pending", `${p.invitePub}:${p.expirationUnix}`]);
