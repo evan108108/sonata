@@ -1147,7 +1147,8 @@ final class StudioStore: ObservableObject {
         roomSlug: String,
         targetEventId: String,
         body: String,
-        intent: String?
+        intent: String?,
+        blocks: [StudioBlock] = []
     ) {
         let now = Int64(Date().timeIntervalSince1970)
         let comment = StudioComment(
@@ -1157,6 +1158,7 @@ final class StudioStore: ObservableObject {
             targetEventId: targetEventId,
             body: body,
             intent: intent,
+            blocks: blocks,
             createdByPubkey: currentPubkeyHex,
             roomSlug: roomSlug,
             createdAtSeconds: now
@@ -1173,6 +1175,7 @@ final class StudioStore: ObservableObject {
             targetEventId: old.targetEventId,
             body: old.body,
             intent: old.intent,
+            blocks: old.blocks,
             createdByPubkey: old.createdByPubkey,
             roomSlug: old.roomSlug,
             createdAtSeconds: old.createdAtSeconds
@@ -1256,12 +1259,16 @@ final class StudioStore: ObservableObject {
         return result.rumorEventId
     }
 
-    /// Post a comment via the plugin. Returns the rumor `event_id`.
+    /// Post a comment via the plugin. Returns the rumor `event_id`. `blocks`
+    /// is the JSON-dict shape the plugin's `studio_comment_post` expects —
+    /// image/file blocks are the full dicts returned by `attachImage` /
+    /// `attachFile` (with `type` set).
     func postComment(
         room: String,
         targetEventId: String,
         body bodyText: String,
-        intent: String?
+        intent: String?,
+        blocks: [[String: Any]] = []
     ) async throws -> String {
         var body: [String: Any] = [
             "room": room,
@@ -1269,6 +1276,7 @@ final class StudioStore: ObservableObject {
             "body": bodyText,
         ]
         if let i = intent, !i.isEmpty { body["intent"] = i }
+        if !blocks.isEmpty { body["blocks"] = blocks }
 
         let result: CommentPostResponse = try await EntityHTTP.postPluginActionRaw(
             path: "sonata-studio/comment/post",

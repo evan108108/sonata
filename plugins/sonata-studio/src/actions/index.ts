@@ -208,6 +208,12 @@ const COMMENT_POST_PARAMS: ActionParam[] = [
     type: "string",
     description: "Optional intent tag: agree | disagree | question | verify | dispatch | note | other.",
   },
+  {
+    name: "blocks",
+    type: "array",
+    description:
+      "Optional array of structured content blocks, each {type: <string>, ...}. Same shape as card blocks — image/file blocks come from studio_image_attach / studio_file_attach.",
+  },
 ];
 
 const QUESTION_POST_PARAMS: ActionParam[] = [

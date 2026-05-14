@@ -404,6 +404,7 @@ struct StudioComment: Equatable, Identifiable {
     let targetEventId: String?
     let body: String
     let intent: String?
+    let blocks: [StudioBlock]
     let createdByPubkey: String
     let roomSlug: String
     let createdAtSeconds: Int64
@@ -421,6 +422,12 @@ struct StudioComment: Equatable, Identifiable {
         self.targetEventId = Self.extractEventId(tr)
         self.body = (raw["body"] as? String) ?? ""
         self.intent = raw["intent"] as? String
+        if let arr = raw["blocks"] as? [[String: Any]],
+           let blockData = try? JSONSerialization.data(withJSONObject: arr) {
+            self.blocks = (try? JSONDecoder().decode([StudioBlock].self, from: blockData)) ?? []
+        } else {
+            self.blocks = []
+        }
         self.createdByPubkey = (raw["created_by_pubkey"] as? String) ?? ""
         self.roomSlug = (raw["room_slug"] as? String) ?? ""
         self.createdAtSeconds = (raw["created_at_seconds"] as? Int64)
@@ -449,6 +456,7 @@ struct StudioComment: Equatable, Identifiable {
         targetEventId: String?,
         body: String,
         intent: String?,
+        blocks: [StudioBlock] = [],
         createdByPubkey: String,
         roomSlug: String,
         createdAtSeconds: Int64
@@ -459,6 +467,7 @@ struct StudioComment: Equatable, Identifiable {
         self.targetEventId = targetEventId
         self.body = body
         self.intent = intent
+        self.blocks = blocks
         self.createdByPubkey = createdByPubkey
         self.roomSlug = roomSlug
         self.createdAtSeconds = createdAtSeconds

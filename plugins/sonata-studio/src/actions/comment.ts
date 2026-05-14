@@ -17,11 +17,17 @@ import {
 } from "./util";
 import type { ActionCtx } from "./room";
 
+interface CommentBlock {
+  type: string;
+  [k: string]: unknown;
+}
+
 interface CommentPostRequest {
   room?: unknown;
   target?: unknown;
   body?: unknown;
   intent?: unknown;
+  blocks?: unknown;
 }
 
 interface CommentPostResult {
@@ -37,6 +43,7 @@ export async function postComment(
   const target = ensureString(body.target, "target");
   const text = ensureString(body.body, "body");
   const intent = body.intent !== undefined ? ensureString(body.intent, "intent") : undefined;
+  const blocks = normalizeBlocks(body.blocks);
 
   const room = await loadRoomCtx(roomSlug, ctx.cfg.pluginPub);
 
@@ -48,6 +55,7 @@ export async function postComment(
     createdBy: ctx.cfg.pluginPub.toLowerCase(),
   };
   if (intent !== undefined) payload["intent"] = intent;
+  if (blocks.length > 0) payload["blocks"] = blocks;
   validatePayload(STUDIO_KIND_COMMENT, payload);
 
   const dTagScope = isHex64(target) ? target.toLowerCase() : hashLikeScope(target);
@@ -81,6 +89,26 @@ export async function postComment(
  */
 function hashLikeScope(s: string): string {
   return s.replace(/[^a-z0-9]/gi, "").slice(0, 32) || "target";
+}
+
+function normalizeBlocks(raw: unknown): CommentBlock[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    throw new HttpError(400, "bad_request", `"blocks" must be an array`);
+  }
+  const out: CommentBlock[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const b = raw[i];
+    if (!b || typeof b !== "object" || Array.isArray(b)) {
+      throw new HttpError(400, "bad_request", `blocks[${i}] must be an object`);
+    }
+    const obj = b as Record<string, unknown>;
+    if (typeof obj["type"] !== "string" || obj["type"].length === 0) {
+      throw new HttpError(400, "bad_request", `blocks[${i}].type must be a non-empty string`);
+    }
+    out.push(obj as CommentBlock);
+  }
+  return out;
 }
 
 export const comment = {
