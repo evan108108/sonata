@@ -1198,6 +1198,121 @@ export async function retryPendingAdminPublish(
   }
 }
 
+// ── boot (founder removes a member) ─────────────────────────────────────────
+
+interface RoomBootRequest {
+  slug?: unknown;
+  member_pubkey?: unknown;
+}
+
+interface RoomBootResult {
+  ok: true;
+  slug: string;
+  new_declaration_event_id: string;
+  removed_pubkey: string;
+  members_after: string[];
+}
+
+/**
+ * Founder-only roster removal: republish kind:30520 with the booted pubkey
+ * dropped from the `p` tags. Does NOT rotate the epoch (forward secrecy is
+ * out of scope for v0 — see §11). Local entity is patched immediately to
+ * mirror the founder's intent; failures park the signed declaration on
+ * pending_admin_publish (same queue as close/reopen) for retry.
+ */
+export async function bootMember(
+  body: RoomBootRequest,
+  ctx: ActionCtx,
+): Promise<RoomBootResult> {
+  const slug = ensureSlug(body.slug, "slug");
+  const memberPubkey = ensureString(body.member_pubkey, "member_pubkey").toLowerCase();
+  if (!isHex64(memberPubkey)) {
+    throw new HttpError(400, "bad_request", "member_pubkey must be 64-hex");
+  }
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (!room.audIdPrivHex) {
+    throw new HttpError(403, "not_founder", `only the founder can boot members from "${slug}"`);
+  }
+  if (memberPubkey === ctx.cfg.pluginPub.toLowerCase()) {
+    throw new HttpError(400, "cannot_boot_self", "founder cannot boot themselves");
+  }
+  const exists = room.members.some((m) => m.toLowerCase() === memberPubkey);
+  if (!exists) {
+    throw new HttpError(404, "not_a_member", `pubkey ${memberPubkey} is not in roster`);
+  }
+
+  const nextMembers = room.members.filter((m) => m.toLowerCase() !== memberPubkey);
+  const buildArgs: Parameters<typeof buildAudienceDeclaration>[0] = {
+    audIdPub: room.audIdPubHex,
+    slug,
+    name: pickTitle(room.attributes),
+    epoch: room.currentEpoch,
+    epochPub: room.currentEpochPubHex,
+    members: nextMembers,
+    pending: currentPendingInvites(room.attributes),
+  };
+  const description = pickDescription(room.attributes);
+  if (description !== undefined) buildArgs.description = description;
+  // Boot keeps the room in whatever status it currently has (active).
+  // Boot-while-closed is rejected by the gateway anyway (§5.1), so we
+  // don't bother propagating the status here.
+  const declTpl = buildAudienceDeclaration(buildArgs);
+  const audIdPriv = hexToBytes(room.audIdPrivHex);
+  const declUnsigned = {
+    pubkey: room.audIdPubHex,
+    kind: declTpl.kind,
+    created_at: declTpl.created_at,
+    tags: declTpl.tags,
+    content: declTpl.content,
+  };
+  const declSigned = __signEvent(declUnsigned, audIdPriv);
+
+  // Patch local members optimistically.
+  const nextAttrs: Record<string, unknown> = {
+    ...room.attributes,
+    members: nextMembers.map((m) => m.toLowerCase()),
+  };
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: nextAttrs,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.boot] local upsert failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  let publishedId = declSigned.id;
+  try {
+    const res = await ctx.gateway.rawPublishDeclaration({
+      audience_address: room.audienceAddress,
+      declaration: toEventLike(declSigned),
+    });
+    publishedId = res.declaration_event_id;
+    await clearPendingAdminPublish(slug, nextAttrs);
+  } catch (err) {
+    await queuePendingAdminPublish(slug, nextAttrs, {
+      kind: "boot",
+      declaration: toEventLike(declSigned),
+      audience_address: room.audienceAddress,
+      queued_at_ms: Date.now(),
+    });
+    throw err;
+  }
+
+  return {
+    ok: true,
+    slug,
+    new_declaration_event_id: publishedId,
+    removed_pubkey: memberPubkey,
+    members_after: nextMembers.map((m) => m.toLowerCase()),
+  };
+}
+
 // ── leave (federated self-removal) ──────────────────────────────────────────
 
 interface RoomLeaveRequest {
@@ -1485,5 +1600,8 @@ export const room = {
   },
   reopen(body: unknown, ctx: ActionCtx): Promise<RoomReopenResult> {
     return reopenRoom((body ?? {}) as RoomReopenRequest, ctx);
+  },
+  boot(body: unknown, ctx: ActionCtx): Promise<RoomBootResult> {
+    return bootMember((body ?? {}) as RoomBootRequest, ctx);
   },
 };

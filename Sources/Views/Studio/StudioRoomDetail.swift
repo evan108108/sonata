@@ -14,6 +14,7 @@ struct StudioRoomDetail: View {
     @State private var selectedTrack: String? = nil
     @State private var showDispatchTrace: Bool = false
     @State private var selectedCard: StudioCard? = nil
+    @State private var viewMode: StudioRoomViewMode = .cards
     @State private var showComposeSheet: Bool = false
     /// Non-nil while the edit-mode compose sheet is presented. Distinct from
     /// `showComposeSheet` so the "+ new card" path and the pencil-edit path
@@ -34,28 +35,42 @@ struct StudioRoomDetail: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
             }
-            StudioAutoRunConsentBanner(roomSlug: room.slug, roomTitle: room.title)
-            StudioTrackBar(
-                room: room,
-                store: store,
-                selectedTrack: $selectedTrack,
-                showDispatchTrace: $showDispatchTrace
-            )
-            .padding(.horizontal, 12)
+            // View toggle between the cards feed and the new Members tab.
+            // Sits above the auto-run banner so neither sub-view jumps the
+            // toggle off-screen as it grows.
+            HStack {
+                StudioRoomViewToggle(selection: $viewMode)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
             .padding(.vertical, 6)
-            Divider()
-            StudioCardList(
-                room: room,
-                track: selectedTrack,
-                dispatchTrace: dispatchTraceActive,
-                store: store,
-                selectedCard: $selectedCard,
-                onEditCard: { card in editingCard = card }
-            )
-            if let trackForCompose = effectiveTrackForCompose, !isClosed {
+            switch viewMode {
+            case .cards:
+                StudioAutoRunConsentBanner(roomSlug: room.slug, roomTitle: room.title)
+                StudioTrackBar(
+                    room: room,
+                    store: store,
+                    selectedTrack: $selectedTrack,
+                    showDispatchTrace: $showDispatchTrace
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
                 Divider()
-                StudioComposeInline(roomSlug: room.slug, trackSlug: trackForCompose)
-                    .environmentObject(store)
+                StudioCardList(
+                    room: room,
+                    track: selectedTrack,
+                    dispatchTrace: dispatchTraceActive,
+                    store: store,
+                    selectedCard: $selectedCard,
+                    onEditCard: { card in editingCard = card }
+                )
+                if let trackForCompose = effectiveTrackForCompose, !isClosed {
+                    Divider()
+                    StudioComposeInline(roomSlug: room.slug, trackSlug: trackForCompose)
+                        .environmentObject(store)
+                }
+            case .members:
+                StudioRoomMembersView(room: room, store: store)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

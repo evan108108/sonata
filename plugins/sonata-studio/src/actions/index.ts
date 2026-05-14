@@ -107,6 +107,11 @@ const ROOM_REOPEN_PARAMS: ActionParam[] = [
   { name: "slug", type: "string", required: true, description: "Slug of the room to reopen (founder-only)." },
 ];
 
+const ROOM_BOOT_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to boot a member from (founder-only)." },
+  { name: "member_pubkey", type: "string", required: true, description: "64-hex pubkey of the member to remove." },
+];
+
 const CARD_POST_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "track", type: "string", required: true, description: "Track slug within the room." },
@@ -400,6 +405,14 @@ export const ACTIONS: ActionDef[] = [
     params: ROOM_REOPEN_PARAMS,
   },
   {
+    name: "studio_room_boot",
+    description:
+      "Founder-only. Remove a member from the audience roster by republishing kind:30520 without their pubkey. Does NOT rotate the epoch; the booted member keeps their current epoch key (v0 acceptance; see room-lifecycle §11). Rejected with 403 closed_room while the room is closed.",
+    method: "post",
+    path: "/api/room/boot",
+    params: ROOM_BOOT_PARAMS,
+  },
+  {
     name: "studio_card_post",
     description: "Post a card (kind 30530) to a room/track.",
     method: "post",
@@ -593,6 +606,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/room/reopen": {
     method: "post",
     handler: async (body, _q, ctx) => room.reopen(body, ctx),
+  },
+  "/api/room/boot": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.boot(body, ctx),
   },
   "/api/card/post": {
     method: "post",

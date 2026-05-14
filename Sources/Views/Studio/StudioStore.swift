@@ -1554,6 +1554,59 @@ final class StudioStore: ObservableObject {
         }
     }
 
+    /// One member who's no longer in the active roster. Step 7's system-event
+    /// projector populates the underlying entries from kind:30520 roster
+    /// diffs (booted) and kind:30522 status=left events; until that ships,
+    /// `removedMembers(for:)` returns an empty array so the Members tab
+    /// simply hides the section.
+    struct RemovedMemberEntry: Identifiable, Equatable {
+        let pubkey: String
+        let displayName: String
+        let kind: Kind
+        let atSeconds: Int64
+
+        enum Kind { case left, removed }
+
+        var id: String { "\(kind):\(pubkey)" }
+    }
+
+    /// Step 7 will derive this from observed `studio_room_system_event`
+    /// entities. For now: no system events ⇒ no removed-member rows.
+    func removedMembers(for slug: String) -> [RemovedMemberEntry] {
+        return []
+    }
+
+    /// Founder-only boot. Removes a member by republishing kind:30520
+    /// without their pubkey. Does NOT rotate the epoch; the booted member
+    /// keeps their current epoch key (v0 acceptance per spec §11).
+    struct StudioBootResult: Decodable {
+        let ok: Bool
+        let slug: String
+        let newDeclarationEventId: String
+        let removedPubkey: String
+        let membersAfter: [String]
+        enum CodingKeys: String, CodingKey {
+            case ok, slug
+            case newDeclarationEventId = "new_declaration_event_id"
+            case removedPubkey = "removed_pubkey"
+            case membersAfter = "members_after"
+        }
+    }
+    func bootMember(slug: String, memberPubkey: String) async throws -> StudioBootResult {
+        struct Req: Encodable {
+            let slug: String
+            let memberPubkey: String
+            enum CodingKeys: String, CodingKey {
+                case slug
+                case memberPubkey = "member_pubkey"
+            }
+        }
+        return try await EntityHTTP.postPluginAction(
+            path: "sonata-studio/room/boot",
+            body: Req(slug: slug, memberPubkey: memberPubkey)
+        )
+    }
+
     /// Founder-only close. Republishes kind:30520 with fa:status=closed,
     /// freezing the audience to mutating operations. Local state flips to
     /// "closed" immediately; on gateway failure the signed declaration is
