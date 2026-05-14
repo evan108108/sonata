@@ -154,20 +154,35 @@ export interface BuildAudienceClaimInput {
    * URL can read this; only attach if you're OK with that.
    */
   profile?: ClaimProfile;
+  /**
+   * Claim flavor. Absence (or "active") emits a join claim addressable by
+   * invite_pub. "left" emits the self-removal claim per
+   * sonata-studio-room-lifecycle.md §4.2 — d-tag becomes
+   * `<slug>:<epoch>:left:<claimPub>`, the inviter `p` tag is omitted, the
+   * profile preview is dropped (irrelevant for leave), and the JSON-LD
+   * body carries `status: "left"`.
+   */
+  status?: "active" | "left";
 }
 
 export function buildAudienceClaim(input: BuildAudienceClaimInput): EventTemplate {
   const aTag = `${KIND_AUDIENCE}:${input.audIdPub}:${input.slug}`;
-  const dTag = `${input.slug}:${input.epoch}:${input.invitePub}`;
+  const isLeave = input.status === "left";
+  const dTag = isLeave
+    ? `${input.slug}:${input.epoch}:left:${input.claimPub}`
+    : `${input.slug}:${input.epoch}:${input.invitePub}`;
   const tags: string[][] = [
     ["d", dTag],
     ["fa:context", FA_CONTEXT_V0],
-    ["alt", `claim audience ${input.slug} epoch ${input.epoch}`],
+    ["alt", isLeave
+      ? `leave audience ${input.slug} epoch ${input.epoch}`
+      : `claim audience ${input.slug} epoch ${input.epoch}`],
     ["a", aTag],
     ["fa:epoch", String(input.epoch)],
-    ["p", input.inviterPub],
-    ["fa:claim-pubkey", input.claimPub],
   ];
+  if (!isLeave) tags.push(["p", input.inviterPub]);
+  tags.push(["fa:claim-pubkey", input.claimPub]);
+  if (isLeave) tags.push(["fa:status", "left"]);
   if (input.expiration !== undefined) {
     tags.push(["expiration", String(input.expiration)]);
   }
@@ -178,8 +193,9 @@ export function buildAudienceClaim(input: BuildAudienceClaimInput): EventTemplat
     epoch: input.epoch,
     claimPubkey: input.claimPub,
   };
+  if (isLeave) contentObj.status = "left";
   if (input.note !== undefined) contentObj.note = input.note;
-  if (input.profile !== undefined) {
+  if (!isLeave && input.profile !== undefined) {
     const cleaned: Record<string, string> = {};
     if (typeof input.profile.nickname === "string" && input.profile.nickname.trim().length > 0) {
       cleaned.nickname = input.profile.nickname.trim().slice(0, 200);

@@ -95,6 +95,10 @@ const ROOM_DELETE_PARAMS: ActionParam[] = [
   { name: "slug", type: "string", required: true, description: "Slug of the room to delete locally." },
 ];
 
+const ROOM_LEAVE_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to leave (member-only; founders close instead)." },
+];
+
 const CARD_POST_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "track", type: "string", required: true, description: "Track slug within the room." },
@@ -364,6 +368,14 @@ export const ACTIONS: ActionDef[] = [
     params: ROOM_DELETE_PARAMS,
   },
   {
+    name: "studio_room_leave",
+    description:
+      "Federated self-removal: publish a kind:30522 with fa:status=left so peers see this Sonata depart the audience. Founders cannot leave their own room — they close it instead. Local state flips to 'left' (or 'removed' if the gateway reports we were already booted).",
+    method: "post",
+    path: "/api/room/leave",
+    params: ROOM_LEAVE_PARAMS,
+  },
+  {
     name: "studio_card_post",
     description: "Post a card (kind 30530) to a room/track.",
     method: "post",
@@ -545,6 +557,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/room/delete": {
     method: "post",
     handler: async (body, _q, ctx) => room.delete(body, ctx),
+  },
+  "/api/room/leave": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.leave(body, ctx),
   },
   "/api/card/post": {
     method: "post",

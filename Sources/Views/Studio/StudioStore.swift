@@ -1527,6 +1527,33 @@ final class StudioStore: ObservableObject {
         )
     }
 
+    /// Federated leave. Publishes a kind:30522 with fa:status=left so peers
+    /// see this Sonata depart the audience. Founders cannot leave their own
+    /// room — surfaces `founder_cannot_leave` and the caller should redirect
+    /// to closeRoom. Local state flips to "left" on success (or "removed" if
+    /// the founder had already booted us).
+    struct StudioLeaveResult: Decodable {
+        let ok: Bool
+        let slug: String
+        let leaveEventId: String
+        enum CodingKeys: String, CodingKey {
+            case ok, slug
+            case leaveEventId = "leave_event_id"
+        }
+    }
+    func leaveRoom(slug: String) async throws -> StudioLeaveResult {
+        struct Req: Encodable { let slug: String }
+        do {
+            return try await EntityHTTP.postPluginAction(
+                path: "sonata-studio/room/leave",
+                body: Req(slug: slug)
+            )
+        } catch {
+            NSLog("[StudioStore] leaveRoom slug=\(slug) failed: \(error)")
+            throw error
+        }
+    }
+
     /// Local-only delete. Removes the room entity + aud_id/epoch secrets and
     /// closes the SSE subscription. Does NOT publish a federated revocation —
     /// other members keep their copies of the room.

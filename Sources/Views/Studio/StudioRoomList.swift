@@ -8,9 +8,9 @@ struct StudioRoomList: View {
     @State private var showCreateSheet: Bool = false
     @State private var showJoinSheet: Bool = false
     @State private var filterText: String = ""
-    @State private var roomPendingDelete: StudioRoom?
-    @State private var showDeleteAlert: Bool = false
+    @State private var pendingAction: PendingRoomAction?
     @State private var joinToast: InlineToast?
+    @State private var actionToast: InlineToast?
     /// Identifier+slug for the just-created-or-joined room. Drives the
     /// profile-picker sheet that surfaces after the create/join sheet
     /// dismisses. Non-nil ↔ picker is presented.
@@ -20,6 +20,21 @@ struct StudioRoomList: View {
         let id = UUID()
         let slug: String
         let title: String
+    }
+
+    /// Confirmation-dialog selector for room-level actions. Step 3 covers
+    /// leave + delete-locally; close / reopen / boot land in steps 4 and 5
+    /// (added incrementally so each commit ships a coherent UI).
+    enum PendingRoomAction: Identifiable {
+        case deleteLocally(StudioRoom)
+        case leave(StudioRoom)
+
+        var id: String {
+            switch self {
+            case .deleteLocally(let r): return "delete:\(r.id)"
+            case .leave(let r):         return "leave:\(r.id)"
+            }
+        }
     }
 
     var body: some View {
@@ -49,28 +64,64 @@ struct StudioRoomList: View {
                 roomTitle: ctx.title
             )
         }
-        .alert(
-            "Delete '\(roomPendingDelete?.title ?? "")'?",
-            isPresented: $showDeleteAlert,
-            presenting: roomPendingDelete
-        ) { room in
-            Button("Cancel", role: .cancel) {
-                roomPendingDelete = nil
-            }
-            Button("Delete", role: .destructive) {
-                let target = room
-                Task { @MainActor in
-                    do {
-                        try await store.deleteRoom(slug: target.slug)
-                        if selectedRoom?.id == target.id { selectedRoom = nil }
-                    } catch {
-                        NSLog("[StudioRoomList] deleteRoom failed slug=\(target.slug): \(error)")
+        .alert(item: $pendingAction) { action in
+            actionAlert(for: action)
+        }
+    }
+
+    /// Render the appropriate confirmation alert for a `PendingRoomAction`.
+    /// Each case carries its own title, body, and destructive button label
+    /// so the user sees consistent copy whether they trigger from the
+    /// context menu or a Members-tab row.
+    private func actionAlert(for action: PendingRoomAction) -> Alert {
+        switch action {
+        case .deleteLocally(let room):
+            return Alert(
+                title: Text("Delete '\(room.title)' locally?"),
+                message: Text("Removes from this Mac only. Other members are unaffected."),
+                primaryButton: .destructive(Text("Delete")) {
+                    let target = room
+                    Task { @MainActor in
+                        do {
+                            try await store.deleteRoom(slug: target.slug)
+                            if selectedRoom?.id == target.id { selectedRoom = nil }
+                        } catch {
+                            NSLog("[StudioRoomList] deleteRoom failed slug=\(target.slug): \(error)")
+                        }
                     }
-                    roomPendingDelete = nil
-                }
-            }
-        } message: { _ in
-            Text("Removes the local copy and its keys. Other members keep their copies.")
+                },
+                secondaryButton: .cancel()
+            )
+        case .leave(let room):
+            return Alert(
+                title: Text("Leave '\(room.title)'?"),
+                message: Text("You'll keep your local copy of past content but won't see new activity. To re-join, ask the room owner for a new invite."),
+                primaryButton: .destructive(Text("Leave")) {
+                    let target = room
+                    Task { @MainActor in
+                        do {
+                            _ = try await store.leaveRoom(slug: target.slug)
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                actionToast = InlineToast(
+                                    text: "Left '\(target.title)'.",
+                                    symbol: "rectangle.portrait.and.arrow.right",
+                                    tint: .secondary
+                                )
+                            }
+                        } catch {
+                            NSLog("[StudioRoomList] leaveRoom failed slug=\(target.slug): \(error)")
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                actionToast = InlineToast(
+                                    text: "Couldn't leave room.",
+                                    symbol: "exclamationmark.triangle",
+                                    tint: .red
+                                )
+                            }
+                        }
+                    }
+                },
+                secondaryButton: .cancel()
+            )
         }
     }
 
@@ -115,7 +166,11 @@ struct StudioRoomList: View {
 
     @ViewBuilder
     private var joinToastOverlay: some View {
-        if let toast = joinToast {
+        // Single overlay slot for whichever toast is currently active. The
+        // join/leave/close toasts share styling; the in-flight one always
+        // pre-empts the previous one (newer action wins).
+        let toast = actionToast ?? joinToast
+        if let toast {
             HStack(spacing: 8) {
                 Image(systemName: toast.symbol)
                     .foregroundStyle(toast.tint)
@@ -176,6 +231,37 @@ struct StudioRoomList: View {
             if joinToast?.id == id {
                 withAnimation(.easeIn(duration: 0.2)) { joinToast = nil }
             }
+            if actionToast?.id == id {
+                withAnimation(.easeIn(duration: 0.2)) { actionToast = nil }
+            }
+        }
+    }
+
+    /// Role-aware context menu for a sidebar row. The set of items shown
+    /// depends on whether the local pubkey is the founder (holds aud_id_priv)
+    /// vs a member, and on the room's current state. Trailing ellipsis on
+    /// each label signals "this opens a confirmation."
+    @ViewBuilder
+    private func roomContextMenu(for room: StudioRoom) -> some View {
+        let isFounder = !room.createdByPubkey.isEmpty
+            && room.createdByPubkey.lowercased() == store.currentPubkeyHex.lowercased()
+        let isLeft = room.state == "left"
+
+        // Members of an active room get "Leave…" as the destructive primary.
+        // Founders never see Leave — they close the room instead (added in
+        // step 4). Rooms already in "left" state hide Leave too.
+        if !isFounder && !isLeft {
+            Button(role: .destructive) {
+                pendingAction = .leave(room)
+            } label: {
+                Label("Leave Room…", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+            Divider()
+        }
+        Button(role: .destructive) {
+            pendingAction = .deleteLocally(room)
+        } label: {
+            Label("Delete Locally…", systemImage: "trash")
         }
     }
 
@@ -203,12 +289,7 @@ struct StudioRoomList: View {
                         store.markRoomSeen(room.slug)
                     }
                     .contextMenu {
-                        Button(role: .destructive) {
-                            roomPendingDelete = room
-                            showDeleteAlert = true
-                        } label: {
-                            Label("Delete Room", systemImage: "trash")
-                        }
+                        roomContextMenu(for: room)
                     }
                 }
                 if visibleRooms.isEmpty {
@@ -308,16 +389,22 @@ private struct StudioRoomRow: View {
     }
 
     private var subtitleText: String? {
-        if room.state == "pending-grant" {
-            return "joining…"
+        switch room.state {
+        case "pending-grant": return "joining…"
+        case "left":          return "left"
+        case "removed":       return "removed"
+        default:              return nil
         }
-        return nil
     }
 
     private var titleColor: Color {
         if isSelected { return Color.accentColor }
-        if room.state == "pending-grant" { return .secondary }
-        return .primary
+        switch room.state {
+        case "pending-grant", "left", "removed":
+            return .secondary
+        default:
+            return .primary
+        }
     }
 
     private var stateDot: some View {
@@ -330,7 +417,8 @@ private struct StudioRoomRow: View {
         switch room.state {
         case "active":        return .green
         case "pending-grant": return .yellow
-        case "left":          return .secondary
+        case "left":          return .gray
+        case "removed":       return .gray
         default:              return .secondary
         }
     }

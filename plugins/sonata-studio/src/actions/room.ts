@@ -952,6 +952,120 @@ async function republishTrackRumor(
   });
 }
 
+// ── leave (federated self-removal) ──────────────────────────────────────────
+
+interface RoomLeaveRequest {
+  slug?: unknown;
+}
+
+interface RoomLeaveResult {
+  ok: true;
+  slug: string;
+  leave_event_id: string;
+}
+
+/**
+ * Publish a kind:30522 with `fa:status=left` so peers see this Sonata depart
+ * the audience. Local state flips to "left" so the renderer mutes the room
+ * and disables compose. Founders cannot leave their own room — they close
+ * it instead (see closeRoom).
+ *
+ * Per §5.4, if the gateway responds 403 not_current_member the founder has
+ * already booted us; we still flip local state to "left" so the user-visible
+ * outcome is consistent with reality (they're out of the room either way).
+ */
+export async function leaveRoom(
+  body: RoomLeaveRequest,
+  ctx: ActionCtx,
+): Promise<RoomLeaveResult> {
+  const slug = ensureSlug(body.slug, "slug");
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (room.audIdPrivHex) {
+    throw new HttpError(
+      400,
+      "founder_cannot_leave",
+      `founder of "${slug}" cannot leave — close the room instead`,
+    );
+  }
+
+  const claimTpl = buildAudienceClaim({
+    audIdPub: room.audIdPubHex,
+    slug,
+    epoch: room.currentEpoch,
+    // invitePub is required by the type but unused for leave (d-tag is
+    // <slug>:<epoch>:left:<claimPub>). Pass our own pub so the input is
+    // structurally valid.
+    invitePub: ctx.cfg.pluginPub,
+    inviterPub: ctx.cfg.pluginPub,
+    claimPub: ctx.cfg.pluginPub,
+    status: "left",
+  });
+  const claimUnsigned = {
+    pubkey: ctx.cfg.pluginPub.toLowerCase(),
+    kind: claimTpl.kind,
+    created_at: claimTpl.created_at,
+    tags: claimTpl.tags,
+    content: claimTpl.content,
+  };
+  const claimSigned = __signEvent(claimUnsigned, ctx.cfg.pluginPriv);
+
+  let leaveEventId = claimSigned.id;
+  let bootedAlready = false;
+  try {
+    const res = await ctx.gateway.rawClaim({
+      audience_address: room.audienceAddress,
+      claim: toEventLike(claimSigned),
+    });
+    leaveEventId = res.claim_event_id;
+  } catch (err) {
+    if (err instanceof GatewayError && err.code === "not_current_member") {
+      // Leave-while-booted race per §5.4: the founder dropped us from the
+      // roster before our leave landed. Local state still flips so the user
+      // sees consistency.
+      bootedAlready = true;
+    } else {
+      throw err;
+    }
+  }
+
+  // Patch local entity: state = "left", left_at_ms = now.
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: {
+        ...room.attributes,
+        state: bootedAlready ? "removed" : "left",
+        left_at_ms: Date.now(),
+      },
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.leave] entity upsert for "${slug}" failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // Drop the SSE stream — leaving members don't need the live tail.
+  if (ctx.sseManager && typeof ctx.sseManager.close === "function") {
+    try {
+      await ctx.sseManager.close(slug);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.leave] sseManager.close("${slug}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  return { ok: true, slug, leave_event_id: leaveEventId };
+}
+
 // ── delete (local-only) ─────────────────────────────────────────────────────
 
 interface RoomDeleteRequest {
@@ -1116,5 +1230,8 @@ export const room = {
   },
   delete(body: unknown, ctx: ActionCtx): Promise<RoomDeleteResult> {
     return deleteRoom((body ?? {}) as RoomDeleteRequest, ctx);
+  },
+  leave(body: unknown, ctx: ActionCtx): Promise<RoomLeaveResult> {
+    return leaveRoom((body ?? {}) as RoomLeaveRequest, ctx);
   },
 };

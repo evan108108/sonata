@@ -79,6 +79,10 @@ struct StudioRoom: Equatable, Identifiable {
     let lastSeenAtMs: Int64?
     let dispatchTraceOn: Bool
     let epochKeys: [Int: Data]
+    /// Unix-seconds when the founder closed the room. nil unless
+    /// `state == "closed"`. Populated by the kind-30520 projector when the
+    /// declaration carries `fa:closed-at`.
+    let closedAtSeconds: Int64?
 
     init(row: Row) throws {
         guard let id = row["id"] as String? else {
@@ -113,6 +117,7 @@ struct StudioRoom: Equatable, Identifiable {
             }
         }
         self.epochKeys = ek
+        self.closedAtSeconds = Self.intLike(attrs["closed_at_seconds"])
     }
 
     private static func intLike(_ v: Any?) -> Int64? {
