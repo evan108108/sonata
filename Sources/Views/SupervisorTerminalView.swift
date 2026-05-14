@@ -8,6 +8,17 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     weak var terminalView: LocalProcessTerminalView?
     private var autoRestart = true
 
+    // Bridge-child watchdog: if the supervisor claude process is alive but its
+    // `bun sonata-bridge.ts` MCP child has died, no heartbeats reach the
+    // backend → HealthMonitor's 60s freshness guard stops queuing checks →
+    // silent deadlock. Detect a missing bridge child across two consecutive
+    // samples and SIGKILL the supervisor; processTerminated auto-respawns it.
+    private var watchdogTimer: Timer?
+    private var watchdogMissingSamples: Int = 0
+    private static let watchdogStartDelay: TimeInterval = 90  // give MCP children time to load
+    private static let watchdogInterval: TimeInterval = 60
+    private static let watchdogMissingThreshold: Int = 2
+
     init(terminalView: LocalProcessTerminalView) {
         self.terminalView = terminalView
         super.init()
@@ -67,11 +78,109 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 self?.terminalView?.send(txt: "\r")
             }
         }
+
+        startBridgeWatchdog()
     }
 
     func stop() {
         autoRestart = false
+        stopBridgeWatchdog()
         terminalView?.terminate()
+    }
+
+    // MARK: - Bridge-child watchdog
+
+    private func startBridgeWatchdog() {
+        stopBridgeWatchdog()
+        watchdogMissingSamples = 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.watchdogStartDelay) { [weak self] in
+            guard let self, self.autoRestart else { return }
+            self.watchdogTimer = Timer.scheduledTimer(
+                withTimeInterval: Self.watchdogInterval,
+                repeats: true
+            ) { [weak self] _ in
+                self?.checkBridgeChild()
+            }
+        }
+    }
+
+    private func stopBridgeWatchdog() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+        watchdogMissingSamples = 0
+    }
+
+    private func checkBridgeChild() {
+        guard autoRestart else { return }
+        guard let pid = terminalView?.process?.shellPid, pid > 0 else { return }
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let hasBridge = SupervisorCoordinator.hasBridgeChild(supervisorPid: pid)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let currentPid = self.terminalView?.process?.shellPid, currentPid == pid else {
+                    // Supervisor was replaced underneath us — reset and let the
+                    // next tick observe the new process.
+                    self.watchdogMissingSamples = 0
+                    return
+                }
+                if hasBridge {
+                    if self.watchdogMissingSamples > 0 {
+                        print("[supervisor-watchdog] bridge child observed; resetting counter")
+                    }
+                    self.watchdogMissingSamples = 0
+                    return
+                }
+                self.watchdogMissingSamples += 1
+                print("[supervisor-watchdog] bridge child missing (sample \(self.watchdogMissingSamples)/\(Self.watchdogMissingThreshold)) pid=\(pid)")
+                if self.watchdogMissingSamples >= Self.watchdogMissingThreshold {
+                    print("[supervisor-watchdog] SIGKILL supervisor pid=\(pid) — bridge child gone; respawn will follow")
+                    self.stopBridgeWatchdog()
+                    kill(pid_t(pid), SIGKILL)
+                }
+            }
+        }
+    }
+
+    /// Run `pgrep -P <pid>` and look for a `bun ... sonata-bridge.ts` child.
+    /// Returns true only when at least one matching child is found.
+    private static func hasBridgeChild(supervisorPid: Int32) -> Bool {
+        let childPids = runPipe(
+            path: "/usr/bin/pgrep",
+            args: ["-P", String(supervisorPid)]
+        )
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+
+        guard !childPids.isEmpty else { return false }
+
+        let cmdLines = runPipe(
+            path: "/bin/ps",
+            args: ["-o", "command=", "-p"] + childPids.map { String($0) }
+        )
+        for line in cmdLines.split(whereSeparator: \.isNewline) {
+            if line.contains("sonata-bridge.ts") && line.contains("bun") {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func runPipe(path: String, args: [String]) -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = args
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+        } catch {
+            return ""
+        }
+        proc.waitUntilExit()
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     // MARK: - LocalProcessTerminalViewDelegate
@@ -84,6 +193,7 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         print("[supervisor] Process exited with code: \(exitCode ?? -1)")
+        stopBridgeWatchdog()
         guard autoRestart else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             self?.startProcess()
