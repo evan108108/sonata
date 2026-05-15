@@ -14,13 +14,93 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 // --- Config ---
 
 const SONATA_API = process.env.SONATA_API || "http://localhost:3211";
+
+// --- Crash-resilience scaffolding ---
+//
+// The bridge is the beating heart of Sonata: when it dies, the supervisor and
+// every worker session it serves go blind, and the parent claude process has
+// no protocol to respawn an MCP child. Three layers of defense:
+//
+//   1. Top-level uncaughtException / unhandledRejection handlers append a
+//      breadcrumb to ~/.sonata/logs/bridge-crashes.log and DO NOT exit. Bun
+//      defaults to terminating on these; we explicitly opt out.
+//   2. SIGPIPE is ignored — a broken stdio write would otherwise kill the
+//      process before our handlers can react.
+//   3. safeInterval() wraps every periodic callback so a thrown error in one
+//      tick can't kill the timer (and bun) for every other loop.
+//
+// The remaining "I should exit" trigger — persistent stdio-transport failure
+// (parent claude is gone) — is detected via the MCP notification health budget
+// in the worker/supervisor event loop.
+
+const BRIDGE_LOG_DIR = join(homedir(), ".sonata", "logs");
+const BRIDGE_CRASH_LOG = join(BRIDGE_LOG_DIR, "bridge-crashes.log");
+
+function logCrash(label: string, err: unknown): void {
+  try {
+    mkdirSync(BRIDGE_LOG_DIR, { recursive: true });
+    const ts = new Date().toISOString();
+    const stack = err instanceof Error ? (err.stack || err.message) : String(err);
+    const role = process.env.SONATA_ROLE || "unknown";
+    const wid = process.env.WORKER_ID || "(none)";
+    const line = `[${ts}] ${label} role=${role} workerId=${wid} pid=${process.pid}\n${stack}\n\n`;
+    appendFileSync(BRIDGE_CRASH_LOG, line);
+  } catch { /* nothing we can do */ }
+  try { console.error(`[sonata-bridge] ${label}: ${err instanceof Error ? err.message : err}`); } catch {}
+}
+
+process.on("uncaughtException", (err) => { logCrash("uncaughtException", err); });
+process.on("unhandledRejection", (reason) => { logCrash("unhandledRejection", reason); });
+// Ignore SIGPIPE so a closed stdio peer mid-write doesn't bypass our handlers.
+try { process.on("SIGPIPE", () => { /* swallow */ }); } catch {}
+
+/** Wrap a setInterval callback so thrown errors are logged instead of killing
+ * the bun process. Returns the timer handle exactly like setInterval. */
+function safeInterval(name: string, fn: () => void | Promise<void>, ms: number): ReturnType<typeof setInterval> {
+  return setInterval(async () => {
+    try {
+      await fn();
+    } catch (err) {
+      logCrash(`safeInterval(${name})`, err);
+    }
+  }, ms);
+}
+
+// MCP-notification health budget. Channel notifications go out via stdio; if
+// the parent claude process has died, every notify throws EPIPE. We tolerate
+// transient flaps but if the failure streak crosses the threshold, the parent
+// is genuinely gone — exit so the SupervisorCoordinator/WorkerCoordinator can
+// observe processTerminated and respawn us. The threshold matches what would
+// take ~CLAIM_INTERVAL_MS * NOTIFY_FAIL_THRESHOLD seconds (>15s) to trip,
+// which is much longer than any normal stdio latency spike.
+const NOTIFY_FAIL_THRESHOLD = 5;
+let notifyFailureStreak = 0;
+
+/** Safe wrapper for mcp.notification. Returns true on success. On persistent
+ * failure (likely dead stdio), exits the process so the coordinator respawns. */
+async function safeNotify(notification: { method: string; params: unknown }): Promise<boolean> {
+  try {
+    await (mcp as unknown as { notification: (n: unknown) => Promise<void> }).notification(notification);
+    notifyFailureStreak = 0;
+    return true;
+  } catch (err) {
+    notifyFailureStreak += 1;
+    logCrash(`mcp.notification(streak=${notifyFailureStreak})`, err);
+    if (notifyFailureStreak >= NOTIFY_FAIL_THRESHOLD) {
+      console.error(`[sonata-bridge] notification failures hit threshold (${NOTIFY_FAIL_THRESHOLD}); stdio likely dead — exiting for coordinator respawn`);
+      process.exit(0);
+    }
+    return false;
+  }
+}
+
 const WORKER_ID = process.env.WORKER_ID;
 const SESSION_LABEL = process.env.SESSION_LABEL;
 const SONA_SESSION_ID = process.env.SONA_SESSION_ID;
@@ -175,6 +255,12 @@ async function registerWorker(): Promise<void> {
   }
 }
 
+// Track the most recent 410 timestamp + heartbeat failure streak so we can
+// distinguish "transient purge" from "real predecessor-cleanup" and surface
+// persistent connectivity issues without exiting.
+let lastHeartbeat410At = 0;
+let heartbeatFailureStreak = 0;
+
 /** Send the standard worker heartbeat plus, if an event is in flight,
  * the per-event token deltas read from the running transcript JSONL. */
 async function pushLiveHeartbeat(): Promise<void> {
@@ -202,17 +288,37 @@ async function pushLiveHeartbeat(): Promise<void> {
       body: JSON.stringify(body),
     });
     if (res.status === 410) {
-      // Server has no row for us — either supervisor purged us, or a fresh bridge
-      // claimed our sessionLabel (predecessor-cleanup). Exit the bridge process
-      // and let the WorkerCoordinator decide whether to auto-restart. Re-registering
-      // here would resurrect drained workers and ping-pong with the replacement.
-      console.error(`[sonata-bridge] Heartbeat got 410 Gone — bridge ${WORKER_ID} exiting; coordinator will respawn if appropriate`);
-      process.exit(0);
+      // Server has no row for us. Two possible causes:
+      //   1. Transient purge — supervisor's worker_purge swept us during a
+      //      missed-heartbeat window. We are still the legitimate worker for
+      //      this sessionLabel; re-register and continue.
+      //   2. Predecessor-cleanup — a fresh bridge claimed our sessionLabel.
+      //      Re-registering would ping-pong; we must exit.
+      // Heuristic: re-register on the first 410, but if we get another 410
+      // within 30s, treat it as predecessor-cleanup and exit. The fresh bridge
+      // will keep claiming our row and our re-register attempts will keep
+      // losing the race; two 410s in 30s is the unmistakable signal.
+      const now = Date.now();
+      if (now - lastHeartbeat410At < 30_000) {
+        console.error(`[sonata-bridge] Two 410 Gones in <30s — treating as predecessor-cleanup; exiting (workerId=${WORKER_ID})`);
+        process.exit(0);
+      }
+      lastHeartbeat410At = now;
+      console.error(`[sonata-bridge] Heartbeat got 410 Gone — re-registering ${WORKER_ID} (transient purge?)`);
+      await registerWorker();
     } else if (!res.ok) {
-      console.error(`[sonata-bridge] Heartbeat HTTP ${res.status}`);
+      heartbeatFailureStreak += 1;
+      if (heartbeatFailureStreak === 3 || heartbeatFailureStreak % 10 === 0) {
+        console.error(`[sonata-bridge] Heartbeat HTTP ${res.status} (streak=${heartbeatFailureStreak})`);
+      }
+    } else {
+      heartbeatFailureStreak = 0;
     }
   } catch (err: any) {
-    console.error(`[sonata-bridge] Heartbeat threw: ${err?.message ?? err}`);
+    heartbeatFailureStreak += 1;
+    if (heartbeatFailureStreak === 3 || heartbeatFailureStreak % 10 === 0) {
+      console.error(`[sonata-bridge] Heartbeat threw (streak=${heartbeatFailureStreak}): ${err?.message ?? err}`);
+    }
   }
 }
 
@@ -397,10 +503,31 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "complete_event") {
     lastProgressMs = Date.now();
-    // Push one final heartbeat so the per-event token totals land in
-    // promptCacheStats before complete_event clears the worker row.
-    await pushLiveHeartbeat();
     const { event_id, result } = args as { event_id: string; result?: string };
+    // CRITICAL: the supervisor's WORKER_ID is "supervisor" but it is NOT in the
+    // workers table — it lives in supervisorState. Calling pushLiveHeartbeat()
+    // here would hit /api/worker/heartbeat and get 410 Gone, which on line ~210
+    // calls process.exit(0). That would kill the bridge on every single check
+    // event completion. So: only touch the worker heartbeat for true workers.
+    if (IS_SUPERVISOR) {
+      try {
+        await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: WORKER_ID }),
+        });
+      } catch { /* heartbeat is best-effort, don't fail the event */ }
+      // supervisorEvents has no completion endpoint yet — claim is the only
+      // state transition. Returning success here is the documented contract.
+      inFlight = null;
+      usageBaseline = null;
+      return { content: [{ type: "text" as const, text: `Supervisor event ${event_id} acknowledged` }] };
+    }
+    if (IS_WORKER) {
+      // Push one final heartbeat so the per-event token totals land in
+      // promptCacheStats before complete_event clears the worker row.
+      await pushLiveHeartbeat();
+    }
     try {
       await fetch(`${SONATA_API}/api/worker/events/complete`, {
         method: "POST",
@@ -578,8 +705,23 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   if (name === "fail_event") {
     lastProgressMs = Date.now();
-    await pushLiveHeartbeat();
     const { event_id, error: errMsg } = args as { event_id: string; error: string };
+    // Same supervisor-safety as complete_event: do NOT hit worker heartbeat.
+    if (IS_SUPERVISOR) {
+      try {
+        await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: WORKER_ID }),
+        });
+      } catch {}
+      inFlight = null;
+      usageBaseline = null;
+      return { content: [{ type: "text" as const, text: `Supervisor event ${event_id} failed: ${errMsg}` }] };
+    }
+    if (IS_WORKER) {
+      await pushLiveHeartbeat();
+    }
     try {
       await fetch(`${SONATA_API}/api/worker/events/fail`, {
         method: "POST",
@@ -621,7 +763,7 @@ function ensureAFKPollLoop(): void {
 function scheduleAFKPoll(intervalMs: number): void {
   if (afkPollTimer) clearInterval(afkPollTimer);
   afkCurrentIntervalMs = intervalMs;
-  afkPollTimer = setInterval(runAFKPollTick, intervalMs);
+  afkPollTimer = safeInterval("afk-poll", runAFKPollTick, intervalMs);
 }
 
 async function runAFKPollTick(): Promise<void> {
@@ -638,7 +780,7 @@ async function runAFKPollTick(): Promise<void> {
     }
     for (const reply of replies) {
       const content = `[AFK reply for token ${reply.token}]\nFrom: ${reply.fromAddr}\nSubject: ${reply.subject}\n\n${reply.replyText}`;
-      await mcp.notification({
+      await safeNotify({
         method: "notifications/claude/channel",
         params: {
           content,
@@ -662,7 +804,7 @@ async function runAFKPollTick(): Promise<void> {
  * BRIDGE_SESSION_ID — both routes drain into the same Claude session. */
 function ensureDMPollLoop(): void {
   if (dmPollTimer) return;
-  dmPollTimer = setInterval(async () => {
+  dmPollTimer = safeInterval("dm-poll", async () => {
     if (!dmRegistered) return;
     try {
       const url = `${SONATA_API}/api/dm/poll?sessionId=${encodeURIComponent(BRIDGE_SESSION_ID)}`;
@@ -672,7 +814,7 @@ function ensureDMPollLoop(): void {
       const messages: any[] = data?.messages || [];
       for (const m of messages) {
         const sender = m.fromSessionId || m.fromPubkey || "unknown";
-        await mcp.notification({
+        await safeNotify({
           method: "notifications/claude/channel",
           params: {
             content: `[DM from ${sender}]\n${m.body || ""}`,
@@ -748,22 +890,20 @@ async function maybeFireRestartNudge(): Promise<void> {
     `Sonata.app was restarted. You are resumed in your prior conversation. ` +
     `Look at your most recent action — if it was a tool call without a result, ` +
     `decide whether to retry, recover, or continue. Otherwise carry on.`;
-  try {
-    await mcp.notification({
-      method: "notifications/claude/channel",
-      params: {
-        content,
-        meta: {
-          event_type: "sonata_restart",
-          task_id: taskId,
-          last_event_id: lastEventId,
-          restarted_at_ms: String(restartedAt),
-        },
+  const ok = await safeNotify({
+    method: "notifications/claude/channel",
+    params: {
+      content,
+      meta: {
+        event_type: "sonata_restart",
+        task_id: taskId,
+        last_event_id: lastEventId,
+        restarted_at_ms: String(restartedAt),
       },
-    });
+    },
+  });
+  if (ok) {
     console.error("[sonata-bridge] sonata_restart nudge fired for task=" + taskId);
-  } catch (err) {
-    console.error("[sonata-bridge] sonata_restart nudge failed: " + err);
   }
 }
 
@@ -864,24 +1004,22 @@ if (import.meta.main) {
     ensureAFKPollLoop();
 
     // Heartbeat — different endpoint for supervisor
-    setInterval(async () => {
-      try {
-        if (IS_SUPERVISOR) {
-          await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId: WORKER_ID }),
-          });
-        } else {
-          await pushLiveHeartbeat();
-        }
-      } catch {}
+    safeInterval("heartbeat", async () => {
+      if (IS_SUPERVISOR) {
+        await fetch(`${SONATA_API}/api/supervisor/heartbeat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: WORKER_ID }),
+        });
+      } else {
+        await pushLiveHeartbeat();
+      }
     }, HEARTBEAT_INTERVAL_MS);
 
     // Poll for events — different source for supervisor
     let knownEventIds = new Set<string>();
 
-    setInterval(async () => {
+    safeInterval("event-claim", async () => {
       try {
         if (IS_SUPERVISOR) {
           // Supervisor: poll supervisorEvents table
@@ -916,7 +1054,7 @@ if (import.meta.main) {
           }
 
           console.error(`[sonata-bridge] Supervisor event ${eventId} (${eventType})`);
-          await mcp.notification({
+          await safeNotify({
             method: "notifications/claude/channel",
             params: { content, meta },
           });
@@ -962,7 +1100,7 @@ if (import.meta.main) {
                 ? payload
                 : payload.summary || payload.prompt || payload.body || JSON.stringify(payload);
 
-              await mcp.notification({
+              await safeNotify({
                 method: "notifications/claude/channel",
                 params: {
                   content: `[${evt.type.toUpperCase()}] ${content}`,
@@ -1011,7 +1149,7 @@ if (import.meta.main) {
     // memory-namespace afk_register action can see we exist (and so AFK
     // registration through mem-server can validate routing).
     await announceExternalBridge();
-    setInterval(heartbeatExternalBridge, BRIDGE_HEARTBEAT_INTERVAL_MS);
+    safeInterval("external-bridge-heartbeat", heartbeatExternalBridge, BRIDGE_HEARTBEAT_INTERVAL_MS);
 
     // AFK poll loop runs in passive mode too — interactive `claude` sessions
     // (including the orchestrator) can call mcp__memory__afk_register and rely
