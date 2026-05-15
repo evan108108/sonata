@@ -36,6 +36,7 @@ class Worker: ObservableObject, Identifiable {
         self.label = label
         self.sessionId = UUID().uuidString.lowercased()
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        terminalView.applyWarmChrome()
     }
 
     /// Recovery init: reuse a candidate's prior workerId + sessionId so claude
@@ -45,6 +46,7 @@ class Worker: ObservableObject, Identifiable {
         self.label = label
         self.sessionId = sessionId
         self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        terminalView.applyWarmChrome()
     }
 
     func startProcess(restartNudge: Bool = false, taskId: String? = nil, lastEventId: String? = nil) {
@@ -881,6 +883,7 @@ struct WorkersView: View {
             NavigationSplitView {
                 workerSidebar
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 480)
+                    .warmSidebar()
             } detail: {
                 if manager.workers.isEmpty {
                     emptyState

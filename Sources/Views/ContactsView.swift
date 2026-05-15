@@ -116,6 +116,7 @@ struct ContactsView: View {
                 }
             }
         }
+        .warmSidebar()
     }
 
     // MARK: - Empty detail

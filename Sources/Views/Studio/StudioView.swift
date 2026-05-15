@@ -18,6 +18,7 @@ struct StudioView: View {
             )
             .frame(minWidth: 220, idealWidth: 240, maxWidth: 320)
             .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
+            .warmSidebar()
         } detail: {
             // Resolve `selectedRoom` through the live `store.rooms` array on
             // every render — without this, the detail pane keeps the snapshot
@@ -105,7 +106,7 @@ private struct StudioPickRoomPlaceholder: View {
                 .frame(maxWidth: 320)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(Theme.Color.bgDeep)
     }
 }
 

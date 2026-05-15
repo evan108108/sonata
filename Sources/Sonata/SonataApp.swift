@@ -619,8 +619,9 @@ struct SonataApp: App {
         WindowGroup("") {
             StartupGate(dbPool: dbPool, port: sonataPort) {
                 ContentView()
-                    .frame(minWidth: 900, minHeight: 600)
+                    .frame(minWidth: 1100, minHeight: 720)
                     .environment(\.dbPool, dbPool)
+                    .warmWindowTitlebar()
                     // s4a:// URL scheme handler. The Info.plist registers the
                     // scheme with macOS LaunchServices; .onOpenURL is what
                     // SwiftUI hands the resulting URL through. Boot-time pending
@@ -639,6 +640,11 @@ struct SonataApp: App {
             // wash them out.
             .preferredColorScheme(.dark)
         }
+        // Default window size on first launch (and a fallback when SwiftUI's
+        // window state restoration fails — currently a regression caused by
+        // our AppKit titlebar interop, TODO investigate). Picked to be roomy
+        // on a 13" MBP without overflowing.
+        .defaultSize(width: 1300, height: 800)
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0
             CommandGroup(after: .toolbar) {
@@ -845,6 +851,7 @@ final class SupervisorWindowController: NSObject, NSWindowDelegate {
 
         // Create terminal view directly (same pattern as Worker)
         let termView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
+        termView.applyWarmChrome()
         let coord = SupervisorCoordinator(terminalView: termView)
         self.coordinator = coord
         termView.processDelegate = coord

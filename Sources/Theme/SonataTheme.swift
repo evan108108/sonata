@@ -81,7 +81,7 @@ enum Theme {
         /// hairline at low alpha — visible against `bgDeep`/`bgMid` without
         /// fighting the warm shell. Apply directly as a foreground/fill;
         /// already alpha'd, no `.opacity()` needed at call sites.
-        static let dividerWarm   = SwiftUI.Color(red: 1.0, green: 0.80, blue: 0.55).opacity(0.12)
+        static let dividerWarm   = SwiftUI.Color(red: 1.0, green: 0.80, blue: 0.55).opacity(0.22)
 
         /// Low-alpha ember overlay for selected rows in nav/lists. Replaces
         /// the system `accentColor.opacity(0.15)` recipe so selection reads
@@ -219,5 +219,212 @@ enum Theme {
         static var caption: Font {
             .system(size: 11, weight: .regular)
         }
+    }
+}
+
+// MARK: - Chrome modifiers
+//
+// Inner sidebars (NavigationSplitView's sidebar column) and the macOS window
+// titlebar both need warming. SwiftUI's built-in modifiers don't reach the
+// titlebar — that area is owned by AppKit's NSWindow — so we use a small
+// NSViewRepresentable to configure the window once after mount.
+
+import AppKit
+import SwiftTerm
+
+extension LocalProcessTerminalView {
+    /// Apply Sonata's warm chrome background to an embedded SwiftTerm view.
+    /// Replaces the default cold black so the worker / supervisor / inspector /
+    /// interactive consoles match the rest of the app's chrome.
+    func applyWarmChrome() {
+        nativeBackgroundColor = NSColor(Theme.Color.bgDeep)
+    }
+}
+
+extension View {
+    /// Apply the warm-dark chrome treatment to a NavigationSplitView's sidebar
+    /// content. Hides the system scroll background (which is a cool gray),
+    /// fills with the `bgMid` chrome token the nav rail uses, and overlays a
+    /// subtle film-grain noise so the inner sidebar feels like a different
+    /// surface than the nav rail without needing a color difference.
+    ///
+    /// Why texture instead of color: a tonal-shift sidebar (tried `bgEmberTop`)
+    /// reads as muddy reddish brown that fights the loader's amber. Static
+    /// noise gives the surface "fabric" without changing its color.
+    ///
+    /// Apply directly inside the `sidebar:` closure of NavigationSplitView:
+    ///
+    ///   NavigationSplitView { mySidebarList.warmSidebar() } detail: { ... }
+    func warmSidebar() -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background {
+                ZStack {
+                    Theme.Color.bgMid
+                    // Switch which texture is active by changing
+                    // `Theme.activeSidebarTexture` below. Both implementations
+                    // stay defined so we can A/B compare without rewriting.
+                    Theme.activeSidebarTexture.view
+                }
+                .ignoresSafeArea()
+            }
+    }
+
+    /// Make the window's titlebar match the chrome shell. Applied at the
+    /// WindowGroup root so every window opened from the WindowGroup picks it
+    /// up. Uses AppKit interop because SwiftUI's `.toolbarBackground(_:for:
+    /// .windowToolbar)` does not actually reach the macOS titlebar surface.
+    func warmWindowTitlebar() -> some View {
+        background(WindowChromeConfigurator())
+    }
+}
+
+// MARK: - Sidebar texture options
+//
+// Three flavors of "subtle differentiation between nav rail and sidebar":
+//   .gradient  — vertical light-from-above (option 2 — currently liked)
+//   .hatch     — fine diagonal lines (option 3 — premium-fabric feel)
+//   .noise     — film grain dots (option 1 — tried first, OK but not best)
+//
+// Flip between them by changing `Theme.activeSidebarTexture` below. All three
+// stay defined so we can A/B compare without rewriting.
+
+extension Theme {
+    enum SidebarTexture {
+        case gradient
+        case hatch
+        case noise
+
+        @ViewBuilder
+        var view: some View {
+            switch self {
+            case .gradient: WarmGradientOverlay()
+            case .hatch:    WarmHatchOverlay()
+            case .noise:    WarmTextureOverlay()
+            }
+        }
+    }
+
+    /// The texture currently used by `warmSidebar()`. Change this one line
+    /// to flip the entire app's sidebar look.
+    static let activeSidebarTexture: SidebarTexture = .hatch
+}
+
+/// Option 2 — subtle vertical gradient. Top stop a hint lighter than the
+/// bgMid base, fading down. "Implied light from above" depth.
+struct WarmGradientOverlay: View {
+    var body: some View {
+        LinearGradient(
+            stops: [
+                .init(color: SwiftUI.Color(red: 0.16, green: 0.07, blue: 0.03), location: 0.0),
+                .init(color: Theme.Color.bgMid, location: 1.0),
+            ],
+            startPoint: .top, endPoint: .bottom
+        )
+        .allowsHitTesting(false)
+    }
+}
+
+/// Option 3 — fine diagonal hatch lines. Static, deterministic, very low
+/// opacity. Gives the surface a "premium fabric" feel without leaving the
+/// loader's warm palette.
+struct WarmHatchOverlay: View {
+    var body: some View {
+        Canvas { ctx, size in
+            // 45° lines, spaced ~6pt apart on the perpendicular. Each line
+            // is `y = x - c` for offset `c` ranging over the diagonal extent.
+            let spacing: CGFloat = 6
+            let strokeStyle = StrokeStyle(lineWidth: 0.5)
+            let lineColor = GraphicsContext.Shading.color(.white.opacity(0.045))
+            var c: CGFloat = -size.height
+            while c <= size.width {
+                let x1 = max(0, c)
+                let x2 = min(size.width, size.height + c)
+                if x2 > x1 {
+                    var p = Path()
+                    p.move(to: CGPoint(x: x1, y: x1 - c))
+                    p.addLine(to: CGPoint(x: x2, y: x2 - c))
+                    ctx.stroke(p, with: lineColor, style: strokeStyle)
+                }
+                c += spacing
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Option 1 — film-grain dots. Static, deterministic, very low opacity.
+/// ~1200 dots is enough density at typical sidebar widths.
+struct WarmTextureOverlay: View {
+    /// Deterministic dot positions in normalized [0,1] coords. Computed
+    /// once at first access via a seeded LCG so every render of every
+    /// sidebar shows the same noise pattern (no shimmer between layouts).
+    private static let dots: [CGPoint] = {
+        var rng = SeededRNG(seed: 0xC0FFEE_BEEF)
+        var pts: [CGPoint] = []
+        pts.reserveCapacity(1200)
+        for _ in 0..<1200 {
+            pts.append(CGPoint(
+                x: Double.random(in: 0...1, using: &rng),
+                y: Double.random(in: 0...1, using: &rng)
+            ))
+        }
+        return pts
+    }()
+
+    var body: some View {
+        Canvas { ctx, size in
+            let r: CGFloat = 0.5
+            for p in Self.dots {
+                let x = p.x * size.width
+                let y = p.y * size.height
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                    with: .color(.white.opacity(0.06))
+                )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Linear congruential RNG seeded for deterministic noise positions.
+private struct SeededRNG: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { self.state = seed }
+    mutating func next() -> UInt64 {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return state
+    }
+}
+
+/// One-shot AppKit configurator: walks up to the hosting NSWindow on first
+/// mount, makes the titlebar transparent + draw under the toolbar, and tints
+/// the window background to the ember chrome. Idempotent — re-applies on
+/// updateNSView in case the window swaps.
+private struct WindowChromeConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { configure(window: v.window) }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { configure(window: nsView.window) }
+    }
+    private func configure(window: NSWindow?) {
+        guard let window else { return }
+        // Idempotent guard — only configure once per window. Repeated
+        // configuration on every updateNSView was breaking SwiftUI's
+        // WindowGroup state restoration.
+        if window.titlebarAppearsTransparent { return }
+        window.titlebarAppearsTransparent = true
+        // NOTE: deliberately NOT inserting `.fullSizeContentView` into the
+        // styleMask. Doing so caused SwiftUI's `WindowGroup` to forget the
+        // window frame across launches — flipping the styleMask invalidates
+        // the saved frame for the prior style. Without it, the titlebar
+        // is still transparent and shows the window backgroundColor below;
+        // content starts under the titlebar boundary instead of behind it,
+        // which is barely noticeable since the colors match.
+        window.backgroundColor = NSColor(Theme.Color.bgDeep)
     }
 }

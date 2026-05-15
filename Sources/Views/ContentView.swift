@@ -57,6 +57,15 @@ struct ContentView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            // Warm hairline below the (now transparent) titlebar so there's a
+            // defined seam between window chrome and content. Without this the
+            // titlebar's traffic-light area bleeds straight into the nav rail
+            // / content with no visible boundary.
+            Rectangle()
+                .fill(Theme.Color.dividerWarm)
+                .frame(height: 1)
+
         HStack(spacing: 0) {
             NavRail(selected: $selectedTab, items: navItems)
             // Warm hairline between rail and content. Replaces the system
@@ -160,6 +169,7 @@ struct ContentView: View {
                 selectedTab = .studio
             }
         }
+        }  // close VStack opened above to wrap the hairline + HStack
     }
 
     @ViewBuilder
