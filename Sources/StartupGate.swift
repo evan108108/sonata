@@ -293,6 +293,12 @@ private struct StartupGateOverlay: View {
     @ObservedObject var readiness: StartupReadiness
     let onSkip: () -> Void
 
+    // Flip to true once MetalFlameView.preflight() reports a successful
+    // shader compile. Until then, the Canvas FlameAura covers the same
+    // visual real-estate so cold launches see flames immediately. If the
+    // compile fails we stay on Canvas — no user-visible error path.
+    @State private var metalReady = false
+
     var body: some View {
         ZStack {
             // Warm background — vertical gradient from deep ember to candle-glow.
@@ -306,15 +312,27 @@ private struct StartupGateOverlay: View {
             )
             .ignoresSafeArea()
 
+            // Full-window flame layer. Metal version paints the entire
+            // window; Canvas version is the local-blob fallback that lives
+            // behind the wordmark. They're mutually exclusive — only one is
+            // mounted at a time so we don't waste GPU on both.
+            if metalReady {
+                MetalFlameView()
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+
             VStack(spacing: 28) {
                 Spacer()
 
-                // Wordmark sits on a flickering flame aura — a Canvas+TimelineView
-                // composition that draws warm radial blobs and rising sparks
-                // beneath the text. Cheap to render, gives the page a "candle"
-                // feel without leaving SwiftUI.
+                // Wordmark sits on a flickering flame aura. Once Metal is
+                // ready the full-window MetalFlameView paints the flames and
+                // the Canvas aura turns off (the wordmark still gets its own
+                // soft glow via .shadow inside FlickeringWordmark).
                 ZStack {
-                    FlameAura().frame(width: 460, height: 200)
+                    if !metalReady {
+                        FlameAura().frame(width: 460, height: 200)
+                    }
 
                     FlickeringWordmark(text: "Sonata")
                 }
@@ -352,6 +370,15 @@ private struct StartupGateOverlay: View {
                 .padding(.bottom, 32)
             }
             .padding(.horizontal, 48)
+        }
+        .task {
+            // Compile the Metal shader off the main thread. If it succeeds
+            // we swap the Canvas blobs for the MTKView; if it fails we stay
+            // on Canvas (graceful degradation — never surfaced to the user).
+            let ok = await MetalFlameView.preflight()
+            if ok {
+                withAnimation(.easeIn(duration: 0.4)) { metalReady = true }
+            }
         }
     }
 }
