@@ -298,32 +298,26 @@ private struct StartupGateOverlay: View {
             // Warm background — vertical gradient from deep ember to candle-glow.
             LinearGradient(
                 stops: [
-                    .init(color: Color(red: 0.08, green: 0.04, blue: 0.02), location: 0),
-                    .init(color: Color(red: 0.14, green: 0.06, blue: 0.03), location: 0.55),
-                    .init(color: Color(red: 0.22, green: 0.09, blue: 0.04), location: 1),
+                    .init(color: Color(red: 0.06, green: 0.03, blue: 0.02), location: 0),
+                    .init(color: Color(red: 0.12, green: 0.05, blue: 0.02), location: 0.55),
+                    .init(color: Color(red: 0.20, green: 0.08, blue: 0.03), location: 1),
                 ],
                 startPoint: .top, endPoint: .bottom
             )
             .ignoresSafeArea()
 
-            VStack(spacing: 32) {
+            VStack(spacing: 28) {
                 Spacer()
 
-                Text("Sonata")
-                    .font(.system(size: 84, weight: .light, design: .serif))
-                    .italic()
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 1.0,  green: 0.82, blue: 0.55),
-                                Color(red: 1.0,  green: 0.55, blue: 0.20),
-                                Color(red: 0.95, green: 0.35, blue: 0.10),
-                            ],
-                            startPoint: .top, endPoint: .bottom
-                        )
-                    )
-                    .shadow(color: Color(red: 1.0, green: 0.45, blue: 0.10).opacity(0.55), radius: 22, y: 6)
-                    .shadow(color: Color(red: 1.0, green: 0.65, blue: 0.20).opacity(0.35), radius: 4)
+                // Wordmark sits on a flickering flame aura — a Canvas+TimelineView
+                // composition that draws warm radial blobs and rising sparks
+                // beneath the text. Cheap to render, gives the page a "candle"
+                // feel without leaving SwiftUI.
+                ZStack {
+                    FlameAura().frame(width: 460, height: 200)
+
+                    FlickeringWordmark(text: "Sonata")
+                }
 
                 Text("Starting up…")
                     .font(.system(size: 13, weight: .regular, design: .monospaced))
@@ -393,6 +387,137 @@ private struct CheckRow: View {
         case .running: return Color(red: 1.0,  green: 0.82, blue: 0.55)
         case .ready:   return Color(red: 1.0,  green: 0.55, blue: 0.20)
         case .failed:  return Color(red: 0.95, green: 0.30, blue: 0.20)
+        }
+    }
+}
+
+// MARK: - Flame visual
+//
+// SwiftUI-native (no Metal) flicker. A TimelineView drives a Canvas that
+// composites several radial gradient blobs with additive blending to fake a
+// candle/ember glow, plus a handful of rising spark particles. The wordmark
+// sits in front with its own time-driven shadow pulse.
+//
+// Cheap: ~12 draws per frame at 30 fps. No textures, no shaders.
+
+private struct FlameAura: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+
+            Canvas { gctx, size in
+                let w = size.width
+                let h = size.height
+
+                // Background warm wash so the dark page picks up a glow even
+                // before the blobs paint. Subtle — most of the warmth comes
+                // from the blobs below.
+                gctx.fill(
+                    Path(CGRect(origin: .zero, size: size)),
+                    with: .radialGradient(
+                        Gradient(stops: [
+                            .init(color: Color(red: 1.0, green: 0.45, blue: 0.15).opacity(0.18), location: 0.0),
+                            .init(color: Color(red: 0.95, green: 0.30, blue: 0.10).opacity(0.0), location: 1.0),
+                        ]),
+                        center: CGPoint(x: w / 2, y: h * 0.62),
+                        startRadius: 0,
+                        endRadius: max(w, h) * 0.7
+                    )
+                )
+
+                // Flame blobs — 7 of them, parameterized so each has its own
+                // phase, frequency, and color stop. Layered with `.plusLighter`
+                // so overlap brightens rather than darkens.
+                gctx.blendMode = .plusLighter
+
+                let blobs: [(phaseX: Double, phaseY: Double, freqX: Double, freqY: Double, ampX: Double, ampY: Double, baseY: Double, baseX: Double, radius: Double, color: Color)] = [
+                    (0.0,  1.3, 0.42, 0.71, 0.06,  0.04, 0.55, 0.50, 110, Color(red: 1.0,  green: 0.50, blue: 0.15)),
+                    (2.1,  0.4, 0.55, 0.93, 0.08,  0.05, 0.58, 0.30, 80,  Color(red: 1.0,  green: 0.70, blue: 0.25)),
+                    (3.7,  2.2, 0.39, 0.85, 0.07,  0.05, 0.58, 0.70, 80,  Color(red: 1.0,  green: 0.65, blue: 0.20)),
+                    (5.0,  3.5, 0.61, 1.10, 0.04,  0.06, 0.45, 0.40, 60,  Color(red: 1.0,  green: 0.85, blue: 0.40)),
+                    (1.5,  4.1, 0.73, 0.65, 0.05,  0.06, 0.42, 0.62, 60,  Color(red: 1.0,  green: 0.80, blue: 0.35)),
+                    (6.2,  2.8, 0.31, 1.22, 0.09,  0.03, 0.65, 0.18, 70,  Color(red: 0.95, green: 0.40, blue: 0.12)),
+                    (4.6,  5.7, 0.28, 1.05, 0.10,  0.04, 0.65, 0.82, 70,  Color(red: 0.95, green: 0.40, blue: 0.12)),
+                ]
+
+                for blob in blobs {
+                    let dx = sin(t * blob.freqX + blob.phaseX) * blob.ampX
+                    let dy = cos(t * blob.freqY + blob.phaseY) * blob.ampY
+                    let cx = (blob.baseX + dx) * w
+                    let cy = (blob.baseY + dy) * h
+                    let breathing = 0.85 + 0.15 * sin(t * 1.6 + blob.phaseX * 1.7)
+
+                    gctx.fill(
+                        Path(ellipseIn: CGRect(
+                            x: cx - blob.radius * breathing,
+                            y: cy - blob.radius * breathing,
+                            width: blob.radius * 2 * breathing,
+                            height: blob.radius * 2 * breathing
+                        )),
+                        with: .radialGradient(
+                            Gradient(stops: [
+                                .init(color: blob.color.opacity(0.55), location: 0.0),
+                                .init(color: blob.color.opacity(0.0),  location: 1.0),
+                            ]),
+                            center: CGPoint(x: cx, y: cy),
+                            startRadius: 0,
+                            endRadius: blob.radius * breathing
+                        )
+                    )
+                }
+
+                // Rising sparks — 9 of them, each looping vertically over its
+                // own period. Position is deterministic from `t` so the same
+                // moment always looks the same (good for screenshots).
+                for i in 0..<9 {
+                    let period: Double = 3.0 + Double(i % 4) * 0.6
+                    let phase: Double = Double(i) * 0.42
+                    let progress = ((t + phase).truncatingRemainder(dividingBy: period)) / period
+                    let xJitter = sin(t * 1.7 + Double(i) * 2.0) * 0.04
+                    let x = (0.12 + Double(i) * 0.094 + xJitter) * w
+                    // Sparks start near the bottom of the aura and rise.
+                    let y = (0.85 - progress * 0.75) * h
+                    let alpha = (1.0 - progress) * (0.4 + 0.6 * sin(progress * .pi))
+                    let r = 1.5 + sin(t * 4.0 + Double(i)) * 0.6
+                    gctx.fill(
+                        Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                        with: .color(Color(red: 1.0, green: 0.78, blue: 0.40).opacity(alpha))
+                    )
+                }
+            }
+            .blur(radius: 6) // softens the blob edges into "glow"
+            .blendMode(.plusLighter)
+        }
+    }
+}
+
+private struct FlickeringWordmark: View {
+    let text: String
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            // Two summed sines at incommensurate frequencies produce a
+            // non-repeating flicker — feels candle-like rather than periodic.
+            let flicker = 0.5 * (sin(t * 4.1) + sin(t * 7.3 + 1.0))
+            let glow = 14 + 10 * flicker         // 4...24
+            let yOffset = 1.0 + 0.6 * sin(t * 2.0)
+
+            Text(text)
+                .font(.system(size: 84, weight: .light, design: .serif))
+                .italic()
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 1.0,  green: 0.92, blue: 0.70),
+                            Color(red: 1.0,  green: 0.72, blue: 0.30),
+                            Color(red: 0.95, green: 0.40, blue: 0.12),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+                .shadow(color: Color(red: 1.0, green: 0.50, blue: 0.15).opacity(0.6), radius: glow, y: yOffset)
+                .shadow(color: Color(red: 1.0, green: 0.70, blue: 0.25).opacity(0.4), radius: 3)
         }
     }
 }
