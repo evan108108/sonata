@@ -706,17 +706,20 @@ struct StudioSettingsView: View {
         persistProfile()
     }
 
+    // `studio:user_profile` is a singleton entity with multiple writers
+    // (this Settings pane, auto-run config, Studio room avatar paths, the
+    // storage config UI...). Never `upsertEntity` it — that replaces the
+    // entire attributes blob, so saving nickname here would silently wipe
+    // `default_storage_config`, `room_avatar_paths`, and any other key
+    // some other code path owns. Always merge — read current attrs and
+    // PATCH only the keys we own. `mergeIntoUserProfile` (StudioStore.swift)
+    // does exactly that.
     private func save() {
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         nickname = trimmed
         saving = true
         Task {
-            await EntityHTTP.upsertEntity(
-                name: "studio:user_profile",
-                type: "studio_user_profile",
-                description: "Local default profile (machine-only, not federated directly)",
-                attributes: profileAttributes()
-            )
+            await EntityHTTP.mergeIntoUserProfile(profileAttributes())
             await MainActor.run {
                 saving = false
                 savedFlash = true
@@ -728,12 +731,7 @@ struct StudioSettingsView: View {
 
     private func persistProfile() {
         Task {
-            await EntityHTTP.upsertEntity(
-                name: "studio:user_profile",
-                type: "studio_user_profile",
-                description: "Local default profile (machine-only, not federated directly)",
-                attributes: profileAttributes()
-            )
+            await EntityHTTP.mergeIntoUserProfile(profileAttributes())
         }
     }
 
