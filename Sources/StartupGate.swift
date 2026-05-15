@@ -356,9 +356,9 @@ private struct StartupGateOverlay: View {
             // Warm background — vertical gradient from deep ember to candle-glow.
             LinearGradient(
                 stops: [
-                    .init(color: Color(red: 0.06, green: 0.03, blue: 0.02), location: 0),
-                    .init(color: Color(red: 0.12, green: 0.05, blue: 0.02), location: 0.55),
-                    .init(color: Color(red: 0.20, green: 0.08, blue: 0.03), location: 1),
+                    .init(color: Theme.Color.bgEmberDeep, location: 0),
+                    .init(color: Theme.Color.bgEmberMid,  location: 0.55),
+                    .init(color: Theme.Color.bgEmberTop,  location: 1),
                 ],
                 startPoint: .top, endPoint: .bottom
             )
@@ -401,7 +401,7 @@ private struct StartupGateOverlay: View {
 
                 Text("Starting up…")
                     .font(.system(size: 13, weight: .regular, design: .monospaced))
-                    .foregroundStyle(Color(red: 0.95, green: 0.78, blue: 0.55).opacity(0.75))
+                    .foregroundStyle(Theme.Color.textOnEmber.opacity(0.75))
 
                 // Warm horizon-line progress bar.
                 EmberProgressBar(progress: readiness.progress)
@@ -417,7 +417,7 @@ private struct StartupGateOverlay: View {
                         .padding(.vertical, 8)
                         .background(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(red: 1.0, green: 0.55, blue: 0.20).opacity(0.45), lineWidth: 1)
+                                .stroke(Theme.Color.accentEmber.opacity(0.45), lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
@@ -486,10 +486,10 @@ private struct CheckRow: View {
 
     private var color: Color {
         switch check.status {
-        case .pending: return Color(red: 0.95, green: 0.78, blue: 0.55).opacity(0.35)
-        case .running: return Color(red: 1.0,  green: 0.82, blue: 0.55)
-        case .ready:   return Color(red: 1.0,  green: 0.55, blue: 0.20)
-        case .failed:  return Color(red: 0.95, green: 0.30, blue: 0.20)
+        case .pending: return Theme.Color.statusPending.opacity(0.35)
+        case .running: return Theme.Color.statusRunning
+        case .ready:   return Theme.Color.statusReady
+        case .failed:  return Theme.Color.statusFailed
         }
     }
 }
@@ -612,13 +612,16 @@ private struct FlickeringWordmark: View {
                 .foregroundStyle(
                     LinearGradient(
                         colors: [
-                            Color(red: 1.0,  green: 0.92, blue: 0.70),
-                            Color(red: 1.0,  green: 0.72, blue: 0.30),
-                            Color(red: 0.95, green: 0.40, blue: 0.12),
+                            Theme.Color.accentCream,
+                            Theme.Color.accentOrange,
+                            Theme.Color.accentRust,
                         ],
                         startPoint: .top, endPoint: .bottom
                     )
                 )
+                // Shadow tints stay literal — they're flicker-shader internals,
+                // mid-stops between accentRust and accentOrange that aren't
+                // themselves part of the broader palette.
                 .shadow(color: Color(red: 1.0, green: 0.50, blue: 0.15).opacity(0.6), radius: glow, y: yOffset)
                 .shadow(color: Color(red: 1.0, green: 0.70, blue: 0.25).opacity(0.4), radius: 3)
         }
@@ -648,7 +651,7 @@ private struct EmberProgressBar: View {
                         )
                     )
                     .frame(width: max(2, geo.size.width * progress))
-                    .shadow(color: Color(red: 1.0, green: 0.55, blue: 0.20).opacity(0.7), radius: 6)
+                    .shadow(color: Theme.Color.accentEmber.opacity(0.7), radius: 6)
                     .animation(.easeOut(duration: 0.35), value: progress)
             }
         }
