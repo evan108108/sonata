@@ -30,7 +30,9 @@ struct StudioRoomList: View {
             Divider()
             filterField
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        // Don't paint a system-gray background — the parent NavigationSplitView
+        // sidebar applies `.warmSidebar()` which fills with the warm chrome
+        // token + texture. A hardcoded color here would clobber it.
         .overlay(alignment: .bottom) { joinToastOverlay }
         .sheet(isPresented: $showCreateSheet) {
             StudioCreateRoomSheet(store: store) { slug, title in

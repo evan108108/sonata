@@ -221,7 +221,7 @@ struct WikiView: View {
                     List(treeNodes, children: \.children, selection: $selectedNodeId) { node in
                         HStack(spacing: 6) {
                             Image(systemName: node.icon)
-                                .foregroundStyle(node.children != nil ? .blue : .secondary)
+                                .foregroundStyle(node.children != nil ? Theme.Color.accentRust : .secondary)
                                 .frame(width: 16)
                             Text(node.label)
                                 .lineLimit(1)
@@ -260,6 +260,7 @@ struct WikiView: View {
                 .padding(.vertical, 6)
             }
             .frame(minWidth: 260)
+            .warmSidebar()
         } detail: {
             if let page = selectedPage {
                 WikiDetailView(

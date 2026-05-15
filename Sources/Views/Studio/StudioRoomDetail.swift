@@ -54,7 +54,9 @@ struct StudioRoomDetail: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(NSColor.textBackgroundColor))
+        // Use the warm chrome bg so the room content area matches the rest
+        // of the app instead of staying on system text-background gray.
+        .background(Theme.Color.bgDeep)
         .overlay(alignment: .trailing) { drawerOverlay }
         .sheet(isPresented: $showComposeSheet) {
             if let trackForCompose = effectiveTrackForCompose {

@@ -228,6 +228,7 @@ struct MemoryView: View {
                 .padding(.vertical, 6)
             }
             .frame(minWidth: 340)
+            .warmSidebar()
         } detail: {
             if let mem = selectedMemory {
                 MemoryDetailView(memory: mem)

@@ -87,6 +87,7 @@ struct PrivateFilesView: View {
                     }
                 }
             }
+            .warmSidebar()
         } detail: {
             // Content pane
             if isLoading {
