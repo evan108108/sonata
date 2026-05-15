@@ -101,89 +101,135 @@ final class StartupReadiness: ObservableObject {
         update("http", .failed("did not respond in 15s"))
     }
 
-    // MARK: Plugins — list, then per-enabled-plugin /health probe
+    // MARK: Plugins — poll /api/plugins until every enabled plugin is running,
+    // then probe one real action per plugin until the response stabilizes.
+    //
+    // Earlier version probed /api/plugins/<name>/health which doesn't exist
+    // (proxy only forwards declared-action paths). The plugin's status column
+    // is the source of truth for HTTP-up; per-plugin warmup probes catch the
+    // cold-start data window where the HTTP layer responds but action data is
+    // racing.
     private func runPlugins(port: Int) async {
         update("plugins", .running)
 
-        // Wait briefly for HTTP server to be up first.
         guard let listURL = URL(string: "http://127.0.0.1:\(port)/api/plugins") else {
             update("plugins", .failed("bad url")); return
         }
-        var plugins: [(name: String, status: String)] = []
-        let deadline = Date().addingTimeInterval(10)
+
+        let deadline = Date().addingTimeInterval(30)
+        var lastSnapshot: [(name: String, status: String)] = []
+
         while Date() < deadline {
             do {
                 let (data, response) = try await URLSession.shared.data(from: listURL)
                 if let http = response as? HTTPURLResponse, http.statusCode == 200,
                    let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
-                    plugins = arr.compactMap { row in
+                    let snapshot: [(name: String, status: String)] = arr.compactMap { row in
                         guard let name = row["name"] as? String,
                               let status = row["status"] as? String else { return nil }
-                        // Only gate on plugins the user has opted into.
-                        let enabled = ["enabled", "starting", "running"].contains(status)
-                        return enabled ? (name, status) : nil
+                        return (name, status)
                     }
-                    break
+                    let gated = snapshot.filter { row in
+                        ["enabled", "starting", "running", "failed"].contains(row.status)
+                    }
+                    if gated.isEmpty {
+                        update("plugins", .ready, detail: "none enabled"); return
+                    }
+                    let runningCount = gated.filter { $0.status == "running" }.count
+                    let failedNames = gated.filter { $0.status == "failed" }.map(\.name)
+                    if !failedNames.isEmpty {
+                        update("plugins",
+                               .failed("failed: \(failedNames.joined(separator: ", "))"),
+                               detail: "\(runningCount)/\(gated.count)")
+                        return
+                    }
+                    if runningCount == gated.count {
+                        update("plugins", .running, detail: "warming up…")
+                        let warmFailures = await warmupPlugins(gated.map(\.name), port: port)
+                        if warmFailures.isEmpty {
+                            update("plugins", .ready, detail: nil)
+                        } else {
+                            update("plugins",
+                                   .failed("warmup timeout: \(warmFailures.joined(separator: ", "))"),
+                                   detail: nil)
+                        }
+                        return
+                    }
+                    update("plugins", .running, detail: "\(runningCount)/\(gated.count)")
+                    lastSnapshot = gated
                 }
             } catch {
                 // keep trying
             }
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: .milliseconds(400))
         }
 
-        if plugins.isEmpty {
-            update("plugins", .ready, detail: "none enabled"); return
-        }
-
-        update("plugins", .running, detail: "0/\(plugins.count)", label: "Plugins")
-
-        // Probe each plugin's /health endpoint. Hard cap per plugin at 30s.
-        let pluginDeadline = Date().addingTimeInterval(30)
-        var ready = 0
-        var failures: [String] = []
-        for plugin in plugins {
-            guard let healthURL = URL(string: "http://127.0.0.1:\(port)/api/plugins/\(plugin.name)/health") else {
-                failures.append("\(plugin.name): bad url")
-                continue
-            }
-            var ok = false
-            while Date() < pluginDeadline {
-                do {
-                    let (_, response) = try await URLSession.shared.data(from: healthURL)
-                    if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                        ok = true; break
-                    }
-                } catch {
-                    // keep trying
-                }
-                // Re-check status — if the DB flipped this plugin to 'failed',
-                // stop polling and surface that.
-                if let row = try? await fetchPluginStatus(name: plugin.name, port: port),
-                   row == "failed" {
-                    break
-                }
-                try? await Task.sleep(for: .milliseconds(300))
-            }
-            if ok {
-                ready += 1
-                update("plugins", .running, detail: "\(ready)/\(plugins.count)")
-            } else {
-                failures.append(plugin.name)
-            }
-        }
-
-        if failures.isEmpty {
-            update("plugins", .ready, detail: "\(plugins.count)/\(plugins.count)")
-        } else {
-            update("plugins", .failed("failed: \(failures.joined(separator: ", "))"), detail: "\(ready)/\(plugins.count)")
-        }
+        let runningCount = lastSnapshot.filter { $0.status == "running" }.count
+        let stuckNames = lastSnapshot.filter { $0.status != "running" }.map(\.name)
+        update("plugins",
+               .failed("timeout — stuck: \(stuckNames.joined(separator: ", "))"),
+               detail: "\(runningCount)/\(lastSnapshot.count)")
     }
 
-    private func fetchPluginStatus(name: String, port: Int) async throws -> String? {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/plugins") else { return nil }
-        let (data, _) = try await URLSession.shared.data(from: url)
-        guard let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return nil }
-        return arr.first(where: { ($0["name"] as? String) == name })?["status"] as? String
+    /// Per-plugin warmup probe — call one real action endpoint and wait until
+    /// two consecutive identical 200 responses arrive (~800ms apart). Catches
+    /// the cold-start data race where the HTTP layer is up but the plugin's
+    /// data path returns null/empty for the first few calls.
+    private func warmupPlugins(_ names: [String], port: Int) async -> [String] {
+        struct Probe { let method: String; let path: String }
+        let probes: [String: Probe] = [
+            "sonata-studio": Probe(method: "GET", path: "/storage/default/get"),
+            "sonar":         Probe(method: "GET", path: "/identity"),
+            "prstar":        Probe(method: "GET", path: "/status"),
+        ]
+        let perPluginDeadline: TimeInterval = 15
+        var failures: [String] = []
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for name in names {
+                guard let probe = probes[name] else { continue }
+                let method = probe.method
+                let path = probe.path
+                group.addTask {
+                    let ok = await Self.probePluginUntilStable(
+                        name: name, method: method, path: path, port: port,
+                        deadline: Date().addingTimeInterval(perPluginDeadline)
+                    )
+                    return (name, ok)
+                }
+            }
+            for await (name, ok) in group where !ok {
+                failures.append(name)
+            }
+        }
+        return failures
+    }
+
+    private static func probePluginUntilStable(
+        name: String,
+        method: String,
+        path: String,
+        port: Int,
+        deadline: Date
+    ) async -> Bool {
+        let urlString = "http://127.0.0.1:\(port)/api/plugins/\(name)\(path)"
+        guard let url = URL(string: urlString) else { return false }
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.timeoutInterval = 5
+        var lastBody: Data? = nil
+        while Date() < deadline {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    if let prior = lastBody, prior == data { return true }
+                    lastBody = data
+                }
+            } catch {
+                lastBody = nil
+            }
+            try? await Task.sleep(for: .milliseconds(800))
+        }
+        return false
     }
 
     // MARK: Workers — count fresh heartbeats vs defaultWorkerCount
@@ -199,7 +245,8 @@ final class StartupReadiness: ObservableObject {
                     arguments: [cutoff]) ?? 0
             }) ?? 0
             if count >= target {
-                update("workers", .ready, detail: "\(count)/\(target)")
+                // detail intentionally nil — "4/2" reads backwards
+                update("workers", .ready, detail: nil)
                 return
             }
             update("workers", .running, detail: "\(count)/\(target)")
@@ -294,10 +341,15 @@ private struct StartupGateOverlay: View {
     let onSkip: () -> Void
 
     // Flip to true once MetalFlameView.preflight() reports a successful
-    // shader compile. Until then, the Canvas FlameAura covers the same
-    // visual real-estate so cold launches see flames immediately. If the
-    // compile fails we stay on Canvas — no user-visible error path.
+    // shader compile. We hide the Canvas fallback for the first second so
+    // the common case (fast Metal compile, ~100-300ms) shows black → flame
+    // directly with no intermediate Canvas flash. If Metal takes longer
+    // than `canvasGracePeriod`, the Canvas blobs come up so the user sees
+    // *something* warm rather than a mysterious black screen. Whenever
+    // Metal arrives — before or after the grace period — it takes over.
     @State private var metalReady = false
+    @State private var canvasFallbackVisible = false
+    private let canvasGracePeriod: Duration = .seconds(1)
 
     var body: some View {
         ZStack {
@@ -314,24 +366,34 @@ private struct StartupGateOverlay: View {
 
             // Full-window flame layer. Metal version paints the entire
             // window; Canvas version is the local-blob fallback that lives
-            // behind the wordmark. They're mutually exclusive — only one is
-            // mounted at a time so we don't waste GPU on both.
+            // Three-stage visual:
+            //   1. Black-only (just the gradient above) — first ~1s while
+            //      Metal compiles. The common-case shader compile lands
+            //      inside this window so the user goes black → real flame.
+            //   2. Canvas fallback — kicks in only if Metal isn't ready
+            //      after `canvasGracePeriod`. So the user never stares at
+            //      a featureless screen for long.
+            //   3. Metal flame — replaces whichever of the above is
+            //      showing as soon as the shader is compiled.
             if metalReady {
                 MetalFlameView()
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+                    .transition(.opacity)
             }
 
             VStack(spacing: 28) {
                 Spacer()
 
-                // Wordmark sits on a flickering flame aura. Once Metal is
-                // ready the full-window MetalFlameView paints the flames and
-                // the Canvas aura turns off (the wordmark still gets its own
-                // soft glow via .shadow inside FlickeringWordmark).
+                // Wordmark — gets the Canvas fallback flame behind it only
+                // after the grace period (and only if Metal still isn't
+                // ready). Otherwise the wordmark sits on plain dark, then
+                // the Metal layer takes over the whole background.
                 ZStack {
-                    if !metalReady {
-                        FlameAura().frame(width: 460, height: 200)
+                    if !metalReady && canvasFallbackVisible {
+                        FlameAura()
+                            .frame(width: 460, height: 200)
+                            .transition(.opacity)
                     }
 
                     FlickeringWordmark(text: "Sonata")
@@ -345,16 +407,8 @@ private struct StartupGateOverlay: View {
                 EmberProgressBar(progress: readiness.progress)
                     .frame(width: 360, height: 4)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(readiness.checks) { check in
-                        CheckRow(check: check)
-                    }
-                }
-                .padding(.top, 8)
-                .frame(minWidth: 360, alignment: .leading)
-
-                Spacer()
-
+                // Skip button — sits in the calm-zone vignette right under
+                // the progress bar so it stays legible against the flames.
                 Button(action: onSkip) {
                     Text("Skip  ⎋")
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -367,17 +421,39 @@ private struct StartupGateOverlay: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .padding(.bottom, 32)
+                .padding(.top, 4)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(readiness.checks) { check in
+                        CheckRow(check: check)
+                    }
+                }
+                .padding(.top, 8)
+                .frame(minWidth: 360, alignment: .leading)
+
+                Spacer()
+
             }
             .padding(.horizontal, 48)
         }
         .task {
             // Compile the Metal shader off the main thread. If it succeeds
-            // we swap the Canvas blobs for the MTKView; if it fails we stay
-            // on Canvas (graceful degradation — never surfaced to the user).
+            // we promote to the Metal layer; if it fails we stay on the
+            // Canvas fallback (graceful degradation — never surfaced).
             let ok = await MetalFlameView.preflight()
             if ok {
                 withAnimation(.easeIn(duration: 0.4)) { metalReady = true }
+            }
+        }
+        .task {
+            // Canvas fallback grace period — keep the screen black for the
+            // first second so the common case (fast Metal compile) goes
+            // black → flame directly with no Canvas flash. After 1 s, if
+            // Metal still hasn't arrived, the Canvas blobs come up so the
+            // user isn't staring at a void.
+            try? await Task.sleep(for: canvasGracePeriod)
+            if !metalReady {
+                withAnimation(.easeIn(duration: 0.3)) { canvasFallbackVisible = true }
             }
         }
     }
