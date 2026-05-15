@@ -49,7 +49,10 @@ struct NavRail: View {
             .frame(width: railWidth, height: availableHeight, alignment: .top)
         }
         .frame(width: railWidth)
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.6))
+        // Warm dark rail — one step lighter than the window bg so the rail
+        // separates from the content shell. Opaque, not blended; the prior
+        // .opacity(0.6) bled the window color through and read cool.
+        .background(Theme.Color.bgMid)
     }
 
     // MARK: - Layout
@@ -117,8 +120,8 @@ struct NavRail: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .frame(minWidth: 160, alignment: .leading)
-                        .foregroundStyle(selected == item.tab ? Color.accentColor : Color.primary)
-                        .background(selected == item.tab ? Color.accentColor.opacity(0.15) : Color.clear)
+                        .foregroundStyle(selected == item.tab ? Theme.Color.selectionAccent : Color.primary)
+                        .background(selected == item.tab ? Theme.Color.selectionTint : Color.clear)
                     }
                     .buttonStyle(.plain)
                     .contentShape(Rectangle())
@@ -167,7 +170,7 @@ private struct NavRailCell: View {
                     .truncationMode(.tail)
             }
             .frame(width: railWidth, height: cellHeight)
-            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            .foregroundStyle(isSelected ? Theme.Color.selectionAccent : Color.secondary)
             .background(backgroundColor)
         }
         .buttonStyle(.plain)
@@ -181,7 +184,7 @@ private struct NavRailCell: View {
 
     private var backgroundColor: Color {
         if isSelected {
-            return Color.accentColor.opacity(0.15)
+            return Theme.Color.selectionTint
         }
         if isHovering {
             return Color.primary.opacity(0.06)
@@ -208,7 +211,7 @@ private struct NavRailMoreCell: View {
                     .lineLimit(1)
             }
             .frame(width: railWidth, height: cellHeight)
-            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+            .foregroundStyle(isActive ? Theme.Color.selectionAccent : Color.secondary)
             .background(backgroundColor)
         }
         .buttonStyle(.plain)
@@ -222,7 +225,7 @@ private struct NavRailMoreCell: View {
 
     private var backgroundColor: Color {
         if isActive {
-            return Color.accentColor.opacity(0.15)
+            return Theme.Color.selectionTint
         }
         if isHovering {
             return Color.primary.opacity(0.06)

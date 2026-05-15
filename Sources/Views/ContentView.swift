@@ -59,7 +59,11 @@ struct ContentView: View {
     var body: some View {
         HStack(spacing: 0) {
             NavRail(selected: $selectedTab, items: navItems)
-            Divider()
+            // Warm hairline between rail and content. Replaces the system
+            // .separator divider so the seam matches the ember chrome.
+            Rectangle()
+                .fill(Theme.Color.dividerWarm)
+                .frame(width: 1)
             destinationView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .topTrailing) {
@@ -84,6 +88,12 @@ struct ContentView: View {
                     }
                 }
         }
+        // Paint the deepest ember tone behind the whole shell so any view
+        // that doesn't draw its own background (e.g. between-pane gaps,
+        // the rail's transparent gutter) lands on warm dark instead of the
+        // default macOS window gray. Content views with their own neutral
+        // surfaces (lists, forms, web dashboards) still paint over this.
+        .background(Theme.Color.bgDeep.ignoresSafeArea())
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 SearchBar(vm: searchVM, focusBinding: $searchFocused)
@@ -159,7 +169,7 @@ struct ContentView: View {
             // outgoing NavigationSplitView can fully unregister before the
             // incoming one mounts. Background matches the window so the
             // flicker is invisible.
-            Color(NSColor.windowBackgroundColor)
+            Theme.Color.bgDeep
         } else {
             actualDestinationView
         }

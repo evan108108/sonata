@@ -633,6 +633,11 @@ struct SonataApp: App {
                         }
                     }
             }
+            // Lock Sonata to dark appearance regardless of the user's macOS
+            // setting (Spotify / Discord / Linear pattern). The loader, theme
+            // tokens, and warm chrome are designed for dark; light mode would
+            // wash them out.
+            .preferredColorScheme(.dark)
         }
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0

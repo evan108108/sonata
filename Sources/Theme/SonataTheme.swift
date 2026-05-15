@@ -50,6 +50,50 @@ enum Theme {
         /// `bgEmberTop` so we have a single warm-shell token to lean on.
         static let bgWarmShell   = SwiftUI.Color(red: 0.20, green: 0.08, blue: 0.03)
 
+        // MARK: Chrome — warm dark shell (theme v1)
+        //
+        // Three opaque tones for the structural UI that surrounds content:
+        // the window background, the nav rail, and any custom toolbar surface.
+        // Stepped so they read as a layered palette rather than one flat dark:
+        //
+        //   bgDeep  (window)   — deepest, ~loader bottom
+        //   bgMid   (nav rail) — one notch up, gives the rail separation
+        //   bgWarmShell        — warmer top, reuse for hero/toolbar accents
+        //
+        // These are opaque on purpose: they replace the system window/sidebar
+        // surfaces rather than tinting them. Content panes (lists, cards,
+        // forms) should still use system surfaces so body text stays legible.
+
+        /// Window background — the deepest warm dark. Sits behind everything
+        /// when no other surface paints over it. Same RGB as `bgEmberDeep`;
+        /// the alias exists so chrome call sites read as chrome ("window bg")
+        /// rather than as loader gradient stops.
+        static let bgDeep        = SwiftUI.Color(red: 0.06, green: 0.03, blue: 0.02)
+
+        /// Nav rail / sidebar background. One step lighter than `bgDeep` so
+        /// the rail separates from the window without needing a hard divider.
+        /// Same RGB as `bgEmberMid`.
+        static let bgMid         = SwiftUI.Color(red: 0.12, green: 0.05, blue: 0.02)
+
+        // MARK: Chrome dividers & selection
+
+        /// Warm divider replacing the cool `.separator` system color. Cream-ish
+        /// hairline at low alpha — visible against `bgDeep`/`bgMid` without
+        /// fighting the warm shell. Apply directly as a foreground/fill;
+        /// already alpha'd, no `.opacity()` needed at call sites.
+        static let dividerWarm   = SwiftUI.Color(red: 1.0, green: 0.80, blue: 0.55).opacity(0.12)
+
+        /// Low-alpha ember overlay for selected rows in nav/lists. Replaces
+        /// the system `accentColor.opacity(0.15)` recipe so selection reads
+        /// warm against the new chrome surfaces. Already alpha'd.
+        static let selectionTint = SwiftUI.Color(red: 1.0, green: 0.55, blue: 0.20).opacity(0.15)
+
+        /// Full-ember tint for the selected row's icon + label. Same hue as
+        /// `accentEmber`; the alias exists so selection sites read "selection
+        /// color" and don't drift to a different accent if the brand color
+        /// later splits.
+        static let selectionAccent = SwiftUI.Color(red: 1.0, green: 0.55, blue: 0.20)
+
         // MARK: Accents — the wordmark gradient & primary actions
 
         /// Cream highlight — top of the wordmark gradient. Use sparingly: title
