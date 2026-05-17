@@ -240,23 +240,6 @@ let systemActions: [SonataAction] = [
                         .filter { $0.key != "offline" && $0.key != "stale" }
                         .values.reduce(0, +)
 
-                    // Background job summary by status
-                    let bgRows = try Row.fetchAll(db, sql: """
-                        SELECT status, COUNT(*) AS cnt FROM backgroundJobs GROUP BY status
-                    """)
-                    var bgMap: [String: Int] = [:]
-                    for r in bgRows {
-                        let s: String = r["status"]
-                        let c: Int = r["cnt"]
-                        bgMap[s] = c
-                    }
-                    let bgSummary = BackgroundJobSummary(
-                        pending: bgMap["pending"] ?? 0,
-                        running: bgMap["running"] ?? 0,
-                        completed: bgMap["completed"] ?? 0,
-                        failed: bgMap["failed"] ?? 0
-                    )
-
                     return SystemStatusResponse(
                         memoryCount: memoryCount,
                         memoriesByType: memoriesByType,
@@ -275,8 +258,7 @@ let systemActions: [SonataAction] = [
                         upcomingScheduledJobs: upcomingJobs,
                         workerCount: workerCount,
                         workersByStatus: workersByStatus,
-                        externalBridgeCount: externalBridgeCount,
-                        backgroundJobs: bgSummary
+                        externalBridgeCount: externalBridgeCount
                     )
                 }
             } catch {

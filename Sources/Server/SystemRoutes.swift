@@ -31,7 +31,6 @@ struct SystemStatusResponse: Encodable {
     let workerCount: Int               // alive: not offline, fresh heartbeat
     let workersByStatus: [String: Int] // breakdown by effective status (idle/busy/starting/.../stale/offline)
     let externalBridgeCount: Int       // sonata-bridge.ts processes that aren't pool workers (e.g. claude/claude-patched sessions)
-    let backgroundJobs: BackgroundJobSummary
 }
 
 struct NextEventInfo: Encodable {
@@ -83,13 +82,6 @@ struct DeployResponse: Encodable {
     let step: String          // "build" | "copy" | "codesign" | "done"
     let error: String?
     let message: String?
-}
-
-struct BackgroundJobSummary: Encodable {
-    let pending: Int
-    let running: Int
-    let completed: Int
-    let failed: Int
 }
 
 struct ActivityItem: Encodable {

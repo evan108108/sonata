@@ -372,7 +372,6 @@ struct SonataApp: App {
                 registry.register(documentActions)
                 registry.register(embeddingActions)
                 registry.register(contactActions)
-                registry.register(backgroundActions)
                 registry.register(fileActions)
                 registry.register(systemActions)
                 registry.register(pithActions)
