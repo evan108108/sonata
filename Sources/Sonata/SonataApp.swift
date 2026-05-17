@@ -504,11 +504,7 @@ struct SonataApp: App {
                 let friendRelay = FriendRelay(dbPool: pool)
                 await friendRelay.start()
 
-                // 4. Background Job Runner
-                let jobRunner = BackgroundJobRunner(dbPool: pool)
-                await jobRunner.start()
-
-                // 5. Task Orchestrator (dispatches pending tasks to Claude sessions)
+                // 4. Task Orchestrator (dispatches pending tasks to bridge workers)
                 let orchestrator = TaskOrchestrator(dbPool: pool)
                 await orchestrator.start()
 
@@ -541,7 +537,7 @@ struct SonataApp: App {
                 // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up
                 // the default pool. Both run on MainActor since they create terminal views.
                 let workerCount = WorkerManager.defaultWorkerCount
-                // sonata-restart-recovery v0 (claude/documents/evenflow/sonata-restart-recovery-v0-plan.md):
+                // sonata-restart-recovery v0 (claude/documents/plans/sonata-restart-recovery-v0-plan.md):
                 // when toggled on, respawn workers that died holding active work, reusing
                 // their prior workerId/sessionId so claude --resume loads the prior JSONL.
                 // Toggle stored in UserDefaults at "restartRecoveryEnabled" (UI exposes it);
@@ -570,7 +566,6 @@ struct SonataApp: App {
                     await scheduler.shutdown()
                     await emailHandler.shutdown()
                     await friendRelay.shutdown()
-                    await jobRunner.shutdown()
                     await healthMonitor.shutdown()
                     await backupManager.shutdown()
                     await wikiWatcher.shutdown()
