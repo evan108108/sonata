@@ -43,7 +43,10 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         // (1-128 [A-Za-z0-9_-]). Flag unset → behaviour unchanged.
         let mcpSessionKey = "session-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
         let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
-            sessionKey: String(mcpSessionKey), role: .interactive)
+            sessionKey: String(mcpSessionKey),
+            role: .interactive,
+            slotLabel: "interactive"
+        )
         let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: inProcExtras != nil)
 
         var args: [String] = []

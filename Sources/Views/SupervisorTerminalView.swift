@@ -51,7 +51,11 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         // If unset (or registry not yet published, or credential write
         // fails), fall back to today's env-var bridge — supervisor remains
         // byte-for-byte identical to pre-§6.
-        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(sessionKey: "supervisor", role: .supervisor)
+        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
+            sessionKey: "supervisor",
+            role: .supervisor,
+            slotLabel: "supervisor"
+        )
         if inProcExtras == nil {
             env.append("SONATA_ROLE=supervisor")
             env.append("WORKER_ID=supervisor")

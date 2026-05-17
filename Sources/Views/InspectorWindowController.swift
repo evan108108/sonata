@@ -66,7 +66,10 @@ final class InspectorWindowController: NSObject, LocalProcessTerminalViewDelegat
         // worker they're inspecting (different sessionKey, no collision).
         let mcpSessionKey = "inspector-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
         let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
-            sessionKey: String(mcpSessionKey), role: .interactive)
+            sessionKey: String(mcpSessionKey),
+            role: .interactive,
+            slotLabel: "inspector"
+        )
         if inProcExtras == nil {
             env.append("SONATA_ROLE=inspector")
         }

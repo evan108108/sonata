@@ -804,7 +804,11 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("SONA_WORKER=1")
 
         // Per plan §6: opt-in in-proc MCP via SONATA_MCP_INPROC=1.
-        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(sessionKey: workerId, role: .worker)
+        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
+            sessionKey: workerId,
+            role: .worker,
+            slotLabel: sessionLabel
+        )
         if inProcExtras != nil {
             // SONA_SESSION_ID still emitted (mem-server.ts sibling-injection
             // compatibility — Open Question 3 in plan §12). Other legacy
