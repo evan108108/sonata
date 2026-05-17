@@ -40,19 +40,30 @@ actor MCPSessionSweeper {
 
         for snap in snapshots {
             let age = now - snap.lastContactedAt
+            // SSE attached → the session is provably alive on this tick;
+            // refresh heartbeat to `now`. (Idle workers never make MCP
+            // calls, so `lastContactedAt` would otherwise freeze at the
+            // init/tools-list timestamp and the sweeper would write the
+            // same stale value forever.)
+            // No SSE but recent traffic → use lastContactedAt.
+            // No SSE and stale → skip; let downstream stale checks evict.
+            let heartbeatAt: Int64
+            if snap.hasSSE {
+                heartbeatAt = now
+            } else if age < staleThresholdMs {
+                heartbeatAt = snap.lastContactedAt
+            } else {
+                continue
+            }
             switch snap.role {
             case .worker:
-                if snap.hasSSE || age < staleThresholdMs {
-                    await updateWorkerHeartbeat(
-                        workerId: snap.sessionKey,
-                        at: snap.lastContactedAt,
-                        inFlightEventId: snap.inFlightEventId
-                    )
-                }
+                await updateWorkerHeartbeat(
+                    workerId: snap.sessionKey,
+                    at: heartbeatAt,
+                    inFlightEventId: snap.inFlightEventId
+                )
             case .supervisor:
-                if snap.hasSSE || age < staleThresholdMs {
-                    await updateSupervisorHeartbeat(at: snap.lastContactedAt)
-                }
+                await updateSupervisorHeartbeat(at: heartbeatAt)
             case .interactive:
                 break
             }

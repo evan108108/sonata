@@ -428,7 +428,7 @@ struct SonataApp: App {
                     logger: logger
                 )
                 await mcpSweeper.start()
-                let mcpEventPusher = MCPEventPusher(dbPool: pool, logger: logger)
+                let mcpEventPusher = MCPEventPusher(dbPool: pool, registry: mcpRegistry, logger: logger)
                 await mcpEventPusher.start()
                 logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
 

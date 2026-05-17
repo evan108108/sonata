@@ -4,14 +4,16 @@ import Logging
 
 actor MCPEventPusher {
     private let dbPool: DatabasePool
+    private let registry: MCPSessionRegistry
     private let logger: Logger
     private var knownWorkerEventIds: Set<String> = []
     private var knownSupervisorEventIds: Set<String> = []
     private var task: Task<Void, Never>?
     private let pollInterval: TimeInterval = 1.0
 
-    init(dbPool: DatabasePool, logger: Logger) {
+    init(dbPool: DatabasePool, registry: MCPSessionRegistry, logger: Logger) {
         self.dbPool = dbPool
+        self.registry = registry
         self.logger = logger
     }
 
@@ -31,8 +33,71 @@ actor MCPEventPusher {
     }
 
     private func tick() async {
+        // In the legacy bridge model, workers polled `worker_event_claim`
+        // to move events from pending → assigned. The new in-app model
+        // inverts this: workers idle until pushed. So Sonata must do the
+        // assignment itself for any idle worker with SSE attached, then
+        // push the notification.
+        await assignPendingToIdleWorkers()
         await pushPendingWorkerEvents()
         await pushPendingSupervisorEvents()
+    }
+
+    /// Atomically claim pending events for any worker that has SSE attached,
+    /// is currently idle in both the registry (no inFlightEventId) and the
+    /// DB (status='idle', currentEventId IS NULL), and whose sessionLabel
+    /// matches `sona-worker-N`. Mirrors the `worker_event_claim` action's
+    /// state-machine transitions but runs from the server side.
+    private func assignPendingToIdleWorkers() async {
+        let snapshots = await registry.snapshot()
+        let candidates = snapshots.filter {
+            $0.role == .worker && $0.hasSSE && $0.inFlightEventId == nil
+        }
+        if candidates.isEmpty { return }
+
+        for snap in candidates {
+            do {
+                try await dbPool.write { db in
+                    let workerRow = try Row.fetchOne(db, sql: """
+                        SELECT status, currentEventId, sessionLabel
+                        FROM workers WHERE workerId = ?
+                    """, arguments: [snap.sessionKey])
+                    guard let workerRow else { return }
+                    let status = workerRow["status"] as? String ?? ""
+                    if status == "busy" || status == "draining" { return }
+                    if (workerRow["currentEventId"] as? String) != nil { return }
+                    let label = workerRow["sessionLabel"] as? String ?? ""
+                    let isValidLabel = label == "supervisor"
+                        || label.range(of: #"^sona-worker-\d+$"#,
+                                       options: .regularExpression) != nil
+                    if !isValidLabel { return }
+
+                    guard let evtId = try String.fetchOne(db, sql: """
+                        SELECT id FROM workerEvents
+                        WHERE status = 'pending'
+                        ORDER BY priority DESC, createdAt ASC LIMIT 1
+                    """) else { return }
+
+                    let now = nowMs()
+                    let workerSessionId = try String.fetchOne(db, sql:
+                        "SELECT sessionId FROM workers WHERE workerId = ?",
+                        arguments: [snap.sessionKey])
+                    try db.execute(sql: """
+                        UPDATE workerEvents
+                        SET assignedTo = ?, status = 'assigned',
+                            assignedAt = ?, sessionId = ?
+                        WHERE id = ? AND status = 'pending'
+                    """, arguments: [snap.sessionKey, now, workerSessionId, evtId])
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'busy',
+                            currentEventId = ?, lastHeartbeat = ?
+                        WHERE workerId = ?
+                    """, arguments: [evtId, now, snap.sessionKey])
+                }
+            } catch {
+                logger.warning("EventPusher auto-assign failed for \(snap.sessionKey): \(error)")
+            }
+        }
     }
 
     private struct PendingWorkerEvent: Sendable {

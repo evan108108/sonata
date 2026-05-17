@@ -11,9 +11,10 @@ import Foundation
 /// env-var bridge path — i.e. behaviour is byte-for-byte identical to
 /// pre-§6 when SONATA_MCP_INPROC is not set.
 enum MCPSpawn {
-    /// Whether the current process environment has opted into in-proc MCP.
+    /// In-proc MCP is the default. Set `SONATA_MCP_INPROC=0` to fall back
+    /// to the legacy stdio bridge.
     static var inProcEnabled: Bool {
-        ProcessInfo.processInfo.environment["SONATA_MCP_INPROC"] == "1"
+        ProcessInfo.processInfo.environment["SONATA_MCP_INPROC"] != "0"
     }
 
     /// Optional comma-separated allowlist of slot labels that should
