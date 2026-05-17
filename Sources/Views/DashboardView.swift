@@ -18,6 +18,7 @@ struct DashboardView: View {
     @StateObject private var deadlinesVM = DeadlinesViewModel()
     @StateObject private var afkVM = AFKQuestionsViewModel()
     @StateObject private var attentionVM = AttentionTasksViewModel()
+    @StateObject private var allSessionsVM = AllSessionsViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
@@ -103,6 +104,9 @@ struct DashboardView: View {
                             selectedTab = .workers
                         }
                         .padding(.horizontal)
+
+                        AllSessionsSection(vm: allSessionsVM)
+                            .padding(.horizontal)
 
                         // ── Token Usage ────────────────────────────────────────
                         // What is this costing right now — sparkline + today's spend.
@@ -246,6 +250,13 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !allSessionsVM.hasLoadedOnce && !Task.isCancelled {
+                await allSessionsVM.fetch()
+                if allSessionsVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
@@ -255,6 +266,7 @@ struct DashboardView: View {
             Task { await deadlinesVM.fetch() }
             Task { await afkVM.fetch() }
             Task { await attentionVM.fetch() }
+            Task { await allSessionsVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)
