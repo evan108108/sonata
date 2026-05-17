@@ -625,13 +625,12 @@ let dmActions: [SonataAction] = [
                 }
             }
 
-            // Local loopback. Pass A.7: heartbeat freshness gates the
-            // "registered" path so a stale registration can't catch DMs.
-            let checker = makeProductionHeartbeatChecker(dbPool: ctx.dbPool)
-            DMRegistry.shared.setHeartbeatChecker(checker)
-            let registered = DMRegistry.shared.has(targetSessionId)
-            let fresh = registered ? await checker.isFresh(targetSessionId) : false
-
+            // Local loopback. Presence = MCPSessionRegistry.hasSSE on the
+            // target sessionKey. Persist FIRST (so the recipient can backfill
+            // via dm_inbox even if the SSE attach drops mid-push), then push
+            // via the in-app MCPNotificationDispatcher / Registry.deliverDM
+            // path. The legacy DMRegistry enqueue-and-poll surface is dead
+            // (no bridge polls it).
             let env = DMEnvelope(
                 messageId: messageId,
                 fromSessionId: fromSessionId,
@@ -645,12 +644,22 @@ let dmActions: [SonataAction] = [
                 metaJson: metaJson
             )
 
-            if registered && fresh {
-                _ = DMRegistry.shared.enqueue(env)
-                try? await ctx.dbPool.write { db in
-                    _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+            if let mcpReg = MCPSessionRegistry.shared {
+                let delivered = await mcpReg.deliverDM(
+                    target: targetSessionId,
+                    messageId: messageId,
+                    body: body,
+                    fromSessionId: fromSessionId,
+                    context: context,
+                    metaJson: metaJson,
+                    sentAtMs: now
+                )
+                if delivered {
+                    try? await ctx.dbPool.write { db in
+                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+                    }
+                    return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
                 }
-                return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
             }
 
             // §11.1 lazy-optimistic: 202 if a recent dm_messages row exists for
