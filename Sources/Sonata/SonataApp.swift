@@ -479,7 +479,8 @@ struct SonataApp: App {
                         sessionKey: "orchestrator",
                         role: .interactive,
                         registry: mcpRegistry,
-                        port: port
+                        port: port,
+                        persistToken: true
                     )
                     let fm = FileManager.default
                     let home = fm.homeDirectoryForCurrentUser
