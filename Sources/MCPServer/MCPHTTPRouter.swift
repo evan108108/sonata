@@ -43,6 +43,74 @@ enum MCPHTTPRouter {
                 headers: corsHeaders(allowMethod: "POST, GET, DELETE, OPTIONS")
             )
         }
+
+        // Phase C.5 — ad-hoc credential mint for external launchers
+        // (sona-launch wrapper, per-project .mcp.json, etc.). Body:
+        // {"sessionKey":"...", "role":"interactive|worker|supervisor"}.
+        // Returns the per-session MCP config path + bearer.
+        router.post("/api/mcp/issue-credential") { request, _ -> Response in
+            return await issueCredential(
+                request: request,
+                registry: registry,
+                logger: logger
+            )
+        }
+    }
+
+    private static func issueCredential(
+        request: Request,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        // Localhost-only guard. We're bound to 127.0.0.1 only at the
+        // Hummingbird layer, so this is belt-and-suspenders for callers
+        // that go through proxies.
+        let hostRaw = request.headers[HTTPField.Name("host")!] ?? ""
+        let host = hostRaw.split(separator: ":").first.map(String.init) ?? hostRaw
+        if !host.isEmpty && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+            return Response(status: .forbidden)
+        }
+        let bodyBuffer: ByteBuffer
+        do {
+            bodyBuffer = try await request.body.collect(upTo: 4 * 1024)
+        } catch {
+            return Response(status: .badRequest)
+        }
+        let data = Data(buffer: bodyBuffer)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionKey = json["sessionKey"] as? String,
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        let roleStr = (json["role"] as? String)?.lowercased() ?? "interactive"
+        let role: SessionRole = {
+            switch roleStr {
+            case "worker": return .worker
+            case "supervisor": return .supervisor
+            default: return .interactive
+            }
+        }()
+        do {
+            let cred = try await MCPClaudeConfigWriter.writeAndRegister(
+                sessionKey: sessionKey, role: role, registry: registry)
+            let payload: [String: Any] = [
+                "sessionKey": cred.sessionKey,
+                "bearerToken": cred.bearerToken,
+                "configPath": cred.configPath.path,
+                "role": roleStr,
+            ]
+            let outData = try JSONSerialization.data(
+                withJSONObject: payload, options: [.sortedKeys])
+            var buf = ByteBufferAllocator().buffer(capacity: outData.count)
+            buf.writeBytes(outData)
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json"
+            return Response(status: .ok, headers: headers,
+                body: ResponseBody(byteBuffer: buf))
+        } catch {
+            logger.warning("issueCredential failed for \(sessionKey): \(error)")
+            return Response(status: .internalServerError)
+        }
     }
 
     private static func handlePost<Context: RequestContext>(
