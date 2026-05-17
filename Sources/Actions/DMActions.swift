@@ -393,14 +393,19 @@ private struct DMRegistryResponse: Encodable {
 
 // MARK: - Helpers shared by /send routing
 
-/// Produce a heartbeat checker that consults workers AND ExternalBridgeRegistry.
-/// Used by SonataApp at startup AND by HTTP handlers that need a sync gate.
+/// Produce a heartbeat checker that consults workers + MCPSessionRegistry.
+/// In-app MCP sessions count as "fresh" when their SSE writer is attached;
+/// the worker pool falls back to the lastHeartbeat column in the workers
+/// table (refreshed by MCPSessionSweeper).
 func makeProductionHeartbeatChecker(dbPool: DatabasePool) -> DMHeartbeatChecker {
     DMHeartbeatChecker(isFresh: { sessionId in
         let cutoff = nowMs() - DMLimits.heartbeatStaleAfterMs
-        // External bridges first — fast in-memory check.
-        for (sid, entry) in ExternalBridgeRegistry.shared.snapshot() {
-            if sid == sessionId && entry.lastHeartbeat >= cutoff { return true }
+        // MCP sessions first — SSE attach is the presence proof.
+        if let reg = MCPSessionRegistry.shared {
+            let snaps = await reg.snapshot()
+            if snaps.contains(where: { $0.sessionKey == sessionId && $0.hasSSE }) {
+                return true
+            }
         }
         // Fall through to workers table.
         do {

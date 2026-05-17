@@ -97,8 +97,7 @@ struct DashboardView: View {
                         // pool look like right now" is the natural follow-on to
                         // the totals above.
                         LiveWorkersSection(
-                            workers: workerManager.workers,
-                            externalBridgeCount: status.externalBridgeCount
+                            workers: workerManager.workers
                         ) { worker in
                             WorkerManager.shared.selectedWorkerId = worker.id
                             selectedTab = .workers
@@ -302,7 +301,6 @@ private struct StatusResponse: Decodable {
     let entitiesByType: [String: Int]?
     let workerCount: Int?
     let workersByStatus: [String: Int]?
-    let externalBridgeCount: Int?
     let pendingTasks: Int?
     let tasksByStatus: [String: Int]?
     let failedTasks: Int?
@@ -330,7 +328,6 @@ private struct SystemStatus {
     let entitiesByType: [String: Int]
     let workerCount: Int
     let workersByStatus: [String: Int]
-    let externalBridgeCount: Int
     let pendingTasks: Int
     let tasksByStatus: [String: Int]
     let failedTasks: Int
@@ -363,9 +360,6 @@ private struct SystemStatus {
         self.entitiesByType = r.entitiesByType ?? [:]
         self.workerCount = r.workerCount ?? 0
         self.workersByStatus = r.workersByStatus ?? [:]
-        // Older servers won't have this field; default to 0 so the chip just
-        // hides until a fresh binary lands.
-        self.externalBridgeCount = r.externalBridgeCount ?? 0
         self.pendingTasks = r.pendingTasks ?? 0
         self.tasksByStatus = r.tasksByStatus ?? [:]
         // Older servers won't have these fields; default to 0 so the Attention
@@ -659,7 +653,6 @@ private struct StatCard: View {
 
 private struct LiveWorkersSection: View {
     let workers: [Worker]
-    let externalBridgeCount: Int
     let onTapRow: (Worker) -> Void
 
     private var busyCount: Int {
@@ -682,9 +675,6 @@ private struct LiveWorkersSection: View {
                 Text("· \(busyCount) busy")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if externalBridgeCount > 0 {
-                    ExternalBridgesChip(count: externalBridgeCount)
-                }
                 Spacer()
                 Button {
                     WorkerManager.shared.addWorker()
@@ -718,28 +708,6 @@ private struct LiveWorkersSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(Color.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-/// Compact pill on the LiveWorkersSection header showing how many
-/// sonata-bridge.ts processes are running outside the worker pool — typically
-/// interactive `claude` (or claude-patched) sessions with sonata-bridge as an
-/// MCP server. Hidden when the count is zero.
-private struct ExternalBridgesChip: View {
-    let count: Int
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "person.fill.viewfinder")
-                .font(.caption2)
-            Text("\(count) external")
-                .font(.caption.weight(.medium))
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Color.cyan.opacity(0.18), in: Capsule())
-        .help("\(count) external Claude session\(count == 1 ? "" : "s") — sonata-bridge.ts processes that aren't pool workers")
     }
 }
 
