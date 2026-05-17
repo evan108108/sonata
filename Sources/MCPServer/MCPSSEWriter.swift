@@ -60,9 +60,10 @@ final class MCPSSEWriter: @unchecked Sendable {
     }
 
     func close() {
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else { return }
+        lock.lock()
+        if closed { lock.unlock(); return }
         closed = true
+        lock.unlock()
         continuation.finish()
     }
 
