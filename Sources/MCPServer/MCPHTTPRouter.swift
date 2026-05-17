@@ -55,6 +55,45 @@ enum MCPHTTPRouter {
                 logger: logger
             )
         }
+
+        // ⚠️ EXPLICIT TOKEN ROTATION — destructive operation.
+        //
+        // Body: {"sessionKey": "orchestrator"}
+        //
+        // CONSEQUENCES — read before calling:
+        //   1. EVERY claude session currently holding the OLD bearer for
+        //      this sessionKey will start receiving HTTP 401 on every MCP
+        //      call. Their tools silently stop working. The session does
+        //      NOT recover until the claude process is restarted so it
+        //      re-reads ~/.claude.json (which this route rewrites in
+        //      lock-step for sessionKey "orchestrator").
+        //   2. The on-disk persist file at ~/.sonata/secrets/<key>.token
+        //      is overwritten. There is no "undo" — old token can't be
+        //      recovered.
+        //   3. For sessionKey "orchestrator" specifically: ~/.claude.json
+        //      AND ~/.claude/mcp.json get rewritten with the new bearer.
+        //      Any new claude launched after this call picks up the new
+        //      token automatically. Any claude launched BEFORE this call
+        //      keeps the old token in memory and is now broken.
+        //
+        // USE THIS ONLY WHEN:
+        //   - You believe the token has been compromised.
+        //   - You're doing a scheduled security rotation and are prepared
+        //     to restart every affected claude session.
+        //   - You're verifying the persist flow end-to-end and intend the
+        //     breakage.
+        //
+        // Tokens DO NOT rotate on Sonata restart. The persist file is
+        // only ever overwritten by THIS route or by manually removing the
+        // file (then next boot mints a fresh one via
+        // loadOrCreatePersistedToken). There is no automatic rotation.
+        router.post("/api/mcp/rotate-token") { request, _ -> Response in
+            return await rotateToken(
+                request: request,
+                registry: registry,
+                logger: logger
+            )
+        }
     }
 
     private static func issueCredential(
@@ -109,6 +148,87 @@ enum MCPHTTPRouter {
                 body: ResponseBody(byteBuffer: buf))
         } catch {
             logger.warning("issueCredential failed for \(sessionKey): \(error)")
+            return Response(status: .internalServerError)
+        }
+    }
+
+    /// See the comment block on the route registration above for the
+    /// full consequences-of-calling docstring. This handler:
+    ///   1. Validates body {sessionKey}.
+    ///   2. Deletes the on-disk persist file (~/.sonata/secrets/<key>.token).
+    ///   3. Calls writeAndRegister(persistToken: true) which mints a fresh
+    ///      token (file gone), persists the new value, registers it in
+    ///      MCPSessionRegistry, and rewrites the per-session config file.
+    ///   4. For sessionKey "orchestrator" specifically, also calls
+    ///      rewriteGlobalSonataBridgeToHTTP() to sync ~/.claude.json and
+    ///      ~/.claude/mcp.json so freshly-launched claude sessions pick up
+    ///      the new bearer.
+    private static func rotateToken(
+        request: Request,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        let hostRaw = request.headers[HTTPField.Name("host")!] ?? ""
+        let host = hostRaw.split(separator: ":").first.map(String.init) ?? hostRaw
+        if !host.isEmpty && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+            return Response(status: .forbidden)
+        }
+        let bodyBuffer: ByteBuffer
+        do {
+            bodyBuffer = try await request.body.collect(upTo: 4 * 1024)
+        } catch {
+            return Response(status: .badRequest)
+        }
+        let data = Data(buffer: bodyBuffer)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionKey = json["sessionKey"] as? String,
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        // Delete persist file so writeAndRegister mints a fresh one.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let tokenFile = home
+            .appendingPathComponent(".sonata/secrets")
+            .appendingPathComponent("\(sessionKey).token")
+        try? FileManager.default.removeItem(at: tokenFile)
+        do {
+            let cred = try await MCPClaudeConfigWriter.writeAndRegister(
+                sessionKey: sessionKey,
+                role: .interactive,
+                registry: registry,
+                persistToken: true
+            )
+            // Orchestrator is referenced from ~/.claude.json and
+            // ~/.claude/mcp.json — keep those in lock-step. Also refresh
+            // the well-known ~/.sonata/mcp-config-orchestrator.json copy.
+            if sessionKey == "orchestrator" {
+                let stableDst = home.appendingPathComponent(".sonata/mcp-config-orchestrator.json")
+                try? FileManager.default.removeItem(at: stableDst)
+                try? FileManager.default.copyItem(at: cred.configPath, to: stableDst)
+                rewriteGlobalSonataBridgeToHTTP(
+                    home: home,
+                    sessionKey: sessionKey,
+                    bearerToken: cred.bearerToken,
+                    port: 3211
+                )
+            }
+            logger.warning("⚠️ Token rotated for sessionKey=\(sessionKey). All live claude sessions holding the previous bearer are now 401-ing on MCP calls and must be restarted.")
+            let payload: [String: Any] = [
+                "sessionKey": cred.sessionKey,
+                "newBearerToken": cred.bearerToken,
+                "configPath": cred.configPath.path,
+                "warning": "Live claude sessions holding the previous bearer now 401 on all MCP calls. Restart each affected claude process to pick up the new token from ~/.claude.json.",
+            ]
+            let outData = try JSONSerialization.data(
+                withJSONObject: payload, options: [.sortedKeys])
+            var buf = ByteBufferAllocator().buffer(capacity: outData.count)
+            buf.writeBytes(outData)
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json"
+            return Response(status: .ok, headers: headers,
+                body: ResponseBody(byteBuffer: buf))
+        } catch {
+            logger.warning("rotateToken failed for \(sessionKey): \(error)")
             return Response(status: .internalServerError)
         }
     }
