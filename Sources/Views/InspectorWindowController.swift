@@ -59,7 +59,17 @@ final class InspectorWindowController: NSObject, LocalProcessTerminalViewDelegat
         env.append("PATH=\(mergedPath.isEmpty ? currentPath : "\(mergedPath):\(currentPath)")")
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=1")
-        env.append("SONATA_ROLE=inspector")
+
+        // Per plan §6: inspector uses MCP tools too (see file docstring).
+        // SessionKey is a stable inspector- prefix of the resumed session
+        // id so the registry can distinguish inspector windows from the
+        // worker they're inspecting (different sessionKey, no collision).
+        let mcpSessionKey = "inspector-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
+        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
+            sessionKey: String(mcpSessionKey), role: .interactive)
+        if inProcExtras == nil {
+            env.append("SONATA_ROLE=inspector")
+        }
 
         // Pass through auth keys
         let dotEnv = WorkerCoordinator.loadDotEnv(path: "\(home)/.sonata/.env")
@@ -75,11 +85,14 @@ final class InspectorWindowController: NSObject, LocalProcessTerminalViewDelegat
             }
         }
 
-        let args: [String] = [
+        var args: [String] = [
             "--resume", sessionId,
             "--dangerously-skip-permissions",
             "--dangerously-load-development-channels", "server:sonata-bridge",
         ]
+        if let extras = inProcExtras {
+            args.append(contentsOf: extras)
+        }
 
         let terminal = view.getTerminal()
         terminal.resetToInitialState()

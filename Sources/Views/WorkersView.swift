@@ -625,7 +625,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     func startProcess(restartNudge: Bool = false, taskId: String? = nil, lastEventId: String? = nil) {
         guard let view = terminalView else { return }
 
-        let env = WorkerCoordinator.buildEnvironment(
+        let launch = WorkerCoordinator.buildLaunchEnv(
             workerId: worker.id,
             sessionId: worker.sessionId,
             sessionLabel: worker.label,
@@ -657,11 +657,13 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             if let channel = WorkerManager.channelServer {
                 args.append(contentsOf: ["--dangerously-load-development-channels", "server:\(channel)"])
             }
+            // Spread any --mcp-config args from the in-proc opt-in path.
+            args.append(contentsOf: launch.extraArgs)
 
             view.startProcess(
                 executable: WorkerManager.claudeBinary,
                 args: args,
-                environment: env,
+                environment: launch.env,
                 currentDirectory: WorkerManager.workingDirectory
             )
 
@@ -739,6 +741,14 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
     }
 
+    struct LaunchEnv {
+        let env: [String]
+        let extraArgs: [String]
+    }
+
+    /// Backwards-compat shim — pre-§6 call sites that only need the env
+    /// (e.g. tests) keep working. New code should prefer
+    /// `buildLaunchEnv(...)` and spread `.extraArgs` into the claude args.
     static func buildEnvironment(
         workerId: String,
         sessionId: String? = nil,
@@ -747,6 +757,31 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         taskId: String? = nil,
         lastEventId: String? = nil
     ) -> [String] {
+        return buildLaunchEnv(
+            workerId: workerId,
+            sessionId: sessionId,
+            sessionLabel: sessionLabel,
+            restartNudge: restartNudge,
+            taskId: taskId,
+            lastEventId: lastEventId
+        ).env
+    }
+
+    /// Per plan §6: returns env-vars plus any extra args to spread into
+    /// the claude command line. When SONATA_MCP_INPROC=1 and the
+    /// MCPSessionRegistry is published, `extraArgs` carries
+    /// `["--mcp-config", "<path>"]` and the legacy WORKER_ID /
+    /// SONA_SESSION_ID / restart-nudge env-vars are omitted (the new
+    /// MCP server learns identity from the URL path). Flag unset =
+    /// byte-for-byte identical to pre-§6.
+    static func buildLaunchEnv(
+        workerId: String,
+        sessionId: String? = nil,
+        sessionLabel: String? = nil,
+        restartNudge: Bool = false,
+        taskId: String? = nil,
+        lastEventId: String? = nil
+    ) -> LaunchEnv {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
@@ -766,22 +801,54 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("PATH=\(mergedPath.isEmpty ? currentPath : "\(mergedPath):\(currentPath)")")
 
         env.append("HOME=\(home)")
-        env.append("WORKER_ID=\(workerId)")
         env.append("SONA_WORKER=1")
-        if let sessionLabel {
-            env.append("SESSION_LABEL=\(sessionLabel)")
-        }
-        if let sessionId {
-            env.append("SONA_SESSION_ID=\(sessionId)")
-        }
-        if restartNudge {
-            env.append("SONATA_RESTART_NUDGE=1")
-        }
-        if let taskId {
-            env.append("SONATA_RESTART_TASK_ID=\(taskId)")
-        }
-        if let lastEventId {
-            env.append("SONATA_RESTART_LAST_EVENT_ID=\(lastEventId)")
+
+        // Per plan §6: opt-in in-proc MCP via SONATA_MCP_INPROC=1.
+        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(sessionKey: workerId, role: .worker)
+        if inProcExtras != nil {
+            // SONA_SESSION_ID still emitted (mem-server.ts sibling-injection
+            // compatibility — Open Question 3 in plan §12). Other legacy
+            // identity vars (WORKER_ID, SESSION_LABEL, restart-nudge trio)
+            // are NOT emitted: identity is in the URL path now, and the
+            // restart nudge fires inline via MCPNotificationDispatcher
+            // after spawn (scheduled below).
+            if let sessionId {
+                env.append("SONA_SESSION_ID=\(sessionId)")
+            }
+            if restartNudge, let taskId, let lastEventId {
+                // Fire the SONATA_RESTART channel notification ~2s after
+                // spawn, once the in-proc SSE writer has had time to
+                // attach. Cheap detached Task; failure is logged but
+                // non-fatal.
+                let nudgeWorkerId = workerId
+                let nudgeTaskId = taskId
+                let nudgeLastEventId = lastEventId
+                Task.detached {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await MCPNotificationDispatcher.shared.pushSonataRestart(
+                        sessionKey: nudgeWorkerId,
+                        taskId: nudgeTaskId,
+                        lastEventId: nudgeLastEventId
+                    )
+                }
+            }
+        } else {
+            env.append("WORKER_ID=\(workerId)")
+            if let sessionLabel {
+                env.append("SESSION_LABEL=\(sessionLabel)")
+            }
+            if let sessionId {
+                env.append("SONA_SESSION_ID=\(sessionId)")
+            }
+            if restartNudge {
+                env.append("SONATA_RESTART_NUDGE=1")
+            }
+            if let taskId {
+                env.append("SONATA_RESTART_TASK_ID=\(taskId)")
+            }
+            if let lastEventId {
+                env.append("SONATA_RESTART_LAST_EVENT_ID=\(lastEventId)")
+            }
         }
 
         // Pass through auth and API keys from parent environment or .env file
@@ -807,7 +874,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             }
         }
 
-        return env
+        return LaunchEnv(env: env, extraArgs: inProcExtras ?? [])
     }
 
     static func loadDotEnv(path: String) -> [String: String] {

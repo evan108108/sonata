@@ -411,6 +411,10 @@ struct SonataApp: App {
                 // every existing stdio-bridge session unaffected during
                 // Phase B/C.
                 let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: registry)
+                // Publish to coordinators that spawn claude sessions outside
+                // this task graph (SupervisorCoordinator, WorkerCoordinator,
+                // InteractiveSessionTab, InspectorWindowController).
+                MCPSessionRegistry.shared = mcpRegistry
                 MCPHTTPRouter.register(
                     on: router,
                     registry: mcpRegistry,

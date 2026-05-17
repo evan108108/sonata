@@ -2,6 +2,14 @@ import Foundation
 import GRDB
 
 actor MCPSessionRegistry {
+    /// Set once during SonataApp HTTP-server startup. Coordinators that
+    /// spawn claude sessions (Supervisor / Worker / Interactive / Inspector)
+    /// read this to obtain the registry for credential issuance without
+    /// having to plumb it through every constructor. Nil during the brief
+    /// window before SonataApp publishes it; coordinators treat that as
+    /// "fall back to legacy env-var bridge."
+    nonisolated(unsafe) static var shared: MCPSessionRegistry?
+
     private var sessions: [String: MCPSessionState] = [:]
     private var tokens: [String: String] = [:]
 
