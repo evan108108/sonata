@@ -402,6 +402,33 @@ struct SonataApp: App {
                 })
                 logger.info("MCP WebSocket endpoint registered at ws://127.0.0.1:\(port)/mcp")
 
+                // In-app MCP HTTP+SSE server — replaces sonata-bridge.ts.
+                // Routes are always mounted (cheap, idempotent) but no
+                // existing session uses them unless SONATA_MCP_INPROC=1
+                // is set at app launch — which is what the coordinators
+                // in §6 of the plan check before writing `"type": "http"`
+                // into a session's --mcp-config. Off-by-default keeps
+                // every existing stdio-bridge session unaffected during
+                // Phase B/C.
+                let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: registry)
+                MCPHTTPRouter.register(
+                    on: router,
+                    registry: mcpRegistry,
+                    actionRegistry: registry,
+                    dbPool: pool,
+                    logger: logger
+                )
+                await MCPNotificationDispatcher.shared.bind(registry: mcpRegistry)
+                let mcpSweeper = MCPSessionSweeper(
+                    registry: mcpRegistry,
+                    dbPool: pool,
+                    logger: logger
+                )
+                await mcpSweeper.start()
+                let mcpEventPusher = MCPEventPusher(dbPool: pool, logger: logger)
+                await mcpEventPusher.start()
+                logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
+
                 // Serve web dashboard files (HTML/CSS/JS)
                 let webPaths = [
                     "\(NSHomeDirectory())/memory/Sonata/Sources/Sonata/Resources/web",

@@ -49,5 +49,18 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // Phase A smoke-test executable — proves notifications/claude/channel
+        // works over HTTP+SSE to a real Claude Code session before Phase B.
+        // Plan: /Users/evan/memory/claude/documents/plans/sonata-mcp-in-app-server-plan.md §4.
+        .executableTarget(
+            name: "MCPHTTPSmokeTest",
+            dependencies: [
+                .product(name: "Hummingbird", package: "hummingbird"),
+            ],
+            path: "Tools/MCPHTTPSmokeTest",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
     ]
 )
