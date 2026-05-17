@@ -627,7 +627,7 @@ log "Migration complete!"
 # ============================================================================
 # Write migration report
 # ============================================================================
-REPORT="/Users/evan/memory/claude/documents/evenflow/SONATA_MIGRATION_REPORT.md"
+REPORT="/Users/evan/memory/claude/documents/plans/SONATA_MIGRATION_REPORT.md"
 mkdir -p "$(dirname "$REPORT")"
 cat > "$REPORT" << REPORT_EOF
 # Sonata Migration Report

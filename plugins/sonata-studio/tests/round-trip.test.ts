@@ -1,5 +1,5 @@
 // Phase 2 T8 — Round-trip self-test (acceptance gate). Per plan §8 of
-// /Users/evan/memory/claude/documents/evenflow/sonata-studio-v0-phase2-plan.md.
+// /Users/evan/memory/claude/documents/plans/sonata-studio-v0-phase2-plan.md.
 //
 // Spawns the plugin binary (bin/sonata-studio) against an in-process Sonata
 // memory shim and the live api.4a4.ai gateway. Walks steps 1–13 of §8:

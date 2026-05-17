@@ -13,7 +13,7 @@ import SQLite3
 // DMRegistry enqueue, so a bridge that registers after the fact can backfill
 // via /api/dm/inbox.
 //
-// Plan: /Users/evan/memory/claude/documents/evenflow/sonar-dm-v0-plan.md
+// Plan: /Users/evan/memory/claude/documents/plans/sonar-dm-v0-plan.md
 // Sections: §4 (Sonata-side endpoints), §6 (MCP types), §7 (error policy),
 // §11 (locked decisions), §12 (security findings A.1, A.7), §13 (limits).
 
