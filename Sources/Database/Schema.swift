@@ -298,25 +298,9 @@ func createSchema(in db: Database) throws {
         )
     """)
 
-    // MARK: backgroundJobs
-    try db.execute(sql: """
-        CREATE TABLE IF NOT EXISTS backgroundJobs (
-            id           TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-            name         TEXT NOT NULL,
-            status       TEXT NOT NULL DEFAULT 'pending',
-            prompt       TEXT NOT NULL,
-            model        TEXT,
-            maxTurns     INTEGER,
-            result       TEXT,
-            error        TEXT,
-            createdAt    INTEGER NOT NULL,
-            startedAt    INTEGER,
-            completedAt  INTEGER
-        )
-    """)
-
-    try db.execute(sql: "CREATE INDEX IF NOT EXISTS backgroundJobs_by_status      ON backgroundJobs(status)")
-    try db.execute(sql: "CREATE INDEX IF NOT EXISTS backgroundJobs_by_name_status ON backgroundJobs(name, status)")
+    // backgroundJobs table intentionally absent — retired 2026-05-17 along with
+    // BackgroundJobRunner + ClaudeProcessManager (Evan directive thread 1620020f).
+    // v11_drop_backgroundjobs drops the table on existing installs. Do not re-add.
 
     // MARK: scheduledJobs
     try db.execute(sql: """
@@ -783,6 +767,15 @@ extension DatabaseMigrator {
             do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentCwdBasename TEXT") } catch { /* column exists */ }
             do { try db.execute(sql: "ALTER TABLE promptCacheStats ADD COLUMN sessionLabel TEXT") } catch { /* column exists */ }
             do { try db.execute(sql: "ALTER TABLE promptCacheStats ADD COLUMN cwdBasename TEXT") } catch { /* column exists */ }
+        }
+
+        // v11: drop the `backgroundJobs` table. Retired 2026-05-17 along with
+        // BackgroundJobRunner + ClaudeProcessManager (commits 1e74c68, b9cea03)
+        // per Evan directive thread 1620020f. Zero writers, zero readers — the
+        // 5 enqueue sites in CompositeActions now insert into `tasks` instead.
+        // Safe to DROP: the table sat empty on every live install after b9cea03.
+        registerMigration("v11_drop_backgroundjobs") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS backgroundJobs")
         }
     }
 }

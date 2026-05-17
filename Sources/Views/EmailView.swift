@@ -60,6 +60,7 @@ struct EmailView: View {
                     }
                     .listStyle(.sidebar)
                     .frame(minWidth: 300)
+                    .warmSidebar()
 
                     // Detail pane
                     if let email = selectedEmail {

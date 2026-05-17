@@ -23,7 +23,7 @@ struct SettingsView: View {
             // Header
             HStack {
                 Text("Settings")
-                    .font(.title.bold())
+                    .font(Theme.Typography.displayLarge)
                 Spacer()
             }
             .padding()
@@ -36,7 +36,7 @@ struct SettingsView: View {
                     VStack(spacing: 0) {
                         HStack {
                             Text("General")
-                                .font(.headline)
+                                .font(Theme.Typography.displayMedium)
                             Spacer()
                         }
                         .padding(.horizontal)
@@ -87,7 +87,7 @@ struct SettingsView: View {
                                 .onSubmit { saveOwnerEmail() }
                             if ownerEmailSaved {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
+                                    .foregroundStyle(Theme.Color.statusRunning)
                                     .transition(.opacity)
                             }
                         }
@@ -96,7 +96,7 @@ struct SettingsView: View {
                     }
                     .background(.background)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Color.accentEmber.opacity(0.18), lineWidth: 0.5))
 
                     // MARK: - Secrets Section
                     VStack(spacing: 0) {
@@ -107,7 +107,7 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                                     .frame(width: 16)
                                 Text("Secrets")
-                                    .font(.headline)
+                                    .font(Theme.Typography.displayMedium)
                                 if !secretsExpanded && !secrets.isEmpty {
                                     Text("\(secrets.count)")
                                         .font(.caption)
@@ -200,7 +200,7 @@ struct SettingsView: View {
                     }
                     .background(.background)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Color.accentEmber.opacity(0.18), lineWidth: 0.5))
 
                     // MARK: - Email Inboxes Section
                     collapsibleSection("Email Inboxes", icon: "envelope.fill", expanded: $emailExpanded) {
@@ -257,10 +257,14 @@ struct SettingsView: View {
             loadOwnerEmail()
             launchAtLogin = SMAppService.mainApp.status == .enabled
         }
+        // Ember tint propagates down to .borderedProminent buttons, focus rings,
+        // toggle switches, and progress views — Sonata-theme accent in one shot
+        // instead of per-element overrides.
+        .tint(Theme.Color.accentEmber)
         .sheet(isPresented: $showingPathInput) {
             VStack(spacing: 16) {
                 Text("Import .env File")
-                    .font(.headline)
+                    .font(Theme.Typography.displaySmall)
                 Text("Enter the full path to your .env file:")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -351,7 +355,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 16)
                     Label(title, systemImage: icon)
-                        .font(.headline)
+                        .font(Theme.Typography.displayMedium)
                     Spacer()
                 }
                 .padding(.horizontal)
@@ -365,7 +369,7 @@ struct SettingsView: View {
         }
         .background(.background)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Color.accentEmber.opacity(0.18), lineWidth: 0.5))
     }
 
     private func loadOwnerEmail() {
@@ -446,7 +450,7 @@ struct WorkerCyclingSettingsView: View {
         VStack(spacing: 0) {
             HStack {
                 Text("Workers")
-                    .font(.headline)
+                    .font(Theme.Typography.displayMedium)
                 Spacer()
                 if pauseCycling {
                     Text("PAUSED")
@@ -547,7 +551,7 @@ private struct AddSecretSheet: View {
     var body: some View {
         VStack(spacing: 16) {
             Text("Add Secret")
-                .font(.headline)
+                .font(Theme.Typography.displaySmall)
 
             Form {
                 TextField("Key name (e.g. ANTHROPIC_API_KEY)", text: $name)
@@ -639,7 +643,7 @@ struct StudioSettingsView: View {
                         ProgressView().controlSize(.small)
                     } else if savedFlash {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(Theme.Color.statusRunning)
                     } else {
                         Text("Save")
                     }
@@ -657,7 +661,8 @@ struct StudioSettingsView: View {
             // `studio:user_profile.default_storage_config` attribute.
             Divider().padding(.horizontal)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Default storage").bold()
+                Text("Default storage")
+                    .font(Theme.Typography.displaySmall)
                 Text("Backend used for new rooms (Blossom URL or S3-compatible). Each room can override in its gear menu.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -706,17 +711,20 @@ struct StudioSettingsView: View {
         persistProfile()
     }
 
+    // `studio:user_profile` is a singleton entity with multiple writers
+    // (this Settings pane, auto-run config, Studio room avatar paths, the
+    // storage config UI...). Never `upsertEntity` it — that replaces the
+    // entire attributes blob, so saving nickname here would silently wipe
+    // `default_storage_config`, `room_avatar_paths`, and any other key
+    // some other code path owns. Always merge — read current attrs and
+    // PATCH only the keys we own. `mergeIntoUserProfile` (StudioStore.swift)
+    // does exactly that.
     private func save() {
         let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         nickname = trimmed
         saving = true
         Task {
-            await EntityHTTP.upsertEntity(
-                name: "studio:user_profile",
-                type: "studio_user_profile",
-                description: "Local default profile (machine-only, not federated directly)",
-                attributes: profileAttributes()
-            )
+            await EntityHTTP.mergeIntoUserProfile(profileAttributes())
             await MainActor.run {
                 saving = false
                 savedFlash = true
@@ -728,12 +736,7 @@ struct StudioSettingsView: View {
 
     private func persistProfile() {
         Task {
-            await EntityHTTP.upsertEntity(
-                name: "studio:user_profile",
-                type: "studio_user_profile",
-                description: "Local default profile (machine-only, not federated directly)",
-                attributes: profileAttributes()
-            )
+            await EntityHTTP.mergeIntoUserProfile(profileAttributes())
         }
     }
 

@@ -372,7 +372,6 @@ struct SonataApp: App {
                 registry.register(documentActions)
                 registry.register(embeddingActions)
                 registry.register(contactActions)
-                registry.register(backgroundActions)
                 registry.register(fileActions)
                 registry.register(systemActions)
                 registry.register(pithActions)
@@ -535,11 +534,7 @@ struct SonataApp: App {
                 let friendRelay = FriendRelay(dbPool: pool)
                 await friendRelay.start()
 
-                // 4. Background Job Runner
-                let jobRunner = BackgroundJobRunner(dbPool: pool)
-                await jobRunner.start()
-
-                // 5. Task Orchestrator (dispatches pending tasks to Claude sessions)
+                // 4. Task Orchestrator (dispatches pending tasks to bridge workers)
                 let orchestrator = TaskOrchestrator(dbPool: pool)
                 await orchestrator.start()
 
@@ -572,7 +567,7 @@ struct SonataApp: App {
                 // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up
                 // the default pool. Both run on MainActor since they create terminal views.
                 let workerCount = WorkerManager.defaultWorkerCount
-                // sonata-restart-recovery v0 (claude/documents/evenflow/sonata-restart-recovery-v0-plan.md):
+                // sonata-restart-recovery v0 (claude/documents/plans/sonata-restart-recovery-v0-plan.md):
                 // when toggled on, respawn workers that died holding active work, reusing
                 // their prior workerId/sessionId so claude --resume loads the prior JSONL.
                 // Toggle stored in UserDefaults at "restartRecoveryEnabled" (UI exposes it);
@@ -601,7 +596,6 @@ struct SonataApp: App {
                     await scheduler.shutdown()
                     await emailHandler.shutdown()
                     await friendRelay.shutdown()
-                    await jobRunner.shutdown()
                     await healthMonitor.shutdown()
                     await backupManager.shutdown()
                     await wikiWatcher.shutdown()
@@ -648,21 +642,34 @@ struct SonataApp: App {
 
     var body: some Scene {
         WindowGroup("") {
-            ContentView()
-                .frame(minWidth: 900, minHeight: 600)
-                .environment(\.dbPool, dbPool)
-                // s4a:// URL scheme handler. The Info.plist registers the
-                // scheme with macOS LaunchServices; .onOpenURL is what
-                // SwiftUI hands the resulting URL through. Boot-time pending
-                // URLs (Sonata wasn't running when the user clicked the
-                // link) replay through here automatically after launch
-                // finishes — no manual queueing needed.
-                .onOpenURL { url in
-                    if StudioDeepLinkRouter.isInviteURL(url) {
-                        StudioDeepLinkRouter.shared.handle(url: url)
+            StartupGate(dbPool: dbPool, port: sonataPort) {
+                ContentView()
+                    .frame(minWidth: 1100, minHeight: 720)
+                    .environment(\.dbPool, dbPool)
+                    .warmWindowTitlebar()
+                    // s4a:// URL scheme handler. The Info.plist registers the
+                    // scheme with macOS LaunchServices; .onOpenURL is what
+                    // SwiftUI hands the resulting URL through. Boot-time pending
+                    // URLs (Sonata wasn't running when the user clicked the
+                    // link) replay through here automatically after launch
+                    // finishes — no manual queueing needed.
+                    .onOpenURL { url in
+                        if StudioDeepLinkRouter.isInviteURL(url) {
+                            StudioDeepLinkRouter.shared.handle(url: url)
+                        }
                     }
-                }
+            }
+            // Lock Sonata to dark appearance regardless of the user's macOS
+            // setting (Spotify / Discord / Linear pattern). The loader, theme
+            // tokens, and warm chrome are designed for dark; light mode would
+            // wash them out.
+            .preferredColorScheme(.dark)
         }
+        // Default window size on first launch (and a fallback when SwiftUI's
+        // window state restoration fails — currently a regression caused by
+        // our AppKit titlebar interop, TODO investigate). Picked to be roomy
+        // on a 13" MBP without overflowing.
+        .defaultSize(width: 1300, height: 800)
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0
             CommandGroup(after: .toolbar) {
@@ -869,6 +876,7 @@ final class SupervisorWindowController: NSObject, NSWindowDelegate {
 
         // Create terminal view directly (same pattern as Worker)
         let termView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
+        termView.applyWarmChrome()
         let coord = SupervisorCoordinator(terminalView: termView)
         self.coordinator = coord
         termView.processDelegate = coord

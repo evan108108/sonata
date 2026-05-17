@@ -2,14 +2,13 @@ import Foundation
 import GRDB
 import Logging
 
-/// Polls for actionable tasks and dispatches them to Claude sessions.
+/// Polls for actionable tasks and dispatches them to bridge-attached workers.
 ///
-/// Dispatch strategy:
-/// 1. Try to push the task to an idle worker via the channel (SonataChannelServer).
-///    Workers running Claude Code with `--dangerously-load-development-channels server:sonata-channel`
-///    will pick it up through the MCP channel protocol.
-/// 2. If no channel workers are available, fall back to spawning a headless `claude -p` process
-///    via ClaudeProcessManager.
+/// Dispatch: push the task to an idle worker via the channel (SonataChannelServer).
+/// Workers running Claude Code with `--dangerously-load-development-channels server:sonata-channel`
+/// pick it up through the MCP channel protocol. If channel dispatch fails (no idle worker
+/// claimed the event in time), the task stays `pending` and the next poll cycle retries
+/// once a worker frees up. Bridge-only: no headless `claude -p` fallback.
 actor TaskOrchestrator {
     private let dbPool: DatabasePool
     private let logger: Logger
@@ -141,49 +140,10 @@ actor TaskOrchestrator {
             return
         }
 
-        // Strategy 2: Fall back to headless claude -p process
-        logger.info("No channel workers — falling back to ClaudeProcessManager for \"\(title)\"")
-
-        // Mark active only after confirming we can run it
-        activeTasks.insert(taskId)
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        try? await dbPool.write { db in
-            try db.execute(
-                sql: "UPDATE tasks SET status = 'active', startedAt = ?, updatedAt = ? WHERE id = ?",
-                arguments: [now, now, taskId]
-            )
-        }
-
-        if let workerId = try? await findIdleWorker() {
-            try? await dbPool.write { db in
-                try db.execute(
-                    sql: "UPDATE workers SET status = 'busy', currentEventId = ? WHERE workerId = ?",
-                    arguments: [taskId, workerId]
-                )
-            }
-        }
-
-        Task.detached { [weak self] in
-            guard let self = self else { return }
-            do {
-                let model = task.model ?? "claude-opus-4-6"
-                let maxTurns = task.maxTurns ?? 300
-                let cwd = task.workingDir ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("memory").path
-
-                let result = try await ClaudeProcessManager.run(
-                    prompt: prompt,
-                    model: model,
-                    maxTurns: maxTurns,
-                    label: "task:\(title.prefix(30))",
-                    cwd: cwd,
-                    timeoutMs: 600_000
-                )
-
-                await self.completeTask(taskId: taskId, result: result)
-            } catch {
-                await self.failTask(taskId: taskId, error: error.localizedDescription)
-            }
-        }
+        // Channel dispatch failed (no idle worker claimed the event in time).
+        // Leave the task `pending` — the next poll cycle will retry once a
+        // worker frees up. Bridge-only model: no `claude -p` fallback.
+        logger.info("Channel dispatch missed for \"\(title)\" — leaving pending for next poll cycle")
     }
 
     private func priorityToInt(_ priority: String) -> Int {
@@ -195,65 +155,6 @@ actor TaskOrchestrator {
         case "backlog": return 1
         default: return 5
         }
-    }
-
-    private func completeTask(taskId: String, result: ClaudeResult) async {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let summary = "Completed: \(result.numTurns) turns, $\(String(format: "%.4f", result.totalCost)), \(result.durationMs)ms"
-
-        logger.info("Task \(taskId) completed: \(summary)")
-
-        try? await dbPool.write { db in
-            // Mark task complete
-            try db.execute(
-                sql: "UPDATE tasks SET status = 'completed', result = ?, completedAt = ?, updatedAt = ? WHERE id = ?",
-                arguments: [summary, now, now, taskId]
-            )
-
-            // Unblock dependent tasks
-            try unblockDependents(taskId: taskId, in: db, now: now)
-
-            // Roll status up to any parent container.
-            try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
-        }
-
-        // Reset worker to idle, but preserve draining status
-        try? await dbPool.write { db in
-            try db.execute(
-                sql: "UPDATE workers SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'idle' END, currentEventId = NULL WHERE currentEventId = ?",
-                arguments: [taskId]
-            )
-        }
-
-        activeTasks.remove(taskId)
-    }
-
-    private func failTask(taskId: String, error: String) async {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        logger.error("Task \(taskId) failed: \(error)")
-
-        try? await dbPool.write { db in
-            try db.execute(
-                sql: "UPDATE tasks SET status = 'failed', lastError = ?, updatedAt = ? WHERE id = ?",
-                arguments: [error, now, taskId]
-            )
-
-            // Unblock dependent tasks so they don't stay stuck forever
-            try unblockDependents(taskId: taskId, in: db, now: now)
-
-            // Roll status up to any parent container.
-            try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
-        }
-
-        // Reset worker to idle, but preserve draining status
-        try? await dbPool.write { db in
-            try db.execute(
-                sql: "UPDATE workers SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'idle' END, currentEventId = NULL WHERE currentEventId = ?",
-                arguments: [taskId]
-            )
-        }
-
-        activeTasks.remove(taskId)
     }
 
     private func removeActiveTask(_ taskId: String) {
@@ -296,16 +197,6 @@ actor TaskOrchestrator {
         }
     }
 
-    private func findIdleWorker() async throws -> String? {
-        try await dbPool.read { db in
-            try String.fetchOne(db, sql: """
-                SELECT workerId FROM workers
-                WHERE status = 'idle' AND lastHeartbeat >= ?
-                ORDER BY lastHeartbeat DESC
-                LIMIT 1
-            """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 30_000])
-        }
-    }
 }
 
 // Simple row type for reading tasks

@@ -1,15 +1,18 @@
 :root {
-  --bg: #0e0f12;
-  --bg-elev: #16181d;
-  --bg-elev2: #1d2027;
-  --border: #2a2e38;
-  --text: #e6e8ed;
-  --text-dim: #9097a3;
-  --accent: #7aa2f7;
-  --accent-dim: #3d59a1;
+  /* Warm chrome — matches SonataTheme.swift `Theme.Color.bgDeep` /
+     `bgMid` / `bgEmberTop` so embedded HTML views (Tasks, Memory, Files,
+     Wiki, Email) share the same palette as the native Swift chrome. */
+  --bg:        #0f0807;  /* bgDeep    — window background */
+  --bg-elev:   #1f0d05;  /* bgMid     — sidebar / elevated surface */
+  --bg-elev2:  #331505;  /* bgEmberTop — card surface */
+  --border:    rgba(255, 204, 140, 0.12);  /* dividerWarm */
+  --text:      #e6e0d5;
+  --text-dim:  #9a8e7a;
+  --accent:    #ff8c33;  /* accentEmber — primary action */
+  --accent-dim: #cc6618; /* accentRust  — pressed / dim */
   --green: #9ece6a;
-  --yellow: #e0af68;
-  --red: #f7768e;
+  --yellow: #ffd18c;     /* statusRunning */
+  --red: #f25033;        /* statusFailed */
   --purple: #bb9af7;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;

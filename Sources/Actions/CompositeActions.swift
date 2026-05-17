@@ -8,15 +8,16 @@ import Hummingbird
 //
 // Deviations from planning doc (sonata-action-abstraction.md:1936-2333):
 //  - Planning doc used trailing-closure init syntax; we use the real `handler:` param.
-//  - Planning doc referenced a `payload` column on backgroundJobs — schema actually
-//    uses `prompt`. All JSON payloads here go into the `prompt` column.
 //  - Planning doc referenced `parentId` on tasks — schema column is `parentTask`.
 //  - Planning doc referenced undefined formatter symbols (formatWakeBriefing etc.);
 //    those are omitted — results fall back to JSON.
 //  - wikiPages has no `status` column; mem_coverage uses `pageType` surfaced as
 //    `status` to match the spirit of the planning doc.
-//  - mem_visualize is a deferred-execution stub: it enqueues a backgroundJob
-//    instead of calling OpenAI directly.
+//  - mem_think / mem_visualize / mem_embed_backfill / mem_ingest_sessions /
+//    mem_wiki_enrich enqueue rows on the `tasks` table (drained by TaskOrchestrator
+//    via the bridge channel). They used to insert into the `backgroundJobs` table,
+//    which was drained by BackgroundJobRunner spawning `claude -p` — removed
+//    2026-05-17 per Evan directive (thread 1620020f) to reach 0 SDK usage.
 
 // MARK: - Inline response structs
 
@@ -492,7 +493,7 @@ let compositeActions: [SonataAction] = [
         }
     ),
 
-    // mem_think — trigger background thinking
+    // mem_think — enqueue a background-thinking task on the tasks queue
     SonataAction(
         name: "mem_think",
         description: "Trigger background thinking — consolidate, enrich, reflect, hygiene, or free-form.",
@@ -509,14 +510,22 @@ let compositeActions: [SonataAction] = [
             let now = nowMs()
             let jobName = "background-think-\(mode)"
             let promptJSON = "{\"mode\":\"\(jsonEscape(mode))\"}"
+            let dir = "\(NSHomeDirectory())/memory"
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO backgroundJobs (id, name, status, prompt, createdAt)
-                        VALUES (?, ?, 'pending', ?, ?)
+                        INSERT INTO tasks
+                            (id, title, status, priority, prompt,
+                             workingDir, model, blockedBy, originalBlockedBy,
+                             source, outputFiles, tags, retryCount, tools,
+                             createdAt, updatedAt)
+                        VALUES (?, ?, 'pending', 'normal', ?,
+                                ?, 'sonnet', '[]', '[]',
+                                ?, '[]', '[]', 0, '[]',
+                                ?, ?)
                         """,
-                        arguments: [id, jobName, promptJSON, now]
+                        arguments: [id, jobName, promptJSON, dir, jobName, now, now]
                     )
                 }
             } catch {
@@ -682,14 +691,22 @@ let compositeActions: [SonataAction] = [
             let promptJSON = """
             {"description":"\(jsonEscape(description))","size":"\(jsonEscape(size))","style":"\(jsonEscape(style))","quality":"\(jsonEscape(quality))"}
             """
+            let dir = "\(NSHomeDirectory())/memory"
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO backgroundJobs (id, name, status, prompt, createdAt)
-                        VALUES (?, 'visualize', 'pending', ?, ?)
+                        INSERT INTO tasks
+                            (id, title, status, priority, prompt,
+                             workingDir, model, blockedBy, originalBlockedBy,
+                             source, outputFiles, tags, retryCount, tools,
+                             createdAt, updatedAt)
+                        VALUES (?, 'visualize', 'pending', 'normal', ?,
+                                ?, 'sonnet', '[]', '[]',
+                                'visualize', '[]', '[]', 0, '[]',
+                                ?, ?)
                         """,
-                        arguments: [id, promptJSON, now]
+                        arguments: [id, promptJSON, dir, now, now]
                     )
                 }
             } catch {
@@ -758,14 +775,22 @@ let compositeActions: [SonataAction] = [
             let id = newUUID()
             let now = nowMs()
             let promptJSON = "{\"count\":\(count)}"
+            let dir = "\(NSHomeDirectory())/memory"
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO backgroundJobs (id, name, status, prompt, createdAt)
-                        VALUES (?, 'embed-backfill', 'pending', ?, ?)
+                        INSERT INTO tasks
+                            (id, title, status, priority, prompt,
+                             workingDir, model, blockedBy, originalBlockedBy,
+                             source, outputFiles, tags, retryCount, tools,
+                             createdAt, updatedAt)
+                        VALUES (?, 'embed-backfill', 'pending', 'normal', ?,
+                                ?, 'sonnet', '[]', '[]',
+                                'embed-backfill', '[]', '[]', 0, '[]',
+                                ?, ?)
                         """,
-                        arguments: [id, promptJSON, now]
+                        arguments: [id, promptJSON, dir, now, now]
                     )
                 }
             } catch {
@@ -775,7 +800,7 @@ let compositeActions: [SonataAction] = [
         }
     ),
 
-    // mem_ingest_sessions — queue session-ingest job
+    // mem_ingest_sessions — queue session-ingest task on the tasks queue
     SonataAction(
         name: "mem_ingest_sessions",
         description: "Queue a background job to ingest new Claude Code session transcripts.",
@@ -801,14 +826,22 @@ let compositeActions: [SonataAction] = [
 
             let id = newUUID()
             let now = nowMs()
+            let dir = "\(NSHomeDirectory())/memory"
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO backgroundJobs (id, name, status, prompt, createdAt)
-                        VALUES (?, 'ingest-sessions', 'pending', ?, ?)
+                        INSERT INTO tasks
+                            (id, title, status, priority, prompt,
+                             workingDir, model, blockedBy, originalBlockedBy,
+                             source, outputFiles, tags, retryCount, tools,
+                             createdAt, updatedAt)
+                        VALUES (?, 'ingest-sessions', 'pending', 'normal', ?,
+                                ?, 'sonnet', '[]', '[]',
+                                'ingest-sessions', '[]', '[]', 0, '[]',
+                                ?, ?)
                         """,
-                        arguments: [id, promptJSON, now]
+                        arguments: [id, promptJSON, dir, now, now]
                     )
                 }
             } catch {
@@ -818,7 +851,7 @@ let compositeActions: [SonataAction] = [
         }
     ),
 
-    // mem_wiki_enrich — queue wiki-enrichment job for a planning doc
+    // mem_wiki_enrich — queue wiki-enrichment task for a planning doc
     SonataAction(
         name: "mem_wiki_enrich",
         description: "Queue a planning doc for wiki enrichment via background job.",
@@ -839,14 +872,22 @@ let compositeActions: [SonataAction] = [
 
             let id = newUUID()
             let now = nowMs()
+            let dir = "\(NSHomeDirectory())/memory"
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO backgroundJobs (id, name, status, prompt, createdAt)
-                        VALUES (?, 'wiki-enrich', 'pending', ?, ?)
+                        INSERT INTO tasks
+                            (id, title, status, priority, prompt,
+                             workingDir, model, blockedBy, originalBlockedBy,
+                             source, outputFiles, tags, retryCount, tools,
+                             createdAt, updatedAt)
+                        VALUES (?, 'wiki-enrich', 'pending', 'normal', ?,
+                                ?, 'sonnet', '[]', '[]',
+                                'wiki-enrich', '[]', '[]', 0, '[]',
+                                ?, ?)
                         """,
-                        arguments: [id, promptJSON, now]
+                        arguments: [id, promptJSON, dir, now, now]
                     )
                 }
             } catch {
