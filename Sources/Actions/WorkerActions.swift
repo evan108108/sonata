@@ -428,6 +428,32 @@ let workerActions: [SonataAction] = [
         }
     ),
 
+    // POST /api/worker/spawn — top the pool up to defaultWorkerCount.
+    // Gives the supervisor an MCP path to self-heal under-capacity pool
+    // states. WorkerManager.maintainPoolSize() is the same routine the
+    // health-poll loop runs; we just expose it as a tool. Fills missing
+    // slot indices only — never grows the pool beyond defaultWorkerCount.
+    //
+    // 2026-05-18 incident: supervisor purged a zombie, auto-spawn brought
+    // up one replacement, then pool stayed at 1/2 because the auto-spawn
+    // path didn't refire. Without this tool the supervisor's only
+    // recourse was to page Evan; #3 separately tracks fixing the
+    // auto-spawn flake itself.
+    SonataAction(
+        name: "worker_spawn",
+        description: "Top the worker pool up to defaultWorkerCount. Returns labels of slots that were spawned; empty array if the pool was already full.",
+        group: "/api/worker",
+        path: "/spawn",
+        method: .post,
+        params: [],
+        handler: { _ in
+            let spawned = await MainActor.run {
+                WorkerManager.shared.maintainPoolSize()
+            }
+            return SpawnResponse(spawned: spawned)
+        }
+    ),
+
     // GET /api/worker/list — all workers with current task info
     SonataAction(
         name: "worker_list",

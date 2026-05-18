@@ -308,17 +308,22 @@ class WorkerManager: ObservableObject {
     /// rather than appending sona-worker-N+1, which would create duplicate-label
     /// drift over time.
     @MainActor
-    func maintainPoolSize() {
+    @discardableResult
+    func maintainPoolSize() -> [String] {
         let target = WorkerManager.defaultWorkerCount
         let prefix = "sona-worker-"
         let occupied: Set<Int> = Set(workers.compactMap { w in
             guard w.label.hasPrefix(prefix) else { return nil }
             return Int(w.label.dropFirst(prefix.count))
         })
+        var spawned: [String] = []
         for idx in 1...target where !occupied.contains(idx) {
-            print("[pool] missing slot — spawning sona-worker-\(idx)")
-            addWorker(label: "sona-worker-\(idx)")
+            let label = "sona-worker-\(idx)"
+            print("[pool] missing slot — spawning \(label)")
+            addWorker(label: label)
+            spawned.append(label)
         }
+        return spawned
     }
 
     func addWorker(label: String? = nil) {
