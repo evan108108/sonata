@@ -148,7 +148,14 @@ actor MCPEventPusher {
                 createdAt: evt.createdAt,
                 content: content
             )
-            if !delivered {
+            if delivered {
+                // Mark the session as in-flight so the sweeper knows to read
+                // transcript usage for this worker on each heartbeat tick.
+                // Cleared by completeEvent / failEvent in MCPToolHandlers.
+                if let state = await registry.get(evt.assignedTo) {
+                    await state.markInFlight(eventId: evt.id)
+                }
+            } else {
                 knownWorkerEventIds.remove(evt.id)
             }
         }

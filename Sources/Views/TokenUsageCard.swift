@@ -71,6 +71,7 @@ final class TokenUsageViewModel: ObservableObject {
 
 struct TokenUsageCard: View {
     @ObservedObject var vm: TokenUsageViewModel
+    @State private var hoveredDate: String?
 
     private static let usdFormatter: NumberFormatter = {
         let f = NumberFormatter()
@@ -79,6 +80,30 @@ struct TokenUsageCard: View {
         f.maximumFractionDigits = 2
         return f
     }()
+
+    private static let tokenFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.groupingSeparator = ","
+        return f
+    }()
+
+    private static let hoverDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE MMM d"
+        return f
+    }()
+
+    private static let isoDateParser: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private func prettyDate(_ iso: String) -> String {
+        guard let d = Self.isoDateParser.date(from: iso) else { return iso }
+        return Self.hoverDateFormatter.string(from: d)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -165,9 +190,51 @@ struct TokenUsageCard: View {
                     endPoint: .bottom
                 ))
                 .interpolationMethod(.monotone)
+
+                if let hoveredDate, hoveredDate == point.date {
+                    RuleMark(x: .value("Day", point.date))
+                        .foregroundStyle(Color.orange.opacity(0.4))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    PointMark(
+                        x: .value("Day", point.date),
+                        y: .value("USD", point.spendUSD)
+                    )
+                    .foregroundStyle(.orange)
+                    .symbolSize(60)
+                    .annotation(position: .top, spacing: 4, overflowResolution: .init(
+                        x: .fit(to: .chart), y: .disabled
+                    )) {
+                        hoverTooltip(for: point)
+                    }
+                }
             }
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
+            .chartXSelection(value: $hoveredDate)
         }
+    }
+
+    @ViewBuilder
+    private func hoverTooltip(for point: DailySpendPoint) -> some View {
+        let usd = Self.usdFormatter.string(from: NSNumber(value: point.spendUSD)) ?? "$0"
+        let tokens = Self.tokenFormatter.string(from: NSNumber(value: point.totalTokens)) ?? "0"
+        VStack(alignment: .leading, spacing: 2) {
+            Text(prettyDate(point.date))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.primary)
+            Text(usd)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.orange)
+            Text("\(tokens) tok")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.black.opacity(0.85))
+                .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+        )
     }
 }
