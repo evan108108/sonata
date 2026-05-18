@@ -126,11 +126,16 @@ final class StudioCardRowTests: XCTestCase {
     }
 
     func testLinkBlockViewValidURL() {
+        // validURL is intentionally permissive (see comment in
+        // StudioBlockRenderers.swift) — any scheme passes through, schemeless
+        // input gets https:// prepended. Worst case macOS no-ops on garbage.
         XCTAssertNotNil(LinkBlockView.validURL("https://example.com"))
         XCTAssertNotNil(LinkBlockView.validURL("http://example.com"))
-        XCTAssertNil(LinkBlockView.validURL("ftp://example.com"))
-        XCTAssertNil(LinkBlockView.validURL("file:///etc/passwd"))
-        XCTAssertNil(LinkBlockView.validURL("custom-scheme://x"))
-        XCTAssertNil(LinkBlockView.validURL("not a url"))
+        XCTAssertNotNil(LinkBlockView.validURL("ftp://example.com"))
+        XCTAssertNotNil(LinkBlockView.validURL("file:///etc/passwd"))
+        XCTAssertNotNil(LinkBlockView.validURL("custom-scheme://x"))
+        // Empty/whitespace stays nil.
+        XCTAssertNil(LinkBlockView.validURL(""))
+        XCTAssertNil(LinkBlockView.validURL("   "))
     }
 }

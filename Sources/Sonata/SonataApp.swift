@@ -43,29 +43,24 @@ func ensureGlobalMCPServers() {
         sonataFileLog("MCP setup: deployed mem-server.ts to ~/.sonata/mcp/")
     }
 
-    // Copy sonata-bridge.ts from bundle (always overwrite to keep in sync with app version)
-    if let bridgeURL = Bundle.module.url(forResource: "sonata-bridge", withExtension: "ts", subdirectory: "mcp") {
-        let dest = mcpDir.appendingPathComponent("sonata-bridge.ts")
-        try? fm.removeItem(at: dest)
-        try? fm.copyItem(at: bridgeURL, to: dest)
-        sonataFileLog("MCP setup: deployed sonata-bridge.ts to ~/.sonata/mcp/")
-    }
+    // Phase D — sonata-bridge.ts is no longer deployed. The in-app
+    // HTTP+SSE server replaces it. Existing ~/.sonata/mcp/sonata-bridge.ts
+    // files on disk are left alone in case long-lived terminal sessions
+    // are still holding them open as stdio children; they'll be cleaned
+    // up manually after the migration soaks.
 
     // 2. Register in both ~/.claude/mcp.json (Claude Code) and ~/.claude.json (Claude Desktop)
     let memServerPath = mcpDir.appendingPathComponent("mem-server.ts").path
-    let bridgePath = mcpDir.appendingPathComponent("sonata-bridge.ts").path
 
+    // Memory remains stdio (own migration). sonata-bridge is no longer
+    // written here — the HTTP+SSE entry is installed later in the boot
+    // sequence by rewriteGlobalSonataBridgeToHTTP() once the in-app MCP
+    // server is up and the orchestrator credential has been minted.
     let requiredServers: [String: [String: Any]] = [
         "memory": [
             "type": "stdio",
             "command": "bun",
             "args": ["run", memServerPath],
-        ],
-        "sonata-bridge": [
-            "type": "stdio",
-            "command": "bun",
-            "args": [bridgePath],
-            "env": ["SONA_WORKER": "1"],
         ],
     ]
 
@@ -103,6 +98,48 @@ func ensureGlobalMCPServers() {
             }
         } catch {
             sonataFileLog("MCP setup: failed to update \(configPath.lastPathComponent) — \(error)")
+        }
+    }
+}
+
+/// Phase C.5 — Rewrite the `sonata-bridge` entry in the global Claude Code
+/// MCP configs (~/.claude.json and ~/.claude/mcp.json) to point at the
+/// in-app HTTP+SSE MCP server. External launchers that load these configs
+/// (terminal `claude`, `sona` alias without --mcp-config, per-project
+/// sessions that don't override) inherit the orchestrator session and
+/// stop spawning bun stdio bridges.
+///
+/// Token rotates on every Sonata boot — both files get re-written, both
+/// files get the same fresh token. Stale tokens in the file simply 401
+/// on first use; the user re-launches and gets the fresh one.
+func rewriteGlobalSonataBridgeToHTTP(
+    home: URL, sessionKey: String, bearerToken: String, port: Int
+) {
+    let httpEntry: [String: Any] = [
+        "type": "http",
+        "url": "http://localhost:\(port)/mcp/\(sessionKey)",
+        "headers": ["Authorization": "Bearer \(bearerToken)"],
+    ]
+    let configPaths = [
+        home.appendingPathComponent(".claude/mcp.json"),
+        home.appendingPathComponent(".claude.json"),
+    ]
+    for configPath in configPaths {
+        do {
+            var json: [String: Any] = [:]
+            if let data = try? Data(contentsOf: configPath) {
+                json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            }
+            var mcpServers = json["mcpServers"] as? [String: Any] ?? [:]
+            mcpServers["sonata-bridge"] = httpEntry
+            json["mcpServers"] = mcpServers
+            let output = try JSONSerialization.data(
+                withJSONObject: json,
+                options: [.prettyPrinted, .sortedKeys])
+            try output.write(to: configPath)
+            sonataFileLog("Phase C.5: rewrote 'sonata-bridge' entry in \(configPath.lastPathComponent) → HTTP /mcp/\(sessionKey)")
+        } catch {
+            sonataFileLog("Phase C.5: failed to rewrite \(configPath.lastPathComponent) — \(error)")
         }
     }
 }
@@ -350,9 +387,9 @@ struct SonataApp: App {
                 registry.register(entityActions)
                 registry.register(relationActions)
                 registry.register(taskActions)
+                registry.register(taskWatcherActions)
                 registry.register(workerActions)
                 registry.register(workerEventActions)
-                registry.register(bridgeActions)
                 registry.register(inspectorAction)
                 registry.register(afkActions)
                 registry.register(dmActions)
@@ -400,6 +437,67 @@ struct SonataApp: App {
                     }
                 })
                 logger.info("MCP WebSocket endpoint registered at ws://127.0.0.1:\(port)/mcp")
+
+                // In-app MCP HTTP+SSE server — replaces sonata-bridge.ts.
+                // Routes are always mounted (cheap, idempotent) but no
+                // existing session uses them unless SONATA_MCP_INPROC=1
+                // is set at app launch — which is what the coordinators
+                // in §6 of the plan check before writing `"type": "http"`
+                // into a session's --mcp-config. Off-by-default keeps
+                // every existing stdio-bridge session unaffected during
+                // Phase B/C.
+                let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: registry)
+                // Publish to coordinators that spawn claude sessions outside
+                // this task graph (SupervisorCoordinator, WorkerCoordinator,
+                // InteractiveSessionTab, InspectorWindowController).
+                MCPSessionRegistry.shared = mcpRegistry
+                MCPHTTPRouter.register(
+                    on: router,
+                    registry: mcpRegistry,
+                    actionRegistry: registry,
+                    dbPool: pool,
+                    logger: logger
+                )
+                await MCPNotificationDispatcher.shared.bind(registry: mcpRegistry)
+                let mcpSweeper = MCPSessionSweeper(
+                    registry: mcpRegistry,
+                    dbPool: pool,
+                    logger: logger
+                )
+                await mcpSweeper.start()
+                let mcpEventPusher = MCPEventPusher(dbPool: pool, registry: mcpRegistry, logger: logger)
+                await mcpEventPusher.start()
+                logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
+
+                // Phase C.5 — provision the stable "orchestrator" session for
+                // external launchers (sona alias, terminal `claude`, etc.).
+                // Writes the per-session config to ~/.sonata/mcp-cfg/orchestrator.json,
+                // copies it to the well-known ~/.sonata/mcp-config-orchestrator.json
+                // for shell aliases, and rewrites the sonata-bridge entry in
+                // ~/.claude.json and ~/.claude/mcp.json to point at HTTP+SSE.
+                do {
+                    let cred = try await MCPClaudeConfigWriter.writeAndRegister(
+                        sessionKey: "orchestrator",
+                        role: .interactive,
+                        registry: mcpRegistry,
+                        port: port,
+                        persistToken: true
+                    )
+                    let fm = FileManager.default
+                    let home = fm.homeDirectoryForCurrentUser
+                    let stableDst = home.appendingPathComponent(".sonata/mcp-config-orchestrator.json")
+                    try? fm.removeItem(at: stableDst)
+                    try? fm.copyItem(at: cred.configPath, to: stableDst)
+                    rewriteGlobalSonataBridgeToHTTP(
+                        home: home,
+                        sessionKey: "orchestrator",
+                        bearerToken: cred.bearerToken,
+                        port: port
+                    )
+                    logger.info("Phase C.5 — orchestrator credential provisioned; external launchers will use http://127.0.0.1:\(port)/mcp/orchestrator")
+                } catch {
+                    logger.warning("Phase C.5 orchestrator provisioning failed: \(error)")
+                }
 
                 // Serve web dashboard files (HTML/CSS/JS)
                 let webPaths = [
@@ -511,7 +609,18 @@ struct SonataApp: App {
                 let healthMonitor = HealthMonitor(
                     dbPool: pool,
                     port: port,
-                    schedulerStatus: { await scheduler.status().count >= 0 }  // returns true if scheduler is reachable
+                    schedulerStatus: { await scheduler.status().count >= 0 },  // returns true if scheduler is reachable
+                    // Backstop pool-size check (2026-05-18 incident, Fix 4).
+                    // Returns target=defaultWorkerCount and effective=count of
+                    // workers in a non-.offline status. Read on MainActor since
+                    // WorkerManager.workers is @MainActor isolated.
+                    workerPoolStatus: {
+                        await MainActor.run {
+                            let target = WorkerManager.defaultWorkerCount
+                            let effective = WorkerManager.shared.workers.filter { $0.status != .offline }.count
+                            return (target: target, effective: effective)
+                        }
+                    }
                 )
                 await healthMonitor.start()
 

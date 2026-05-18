@@ -13,7 +13,7 @@ import SQLite3
 // DMRegistry enqueue, so a bridge that registers after the fact can backfill
 // via /api/dm/inbox.
 //
-// Plan: /Users/evan/memory/claude/documents/evenflow/sonar-dm-v0-plan.md
+// Plan: /Users/evan/memory/claude/documents/plans/sonar-dm-v0-plan.md
 // Sections: §4 (Sonata-side endpoints), §6 (MCP types), §7 (error policy),
 // §11 (locked decisions), §12 (security findings A.1, A.7), §13 (limits).
 
@@ -393,14 +393,19 @@ private struct DMRegistryResponse: Encodable {
 
 // MARK: - Helpers shared by /send routing
 
-/// Produce a heartbeat checker that consults workers AND ExternalBridgeRegistry.
-/// Used by SonataApp at startup AND by HTTP handlers that need a sync gate.
+/// Produce a heartbeat checker that consults workers + MCPSessionRegistry.
+/// In-app MCP sessions count as "fresh" when their SSE writer is attached;
+/// the worker pool falls back to the lastHeartbeat column in the workers
+/// table (refreshed by MCPSessionSweeper).
 func makeProductionHeartbeatChecker(dbPool: DatabasePool) -> DMHeartbeatChecker {
     DMHeartbeatChecker(isFresh: { sessionId in
         let cutoff = nowMs() - DMLimits.heartbeatStaleAfterMs
-        // External bridges first — fast in-memory check.
-        for (sid, entry) in ExternalBridgeRegistry.shared.snapshot() {
-            if sid == sessionId && entry.lastHeartbeat >= cutoff { return true }
+        // MCP sessions first — SSE attach is the presence proof.
+        if let reg = MCPSessionRegistry.shared {
+            let snaps = await reg.snapshot()
+            if snaps.contains(where: { $0.sessionKey == sessionId && $0.hasSSE }) {
+                return true
+            }
         }
         // Fall through to workers table.
         do {
@@ -620,13 +625,12 @@ let dmActions: [SonataAction] = [
                 }
             }
 
-            // Local loopback. Pass A.7: heartbeat freshness gates the
-            // "registered" path so a stale registration can't catch DMs.
-            let checker = makeProductionHeartbeatChecker(dbPool: ctx.dbPool)
-            DMRegistry.shared.setHeartbeatChecker(checker)
-            let registered = DMRegistry.shared.has(targetSessionId)
-            let fresh = registered ? await checker.isFresh(targetSessionId) : false
-
+            // Local loopback. Presence = MCPSessionRegistry.hasSSE on the
+            // target sessionKey. Persist FIRST (so the recipient can backfill
+            // via dm_inbox even if the SSE attach drops mid-push), then push
+            // via the in-app MCPNotificationDispatcher / Registry.deliverDM
+            // path. The legacy DMRegistry enqueue-and-poll surface is dead
+            // (no bridge polls it).
             let env = DMEnvelope(
                 messageId: messageId,
                 fromSessionId: fromSessionId,
@@ -640,12 +644,22 @@ let dmActions: [SonataAction] = [
                 metaJson: metaJson
             )
 
-            if registered && fresh {
-                _ = DMRegistry.shared.enqueue(env)
-                try? await ctx.dbPool.write { db in
-                    _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+            if let mcpReg = MCPSessionRegistry.shared {
+                let delivered = await mcpReg.deliverDM(
+                    target: targetSessionId,
+                    messageId: messageId,
+                    body: body,
+                    fromSessionId: fromSessionId,
+                    context: context,
+                    metaJson: metaJson,
+                    sentAtMs: now
+                )
+                if delivered {
+                    try? await ctx.dbPool.write { db in
+                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+                    }
+                    return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
                 }
-                return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
             }
 
             // §11.1 lazy-optimistic: 202 if a recent dm_messages row exists for

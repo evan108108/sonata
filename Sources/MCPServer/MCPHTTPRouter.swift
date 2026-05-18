@@ -1,0 +1,396 @@
+import Foundation
+import GRDB
+import Hummingbird
+import HummingbirdCore
+import HTTPTypes
+import Logging
+import NIOCore
+
+enum MCPHTTPRouter {
+    static func register<Context: RequestContext>(
+        on router: Router<Context>,
+        registry: MCPSessionRegistry,
+        actionRegistry: ActionRegistry,
+        dbPool: DatabasePool,
+        logger: Logger
+    ) {
+        router.post("/mcp/:sessionKey") { request, context -> Response in
+            return await handlePost(
+                request: request,
+                context: context,
+                registry: registry,
+                logger: logger
+            )
+        }
+        router.get("/mcp/:sessionKey") { request, context -> Response in
+            return await handleGet(
+                request: request,
+                context: context,
+                registry: registry,
+                logger: logger
+            )
+        }
+        router.delete("/mcp/:sessionKey") { request, context -> Response in
+            return await handleDelete(
+                request: request,
+                context: context,
+                registry: registry
+            )
+        }
+        router.on("/mcp/:sessionKey", method: .options) { _, _ -> Response in
+            return Response(
+                status: .noContent,
+                headers: corsHeaders(allowMethod: "POST, GET, DELETE, OPTIONS")
+            )
+        }
+
+        // Phase C.5 — ad-hoc credential mint for external launchers
+        // (sona-launch wrapper, per-project .mcp.json, etc.). Body:
+        // {"sessionKey":"...", "role":"interactive|worker|supervisor"}.
+        // Returns the per-session MCP config path + bearer.
+        router.post("/api/mcp/issue-credential") { request, _ -> Response in
+            return await issueCredential(
+                request: request,
+                registry: registry,
+                logger: logger
+            )
+        }
+
+        // ⚠️ EXPLICIT TOKEN ROTATION — destructive operation.
+        //
+        // Body: {"sessionKey": "orchestrator"}
+        //
+        // CONSEQUENCES — read before calling:
+        //   1. EVERY claude session currently holding the OLD bearer for
+        //      this sessionKey will start receiving HTTP 401 on every MCP
+        //      call. Their tools silently stop working. The session does
+        //      NOT recover until the claude process is restarted so it
+        //      re-reads ~/.claude.json (which this route rewrites in
+        //      lock-step for sessionKey "orchestrator").
+        //   2. The on-disk persist file at ~/.sonata/secrets/<key>.token
+        //      is overwritten. There is no "undo" — old token can't be
+        //      recovered.
+        //   3. For sessionKey "orchestrator" specifically: ~/.claude.json
+        //      AND ~/.claude/mcp.json get rewritten with the new bearer.
+        //      Any new claude launched after this call picks up the new
+        //      token automatically. Any claude launched BEFORE this call
+        //      keeps the old token in memory and is now broken.
+        //
+        // USE THIS ONLY WHEN:
+        //   - You believe the token has been compromised.
+        //   - You're doing a scheduled security rotation and are prepared
+        //     to restart every affected claude session.
+        //   - You're verifying the persist flow end-to-end and intend the
+        //     breakage.
+        //
+        // Tokens DO NOT rotate on Sonata restart. The persist file is
+        // only ever overwritten by THIS route or by manually removing the
+        // file (then next boot mints a fresh one via
+        // loadOrCreatePersistedToken). There is no automatic rotation.
+        router.post("/api/mcp/rotate-token") { request, _ -> Response in
+            return await rotateToken(
+                request: request,
+                registry: registry,
+                logger: logger
+            )
+        }
+    }
+
+    private static func issueCredential(
+        request: Request,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        // Localhost-only guard. We're bound to 127.0.0.1 only at the
+        // Hummingbird layer, so this is belt-and-suspenders for callers
+        // that go through proxies.
+        let hostRaw = request.headers[HTTPField.Name("host")!] ?? ""
+        let host = hostRaw.split(separator: ":").first.map(String.init) ?? hostRaw
+        if !host.isEmpty && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+            return Response(status: .forbidden)
+        }
+        let bodyBuffer: ByteBuffer
+        do {
+            bodyBuffer = try await request.body.collect(upTo: 4 * 1024)
+        } catch {
+            return Response(status: .badRequest)
+        }
+        let data = Data(buffer: bodyBuffer)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionKey = json["sessionKey"] as? String,
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        let roleStr = (json["role"] as? String)?.lowercased() ?? "interactive"
+        let role: SessionRole = {
+            switch roleStr {
+            case "worker": return .worker
+            case "supervisor": return .supervisor
+            default: return .interactive
+            }
+        }()
+        do {
+            let cred = try await MCPClaudeConfigWriter.writeAndRegister(
+                sessionKey: sessionKey, role: role, registry: registry)
+            let payload: [String: Any] = [
+                "sessionKey": cred.sessionKey,
+                "bearerToken": cred.bearerToken,
+                "configPath": cred.configPath.path,
+                "role": roleStr,
+            ]
+            let outData = try JSONSerialization.data(
+                withJSONObject: payload, options: [.sortedKeys])
+            var buf = ByteBufferAllocator().buffer(capacity: outData.count)
+            buf.writeBytes(outData)
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json"
+            return Response(status: .ok, headers: headers,
+                body: ResponseBody(byteBuffer: buf))
+        } catch {
+            logger.warning("issueCredential failed for \(sessionKey): \(error)")
+            return Response(status: .internalServerError)
+        }
+    }
+
+    /// See the comment block on the route registration above for the
+    /// full consequences-of-calling docstring. This handler:
+    ///   1. Validates body {sessionKey}.
+    ///   2. Deletes the on-disk persist file (~/.sonata/secrets/<key>.token).
+    ///   3. Calls writeAndRegister(persistToken: true) which mints a fresh
+    ///      token (file gone), persists the new value, registers it in
+    ///      MCPSessionRegistry, and rewrites the per-session config file.
+    ///   4. For sessionKey "orchestrator" specifically, also calls
+    ///      rewriteGlobalSonataBridgeToHTTP() to sync ~/.claude.json and
+    ///      ~/.claude/mcp.json so freshly-launched claude sessions pick up
+    ///      the new bearer.
+    private static func rotateToken(
+        request: Request,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        let hostRaw = request.headers[HTTPField.Name("host")!] ?? ""
+        let host = hostRaw.split(separator: ":").first.map(String.init) ?? hostRaw
+        if !host.isEmpty && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+            return Response(status: .forbidden)
+        }
+        let bodyBuffer: ByteBuffer
+        do {
+            bodyBuffer = try await request.body.collect(upTo: 4 * 1024)
+        } catch {
+            return Response(status: .badRequest)
+        }
+        let data = Data(buffer: bodyBuffer)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionKey = json["sessionKey"] as? String,
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        // Delete persist file so writeAndRegister mints a fresh one.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let tokenFile = home
+            .appendingPathComponent(".sonata/secrets")
+            .appendingPathComponent("\(sessionKey).token")
+        try? FileManager.default.removeItem(at: tokenFile)
+        do {
+            let cred = try await MCPClaudeConfigWriter.writeAndRegister(
+                sessionKey: sessionKey,
+                role: .interactive,
+                registry: registry,
+                persistToken: true
+            )
+            // Orchestrator is referenced from ~/.claude.json and
+            // ~/.claude/mcp.json — keep those in lock-step. Also refresh
+            // the well-known ~/.sonata/mcp-config-orchestrator.json copy.
+            if sessionKey == "orchestrator" {
+                let stableDst = home.appendingPathComponent(".sonata/mcp-config-orchestrator.json")
+                try? FileManager.default.removeItem(at: stableDst)
+                try? FileManager.default.copyItem(at: cred.configPath, to: stableDst)
+                rewriteGlobalSonataBridgeToHTTP(
+                    home: home,
+                    sessionKey: sessionKey,
+                    bearerToken: cred.bearerToken,
+                    port: 3211
+                )
+            }
+            logger.warning("⚠️ Token rotated for sessionKey=\(sessionKey). All live claude sessions holding the previous bearer are now 401-ing on MCP calls and must be restarted.")
+            let payload: [String: Any] = [
+                "sessionKey": cred.sessionKey,
+                "newBearerToken": cred.bearerToken,
+                "configPath": cred.configPath.path,
+                "warning": "Live claude sessions holding the previous bearer now 401 on all MCP calls. Restart each affected claude process to pick up the new token from ~/.claude.json.",
+            ]
+            let outData = try JSONSerialization.data(
+                withJSONObject: payload, options: [.sortedKeys])
+            var buf = ByteBufferAllocator().buffer(capacity: outData.count)
+            buf.writeBytes(outData)
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json"
+            return Response(status: .ok, headers: headers,
+                body: ResponseBody(byteBuffer: buf))
+        } catch {
+            logger.warning("rotateToken failed for \(sessionKey): \(error)")
+            return Response(status: .internalServerError)
+        }
+    }
+
+    private static func handlePost<Context: RequestContext>(
+        request: Request,
+        context: Context,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        guard let sessionKey = context.parameters.get("sessionKey"),
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        let supplied = bearerToken(from: request.headers)
+        let valid = await registry.validateBearer(
+            sessionKey: sessionKey, suppliedToken: supplied)
+        guard valid else {
+            return Response(status: .unauthorized)
+        }
+        let bodyBuffer: ByteBuffer
+        do {
+            bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
+        } catch {
+            return jsonRPCErrorResponse(status: .badRequest, code: -32700,
+                message: "Failed to read body")
+        }
+        let bodyData = Data(buffer: bodyBuffer)
+        guard let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            return jsonRPCErrorResponse(status: .badRequest, code: -32700,
+                message: "Parse error")
+        }
+        let method = json["method"] as? String ?? ""
+        if method.isEmpty {
+            return jsonRPCErrorResponse(status: .badRequest, code: -32600,
+                message: "Missing method")
+        }
+        let id = json["id"]
+        let params = json["params"] as? [String: Any] ?? [:]
+
+        let state = await registry.getOrCreate(sessionKey) {
+            await inferRole(sessionKey: sessionKey, dbPool: registry.dbPool)
+        }
+        guard let responseJSON = await state.handle(
+                method: method, id: id, params: params) else {
+            return Response(status: .accepted)
+        }
+        var headers = corsHeaders(allowMethod: "POST")
+        headers[.contentType] = "application/json"
+        var buffer = ByteBufferAllocator().buffer(capacity: responseJSON.utf8.count)
+        buffer.writeString(responseJSON)
+        return Response(status: .ok, headers: headers,
+            body: ResponseBody(byteBuffer: buffer))
+    }
+
+    private static func handleGet<Context: RequestContext>(
+        request: Request,
+        context: Context,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        guard let sessionKey = context.parameters.get("sessionKey"),
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        let supplied = bearerToken(from: request.headers)
+        let valid = await registry.validateBearer(
+            sessionKey: sessionKey, suppliedToken: supplied)
+        guard valid else {
+            return Response(status: .unauthorized)
+        }
+        let accept = request.headers[.accept] ?? ""
+        guard accept.contains("text/event-stream") || accept.contains("*/*") else {
+            return Response(status: .notAcceptable)
+        }
+
+        let writer = MCPSSEWriter()
+        let state = await registry.getOrCreate(sessionKey) {
+            await inferRole(sessionKey: sessionKey, dbPool: registry.dbPool)
+        }
+        await state.attachSSE(writer)
+        writer.sendKeepAlive()
+
+        var headers = corsHeaders(allowMethod: "GET")
+        headers[.contentType] = "text/event-stream"
+        headers[.cacheControl] = "no-cache, no-transform"
+        headers[HTTPField.Name("Connection")!] = "keep-alive"
+        headers[HTTPField.Name("X-Accel-Buffering")!] = "no"
+
+        writer.setOnClose { [weak writer] in
+            guard let writer else { return }
+            Task { await state.detachSSE(writer) }
+        }
+        let body = ResponseBody(asyncSequence: writer.stream)
+        return Response(status: .ok, headers: headers, body: body)
+    }
+
+    private static func handleDelete<Context: RequestContext>(
+        request: Request,
+        context: Context,
+        registry: MCPSessionRegistry
+    ) async -> Response {
+        guard let sessionKey = context.parameters.get("sessionKey"),
+              MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        let supplied = bearerToken(from: request.headers)
+        let valid = await registry.validateBearer(
+            sessionKey: sessionKey, suppliedToken: supplied)
+        guard valid else {
+            return Response(status: .unauthorized)
+        }
+        await registry.evict(sessionKey)
+        return Response(status: .noContent,
+            headers: corsHeaders(allowMethod: "DELETE"))
+    }
+
+    private static func bearerToken(from headers: HTTPFields) -> String? {
+        guard let auth = headers[.authorization] else { return nil }
+        guard auth.lowercased().hasPrefix("bearer ") else { return nil }
+        return String(auth.dropFirst("bearer ".count)).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func corsHeaders(allowMethod: String) -> HTTPFields {
+        var h = HTTPFields()
+        h[.accessControlAllowOrigin] = "http://localhost:3211"
+        h[HTTPField.Name("Access-Control-Allow-Methods")!] = "POST, GET, DELETE, OPTIONS"
+        h[HTTPField.Name("Access-Control-Allow-Headers")!] = "Authorization, Content-Type, Accept"
+        h[HTTPField.Name("Access-Control-Max-Age")!] = "600"
+        return h
+    }
+
+    private static func jsonRPCErrorResponse(
+        status: HTTPResponse.Status, code: Int, message: String
+    ) -> Response {
+        let envelope: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": NSNull(),
+            "error": ["code": code, "message": message],
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])) ?? Data()
+        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+        buffer.writeBytes(data)
+        var headers = corsHeaders(allowMethod: "POST")
+        headers[.contentType] = "application/json"
+        return Response(status: status, headers: headers,
+            body: ResponseBody(byteBuffer: buffer))
+    }
+
+    private static func inferRole(
+        sessionKey: String, dbPool: DatabasePool
+    ) async -> SessionRole {
+        if sessionKey == "supervisor" { return .supervisor }
+        do {
+            let count = try await dbPool.read { db in
+                try Int.fetchOne(db,
+                    sql: "SELECT COUNT(*) FROM workers WHERE workerId = ?",
+                    arguments: [sessionKey]) ?? 0
+            }
+            return count > 0 ? .worker : .interactive
+        } catch {
+            return .interactive
+        }
+    }
+}

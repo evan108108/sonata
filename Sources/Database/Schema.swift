@@ -777,5 +777,25 @@ extension DatabaseMigrator {
         registerMigration("v11_drop_backgroundjobs") { db in
             try db.execute(sql: "DROP TABLE IF EXISTS backgroundJobs")
         }
+
+        // v12: task_watchers — push-vs-poll primitive. Callers register interest
+        // in a task's status transitions; on any status update, the writer fans
+        // out a sonar_dm_send to each registered watcher whose on_mask matches.
+        // Dead watchers are swept passively at fan-out time against the MCP
+        // session registry (no separate timer). PK (taskId, target_session_id)
+        // makes registration idempotent.
+        registerMigration("v12_task_watchers") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS task_watchers (
+                    taskId            TEXT NOT NULL,
+                    target_session_id TEXT NOT NULL,
+                    on_mask           TEXT NOT NULL,
+                    createdAt         INTEGER NOT NULL,
+                    PRIMARY KEY (taskId, target_session_id)
+                )
+            """)
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS task_watchers_by_task ON task_watchers(taskId)")
+        }
     }
 }

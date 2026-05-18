@@ -46,9 +46,21 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("PATH=\(mergedPath.isEmpty ? currentPath : "\(mergedPath):\(currentPath)")")
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=1")
-        env.append("SONATA_ROLE=supervisor")
-        env.append("WORKER_ID=supervisor")
-        env.append("SESSION_LABEL=supervisor")
+
+        // Per plan §6: opt into in-proc MCP HTTP+SSE via SONATA_MCP_INPROC=1.
+        // If unset (or registry not yet published, or credential write
+        // fails), fall back to today's env-var bridge — supervisor remains
+        // byte-for-byte identical to pre-§6.
+        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
+            sessionKey: "supervisor",
+            role: .supervisor,
+            slotLabel: "supervisor"
+        )
+        if inProcExtras == nil {
+            env.append("SONATA_ROLE=supervisor")
+            env.append("WORKER_ID=supervisor")
+            env.append("SESSION_LABEL=supervisor")
+        }
 
         if let extra = ProcessInfo.processInfo.environment["SONA_EXTRA_ENV"] {
             for item in extra.components(separatedBy: ",") where !item.isEmpty {
@@ -56,11 +68,14 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             }
         }
 
-        let args: [String] = [
+        var args: [String] = [
             "--dangerously-skip-permissions",
             "--dangerously-load-development-channels", "server:sonata-bridge",
             "--model", "claude-sonnet-4-6",
         ]
+        if let extras = inProcExtras {
+            args.append(contentsOf: extras)
+        }
 
         let terminal = view.getTerminal()
         terminal.resetToInitialState()
@@ -79,7 +94,13 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             }
         }
 
-        startBridgeWatchdog()
+        // Watchdog only makes sense in the legacy stdio-bridge path. In
+        // the in-proc HTTP path there's no bun child process to watch;
+        // SSE writer drop is the presence signal. (Plan §6, removal
+        // queued for Phase D step 1.)
+        if !MCPSpawn.inProcEnabled {
+            startBridgeWatchdog()
+        }
     }
 
     func stop() {

@@ -30,7 +30,6 @@ struct SystemStatusResponse: Encodable {
     let upcomingScheduledJobs: [NextEventInfo]  // top 3 by nextRunAt ASC
     let workerCount: Int               // alive: not offline, fresh heartbeat
     let workersByStatus: [String: Int] // breakdown by effective status (idle/busy/starting/.../stale/offline)
-    let externalBridgeCount: Int       // sonata-bridge.ts processes that aren't pool workers (e.g. claude/claude-patched sessions)
 }
 
 struct NextEventInfo: Encodable {

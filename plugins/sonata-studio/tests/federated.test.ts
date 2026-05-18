@@ -1,5 +1,5 @@
 // Phase 3 T4 — Cross-machine federated round-trip test. Per plan §2.3 of
-// /Users/evan/memory/claude/documents/evenflow/sonata-studio-v0-phase3-plan.md.
+// /Users/evan/memory/claude/documents/plans/sonata-studio-v0-phase3-plan.md.
 //
 // Two plugin processes:
 //   - Workstation: spawned in-process against the same memory shim used by
