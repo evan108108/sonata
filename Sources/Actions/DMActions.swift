@@ -749,7 +749,113 @@ let dmActions: [SonataAction] = [
             )
         }
     ),
+
+    // POST /api/dm/broadcast — DMAll. Fan a single DM to every
+    // SSE-attached session matching the optional kind filter. Used by
+    // the dashboard "Broadcast" affordance and the sonar_dm_broadcast
+    // MCP tool (the MCP tool routes through MCPToolHandlers; the HTTP
+    // route lets non-MCP callers — dashboard, scripts — do the same
+    // thing).
+    SonataAction(
+        name: "dm_broadcast",
+        description: "Send a DM to every SSE-attached session matching the optional kind filter ('all'|'workers'|'interactive'|'supervisor'; default 'all'). Excludes the sender.",
+        group: "/api/dm",
+        path: "/broadcast",
+        method: .post,
+        params: [
+            ActionParam("fromSessionId", .string, required: true, description: "Sender session id"),
+            ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB"),
+            ActionParam("filter", .string, required: false, description: "Recipient kind filter (default 'all')"),
+            ActionParam("context", .string, required: false, description: "Optional context string"),
+        ],
+        handler: { ctx in
+            let fromSessionId = try ctx.params.require("fromSessionId")
+            let body = try ctx.params.require("body")
+            let filterRaw = (ctx.params.string("filter") ?? "all").lowercased()
+            let context = ctx.params.string("context")
+            guard !body.isEmpty else {
+                throw ActionError.custom("body required", .unprocessableContent)
+            }
+            guard body.utf8.count <= 256 * 1024 else {
+                throw ActionError.custom("body exceeds 256 KiB", .unprocessableContent)
+            }
+            let allow: (SessionRole) -> Bool
+            switch filterRaw {
+            case "worker", "workers": allow = { $0 == .worker }
+            case "interactive", "humans": allow = { $0 == .interactive }
+            case "supervisor": allow = { $0 == .supervisor }
+            case "all", "": allow = { _ in true }
+            default:
+                throw ActionError.custom("unknown filter '\(filterRaw)'", .unprocessableContent)
+            }
+            guard let reg = MCPSessionRegistry.shared else {
+                return DMBroadcastResponse(
+                    filter: filterRaw, deliveredCount: 0, skippedCount: 0,
+                    deliveredTo: [])
+            }
+            let snaps = await reg.snapshot()
+            var delivered: [String] = []
+            var skipped = 0
+            let now = nowMs()
+            for snap in snaps {
+                guard allow(snap.role), snap.hasSSE,
+                      snap.sessionKey != fromSessionId else {
+                    skipped += 1; continue
+                }
+                let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
+                let pushed = await reg.deliverDM(
+                    target: snap.sessionKey,
+                    messageId: messageId,
+                    body: body,
+                    fromSessionId: fromSessionId,
+                    context: context,
+                    metaJson: nil,
+                    sentAtMs: now
+                )
+                if pushed {
+                    delivered.append(snap.sessionKey)
+                    let env = DMEnvelope(
+                        messageId: messageId,
+                        fromSessionId: fromSessionId,
+                        fromPubkey: nil,
+                        fromPeerId: nil,
+                        targetSessionId: snap.sessionKey,
+                        body: body,
+                        context: context,
+                        sentAtMs: now,
+                        receivedAtMs: now,
+                        metaJson: nil
+                    )
+                    try? await ctx.dbPool.write { db in
+                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+                    }
+                } else {
+                    skipped += 1
+                }
+            }
+            return DMBroadcastResponse(
+                filter: filterRaw,
+                deliveredCount: delivered.count,
+                skippedCount: skipped,
+                deliveredTo: delivered
+            )
+        }
+    ),
 ]
+
+private struct DMBroadcastResponse: Encodable {
+    let filter: String
+    let deliveredCount: Int
+    let skippedCount: Int
+    let deliveredTo: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case filter
+        case deliveredCount = "delivered_count"
+        case skippedCount = "skipped_count"
+        case deliveredTo = "delivered_to"
+    }
+}
 
 // MARK: - Sonar peer-card + send wiring
 

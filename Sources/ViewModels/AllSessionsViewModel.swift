@@ -1,22 +1,20 @@
 import Foundation
 import SwiftUI
 
-/// Snapshot of one row in the All-Sessions dashboard. Mirrors
-/// MCPSessionRegistry.SessionSnapshot but on the main actor and with a
-/// derived sub-type for type-chip rendering (the registry only stores
-/// SessionRole, not the orchestrator/inspector/adhoc distinction inside
-/// `interactive`).
+/// Snapshot of one row in the All-Sessions dashboard. Each row is one
+/// claude session — either visible to Sonata via MCPSessionRegistry
+/// (Workers / Connected) or visible only via ~/.claude/sessions/
+/// (Unconnected — a live claude process not currently speaking MCP
+/// to Sonata).
 struct AllSessionsRow: Identifiable, Sendable, Equatable {
     enum Kind: String, Sendable {
-        case worker, supervisor, orchestrator, inspector, interactive
+        case worker, supervisor, interactive
 
         var displayName: String {
             switch self {
             case .worker: return "worker"
             case .supervisor: return "supervisor"
-            case .orchestrator: return "orchestrator"
-            case .inspector: return "inspector"
-            case .interactive: return "adhoc"
+            case .interactive: return "interactive"
             }
         }
 
@@ -24,33 +22,45 @@ struct AllSessionsRow: Identifiable, Sendable, Equatable {
             switch self {
             case .worker: return .cyan
             case .supervisor: return .indigo
-            case .orchestrator: return .orange
-            case .inspector: return .purple
             case .interactive: return .gray
             }
         }
     }
 
+    enum Section: String, Sendable {
+        case workers, connected, unconnected
+    }
+
+    /// The routing identifier used for DMs / channel pushes. For
+    /// MCP-attached sessions this is the bearer/sessionKey. For
+    /// unconnected sessions (no MCP) this is claude's own session id
+    /// — useful as a display id but not addressable until they
+    /// connect.
     let sessionKey: String
+
+    /// Claude's internal session id, set by the `sonata_identify` tool
+    /// call (or read from `~/.claude/sessions/<pid>.json` for the
+    /// unconnected section). May equal sessionKey for sona-launched
+    /// sessions.
+    let claudeSessionId: String?
+
     let kind: Kind
-    let lastContactedAt: Int64
+    let section: Section
+    let cwd: String?
+    let pid: Int?
     let hasSSE: Bool
     let inFlightEventId: String?
 
+    /// Epoch ms of last contact. For MCP-attached sessions this is the
+    /// registry's lastContactedAt; for unconnected, it's the file's
+    /// updatedAt.
+    let lastSeenMs: Int64
+
     var id: String { sessionKey }
 
-    /// Alive = SSE attached AND we've heard from it in the last 90s. The
-    /// session sweeper evicts much later than that, so this is a tighter
-    /// "is the row meaningful right now" check.
-    var isAlive: Bool {
-        guard hasSSE else { return false }
+    var lastSeenRelative: String {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        return (nowMs - lastContactedAt) < 90_000
-    }
-
-    var lastContactedRelative: String {
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let delta = max(0, nowMs - lastContactedAt) / 1000
+        let delta = max(0, nowMs - lastSeenMs) / 1000
         if delta < 5 { return "just now" }
         if delta < 60 { return "\(delta)s ago" }
         let m = delta / 60
@@ -67,30 +77,109 @@ final class AllSessionsViewModel: ObservableObject {
     @Published private(set) var hasLoadedOnce = false
     @Published var dmResult: String?
 
+    var workers: [AllSessionsRow] { rows.filter { $0.section == .workers } }
+    var connected: [AllSessionsRow] { rows.filter { $0.section == .connected } }
+    var unconnected: [AllSessionsRow] { rows.filter { $0.section == .unconnected } }
+
     func fetch() async {
-        guard let reg = MCPSessionRegistry.shared else {
-            self.rows = []
-            self.hasLoadedOnce = true
-            return
-        }
-        let snaps = await reg.snapshot()
-        // Sort: live first, then by sessionKey for stable ordering.
-        let mapped = snaps
-            .map { snap -> AllSessionsRow in
-                AllSessionsRow(
+        var collected: [AllSessionsRow] = []
+
+        // 1. MCP-attached sessions from the registry.
+        var attachedClaudeIds: Set<String> = []
+        if let reg = MCPSessionRegistry.shared {
+            let snaps = await reg.snapshot()
+            for snap in snaps {
+                let kind: AllSessionsRow.Kind
+                let section: AllSessionsRow.Section
+                switch snap.role {
+                case .worker:
+                    kind = .worker
+                    section = .workers
+                case .supervisor:
+                    kind = .supervisor
+                    section = .workers  // grouped with workers since it's a Sonata-spawned non-interactive
+                case .interactive:
+                    kind = .interactive
+                    section = .connected
+                }
+                collected.append(AllSessionsRow(
                     sessionKey: snap.sessionKey,
-                    kind: classify(sessionKey: snap.sessionKey, role: snap.role),
-                    lastContactedAt: snap.lastContactedAt,
+                    claudeSessionId: snap.claudeSessionId,
+                    kind: kind,
+                    section: section,
+                    cwd: snap.cwd,
+                    pid: snap.pid,
                     hasSSE: snap.hasSSE,
-                    inFlightEventId: snap.inFlightEventId
-                )
+                    inFlightEventId: snap.inFlightEventId,
+                    lastSeenMs: snap.lastContactedAt
+                ))
+                if let csid = snap.claudeSessionId {
+                    attachedClaudeIds.insert(csid)
+                }
             }
-            .sorted { lhs, rhs in
-                if lhs.isAlive != rhs.isAlive { return lhs.isAlive }
-                return lhs.sessionKey < rhs.sessionKey
+        }
+
+        // 2. Live-but-unconnected claudes from ~/.claude/sessions/.
+        // These are claude processes that Sonata can see via the
+        // per-PID metadata files but that aren't currently MCP-attached
+        // (typically: launched without `sona`, or before SONA_SESSION_ID
+        // env wiring was in place).
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions")
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
+            for entry in entries where entry.hasSuffix(".json") {
+                guard let pid = Int(String(entry.dropLast(".json".count))) else { continue }
+                // Only show live processes.
+                guard kill(pid_t(pid), 0) == 0 else { continue }
+                guard let data = try? Data(contentsOf: dir.appendingPathComponent(entry)),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+                let sessionId = json["sessionId"] as? String ?? entry
+                // If this claude is already attached to MCP, skip — it shows
+                // up in workers/connected via the registry pass.
+                if attachedClaudeIds.contains(sessionId) { continue }
+                let kindRaw = (json["kind"] as? String) ?? "interactive"
+                let kind: AllSessionsRow.Kind
+                switch kindRaw.lowercased() {
+                case "worker": kind = .worker
+                case "supervisor": kind = .supervisor
+                default: kind = .interactive
+                }
+                let cwd = json["cwd"] as? String
+                let updatedAt = (json["updatedAt"] as? Int64)
+                    ?? (json["updatedAt"] as? Double).map { Int64($0) }
+                    ?? (json["startedAt"] as? Int64)
+                    ?? 0
+                collected.append(AllSessionsRow(
+                    sessionKey: sessionId,
+                    claudeSessionId: sessionId,
+                    kind: kind,
+                    section: .unconnected,
+                    cwd: cwd,
+                    pid: pid,
+                    hasSSE: false,
+                    inFlightEventId: nil,
+                    lastSeenMs: updatedAt
+                ))
             }
-        self.rows = mapped
+        }
+
+        // Sort within each section: workers by sessionKey, others by recency.
+        self.rows = collected.sorted { lhs, rhs in
+            if lhs.section != rhs.section {
+                return sectionOrder(lhs.section) < sectionOrder(rhs.section)
+            }
+            return lhs.lastSeenMs > rhs.lastSeenMs
+        }
         self.hasLoadedOnce = true
+    }
+
+    private func sectionOrder(_ s: AllSessionsRow.Section) -> Int {
+        switch s {
+        case .workers: return 0
+        case .connected: return 1
+        case .unconnected: return 2
+        }
     }
 
     /// Send a DM via the existing `/api/dm/send` action. fromSessionId is
@@ -124,14 +213,33 @@ final class AllSessionsViewModel: ObservableObject {
         }
     }
 
-    private func classify(sessionKey: String, role: SessionRole) -> AllSessionsRow.Kind {
-        switch role {
-        case .worker: return .worker
-        case .supervisor: return .supervisor
-        case .interactive:
-            if sessionKey == "orchestrator" { return .orchestrator }
-            if sessionKey.hasPrefix("inspector-") { return .inspector }
-            return .interactive
+    /// Broadcast a DM via `/api/dm/broadcast` (sonar_dm_broadcast).
+    /// Filter: "all" | "workers" | "interactive" | "supervisor".
+    func broadcast(filter: String, body: String) async {
+        let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/dm/broadcast")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any] = [
+            "fromSessionId": "dashboard",
+            "body": body,
+            "filter": filter,
+            "context": "dashboard-broadcast",
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
+            if status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let count = obj["delivered_count"] as? Int {
+                self.dmResult = "Broadcast \(filter): delivered to \(count) session(s)"
+            } else {
+                let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
+                self.dmResult = "Broadcast failed (HTTP \(status)) — \(snippet)"
+            }
+        } catch {
+            self.dmResult = "Broadcast failed — \(error.localizedDescription)"
         }
     }
 }

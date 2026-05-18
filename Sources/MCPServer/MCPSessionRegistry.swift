@@ -77,6 +77,10 @@ actor MCPSessionRegistry {
         let lastContactedAt: Int64
         let hasSSE: Bool
         let inFlightEventId: String?
+        let claudeSessionId: String?
+        let cwd: String?
+        let claudeKind: String?
+        let pid: Int?
     }
 
     func snapshot() async -> [SessionSnapshot] {
@@ -86,12 +90,20 @@ actor MCPSessionRegistry {
             let role = await state.role
             let hasSSE = await (state.sseWriter != nil)
             let inFlight = await state.inFlightEventId
+            let csid = await state.claudeSessionId
+            let cwd = await state.cwd
+            let kind = await state.claudeKind
+            let pid = await state.pid
             out.append(SessionSnapshot(
                 sessionKey: key,
                 role: role,
                 lastContactedAt: last,
                 hasSSE: hasSSE,
-                inFlightEventId: inFlight
+                inFlightEventId: inFlight,
+                claudeSessionId: csid,
+                cwd: cwd,
+                claudeKind: kind,
+                pid: pid
             ))
         }
         return out
