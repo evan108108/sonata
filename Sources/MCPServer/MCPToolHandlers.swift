@@ -42,9 +42,38 @@ enum MCPToolHandlers {
             return await memTaskUnwatch(
                 args: args, sessionKey: sessionKey,
                 actionRegistry: actionRegistry, dbPool: dbPool)
+        case "sonata_identify":
+            return await sonataIdentify(args: args, state: state)
         default:
             return (false, "Unknown tool: \(toolName)")
         }
+    }
+
+    /// Self-registration call. Non-sona-launched sessions land with a
+    /// temporary "anon-XXX" sessionKey; after the channel-pushed
+    /// "identify yourself" notification, they read
+    /// ~/.claude/sessions/$PPID.json and call this with the fields.
+    /// Sona-launched sessions already match bearer == sessionId so this
+    /// call is mostly redundant for them — but harmless and idempotent.
+    private static func sonataIdentify(
+        args: [String: Any],
+        state: MCPSessionState
+    ) async -> (success: Bool, result: String) {
+        let claudeSessionId = (args["sessionId"] as? String) ?? ""
+        let cwd = args["cwd"] as? String
+        let kindStr = args["kind"] as? String
+        let pidNumber = args["pid"]
+        let pid: Int? = (pidNumber as? Int) ?? (pidNumber as? Int64).map(Int.init) ?? (pidNumber as? Double).map(Int.init)
+        guard !claudeSessionId.isEmpty else {
+            return (false, "sonata_identify: sessionId required")
+        }
+        await state.identify(
+            claudeSessionId: claudeSessionId,
+            cwd: cwd,
+            kind: kindStr,
+            pid: pid
+        )
+        return (true, "Identified as \(claudeSessionId)")
     }
 
     /// Defaults target_session_id to the caller's sessionKey when omitted —
@@ -324,6 +353,20 @@ enum MCPToolSchemas {
                     "meta": ["type": "object", "description": "Optional ≤4KB JSON metadata blob"],
                 ],
                 "required": ["target_session_id", "body"],
+            ],
+        ],
+        [
+            "name": "sonata_identify",
+            "description": "Self-register this session's claude metadata. Required for non-sona-launched sessions after the channel-pushed identify request. Idempotent.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "sessionId": ["type": "string", "description": "claude's session id (UUID from ~/.claude/sessions/$PPID.json)"],
+                    "cwd": ["type": "string", "description": "working directory"],
+                    "kind": ["type": "string", "description": "interactive | worker | supervisor | inspector"],
+                    "pid": ["type": "number", "description": "claude's process id"],
+                ],
+                "required": ["sessionId"],
             ],
         ],
         [

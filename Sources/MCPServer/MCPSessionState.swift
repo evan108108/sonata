@@ -9,6 +9,16 @@ actor MCPSessionState {
     var inFlightEventId: String?
     var sessionLabel: String?
 
+    /// Claude's own session id (UUID from ~/.claude/sessions/<pid>.json),
+    /// set by the `sonata_identify` tool. For sona-launched sessions
+    /// this equals sessionKey. For anon-XXX sessions, it's the id we
+    /// learn after the identify handshake. Used for DM addressing,
+    /// dashboard display, and ghost-prevention cross-checks.
+    private(set) var claudeSessionId: String?
+    private(set) var cwd: String?
+    private(set) var claudeKind: String?
+    private(set) var pid: Int?
+
     private(set) var protocolVersion: String = "2025-03-26"
 
     private let dbPool: DatabasePool
@@ -32,6 +42,23 @@ actor MCPSessionState {
 
     func touch() {
         lastContactedAt = Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    /// Called by the `sonata_identify` MCP tool. Stores claude's session
+    /// metadata on this session state so the dashboard can label the row
+    /// and DMs targeting the claude session id can be resolved to the
+    /// (possibly different) sessionKey. Idempotent — later calls update
+    /// the metadata in place.
+    func identify(
+        claudeSessionId: String,
+        cwd: String?,
+        kind: String?,
+        pid: Int?
+    ) {
+        self.claudeSessionId = claudeSessionId
+        if let cwd { self.cwd = cwd }
+        if let kind { self.claudeKind = kind }
+        if let pid { self.pid = pid }
     }
 
     func attachSSE(_ writer: MCPSSEWriter) {

@@ -54,6 +54,7 @@ final class MCPHandshakeTests: XCTestCase {
         XCTAssertEqual(names, [
             "complete_event", "fail_event",
             "sonar_dm_send", "sonar_dm_inbox",
+            "sonata_identify",
             "mem_task_list", "mem_task_get", "mem_task_create",
             "mem_task_watch", "mem_task_unwatch",
         ])

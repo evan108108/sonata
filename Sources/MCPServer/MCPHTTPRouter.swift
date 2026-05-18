@@ -44,6 +44,35 @@ enum MCPHTTPRouter {
             )
         }
 
+        // New unified MCP endpoint — bearer header IS the sessionKey.
+        // See ~/.sonata/wiki/sonata/mcp-identity.md for the design.
+        //
+        // - sona-launched sessions: SONA_SESSION_ID env var is substituted by
+        //   claude's HTTP MCP client into "Authorization: Bearer <uuid>".
+        //   That uuid is the sessionKey, no pre-registration needed.
+        // - non-sona sessions (env var not set): bearer arrives empty OR as
+        //   the literal "${SONA_SESSION_ID}". We mint a temp anon-XXX
+        //   sessionKey and (on SSE attach) push a channel notification
+        //   asking the session to call sonata_identify.
+        router.post("/mcp") { request, _ -> Response in
+            return await handlePostNoPath(
+                request: request, registry: registry, logger: logger)
+        }
+        router.get("/mcp") { request, _ -> Response in
+            return await handleGetNoPath(
+                request: request, registry: registry, logger: logger)
+        }
+        router.delete("/mcp") { request, _ -> Response in
+            return await handleDeleteNoPath(
+                request: request, registry: registry)
+        }
+        router.on("/mcp", method: .options) { _, _ -> Response in
+            return Response(
+                status: .noContent,
+                headers: corsHeaders(allowMethod: "POST, GET, DELETE, OPTIONS")
+            )
+        }
+
         // Phase C.5 — ad-hoc credential mint for external launchers
         // (sona-launch wrapper, per-project .mcp.json, etc.). Body:
         // {"sessionKey":"...", "role":"interactive|worker|supervisor"}.
@@ -232,6 +261,157 @@ enum MCPHTTPRouter {
             return Response(status: .internalServerError)
         }
     }
+
+    // MARK: - New /mcp endpoint (bearer-as-sessionKey)
+    //
+    // Derives the sessionKey from the bearer header. Empty / literal-
+    // env-var bearers get a fresh "anon-<hex>" sessionKey; the SSE
+    // attach handler queues a handshake notification telling the
+    // session to call sonata_identify.
+
+    /// Returns either:
+    ///   - the bearer value verbatim (treated as the sessionKey for
+    ///     sona-launched sessions)
+    ///   - a fresh "anon-<8hex>" id when the bearer is missing, empty,
+    ///     or the literal "${SONA_SESSION_ID}" (env var not set →
+    ///     claude didn't substitute)
+    /// `needsHandshake` is true in the anon path.
+    private static func deriveSessionKey(
+        from headers: HTTPFields
+    ) -> (sessionKey: String, needsHandshake: Bool) {
+        guard let bearer = bearerToken(from: headers), !bearer.isEmpty else {
+            return ("anon-\(randomHex8())", true)
+        }
+        // Claude leaves unsubstituted env vars as the literal "${VAR}".
+        if bearer.hasPrefix("${") && bearer.hasSuffix("}") {
+            return ("anon-\(randomHex8())", true)
+        }
+        return (bearer, false)
+    }
+
+    private static func randomHex8() -> String {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        for i in 0..<4 { bytes[i] = UInt8.random(in: 0...255) }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func handlePostNoPath(
+        request: Request,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        let (sessionKey, needsHandshake) = deriveSessionKey(from: request.headers)
+        guard MCPSessionKey.isValid(sessionKey) else {
+            return jsonRPCErrorResponse(
+                status: .badRequest, code: -32600,
+                message: "Invalid session id (Authorization: Bearer ...)")
+        }
+        let bodyBuffer: ByteBuffer
+        do {
+            bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
+        } catch {
+            return jsonRPCErrorResponse(status: .badRequest, code: -32700,
+                message: "Failed to read body")
+        }
+        let bodyData = Data(buffer: bodyBuffer)
+        guard let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            return jsonRPCErrorResponse(status: .badRequest, code: -32700,
+                message: "Parse error")
+        }
+        let method = json["method"] as? String ?? ""
+        if method.isEmpty {
+            return jsonRPCErrorResponse(status: .badRequest, code: -32600,
+                message: "Missing method")
+        }
+        let id = json["id"]
+        let params = json["params"] as? [String: Any] ?? [:]
+
+        let state = await registry.getOrCreate(sessionKey) {
+            needsHandshake ? .interactive
+                : await inferRole(sessionKey: sessionKey, dbPool: registry.dbPool)
+        }
+        guard let responseJSON = await state.handle(
+                method: method, id: id, params: params) else {
+            return Response(status: .accepted)
+        }
+        var headers = corsHeaders(allowMethod: "POST")
+        headers[.contentType] = "application/json"
+        var buffer = ByteBufferAllocator().buffer(capacity: responseJSON.utf8.count)
+        buffer.writeString(responseJSON)
+        return Response(status: .ok, headers: headers,
+            body: ResponseBody(byteBuffer: buffer))
+    }
+
+    private static func handleGetNoPath(
+        request: Request,
+        registry: MCPSessionRegistry,
+        logger: Logger
+    ) async -> Response {
+        let (sessionKey, needsHandshake) = deriveSessionKey(from: request.headers)
+        guard MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        let accept = request.headers[.accept] ?? ""
+        guard accept.contains("text/event-stream") || accept.contains("*/*") else {
+            return Response(status: .notAcceptable)
+        }
+        let writer = MCPSSEWriter()
+        let state = await registry.getOrCreate(sessionKey) {
+            needsHandshake ? .interactive
+                : await inferRole(sessionKey: sessionKey, dbPool: registry.dbPool)
+        }
+        await state.attachSSE(writer)
+        writer.sendKeepAlive()
+
+        var headers = corsHeaders(allowMethod: "GET")
+        headers[.contentType] = "text/event-stream"
+        headers[.cacheControl] = "no-cache, no-transform"
+        headers[HTTPField.Name("Connection")!] = "keep-alive"
+        headers[HTTPField.Name("X-Accel-Buffering")!] = "no"
+
+        writer.setOnClose { [weak writer] in
+            guard let writer else { return }
+            Task { await state.detachSSE(writer) }
+        }
+
+        if needsHandshake {
+            // Push a one-shot instructional channel notification telling
+            // the session to identify itself. The session reads
+            // ~/.claude/sessions/$PPID.json and calls sonata_identify.
+            let params: [String: Any] = [
+                "content": """
+                    Sonata: you're connected but unidentified (SONA_SESSION_ID env var was \
+                    not set on your launch). Read ~/.claude/sessions/$PPID.json and call \
+                    the sonata_identify MCP tool with sessionId, cwd, kind, and pid from \
+                    that file. Your temporary id is \(sessionKey).
+                    """,
+                "meta": [
+                    "event_type": "sonata_identify_request",
+                    "temp_session_key": sessionKey,
+                ],
+            ]
+            await state.pushNotification(
+                method: "notifications/claude/channel", params: params)
+        }
+
+        let body = ResponseBody(asyncSequence: writer.stream)
+        return Response(status: .ok, headers: headers, body: body)
+    }
+
+    private static func handleDeleteNoPath(
+        request: Request,
+        registry: MCPSessionRegistry
+    ) async -> Response {
+        let (sessionKey, _) = deriveSessionKey(from: request.headers)
+        guard MCPSessionKey.isValid(sessionKey) else {
+            return Response(status: .badRequest)
+        }
+        await registry.evict(sessionKey)
+        return Response(status: .noContent,
+            headers: corsHeaders(allowMethod: "DELETE"))
+    }
+
+    // MARK: - Legacy /mcp/:sessionKey endpoint (URL-path-keyed, bearer-validated)
 
     private static func handlePost<Context: RequestContext>(
         request: Request,
