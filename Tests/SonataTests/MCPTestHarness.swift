@@ -49,6 +49,8 @@ struct MCPTestHarness {
         actions.register(supervisorActions)
         actions.register(afkActions)
         actions.register(dmActions)
+        actions.register(taskActions)
+        actions.register(taskWatcherActions)
 
         let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: actions)
         let dispatcher = MCPNotificationDispatcher()

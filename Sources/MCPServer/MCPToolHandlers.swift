@@ -25,9 +25,73 @@ enum MCPToolHandlers {
         case "sonar_dm_inbox":
             return await sonarDMInbox(args: args, sessionKey: sessionKey,
                 actionRegistry: actionRegistry, dbPool: dbPool)
+        case "mem_task_list":
+            return await actionRegistry.executeMCPTool(
+                name: "mem_task_list", args: args, dbPool: dbPool)
+        case "mem_task_get":
+            return await actionRegistry.executeMCPTool(
+                name: "mem_task_get", args: args, dbPool: dbPool)
+        case "mem_task_create":
+            return await memTaskCreate(
+                args: args, actionRegistry: actionRegistry, dbPool: dbPool)
+        case "mem_task_watch":
+            return await memTaskWatch(
+                args: args, sessionKey: sessionKey,
+                actionRegistry: actionRegistry, dbPool: dbPool)
+        case "mem_task_unwatch":
+            return await memTaskUnwatch(
+                args: args, sessionKey: sessionKey,
+                actionRegistry: actionRegistry, dbPool: dbPool)
         default:
             return (false, "Unknown tool: \(toolName)")
         }
+    }
+
+    /// Defaults target_session_id to the caller's sessionKey when omitted —
+    /// the "subscribe me to this task" pattern is the common case and forcing
+    /// every caller to repeat its own id is friction.
+    private static func memTaskWatch(
+        args: [String: Any],
+        sessionKey: String,
+        actionRegistry: ActionRegistry,
+        dbPool: DatabasePool
+    ) async -> (success: Bool, result: String) {
+        var coerced = args
+        if (coerced["target_session_id"] as? String).map({ $0.isEmpty }) ?? true {
+            coerced["target_session_id"] = sessionKey
+        }
+        return await actionRegistry.executeMCPTool(
+            name: "mem_task_watch", args: coerced, dbPool: dbPool)
+    }
+
+    private static func memTaskUnwatch(
+        args: [String: Any],
+        sessionKey: String,
+        actionRegistry: ActionRegistry,
+        dbPool: DatabasePool
+    ) async -> (success: Bool, result: String) {
+        var coerced = args
+        if (coerced["target_session_id"] as? String).map({ $0.isEmpty }) ?? true {
+            coerced["target_session_id"] = sessionKey
+        }
+        return await actionRegistry.executeMCPTool(
+            name: "mem_task_unwatch", args: coerced, dbPool: dbPool)
+    }
+
+    /// Worker-facing mem_task_create. The dispatcher only picks up rows
+    /// with status='pending'; an active-on-create task is orphaned (per
+    /// feedback_mem_task_create_pending). Workers therefore have no
+    /// legitimate reason to set any other status here — we force
+    /// status='pending' regardless of what the caller supplied.
+    private static func memTaskCreate(
+        args: [String: Any],
+        actionRegistry: ActionRegistry,
+        dbPool: DatabasePool
+    ) async -> (success: Bool, result: String) {
+        var coerced = args
+        coerced["status"] = "pending"
+        return await actionRegistry.executeMCPTool(
+            name: "mem_task_create", args: coerced, dbPool: dbPool)
     }
 
     private static func completeEvent(
@@ -265,6 +329,88 @@ enum MCPToolSchemas {
                     "since_ts": ["type": "number", "description": "Epoch ms; default 0 (returns up to limit)"],
                     "limit": ["type": "number", "description": "Max rows (default 50, max 500)"],
                 ],
+            ],
+        ],
+        [
+            "name": "mem_task_list",
+            "description": "List tasks in the worker queue with optional filters.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "limit": ["type": "number", "description": "Max results (default 50)"],
+                    "offset": ["type": "number", "description": "Skip N results (default 0)"],
+                    "status": ["type": "string", "description": "Filter by status (e.g. 'pending', 'active', 'completed')"],
+                    "project": ["type": "string", "description": "Filter by project namespace"],
+                    "assignedTo": ["type": "string", "description": "Filter by assignee"],
+                ],
+            ],
+        ],
+        [
+            "name": "mem_task_get",
+            "description": "Fetch a single task by ID.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "id": ["type": "string", "description": "Task ID"],
+                ],
+                "required": ["id"],
+            ],
+        ],
+        [
+            "name": "mem_task_create",
+            "description": "Create a new task. Worker callers can only create rows with status='pending' — any other status is silently coerced (the dispatcher only picks up pending rows, so active-on-create orphans the task).",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "title": ["type": "string", "description": "Task title"],
+                    "source": ["type": "string", "description": "Source system (required)"],
+                    "description": ["type": "string", "description": "Task description"],
+                    "priority": ["type": "string", "description": "Priority (default 'normal')"],
+                    "prompt": ["type": "string", "description": "Prompt/instructions for the worker"],
+                    "workingDir": ["type": "string", "description": "Working directory"],
+                    "model": ["type": "string", "description": "Model override"],
+                    "maxTurns": ["type": "number", "description": "Max turns"],
+                    "project": ["type": "string", "description": "Project namespace"],
+                    "blockedBy": ["type": "array", "items": ["type": "string"], "description": "Blocker task IDs"],
+                    "parentTask": ["type": "string", "description": "Parent task ID"],
+                    "sourceRef": ["type": "string", "description": "External source reference"],
+                    "tags": ["type": "array", "items": ["type": "string"], "description": "Tags"],
+                    "assignedTo": ["type": "string", "description": "Assignee"],
+                    "dueAt": ["type": "number", "description": "Due timestamp (epoch ms)"],
+                    "maxRetries": ["type": "number", "description": "Max retries"],
+                    "tools": ["type": "array", "items": ["type": "string"], "description": "Allowed tools"],
+                    "metadata": ["type": "string", "description": "JSON metadata string"],
+                ],
+                "required": ["title", "source"],
+            ],
+        ],
+        [
+            "name": "mem_task_watch",
+            "description": "Subscribe to status transitions on a task — delivers a sonar DM on change instead of polling. Defaults target_session_id to the caller's session.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "taskId": ["type": "string", "description": "Task ID to watch"],
+                    "target_session_id": ["type": "string", "description": "Session to receive DMs (defaults to caller)"],
+                    "on": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "description": "Subset of [done, failed, status_change]. Defaults to [status_change].",
+                    ],
+                ],
+                "required": ["taskId"],
+            ],
+        ],
+        [
+            "name": "mem_task_unwatch",
+            "description": "Drop a task watcher. Idempotent. Defaults target_session_id to the caller's session.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "taskId": ["type": "string", "description": "Task ID"],
+                    "target_session_id": ["type": "string", "description": "Watcher session id (defaults to caller)"],
+                ],
+                "required": ["taskId"],
             ],
         ],
     ]

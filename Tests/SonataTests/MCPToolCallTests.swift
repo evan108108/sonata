@@ -153,6 +153,146 @@ final class MCPToolCallTests: XCTestCase {
         XCTAssertEqual(status, "failed")
     }
 
+    /// Workers can list tasks via mem_task_list. Pins the worker-allowlist
+    /// wiring so a regression here surfaces immediately.
+    func testMemTaskListReturnsRows() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        // Seed one pending row directly so the list call has something to return.
+        let now = nowMs()
+        try await h.dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO tasks
+                    (id, title, description, status, priority,
+                     prompt, workingDir, model, maxTurns,
+                     project, blockedBy, originalBlockedBy, parentTask,
+                     source, sourceRef, tags, assignedTo, dueAt,
+                     maxRetries, tools, metadata,
+                     retryCount, outputFiles,
+                     createdAt, updatedAt)
+                VALUES (?, ?, NULL, 'pending', 'normal',
+                        NULL, NULL, NULL, NULL,
+                        NULL, '[]', '[]', NULL,
+                        ?, NULL, '[]', NULL, NULL,
+                        NULL, '[]', NULL,
+                        0, '[]',
+                        ?, ?)
+            """, arguments: ["task-list-1", "seeded", "test", now, now])
+        }
+
+        let (_, state) = await h.registerSession(sessionKey: "worker-mtl", role: .worker)
+        let raw = await state.handle(
+            method: "tools/call", id: 200,
+            params: ["name": "mem_task_list", "arguments": ["limit": 10]])
+        let response = try parseJSON(raw)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertNil(result["isError"], "mem_task_list must succeed; got \(result)")
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        XCTAssertTrue(text.contains("task-list-1"),
+            "expected list to include seeded task; got: \(text)")
+    }
+
+    /// mem_task_create from a worker with no status must yield status='pending'.
+    /// Anchors the pending-only invariant (feedback_mem_task_create_pending):
+    /// the dispatcher only picks up pending rows, so active-on-create orphans.
+    func testMemTaskCreateDefaultsToPending() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        let (_, state) = await h.registerSession(sessionKey: "worker-mtc1", role: .worker)
+        let raw = await state.handle(
+            method: "tools/call", id: 201,
+            params: [
+                "name": "mem_task_create",
+                "arguments": [
+                    "title": "from-worker",
+                    "source": "test",
+                ],
+            ])
+        let response = try parseJSON(raw)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertNil(result["isError"], "mem_task_create must succeed; got \(result)")
+
+        let status = try await h.dbPool.read { db in
+            try String.fetchOne(db,
+                sql: "SELECT status FROM tasks WHERE title = ?",
+                arguments: ["from-worker"])
+        }
+        XCTAssertEqual(status, "pending")
+    }
+
+    /// Worker-supplied status='active' must NOT survive — the handler
+    /// silently coerces to 'pending' to avoid orphaning the task.
+    func testMemTaskCreateCoercesActiveToPending() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        let (_, state) = await h.registerSession(sessionKey: "worker-mtc2", role: .worker)
+        let raw = await state.handle(
+            method: "tools/call", id: 202,
+            params: [
+                "name": "mem_task_create",
+                "arguments": [
+                    "title": "tried-active",
+                    "source": "test",
+                    "status": "active",
+                ],
+            ])
+        let response = try parseJSON(raw)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertNil(result["isError"],
+            "mem_task_create must succeed even when caller asks for status=active; got \(result)")
+
+        let status = try await h.dbPool.read { db in
+            try String.fetchOne(db,
+                sql: "SELECT status FROM tasks WHERE title = ?",
+                arguments: ["tried-active"])
+        }
+        XCTAssertEqual(status, "pending",
+            "worker-supplied status=active must be coerced to pending; got \(status ?? "nil")")
+    }
+
+    /// mem_task_get returns the row by ID.
+    func testMemTaskGetReturnsRow() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        let now = nowMs()
+        try await h.dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO tasks
+                    (id, title, description, status, priority,
+                     prompt, workingDir, model, maxTurns,
+                     project, blockedBy, originalBlockedBy, parentTask,
+                     source, sourceRef, tags, assignedTo, dueAt,
+                     maxRetries, tools, metadata,
+                     retryCount, outputFiles,
+                     createdAt, updatedAt)
+                VALUES (?, ?, NULL, 'pending', 'normal',
+                        NULL, NULL, NULL, NULL,
+                        NULL, '[]', '[]', NULL,
+                        ?, NULL, '[]', NULL, NULL,
+                        NULL, '[]', NULL,
+                        0, '[]',
+                        ?, ?)
+            """, arguments: ["task-get-1", "fetchable", "test", now, now])
+        }
+
+        let (_, state) = await h.registerSession(sessionKey: "worker-mtg", role: .worker)
+        let raw = await state.handle(
+            method: "tools/call", id: 203,
+            params: ["name": "mem_task_get", "arguments": ["id": "task-get-1"]])
+        let response = try parseJSON(raw)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertNil(result["isError"], "mem_task_get must succeed; got \(result)")
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        XCTAssertTrue(text.contains("fetchable"),
+            "expected get result to include title; got: \(text)")
+    }
+
     func testUnknownToolReturnsIsError() async throws {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
