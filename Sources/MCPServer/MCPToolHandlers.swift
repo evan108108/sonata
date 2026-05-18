@@ -81,14 +81,20 @@ enum MCPToolHandlers {
     /// Worker-facing mem_task_create. The dispatcher only picks up rows
     /// with status='pending'; an active-on-create task is orphaned (per
     /// feedback_mem_task_create_pending). Workers therefore have no
-    /// legitimate reason to set any other status here — we force
-    /// status='pending' regardless of what the caller supplied.
+    /// legitimate reason to set any other status here — we silently
+    /// coerce to 'pending' and emit a stderr warning when the caller
+    /// supplied something else, so the misuse is visible in logs
+    /// without breaking the create call.
     private static func memTaskCreate(
         args: [String: Any],
         actionRegistry: ActionRegistry,
         dbPool: DatabasePool
     ) async -> (success: Bool, result: String) {
         var coerced = args
+        if let supplied = args["status"] as? String, supplied != "pending" {
+            FileHandle.standardError.write(Data(
+                "[mcp-tool] mem_task_create: worker caller supplied status='\(supplied)' — coerced to 'pending' (dispatcher only picks up pending rows; see feedback_mem_task_create_pending)\n".utf8))
+        }
         coerced["status"] = "pending"
         return await actionRegistry.executeMCPTool(
             name: "mem_task_create", args: coerced, dbPool: dbPool)
