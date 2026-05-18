@@ -85,7 +85,13 @@ final class AllSessionsViewModel: ObservableObject {
         var collected: [AllSessionsRow] = []
 
         // 1. MCP-attached sessions from the registry.
-        var attachedClaudeIds: Set<String> = []
+        // attachedIds collects both sessionKey AND claudeSessionId so the
+        // ~/.claude/sessions pass can dedup either way:
+        //   - sona-launched: sessionKey == claude session uuid (bearer)
+        //   - identified anon-XXX: claudeSessionId is the uuid (set via sonata_identify)
+        //   - legacy workers/supervisor: sessionKey is workerId, no uuid match
+        //     (handled by the cwd-prefix filter below)
+        var attachedIds: Set<String> = []
         if let reg = MCPSessionRegistry.shared {
             let snaps = await reg.snapshot()
             for snap in snaps {
@@ -97,7 +103,7 @@ final class AllSessionsViewModel: ObservableObject {
                     section = .workers
                 case .supervisor:
                     kind = .supervisor
-                    section = .workers  // grouped with workers since it's a Sonata-spawned non-interactive
+                    section = .workers
                 case .interactive:
                     kind = .interactive
                     section = .connected
@@ -113,8 +119,9 @@ final class AllSessionsViewModel: ObservableObject {
                     inFlightEventId: snap.inFlightEventId,
                     lastSeenMs: snap.lastContactedAt
                 ))
+                attachedIds.insert(snap.sessionKey)
                 if let csid = snap.claudeSessionId {
-                    attachedClaudeIds.insert(csid)
+                    attachedIds.insert(csid)
                 }
             }
         }
@@ -135,9 +142,15 @@ final class AllSessionsViewModel: ObservableObject {
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else { continue }
                 let sessionId = json["sessionId"] as? String ?? entry
-                // If this claude is already attached to MCP, skip — it shows
-                // up in workers/connected via the registry pass.
-                if attachedClaudeIds.contains(sessionId) { continue }
+                // If this claude is already MCP-attached, skip — it shows up
+                // in workers/connected via the registry pass.
+                if attachedIds.contains(sessionId) { continue }
+                // Sonata-internal processes (workers, supervisor) belong in
+                // the Workers section and are surfaced via WorkerManager.
+                // Filter them out of Unconnected by cwd prefix so they never
+                // double-list as "external claudes."
+                let cwdField = json["cwd"] as? String ?? ""
+                if cwdField.hasPrefix("\(NSHomeDirectory())/.sonata/") { continue }
                 let kindRaw = (json["kind"] as? String) ?? "interactive"
                 let kind: AllSessionsRow.Kind
                 switch kindRaw.lowercased() {

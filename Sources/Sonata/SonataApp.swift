@@ -157,6 +157,16 @@ func ensureSonaLauncher() {
                 fi
             done
             : ${sid:=$(uuidgen | tr 'A-Z' 'a-z')}
+            # Pre-warm Sonata's session registry so the dashboard shows
+            # this session immediately. Without this, claude's HTTP MCP
+            # client connects LAZILY on first tool call — meaning a fresh
+            # `sona` session might not appear in "Connected" for minutes.
+            # The bearer matches what claude will use; same session entry.
+            curl -s --max-time 1 \\
+                -H "Authorization: Bearer $sid" \\
+                -H "Content-Type: application/json" \\
+                -d '{"jsonrpc":"2.0","method":"ping","id":0}' \\
+                http://localhost:3211/mcp >/dev/null 2>&1 || true
             SONA_SESSION_ID=$sid CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 \\
                 exec $HOME/bin/claude-patched \\
                     --session-id $sid \\
