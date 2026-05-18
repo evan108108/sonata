@@ -21,7 +21,15 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
 
     let cwd: URL
     let terminalView: LocalProcessTerminalView
-    private let sessionId: String
+    let sessionId: String
+
+    /// Stable MCP-side identifier for this tab — what shows up as the
+    /// sessionKey in MCPSessionRegistry, used by the dashboard's
+    /// Connected/Unconnected sections to find the human-readable name
+    /// ("Session 1" / "My Session") attached to the tab.
+    var mcpSessionKey: String {
+        "session-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
+    }
 
     init(id: UUID = UUID(), name: String, cwd: URL) {
         self.id = id
@@ -39,13 +47,24 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     func spawn() {
         try? FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
 
-        let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId)
+        // Per plan §6: opt-in in-proc MCP. SessionKey is a stable prefix
+        // of the existing UUID so it satisfies MCPSessionKey.isValid
+        // (1-128 [A-Za-z0-9_-]). Flag unset → behaviour unchanged.
+        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
+            sessionKey: mcpSessionKey,
+            role: .interactive,
+            slotLabel: "interactive"
+        )
+        let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: inProcExtras != nil)
 
         var args: [String] = []
         args.append(contentsOf: ["--session-id", sessionId])
         args.append("--dangerously-skip-permissions")
         args.append(contentsOf: ["--dangerously-load-development-channels", "server:sonata-bridge"])
         args.append(contentsOf: ["--model", "claude-opus-4-7"])
+        if let extras = inProcExtras {
+            args.append(contentsOf: extras)
+        }
 
         let terminal = terminalView.getTerminal()
         terminal.resetToInitialState()
@@ -117,7 +136,11 @@ extension InteractiveSessionTab {
     /// Build env for an Interactive Sessions subprocess. Mirrors the WorkerCoordinator
     /// passthrough list but flips SONA_WORKER=0 and omits WORKER_ID / SESSION_LABEL —
     /// these are conversational sessions, not pool members.
-    static func buildEnvironment(sessionId: String) -> [String] {
+    /// `omitLegacyRole` is set true by spawn() when the in-proc MCP path
+    /// is active — the new server learns identity from the URL path so
+    /// SONATA_ROLE=session is redundant and would confuse a side-by-side
+    /// stdio bridge if both were live.
+    static func buildEnvironment(sessionId: String, omitLegacyRole: Bool = false) -> [String] {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
@@ -138,7 +161,9 @@ extension InteractiveSessionTab {
 
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=0")
-        env.append("SONATA_ROLE=session")
+        if !omitLegacyRole {
+            env.append("SONATA_ROLE=session")
+        }
         env.append("SONA_SESSION_ID=\(sessionId)")
 
         let passthrough = [

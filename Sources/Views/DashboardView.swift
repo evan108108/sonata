@@ -18,8 +18,13 @@ struct DashboardView: View {
     @StateObject private var deadlinesVM = DeadlinesViewModel()
     @StateObject private var afkVM = AFKQuestionsViewModel()
     @StateObject private var attentionVM = AttentionTasksViewModel()
+    @StateObject private var allSessionsVM = AllSessionsViewModel()
 
     private let timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    /// Sessions list refreshes faster than the rest of the dashboard so
+    /// new Connected rows appear shortly after a session attaches its
+    /// SSE — not after up to 30s.
+    private let sessionsTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
     private let bootRetryInterval: TimeInterval = 1.5
 
     var body: some View {
@@ -97,13 +102,18 @@ struct DashboardView: View {
                         // pool look like right now" is the natural follow-on to
                         // the totals above.
                         LiveWorkersSection(
-                            workers: workerManager.workers,
-                            externalBridgeCount: status.externalBridgeCount
+                            workers: workerManager.workers
                         ) { worker in
                             WorkerManager.shared.selectedWorkerId = worker.id
                             selectedTab = .workers
                         }
                         .padding(.horizontal)
+
+                        ConnectedSessionsSection(vm: allSessionsVM)
+                            .padding(.horizontal)
+
+                        UnconnectedSessionsSection(vm: allSessionsVM)
+                            .padding(.horizontal)
 
                         // ── Token Usage ────────────────────────────────────────
                         // What is this costing right now — sparkline + today's spend.
@@ -247,6 +257,13 @@ struct DashboardView: View {
                 try? await Task.sleep(for: .seconds(bootRetryInterval))
             }
         }
+        .task {
+            while !allSessionsVM.hasLoadedOnce && !Task.isCancelled {
+                await allSessionsVM.fetch()
+                if allSessionsVM.hasLoadedOnce { break }
+                try? await Task.sleep(for: .seconds(bootRetryInterval))
+            }
+        }
         .onReceive(timer) { _ in
             Task { await fetchStatus() }
             Task { await activityVM.fetch() }
@@ -256,6 +273,7 @@ struct DashboardView: View {
             Task { await deadlinesVM.fetch() }
             Task { await afkVM.fetch() }
             Task { await attentionVM.fetch() }
+            Task { await allSessionsVM.fetch() }
         }
         .sheet(isPresented: $showingEntityBreakdown) {
             BreakdownSheet(title: "Entities by type", counts: status?.entitiesByType ?? [:], footnote: nil)
@@ -302,7 +320,6 @@ private struct StatusResponse: Decodable {
     let entitiesByType: [String: Int]?
     let workerCount: Int?
     let workersByStatus: [String: Int]?
-    let externalBridgeCount: Int?
     let pendingTasks: Int?
     let tasksByStatus: [String: Int]?
     let failedTasks: Int?
@@ -330,7 +347,6 @@ private struct SystemStatus {
     let entitiesByType: [String: Int]
     let workerCount: Int
     let workersByStatus: [String: Int]
-    let externalBridgeCount: Int
     let pendingTasks: Int
     let tasksByStatus: [String: Int]
     let failedTasks: Int
@@ -363,9 +379,6 @@ private struct SystemStatus {
         self.entitiesByType = r.entitiesByType ?? [:]
         self.workerCount = r.workerCount ?? 0
         self.workersByStatus = r.workersByStatus ?? [:]
-        // Older servers won't have this field; default to 0 so the chip just
-        // hides until a fresh binary lands.
-        self.externalBridgeCount = r.externalBridgeCount ?? 0
         self.pendingTasks = r.pendingTasks ?? 0
         self.tasksByStatus = r.tasksByStatus ?? [:]
         // Older servers won't have these fields; default to 0 so the Attention
@@ -659,8 +672,9 @@ private struct StatCard: View {
 
 private struct LiveWorkersSection: View {
     let workers: [Worker]
-    let externalBridgeCount: Int
     let onTapRow: (Worker) -> Void
+    @State private var dmTarget: Worker?
+    @State private var dmResult: String?
 
     private var busyCount: Int {
         workers.filter { $0.status == .busy }.count
@@ -674,7 +688,7 @@ private struct LiveWorkersSection: View {
             HStack(spacing: 10) {
                 Image(systemName: "cpu")
                     .foregroundStyle(.cyan)
-                Text("Live Workers")
+                Text("Workers")
                     .font(.headline)
                 Text("\(workers.count)")
                     .font(.subheadline.weight(.semibold))
@@ -682,9 +696,6 @@ private struct LiveWorkersSection: View {
                 Text("· \(busyCount) busy")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if externalBridgeCount > 0 {
-                    ExternalBridgesChip(count: externalBridgeCount)
-                }
                 Spacer()
                 Button {
                     WorkerManager.shared.addWorker()
@@ -709,43 +720,134 @@ private struct LiveWorkersSection: View {
                 .padding(.vertical, 16)
             } else {
                 VStack(spacing: 2) {
+                    workerColumnHeader
                     ForEach(workers) { worker in
-                        LiveWorkerRow(worker: worker, onTap: onTapRow)
+                        LiveWorkerRow(worker: worker, onTap: onTapRow) {
+                            dmTarget = worker
+                        }
                     }
                 }
+            }
+            if let result = dmResult {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
         .background(Color.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .sheet(item: $dmTarget) { worker in
+            WorkerDMSheet(worker: worker) { text in
+                Task {
+                    dmResult = await Self.sendDM(target: worker.id, body: text)
+                }
+            }
+        }
+    }
+
+    private static func sendDM(target: String, body: String) async -> String {
+        let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/dm/send")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any] = [
+            "targetSessionId": target,
+            "fromSessionId": "dashboard",
+            "body": body,
+            "context": "dashboard-worker-dm",
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let delivery = obj["deliveryStatus"] as? String {
+                return "Sent to \(target) — \(delivery)"
+            }
+            let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
+            return "Failed (HTTP \(code)) — \(snippet)"
+        } catch {
+            return "Failed — \(error.localizedDescription)"
+        }
     }
 }
 
-/// Compact pill on the LiveWorkersSection header showing how many
-/// sonata-bridge.ts processes are running outside the worker pool — typically
-/// interactive `claude` (or claude-patched) sessions with sonata-bridge as an
-/// MCP server. Hidden when the count is zero.
-private struct ExternalBridgesChip: View {
-    let count: Int
+private struct WorkerDMSheet: View {
+    let worker: Worker
+    let onSend: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var messageText: String = ""
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "person.fill.viewfinder")
-                .font(.caption2)
-            Text("\(count) external")
-                .font(.caption.weight(.medium))
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "paperplane.fill").foregroundStyle(.cyan)
+                Text("DM \(worker.label)").font(.headline)
+                Text(worker.id)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { dismiss() }.buttonStyle(.borderless)
+            }
+            TextEditor(text: $messageText)
+                .font(.system(.body, design: .monospaced))
+                .frame(minHeight: 140)
+                .padding(6)
+                .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            HStack {
+                Text("\(messageText.utf8.count) bytes")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Send") {
+                    onSend(messageText)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Color.cyan.opacity(0.18), in: Capsule())
-        .help("\(count) external Claude session\(count == 1 ? "" : "s") — sonata-bridge.ts processes that aren't pool workers")
+        .padding()
+        .frame(minWidth: 460, minHeight: 260)
     }
+}
+
+/// Column header for the Workers section — column widths match
+/// LiveWorkerRow.rowContent so headers line up.
+fileprivate var workerColumnHeader: some View {
+    HStack(spacing: 10) {
+        Color.clear.frame(width: 8, height: 8)
+        Text("WORKER")
+            .frame(width: 110, alignment: .leading)
+        Text("STATUS")
+            .frame(width: 70, alignment: .leading)
+        Text("CURRENT TASK")
+            .frame(maxWidth: .infinity, alignment: .leading)
+        Text("ELAPSED")
+            .frame(width: 60, alignment: .trailing)
+        Text("TASKS")
+            .frame(width: 50, alignment: .trailing)
+        Text("TOKENS")
+            .frame(width: 60, alignment: .trailing)
+        Text("CACHE")
+            .frame(width: 60, alignment: .trailing)
+        // action column placeholder (3 buttons ≈ 60pt)
+        Color.clear.frame(width: 60)
+    }
+    .font(.system(size: 9, weight: .semibold))
+    .foregroundStyle(.tertiary)
+    .padding(.top, 4)
+    .padding(.bottom, 2)
 }
 
 private struct LiveWorkerRow: View {
     @ObservedObject var worker: Worker
     let onTap: (Worker) -> Void
+    let onDM: () -> Void
 
     @State private var isHovered = false
     @State private var showRestartAlert = false
@@ -765,6 +867,91 @@ private struct LiveWorkerRow: View {
 
     private var statusText: String {
         worker.status.rawValue.lowercased()
+    }
+
+    private var labelCell: some View {
+        Text(worker.label)
+            .font(.system(.caption, design: .monospaced))
+            .frame(width: 110, alignment: .leading)
+    }
+
+    private var statusCell: some View {
+        Text(worker.status == .draining ? "draining" : statusText)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(width: 70, alignment: .leading)
+    }
+
+    private var taskCell: some View {
+        // Pick the first non-empty hint: slug (most readable) → task
+        // (often the prompt summary) → eventId (last-resort identifier).
+        let candidates = [worker.currentSlug, worker.currentTask, worker.currentEventId]
+        let display = candidates.first(where: { !$0.isEmpty }) ?? ""
+        let hasTask = !display.isEmpty
+        return Text(hasTask ? display : "—")
+            .font(.caption)
+            .foregroundStyle(hasTask ? .secondary : .tertiary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(hasTask ? display : "(no task assigned)")
+    }
+
+    private var elapsedCell: some View {
+        let text: String = {
+            guard worker.status == .busy, worker.taskStartedAt > 0 else { return "—" }
+            let elapsedSec = Int((Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 1000)
+            return "\(elapsedSec)s"
+        }()
+        return Text(text)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .frame(width: 60, alignment: .trailing)
+    }
+
+    private var tasksCountCell: some View {
+        Text("\(worker.tasksSinceSpawn)")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .frame(width: 50, alignment: .trailing)
+            .help("Tasks completed since this worker spawned")
+    }
+
+    private var tokensCell: some View {
+        let text: String = {
+            guard worker.currentEventTokens > 0 else { return "—" }
+            return String(format: "%.1fk", Double(worker.currentEventTokens) / 1000.0)
+        }()
+        return Text(text)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.tertiary)
+            .frame(width: 60, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private var cacheCell: some View {
+        HStack(spacing: 2) {
+            if let hr = worker.currentCacheHitRate,
+               worker.currentInputTokens >= Self.cacheSampleFloor {
+                if hr < 0.5 {
+                    Text(String(format: "%.0f%%", hr * 100))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(Color.orange)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Color.orange)
+                } else {
+                    Text(String(format: "%.0f%%", hr * 100))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            } else {
+                Text("—")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: 60, alignment: .trailing)
     }
 
     var body: some View {
@@ -792,58 +979,23 @@ private struct LiveWorkerRow: View {
             Circle()
                 .fill(statusDotColor)
                 .frame(width: 8, height: 8)
-
-            Text(worker.label)
-                .font(.system(.caption, design: .monospaced))
-                .frame(minWidth: 110, alignment: .leading)
-
-            Text(statusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if worker.status == .draining {
-                Text("(cycling)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if worker.status == .busy {
-                if !worker.currentSlug.isEmpty {
-                    Text("· \(worker.currentSlug)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if worker.taskStartedAt > 0 {
-                    let elapsedSec = Int((Date().timeIntervalSince1970 * 1000 - Double(worker.taskStartedAt)) / 1000)
-                    Text("· \(elapsedSec)s elapsed")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                if worker.currentEventTokens > 0 {
-                    let kTokens = Double(worker.currentEventTokens) / 1000.0
-                    Text(String(format: "· %.1fk tokens", kTokens))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                if let hr = worker.currentCacheHitRate,
-                   worker.currentInputTokens >= Self.cacheSampleFloor {
-                    Text(String(format: "· %.0f%% cache", hr * 100))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    if hr < 0.5 {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
-                }
-            }
-
-            Spacer()
-
+            labelCell
+            statusCell
+            taskCell
+            elapsedCell
+            tasksCountCell
+            tokensCell
+            cacheCell
             HStack(spacing: 6) {
+                Button {
+                    onDM()
+                } label: {
+                    Image(systemName: "paperplane")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("DM this worker")
+
                 Button {
                     showRestartAlert = true
                 } label: {

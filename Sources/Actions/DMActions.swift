@@ -13,7 +13,7 @@ import SQLite3
 // DMRegistry enqueue, so a bridge that registers after the fact can backfill
 // via /api/dm/inbox.
 //
-// Plan: /Users/evan/memory/claude/documents/evenflow/sonar-dm-v0-plan.md
+// Plan: /Users/evan/memory/claude/documents/plans/sonar-dm-v0-plan.md
 // Sections: §4 (Sonata-side endpoints), §6 (MCP types), §7 (error policy),
 // §11 (locked decisions), §12 (security findings A.1, A.7), §13 (limits).
 
@@ -393,14 +393,19 @@ private struct DMRegistryResponse: Encodable {
 
 // MARK: - Helpers shared by /send routing
 
-/// Produce a heartbeat checker that consults workers AND ExternalBridgeRegistry.
-/// Used by SonataApp at startup AND by HTTP handlers that need a sync gate.
+/// Produce a heartbeat checker that consults workers + MCPSessionRegistry.
+/// In-app MCP sessions count as "fresh" when their SSE writer is attached;
+/// the worker pool falls back to the lastHeartbeat column in the workers
+/// table (refreshed by MCPSessionSweeper).
 func makeProductionHeartbeatChecker(dbPool: DatabasePool) -> DMHeartbeatChecker {
     DMHeartbeatChecker(isFresh: { sessionId in
         let cutoff = nowMs() - DMLimits.heartbeatStaleAfterMs
-        // External bridges first — fast in-memory check.
-        for (sid, entry) in ExternalBridgeRegistry.shared.snapshot() {
-            if sid == sessionId && entry.lastHeartbeat >= cutoff { return true }
+        // MCP sessions first — SSE attach is the presence proof.
+        if let reg = MCPSessionRegistry.shared {
+            let snaps = await reg.snapshot()
+            if snaps.contains(where: { $0.sessionKey == sessionId && $0.hasSSE }) {
+                return true
+            }
         }
         // Fall through to workers table.
         do {
@@ -620,13 +625,12 @@ let dmActions: [SonataAction] = [
                 }
             }
 
-            // Local loopback. Pass A.7: heartbeat freshness gates the
-            // "registered" path so a stale registration can't catch DMs.
-            let checker = makeProductionHeartbeatChecker(dbPool: ctx.dbPool)
-            DMRegistry.shared.setHeartbeatChecker(checker)
-            let registered = DMRegistry.shared.has(targetSessionId)
-            let fresh = registered ? await checker.isFresh(targetSessionId) : false
-
+            // Local loopback. Presence = MCPSessionRegistry.hasSSE on the
+            // target sessionKey. Persist FIRST (so the recipient can backfill
+            // via dm_inbox even if the SSE attach drops mid-push), then push
+            // via the in-app MCPNotificationDispatcher / Registry.deliverDM
+            // path. The legacy DMRegistry enqueue-and-poll surface is dead
+            // (no bridge polls it).
             let env = DMEnvelope(
                 messageId: messageId,
                 fromSessionId: fromSessionId,
@@ -640,12 +644,22 @@ let dmActions: [SonataAction] = [
                 metaJson: metaJson
             )
 
-            if registered && fresh {
-                _ = DMRegistry.shared.enqueue(env)
-                try? await ctx.dbPool.write { db in
-                    _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+            if let mcpReg = MCPSessionRegistry.shared {
+                let delivered = await mcpReg.deliverDM(
+                    target: targetSessionId,
+                    messageId: messageId,
+                    body: body,
+                    fromSessionId: fromSessionId,
+                    context: context,
+                    metaJson: metaJson,
+                    sentAtMs: now
+                )
+                if delivered {
+                    try? await ctx.dbPool.write { db in
+                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+                    }
+                    return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
                 }
-                return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
             }
 
             // §11.1 lazy-optimistic: 202 if a recent dm_messages row exists for
@@ -735,7 +749,113 @@ let dmActions: [SonataAction] = [
             )
         }
     ),
+
+    // POST /api/dm/broadcast — DMAll. Fan a single DM to every
+    // SSE-attached session matching the optional kind filter. Used by
+    // the dashboard "Broadcast" affordance and the sonar_dm_broadcast
+    // MCP tool (the MCP tool routes through MCPToolHandlers; the HTTP
+    // route lets non-MCP callers — dashboard, scripts — do the same
+    // thing).
+    SonataAction(
+        name: "dm_broadcast",
+        description: "Send a DM to every SSE-attached session matching the optional kind filter ('all'|'workers'|'interactive'|'supervisor'; default 'all'). Excludes the sender.",
+        group: "/api/dm",
+        path: "/broadcast",
+        method: .post,
+        params: [
+            ActionParam("fromSessionId", .string, required: true, description: "Sender session id"),
+            ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB"),
+            ActionParam("filter", .string, required: false, description: "Recipient kind filter (default 'all')"),
+            ActionParam("context", .string, required: false, description: "Optional context string"),
+        ],
+        handler: { ctx in
+            let fromSessionId = try ctx.params.require("fromSessionId")
+            let body = try ctx.params.require("body")
+            let filterRaw = (ctx.params.string("filter") ?? "all").lowercased()
+            let context = ctx.params.string("context")
+            guard !body.isEmpty else {
+                throw ActionError.custom("body required", .unprocessableContent)
+            }
+            guard body.utf8.count <= 256 * 1024 else {
+                throw ActionError.custom("body exceeds 256 KiB", .unprocessableContent)
+            }
+            let allow: (SessionRole) -> Bool
+            switch filterRaw {
+            case "worker", "workers": allow = { $0 == .worker }
+            case "interactive", "humans": allow = { $0 == .interactive }
+            case "supervisor": allow = { $0 == .supervisor }
+            case "all", "": allow = { _ in true }
+            default:
+                throw ActionError.custom("unknown filter '\(filterRaw)'", .unprocessableContent)
+            }
+            guard let reg = MCPSessionRegistry.shared else {
+                return DMBroadcastResponse(
+                    filter: filterRaw, deliveredCount: 0, skippedCount: 0,
+                    deliveredTo: [])
+            }
+            let snaps = await reg.snapshot()
+            var delivered: [String] = []
+            var skipped = 0
+            let now = nowMs()
+            for snap in snaps {
+                guard allow(snap.role), snap.hasSSE,
+                      snap.sessionKey != fromSessionId else {
+                    skipped += 1; continue
+                }
+                let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
+                let pushed = await reg.deliverDM(
+                    target: snap.sessionKey,
+                    messageId: messageId,
+                    body: body,
+                    fromSessionId: fromSessionId,
+                    context: context,
+                    metaJson: nil,
+                    sentAtMs: now
+                )
+                if pushed {
+                    delivered.append(snap.sessionKey)
+                    let env = DMEnvelope(
+                        messageId: messageId,
+                        fromSessionId: fromSessionId,
+                        fromPubkey: nil,
+                        fromPeerId: nil,
+                        targetSessionId: snap.sessionKey,
+                        body: body,
+                        context: context,
+                        sentAtMs: now,
+                        receivedAtMs: now,
+                        metaJson: nil
+                    )
+                    try? await ctx.dbPool.write { db in
+                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+                    }
+                } else {
+                    skipped += 1
+                }
+            }
+            return DMBroadcastResponse(
+                filter: filterRaw,
+                deliveredCount: delivered.count,
+                skippedCount: skipped,
+                deliveredTo: delivered
+            )
+        }
+    ),
 ]
+
+private struct DMBroadcastResponse: Encodable {
+    let filter: String
+    let deliveredCount: Int
+    let skippedCount: Int
+    let deliveredTo: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case filter
+        case deliveredCount = "delivered_count"
+        case skippedCount = "skipped_count"
+        case deliveredTo = "delivered_to"
+    }
+}
 
 // MARK: - Sonar peer-card + send wiring
 

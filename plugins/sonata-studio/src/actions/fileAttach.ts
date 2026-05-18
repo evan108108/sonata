@@ -24,7 +24,7 @@
 //   8. Sign a BUD-01 auth event (kind 24242, t=upload), PUT ciphertext.
 //   9. Verify response sha256 matches; return file-block content.
 //
-// See plumbing audit /Users/evan/memory/claude/documents/evenflow/
+// See plumbing audit /Users/evan/memory/claude/documents/plans/
 //   sonata-studio-phase5-plumbing-audit.md for the crypto round-trip proof
 //   and SPEC-v0.5 compatibility check — no spec edits required.
 

@@ -15,7 +15,7 @@
 // (the @noble/ciphers chacha20poly1305 or the gateway-mirrored nip44.ts) is
 // caught at `bun test` time before file-attach code lands.
 //
-// Audit doc: /Users/evan/memory/claude/documents/evenflow/sonata-studio-phase5-plumbing-audit.md
+// Audit doc: /Users/evan/memory/claude/documents/plans/sonata-studio-phase5-plumbing-audit.md
 
 import { describe, expect, it } from "bun:test";
 import { randomBytes as nodeRandomBytes } from "node:crypto";

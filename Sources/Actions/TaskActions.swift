@@ -344,7 +344,7 @@ let taskActions: [SonataAction] = [
         }
     ),
 
-    // PATCH /api/task
+    // PATCH /api/task — also fans out task-watcher DMs when `status` changes.
     SonataAction(
         name: "mem_task_patch",
         description: "Update any fields on a task by ID.",
@@ -423,12 +423,34 @@ let taskActions: [SonataAction] = [
             args.append(id)
             let sql = "UPDATE tasks SET \(setClauses.joined(separator: ", ")) WHERE id = ?"
 
+            // Status-change watcher fan-out: capture the row's pre-write
+            // status atomically inside the same write so the (oldStatus,
+            // newStatus) pair is consistent. The non-Sendable `var args`
+            // gets materialized into StatementArguments before the closure
+            // so Swift 6 stops complaining about the captured-var.
+            let newStatus = ctx.params.string("status")
+            // Materialize args into StatementArguments before the @Sendable
+            // closure (Swift 6 rejects captured `var`). Cast through
+            // `(any DatabaseValueConvertible)?` to hit the sequence init.
+            let bound = StatementArguments(args.map { $0 as (any DatabaseValueConvertible)? })
+            final class StatusBox: @unchecked Sendable { var old: String? }
+            let box = StatusBox()
             do {
-                try ctx.dbPool.write { db in
-                    try db.execute(sql: sql, arguments: StatementArguments(args))
+                try await ctx.dbPool.write { db in
+                    if newStatus != nil {
+                        box.old = try String.fetchOne(
+                            db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id]
+                        )
+                    }
+                    try db.execute(sql: sql, arguments: bound)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            if let newStatus, let oldStatus = box.old, oldStatus != newStatus {
+                await fireTaskWatcherDMs(
+                    taskId: id, oldStatus: oldStatus, newStatus: newStatus, dbPool: ctx.dbPool
+                )
             }
             return PatchResponse(id: id)
         }
@@ -447,6 +469,9 @@ let taskActions: [SonataAction] = [
         handler: { ctx in
             let id = try ctx.params.require("id")
             let now = nowMs()
+            let oldStatus = (try? await ctx.dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id])
+            }) ?? nil
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -462,6 +487,11 @@ let taskActions: [SonataAction] = [
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            if let oldStatus {
+                await fireTaskWatcherDMs(
+                    taskId: id, oldStatus: oldStatus, newStatus: "completed", dbPool: ctx.dbPool
+                )
             }
             return SuccessResponse()
         }
@@ -482,6 +512,9 @@ let taskActions: [SonataAction] = [
             let id = try ctx.params.require("id")
             let lastError = ctx.params.string("lastError")
             let now = nowMs()
+            let oldStatus = (try? await ctx.dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id])
+            }) ?? nil
 
             do {
                 try await ctx.dbPool.write { db in
@@ -500,6 +533,11 @@ let taskActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            if let oldStatus {
+                await fireTaskWatcherDMs(
+                    taskId: id, oldStatus: oldStatus, newStatus: "failed", dbPool: ctx.dbPool
+                )
+            }
             return SuccessResponse()
         }
     ),
@@ -517,6 +555,9 @@ let taskActions: [SonataAction] = [
         handler: { ctx in
             let id = try ctx.params.require("id")
             let now = nowMs()
+            let oldStatus = (try? await ctx.dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id])
+            }) ?? nil
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -528,6 +569,11 @@ let taskActions: [SonataAction] = [
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            if let oldStatus {
+                await fireTaskWatcherDMs(
+                    taskId: id, oldStatus: oldStatus, newStatus: "cancelled", dbPool: ctx.dbPool
+                )
             }
             return SuccessResponse()
         }
@@ -546,6 +592,9 @@ let taskActions: [SonataAction] = [
         handler: { ctx in
             let id = try ctx.params.require("id")
             let now = nowMs()
+            let oldStatus = (try? await ctx.dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id])
+            }) ?? nil
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -559,6 +608,11 @@ let taskActions: [SonataAction] = [
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            if let oldStatus {
+                await fireTaskWatcherDMs(
+                    taskId: id, oldStatus: oldStatus, newStatus: "active", dbPool: ctx.dbPool
+                )
             }
             return SuccessResponse()
         }
@@ -577,6 +631,9 @@ let taskActions: [SonataAction] = [
         handler: { ctx in
             let id = try ctx.params.require("id")
             let now = nowMs()
+            let oldStatus = (try? await ctx.dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT status FROM tasks WHERE id = ?", arguments: [id])
+            }) ?? nil
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -592,6 +649,11 @@ let taskActions: [SonataAction] = [
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            if let oldStatus {
+                await fireTaskWatcherDMs(
+                    taskId: id, oldStatus: oldStatus, newStatus: "pending", dbPool: ctx.dbPool
+                )
             }
             return SuccessResponse()
         }

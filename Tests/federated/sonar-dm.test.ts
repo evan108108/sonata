@@ -1,6 +1,6 @@
 // Sonar DMs v0 — Federated round-trip test (T4).
 //
-// Plan: /Users/evan/memory/claude/documents/evenflow/sonar-dm-v0-plan.md
+// Plan: /Users/evan/memory/claude/documents/plans/sonar-dm-v0-plan.md
 // Sections: §2 (architecture), §6 (DMMessageView shape), §8.4 (this test),
 // §10 (T4 row).
 //

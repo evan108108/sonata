@@ -42,6 +42,15 @@ struct CycleSettings {
         return (1...20).contains(val) ? val : 3
     }
 
+    /// Max consecutive auto-restart attempts before the coordinator gives up
+    /// and disables autoRestartEnabled (2026-05-18 incident: silent infinite
+    /// restart loop when --session-id collided with an existing JSONL).
+    /// Reset on successful registration. Default 3.
+    var maxAutoRestarts: Int {
+        let val = UserDefaults.standard.integer(forKey: "sonata.maxAutoRestarts")
+        return (1...20).contains(val) ? val : 3
+    }
+
     /// When true, cycling is paused across all workers.
     var pauseCycling: Bool {
         UserDefaults.standard.bool(forKey: "sonata.pauseCycling")

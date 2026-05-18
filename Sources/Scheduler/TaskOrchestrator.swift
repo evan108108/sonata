@@ -113,6 +113,11 @@ actor TaskOrchestrator {
                     arguments: [now, now, taskId]
                 )
             }
+            // Fan-out to task watchers: pending → active. Status was pending
+            // when the orchestrator picked it, so we can avoid a re-read.
+            await fireTaskWatcherDMs(
+                taskId: taskId, oldStatus: "pending", newStatus: "active", dbPool: dbPool
+            )
 
             logger.info("Task \"\(title)\" dispatched via channel (event: \(eventId))")
 

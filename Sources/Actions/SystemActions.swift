@@ -89,9 +89,6 @@ let systemActions: [SonataAction] = [
         method: .get,
         params: [],
         handler: { ctx in
-            // Read external-bridge count outside the dbPool block — the registry
-            // is in-memory and entirely independent of the SQLite connection.
-            let externalBridgeCount = ExternalBridgeRegistry.shared.currentCount()
             do {
                 return try await ctx.dbPool.read { db -> SystemStatusResponse in
                     let memRow = try Row.fetchOne(db, sql: "SELECT COUNT(*) AS cnt FROM memories")!
@@ -257,8 +254,7 @@ let systemActions: [SonataAction] = [
                         nextScheduledJob: nextJob,
                         upcomingScheduledJobs: upcomingJobs,
                         workerCount: workerCount,
-                        workersByStatus: workersByStatus,
-                        externalBridgeCount: externalBridgeCount
+                        workersByStatus: workersByStatus
                     )
                 }
             } catch {

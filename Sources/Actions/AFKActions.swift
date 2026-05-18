@@ -35,6 +35,34 @@ final class AFKRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var registrations: [String: AFKRegistration] = [:]   // token → registration
     private var pendingReplies: [String: [AFKReply]] = [:]
+    // Delivery hook for the in-app MCP server (MCPNotificationDispatcher).
+    // When set, enqueueReply invokes it inline INSTEAD of queueing into
+    // pendingReplies. The polling endpoint (/api/afk/poll) keeps working
+    // for the legacy bridge during Phase B/C by reading whatever happened
+    // to be queued before the hook was installed.
+    private var deliveryHook: (@Sendable (String, AFKReply) -> Void)?
+
+    func setDeliveryHook(_ hook: @escaping @Sendable (String, AFKReply) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        deliveryHook = hook
+    }
+
+    /// Replay queued replies through the hook after binding. Idempotent.
+    /// MCPNotificationDispatcher.bind calls this immediately after
+    /// setDeliveryHook so any AFK replies that landed in the boot gap
+    /// fire as channel notifications rather than sitting in the polling
+    /// queue forever.
+    func drainPendingForHook() {
+        lock.lock()
+        let hook = deliveryHook
+        guard hook != nil else { lock.unlock(); return }
+        let snapshot = pendingReplies
+        pendingReplies.removeAll()
+        lock.unlock()
+        for (sessionId, replies) in snapshot {
+            for reply in replies { hook?(sessionId, reply) }
+        }
+    }
 
     func register(token: String, sessionId: String) {
         lock.lock(); defer { lock.unlock() }
@@ -70,12 +98,22 @@ final class AFKRegistry: @unchecked Sendable {
     }
 
     /// Enqueue a reply for whatever session owns `token`. Returns true if a
-    /// session was registered and the reply was queued.
+    /// session was registered. When the in-app MCP delivery hook is set,
+    /// the reply fires inline through it; otherwise it queues into
+    /// pendingReplies for the legacy /api/afk/poll path to drain.
     @discardableResult
     func enqueueReply(_ reply: AFKReply) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard let sessionId = registrations[reply.token]?.sessionId else { return false }
-        pendingReplies[sessionId, default: []].append(reply)
+        lock.lock()
+        guard let sessionId = registrations[reply.token]?.sessionId else {
+            lock.unlock()
+            return false
+        }
+        let hook = deliveryHook
+        if hook == nil {
+            pendingReplies[sessionId, default: []].append(reply)
+        }
+        lock.unlock()
+        hook?(sessionId, reply)
         return true
     }
 
@@ -127,23 +165,27 @@ let afkActions: [SonataAction] = [
             let sessionId = try ctx.params.require("sessionId")
             AFKRegistry.shared.register(token: token, sessionId: sessionId)
 
-            // Sanity check: warn (but still register) if no live bridge is
-            // polling for this sessionId. Workers are tracked in the workers
-            // table; interactive bridges in ExternalBridgeRegistry. A miss in
-            // both means the reply will sit in pendingReplies forever — the
-            // exact footgun this whole unification is meant to prevent.
+            // Sanity check: warn (but still register) if no MCP session is
+            // attached for this sessionId. Workers live in the `workers`
+            // table; interactive sessions live in MCPSessionRegistry (SSE
+            // attach is the presence signal). A miss in both means the
+            // reply will sit in pendingReplies forever.
             let isLiveWorker: Bool = (try? await ctx.dbPool.read { db -> Bool in
                 let sql = "SELECT 1 FROM workers WHERE sessionId = ? LIMIT 1"
                 return try Row.fetchOne(db, sql: sql, arguments: [sessionId]) != nil
             }) ?? false
-            let isLiveBridge = ExternalBridgeRegistry.shared.contains(sessionId: sessionId)
-            if !isLiveWorker && !isLiveBridge {
+            let hasMCPSession: Bool = await {
+                guard let reg = MCPSessionRegistry.shared else { return false }
+                let snaps = await reg.snapshot()
+                return snaps.contains { $0.sessionKey == sessionId && $0.hasSSE }
+            }()
+            if !isLiveWorker && !hasMCPSession {
                 afkLogger.warning("""
                     afk_register: sessionId \(sessionId) is not a known live worker \
-                    or external bridge. The token \(token) was stored, but no bridge \
-                    appears to be polling — AFK replies may never be delivered. \
-                    Verify the calling session has the sonata-bridge MCP server \
-                    configured and that the bridge process is alive.
+                    and has no SSE-attached MCP session. The token \(token) was stored, \
+                    but no delivery path appears active — AFK replies may never reach \
+                    the caller. Verify the session has the sonata-bridge MCP entry \
+                    pointing at http://localhost:3211/mcp/<sessionId>.
                     """)
             }
             return SuccessResponse()
