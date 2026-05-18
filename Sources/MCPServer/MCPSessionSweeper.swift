@@ -10,6 +10,12 @@ actor MCPSessionSweeper {
 
     private let tickInterval: TimeInterval = 15.0
     private let staleThresholdMs: Int64 = 30_000
+    /// Eviction threshold for sessions with no SSE attached. Once
+    /// lastContactedAt is older than this AND hasSSE is false AND no
+    /// backing live PID exists, the entry is removed from the registry.
+    /// Conservative — must be longer than the typical reconnect window
+    /// for a session restarting itself.
+    private let evictNoSSEAfterMs: Int64 = 120_000
 
     init(registry: MCPSessionRegistry, dbPool: DatabasePool, logger: Logger) {
         self.registry = registry
@@ -35,18 +41,61 @@ actor MCPSessionSweeper {
     private func tick() async {
         await registry.tickKeepAlives()
 
+        // Snapshot the registry first, then snapshot the supporting
+        // truth tables (workers, claude PID files). After that we can
+        // make eviction + heartbeat decisions per session.
         let snapshots = await registry.snapshot()
         let now = nowMs()
+        let liveWorkerIds = await fetchLiveWorkerIds()
+        let livePIDs: Set<Int>? = livePIDsFromClaudeSessionsDir()
 
         for snap in snapshots {
+            // ─── Ghost-prevention eviction pass ───
+            // 2026-05-18 — observed 3 ghost worker rows in the
+            // All-Sessions dashboard from prior worker generations
+            // that the registry kept forever. The sweeper now removes
+            // any registry entry that no longer corresponds to a live
+            // session.
             let age = now - snap.lastContactedAt
-            // SSE attached → the session is provably alive on this tick;
-            // refresh heartbeat to `now`. (Idle workers never make MCP
-            // calls, so `lastContactedAt` would otherwise freeze at the
-            // init/tools-list timestamp and the sweeper would write the
-            // same stale value forever.)
-            // No SSE but recent traffic → use lastContactedAt.
-            // No SSE and stale → skip; let downstream stale checks evict.
+            switch snap.role {
+            case .worker:
+                // Workers must exist in the workers DB table (in a
+                // non-terminal status). If the row's gone, the worker
+                // was recycled and this entry is a ghost — evict.
+                if !liveWorkerIds.contains(snap.sessionKey) {
+                    await registry.evict(snap.sessionKey)
+                    continue
+                }
+            case .supervisor:
+                break  // supervisor session is a singleton, no ghost case
+            case .interactive:
+                // Interactive sessions (sona-launched + anon-XXX) are
+                // backed by a claude process. Evict if all of:
+                //   * SSE is gone
+                //   * idle past the eviction window
+                //   * EITHER we know the session's pid and it's no
+                //     longer alive, OR the session never identified
+                //     itself (anon-XXX that didn't call sonata_identify)
+                // If `livePIDs` is nil (~/.claude/sessions unreadable),
+                // skip eviction entirely so a transient hiccup doesn't
+                // kill live sessions.
+                if !snap.hasSSE, age >= evictNoSSEAfterMs, let livePIDs {
+                    let state = await registry.get(snap.sessionKey)
+                    let pid = await state?.pid
+                    let shouldEvict: Bool
+                    if let pid {
+                        shouldEvict = !livePIDs.contains(pid)
+                    } else {
+                        shouldEvict = true
+                    }
+                    if shouldEvict {
+                        await registry.evict(snap.sessionKey)
+                        continue
+                    }
+                }
+            }
+
+            // ─── Heartbeat refresh ───
             let heartbeatAt: Int64
             if snap.hasSSE {
                 heartbeatAt = now
@@ -68,6 +117,49 @@ actor MCPSessionSweeper {
                 break
             }
         }
+    }
+
+    /// Returns the set of workerIds from the `workers` DB table whose
+    /// status is non-terminal (not 'offline' / 'stale'). Used by the
+    /// sweeper to drop registry ghosts (entries with no DB backing).
+    private func fetchLiveWorkerIds() async -> Set<String> {
+        let rows: [String]
+        do {
+            rows = try await dbPool.read { db -> [String] in
+                try String.fetchAll(db, sql: """
+                    SELECT workerId FROM workers
+                    WHERE status != 'offline' AND status != 'stale'
+                """)
+            }
+        } catch {
+            // If we can't read, assume everything is live (safe failure
+            // — don't accidentally evict on a transient DB hiccup).
+            return Set<String>()
+        }
+        return Set(rows)
+    }
+
+    /// Returns the PIDs of every live claude process per
+    /// `~/.claude/sessions/<pid>.json`, cross-checked against `kill(pid, 0)`.
+    /// Returns nil if the directory is unreadable so the caller can skip
+    /// eviction (better safe than killing live sessions on a transient
+    /// filesystem hiccup).
+    private func livePIDsFromClaudeSessionsDir() -> Set<Int>? {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions")
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            atPath: dir.path) else {
+            return nil
+        }
+        var pids: Set<Int> = []
+        for entry in entries where entry.hasSuffix(".json") {
+            let stem = String(entry.dropLast(".json".count))
+            guard let pid = Int(stem) else { continue }
+            if kill(pid_t(pid), 0) == 0 {
+                pids.insert(pid)
+            }
+        }
+        return pids
     }
 
     private func updateWorkerHeartbeat(
