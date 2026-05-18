@@ -300,30 +300,94 @@ class WorkerManager: ObservableObject {
         return spawned
     }
 
+    /// Pure value type carrying the planned mutations for `maintainPoolSize`.
+    /// Exposed so unit tests can exercise the planning logic without
+    /// instantiating real `Worker` objects (which spin up AppKit views).
+    struct PoolMaintainPlan: Equatable {
+        /// Labels of new workers to spawn (e.g. "sona-worker-2").
+        let toSpawn: [String]
+        /// IDs of stale `.offline` workers to displace before spawning their
+        /// slot's replacement.
+        let toDisplace: [String]
+    }
+
+    /// Minimal projection of `Worker` fields used by `computePoolMaintainPlan`.
+    struct WorkerSlotInfo: Equatable {
+        let id: String
+        let label: String
+        let status: Worker.WorkerStatus
+    }
+
+    /// Pure planning function for pool maintenance. Status-aware: an
+    /// `.offline` worker is treated as not occupying its slot, so the
+    /// pool refills around it; the stale `.offline` Worker is reported
+    /// in `toDisplace` so the caller can remove it before spawning.
+    /// In-flight states (`.starting`, `.restarting`) still occupy the
+    /// slot so we don't double-spawn during a normal startup.
+    /// 2026-05-18 incident: prior version treated `.offline` as occupied
+    /// and the pool stalled at 1/2 while a dead Worker held the slot.
+    static func computePoolMaintainPlan(target: Int, workers: [WorkerSlotInfo]) -> PoolMaintainPlan {
+        guard target > 0 else { return PoolMaintainPlan(toSpawn: [], toDisplace: []) }
+        let prefix = "sona-worker-"
+        var bySlot: [Int: [WorkerSlotInfo]] = [:]
+        for w in workers {
+            guard w.label.hasPrefix(prefix),
+                  let idx = Int(w.label.dropFirst(prefix.count)) else { continue }
+            bySlot[idx, default: []].append(w)
+        }
+        var toSpawn: [String] = []
+        var toDisplace: [String] = []
+        for idx in 1...target {
+            let occupants = bySlot[idx] ?? []
+            let liveOccupants = occupants.filter { $0.status != .offline }
+            if liveOccupants.isEmpty {
+                for stale in occupants where stale.status == .offline {
+                    toDisplace.append(stale.id)
+                }
+                toSpawn.append("\(prefix)\(idx)")
+            }
+        }
+        return PoolMaintainPlan(toSpawn: toSpawn, toDisplace: toDisplace)
+    }
+
     /// Ensure the pool has a Worker for every slot index in 1...defaultWorkerCount.
     /// Called from pollHealth and from any removal path so that pollHealth-driven
     /// removals (displaced predecessors, drained-and-vanished) and coordinator-driven
     /// removals don't leave the pool below its configured size. Fills gaps by index
     /// (e.g. sona-worker-1 missing while sona-worker-2 exists → spawn sona-worker-1)
     /// rather than appending sona-worker-N+1, which would create duplicate-label
-    /// drift over time.
+    /// drift over time. Status-aware via `computePoolMaintainPlan`.
     @MainActor
     @discardableResult
     func maintainPoolSize() -> [String] {
         let target = WorkerManager.defaultWorkerCount
-        let prefix = "sona-worker-"
-        let occupied: Set<Int> = Set(workers.compactMap { w in
-            guard w.label.hasPrefix(prefix) else { return nil }
-            return Int(w.label.dropFirst(prefix.count))
-        })
-        var spawned: [String] = []
-        for idx in 1...target where !occupied.contains(idx) {
-            let label = "sona-worker-\(idx)"
+        let snapshot = workers.map {
+            WorkerSlotInfo(id: $0.id, label: $0.label, status: $0.status)
+        }
+        let plan = WorkerManager.computePoolMaintainPlan(target: target, workers: snapshot)
+
+        // Displace stale .offline workers first so addWorker's max-index search
+        // and pollHealth's later reconcile pass don't observe two entries for
+        // the same slot.
+        for displacedId in plan.toDisplace {
+            if let stale = workers.first(where: { $0.id == displacedId }) {
+                print("[pool] displaced offline worker \(stale.label)")
+                alertSupervisor(message: "Replacing offline worker \(stale.label) — auto-spawn refilling slot")
+            }
+        }
+        if !plan.toDisplace.isEmpty {
+            let displacedSet = Set(plan.toDisplace)
+            workers.removeAll { displacedSet.contains($0.id) }
+            if let selected = selectedWorkerId, displacedSet.contains(selected) {
+                selectedWorkerId = workers.first?.id
+            }
+        }
+
+        for label in plan.toSpawn {
             print("[pool] missing slot — spawning \(label)")
             addWorker(label: label)
-            spawned.append(label)
         }
-        return spawned
+        return plan.toSpawn
     }
 
     func addWorker(label: String? = nil) {
@@ -498,14 +562,14 @@ class WorkerManager: ObservableObject {
         }
     }
 
-    private func alertSupervisor(message: String) {
+    func alertSupervisor(type: String = "cycle-failure", message: String) {
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
         Task {
             var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/supervisor/alert")!)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: [
-                "type": "cycle-failure",
+                "type": type,
                 "message": message
             ])
             _ = try? await URLSession.shared.data(for: req)
@@ -625,8 +689,52 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     var autoRestartEnabled = true
     private var contextWatchTimer: Timer?
 
+    /// Per-coordinator consecutive auto-restart counter. Reset on successful
+    /// HTTP registration (worker reached `.idle`) or when an inbound event is
+    /// handled. Bounded by `CycleSettings.maxAutoRestarts` so a broken launch
+    /// (e.g. claude rejecting `--session-id` with "already in use") does not
+    /// produce a silent infinite restart loop. 2026-05-18 incident root cause.
+    var restartAttempts: Int = 0
+
+    /// Exit code recorded by the most recent `processTerminated`. Included
+    /// in the supervisor alert when `restartAttempts` exceeds its bound so
+    /// the operator can correlate with claude's stderr / JSONL state.
+    var lastExitCode: Int32?
+
     init(worker: Worker) {
         self.worker = worker
+    }
+
+    /// Resolve the claude session JSONL path for a given sessionId and cwd.
+    /// Mirrors claude's CLI behavior: it stores transcripts under
+    /// `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`, where the
+    /// encoding replaces `/` and `.` with `-`. Pure: no I/O, no globals.
+    static func sessionJSONLPath(sessionId: String, cwd: String, home: String) -> String {
+        let encoded = cwd.replacingOccurrences(
+            of: #"[\/.]"#, with: "-", options: .regularExpression)
+        return "\(home)/.claude/projects/\(encoded)/\(sessionId).jsonl"
+    }
+
+    /// Returns true when claude has already persisted a JSONL for this
+    /// sessionId. If so, a fresh `--session-id` relaunch will be rejected
+    /// with "already in use"; the restart must use `--resume` instead.
+    static func sessionJSONLExists(
+        sessionId: String,
+        cwd: String = WorkerManager.workingDirectory,
+        home: String? = nil,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let resolvedHome = home
+            ?? ProcessInfo.processInfo.environment["HOME"]
+            ?? NSHomeDirectory()
+        let path = sessionJSONLPath(sessionId: sessionId, cwd: cwd, home: resolvedHome)
+        return fileManager.fileExists(atPath: path)
+    }
+
+    /// Returns true when `restartAttempts` (post-increment) has exceeded the
+    /// configured bound. Pure helper for testing.
+    static func shouldDisableAfterAttempts(attempts: Int, max: Int) -> Bool {
+        attempts > max
     }
 
     func startProcess(restartNudge: Bool = false, taskId: String? = nil, lastEventId: String? = nil) {
@@ -693,9 +801,18 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                     "sessionId": workerSessionId,
                     "capabilities": ["task", "email"]
                 ])
-                URLSession.shared.dataTask(with: req) { _, _, _ in
+                URLSession.shared.dataTask(with: req) { _, response, _ in
+                    let ok = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
                     DispatchQueue.main.async { [weak self] in
                         self?.worker.status = .idle
+                        // Reset auto-restart counter once the process actually
+                        // reaches a registered+idle state — the restart loop
+                        // was productive, so subsequent crashes start counting
+                        // from zero again. Fix 3 of the 2026-05-18 auto-spawn
+                        // patch (claude/documents/plans/worker-auto-spawn-...).
+                        if ok {
+                            self?.restartAttempts = 0
+                        }
                     }
                 }.resume()
             }
@@ -916,13 +1033,33 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.worker.status = .offline
+            self.lastExitCode = exitCode
 
-            if self.autoRestartEnabled {
-                print("[\(self.worker.label)] Auto-restarting in 3s...")
-                self.worker.status = .restarting
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                    self?.startProcess()
-                }
+            guard self.autoRestartEnabled else { return }
+
+            let maxAttempts = CycleSettings.shared.maxAutoRestarts
+            self.restartAttempts += 1
+            if WorkerCoordinator.shouldDisableAfterAttempts(attempts: self.restartAttempts, max: maxAttempts) {
+                self.autoRestartEnabled = false
+                let exitDesc = exitCode.map(String.init(describing:)) ?? "?"
+                print("[\(self.worker.label)] Auto-restart bound (\(maxAttempts)) exceeded — disabling autoRestart (lastExit=\(exitDesc))")
+                WorkerManager.shared.alertSupervisor(
+                    type: "auto-restart-bound",
+                    message: "Worker \(self.worker.label) hit auto-restart bound (\(maxAttempts) consecutive attempts); lastExit=\(exitDesc). autoRestart disabled — pool maintainer or supervisor must intervene."
+                )
+                return
+            }
+
+            // Pick --resume vs --session-id based on JSONL state. Claude rejects
+            // --session-id with "already in use" once a JSONL exists for that
+            // UUID; before this guard, the auto-restart loop produced a silent
+            // infinite restart on the 2026-05-18 incident. --resume rehydrates
+            // the prior conversation (Evan, 2026-05-18: "RESUME").
+            let useResume = WorkerCoordinator.sessionJSONLExists(sessionId: self.worker.sessionId)
+            print("[\(self.worker.label)] Auto-restarting in 3s (attempt \(self.restartAttempts)/\(maxAttempts), useResume=\(useResume))...")
+            self.worker.status = .restarting
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.startProcess(restartNudge: useResume)
             }
         }
     }

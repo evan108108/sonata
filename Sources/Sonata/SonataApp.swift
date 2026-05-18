@@ -609,7 +609,18 @@ struct SonataApp: App {
                 let healthMonitor = HealthMonitor(
                     dbPool: pool,
                     port: port,
-                    schedulerStatus: { await scheduler.status().count >= 0 }  // returns true if scheduler is reachable
+                    schedulerStatus: { await scheduler.status().count >= 0 },  // returns true if scheduler is reachable
+                    // Backstop pool-size check (2026-05-18 incident, Fix 4).
+                    // Returns target=defaultWorkerCount and effective=count of
+                    // workers in a non-.offline status. Read on MainActor since
+                    // WorkerManager.workers is @MainActor isolated.
+                    workerPoolStatus: {
+                        await MainActor.run {
+                            let target = WorkerManager.defaultWorkerCount
+                            let effective = WorkerManager.shared.workers.filter { $0.status != .offline }.count
+                            return (target: target, effective: effective)
+                        }
+                    }
                 )
                 await healthMonitor.start()
 

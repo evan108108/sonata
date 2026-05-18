@@ -70,6 +70,26 @@ actor HealthMonitor {
     /// Weak reference to the scheduler for status checks.
     private let schedulerStatus: (@Sendable () async -> Bool)?
 
+    /// Returns `(target, effective)` for the worker pool. `effective` is the
+    /// count of workers in a non-terminal status (i.e. NOT `.offline`).
+    /// Optional — when nil, the worker_pool check is skipped (e.g. in test
+    /// harnesses that don't boot a WorkerManager).
+    private let workerPoolStatus: (@Sendable () async -> (target: Int, effective: Int))?
+
+    /// First time `workerPoolStatus` reported effective < target with no
+    /// subsequent recovery. Cleared the moment effective >= target. Used to
+    /// distinguish a transient dip (single tick) from a stuck pool (>5 min)
+    /// — only the latter triggers the unhealthy CheckResult.
+    private var poolUnderTargetSince: Date?
+
+    /// Grace period: how long the pool may run below target before the
+    /// `worker_pool` check goes unhealthy. 2026-05-18 incident headline:
+    /// "you'll get paged in under 10 min if pool stalls" — combined with
+    /// the existing 3-strike alertThreshold and 60s checkInterval this
+    /// puts a hard upper bound on time-to-alert. Backstop only; the real
+    /// fixes live in WorkerManager.
+    private let poolUnderTargetGrace: TimeInterval = 300
+
     // MARK: - Health Check Result
 
     struct CheckResult: Sendable {
@@ -100,11 +120,13 @@ actor HealthMonitor {
         dbPool: DatabasePool,
         port: Int = 3212,
         schedulerStatus: (@Sendable () async -> Bool)? = nil,
+        workerPoolStatus: (@Sendable () async -> (target: Int, effective: Int))? = nil,
         logger: Logger? = nil
     ) {
         self.dbPool = dbPool
         self.serverURL = "http://127.0.0.1:\(port)/api/ping"
         self.schedulerStatus = schedulerStatus
+        self.workerPoolStatus = workerPoolStatus
         var log = logger ?? Logger(label: "sonata.health")
         log.logLevel = .info
         self.logger = log
@@ -323,7 +345,59 @@ actor HealthMonitor {
         // 4. Disk space
         results.append(checkDiskSpace(at: now))
 
+        // 5. Worker pool size (backstop for 2026-05-18 auto-spawn flake).
+        // Skipped silently when no provider is configured (test harnesses).
+        if let poolResult = await checkWorkerPool(at: now) {
+            results.append(poolResult)
+        }
+
         return results
+    }
+
+    /// Returns `nil` when no pool-status provider is configured (test mode).
+    /// Otherwise: healthy iff effective >= target OR effective < target for
+    /// less than `poolUnderTargetGrace`. Unhealthy results feed the existing
+    /// consecutive-failure alert path.
+    private func checkWorkerPool(at time: Date) async -> CheckResult? {
+        guard let provider = workerPoolStatus else { return nil }
+        let snapshot = await provider()
+        if snapshot.effective >= snapshot.target {
+            poolUnderTargetSince = nil
+            return CheckResult(
+                name: "worker_pool",
+                healthy: true,
+                message: "OK (\(snapshot.effective)/\(snapshot.target))",
+                timestamp: time
+            )
+        }
+        let stuckSince = poolUnderTargetSince ?? time
+        poolUnderTargetSince = stuckSince
+        let elapsed = time.timeIntervalSince(stuckSince)
+        if elapsed < poolUnderTargetGrace {
+            return CheckResult(
+                name: "worker_pool",
+                healthy: true,
+                message: "under-target \(Int(elapsed))s grace (\(snapshot.effective)/\(snapshot.target))",
+                timestamp: time
+            )
+        }
+        return CheckResult(
+            name: "worker_pool",
+            healthy: false,
+            message: "Pool below target for \(Int(elapsed))s: \(snapshot.effective)/\(snapshot.target)",
+            timestamp: time
+        )
+    }
+
+    /// Test-only knob: prime the stuck-since clock so unit tests can exercise
+    /// the past-grace branch without sleeping for 5 minutes of wall time.
+    func setPoolUnderTargetSinceForTesting(_ date: Date?) {
+        poolUnderTargetSince = date
+    }
+
+    /// Test-only invoker for `checkWorkerPool` (private otherwise).
+    func runWorkerPoolCheckForTesting(at time: Date = Date()) async -> CheckResult? {
+        await checkWorkerPool(at: time)
     }
 
     /// Check that SQLite is accessible by running a simple query.
