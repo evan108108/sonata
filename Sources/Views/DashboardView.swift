@@ -105,7 +105,10 @@ struct DashboardView: View {
                         }
                         .padding(.horizontal)
 
-                        AllSessionsSection(vm: allSessionsVM)
+                        ConnectedSessionsSection(vm: allSessionsVM)
+                            .padding(.horizontal)
+
+                        UnconnectedSessionsSection(vm: allSessionsVM)
                             .padding(.horizontal)
 
                         // ── Token Usage ────────────────────────────────────────
@@ -679,7 +682,7 @@ private struct LiveWorkersSection: View {
             HStack(spacing: 10) {
                 Image(systemName: "cpu")
                     .foregroundStyle(.cyan)
-                Text("Live Workers")
+                Text("Workers")
                     .font(.headline)
                 Text("\(workers.count)")
                     .font(.subheadline.weight(.semibold))
