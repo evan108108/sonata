@@ -67,6 +67,7 @@ struct ConnectedSessionsSection: View {
                 .padding(.vertical, 16)
             } else {
                 VStack(spacing: 2) {
+                    sessionColumnHeader
                     ForEach(vm.connected) { row in
                         ConnectedSessionRow(row: row) { dmTarget = row }
                     }
@@ -116,34 +117,42 @@ private struct ConnectedSessionRow: View {
                 .foregroundStyle(row.kind.tint)
                 .frame(minWidth: 80, alignment: .leading)
 
+            Text(row.displayName ?? "—")
+                .font(.caption)
+                .foregroundStyle(row.displayName == nil ? .tertiary : .primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 110, alignment: .leading)
+
             Text(row.sessionKey)
                 .font(.system(.caption, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help(row.sessionKey)
+                .frame(width: 180, alignment: .leading)
 
-            if let cwd = row.cwd {
-                Text("·")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Text((cwd as NSString).lastPathComponent)
-                    .font(.caption.italic())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(cwd)
-            }
+            Text(row.cwd ?? "—")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(row.cwd == nil ? .tertiary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: 200, alignment: .leading)
 
-            Spacer()
+            Text(row.lastPrompt ?? row.firstPrompt ?? "—")
+                .font(.caption)
+                .foregroundStyle(row.lastPrompt == nil && row.firstPrompt == nil ? .tertiary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            if row.inFlightEventId != nil {
-                Text("· busy")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
+            Text(row.pid.map { String($0) } ?? "—")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 70, alignment: .trailing)
 
             Text(row.lastSeenRelative)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
+                .frame(width: 80, alignment: .trailing)
 
             Button {
                 onDM()
@@ -154,11 +163,24 @@ private struct ConnectedSessionRow: View {
             .buttonStyle(.borderless)
             .help("Send a DM to this session")
             .opacity(isHovered ? 1 : 0.6)
+            .frame(width: 22)
         }
         .frame(height: 28)
         .contentShape(Rectangle())
+        .help(sessionRowTooltip(row))
         .opacity(row.hasSSE ? 1.0 : 0.65)
         .onHover { isHovered = $0 }
+        .overlay(alignment: .topTrailing) {
+            if row.inFlightEventId != nil {
+                Text("busy")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(.orange.opacity(0.12), in: Capsule())
+                    .offset(x: -30, y: 6)
+            }
+        }
     }
 }
 
@@ -214,6 +236,7 @@ struct UnconnectedSessionsSection: View {
                 .padding(.vertical, 16)
             } else {
                 VStack(spacing: 2) {
+                    sessionColumnHeader
                     ForEach(rows) { row in
                         UnconnectedSessionRow(row: row)
                     }
@@ -224,6 +247,48 @@ struct UnconnectedSessionsSection: View {
         .padding()
         .background(Color.gray.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
     }
+}
+
+/// Shared column-header row used by both Connected and Unconnected
+/// section tables. Mirrors the cell layout of ConnectedSessionRow and
+/// UnconnectedSessionRow so the headers line up.
+fileprivate var sessionColumnHeader: some View {
+    HStack(spacing: 10) {
+        // status dot column (8pt circle width)
+        Color.clear.frame(width: 8, height: 8)
+        Text("KIND")
+            .frame(minWidth: 80, alignment: .leading)
+        Text("NAME")
+            .frame(width: 110, alignment: .leading)
+        Text("SESSION ID")
+            .frame(width: 180, alignment: .leading)
+        Text("CWD")
+            .frame(width: 200, alignment: .leading)
+        Text("LAST PROMPT")
+            .frame(maxWidth: .infinity, alignment: .leading)
+        Text("PID")
+            .frame(width: 70, alignment: .trailing)
+        Text("LAST SEEN")
+            .frame(width: 80, alignment: .trailing)
+        // action column (paperplane button width)
+        Color.clear.frame(width: 22)
+    }
+    .font(.system(size: 9, weight: .semibold))
+    .foregroundStyle(.tertiary)
+    .padding(.top, 4)
+    .padding(.bottom, 2)
+}
+
+/// Compose the row's hover tooltip — full sessionKey, cwd, first
+/// prompt, last prompt, all unabridged.
+fileprivate func sessionRowTooltip(_ row: AllSessionsRow) -> String {
+    var parts: [String] = []
+    parts.append("Session: \(row.sessionKey)")
+    if let cwd = row.cwd { parts.append("CWD: \(cwd)") }
+    if let pid = row.pid { parts.append("PID: \(pid)") }
+    if let first = row.firstPrompt { parts.append("First prompt: \(first)") }
+    if let last = row.lastPrompt { parts.append("Last prompt: \(last)") }
+    return parts.joined(separator: "\n\n")
 }
 
 private struct UnconnectedSessionRow: View {
@@ -244,37 +309,48 @@ private struct UnconnectedSessionRow: View {
                 .foregroundStyle(row.kind.tint)
                 .frame(minWidth: 80, alignment: .leading)
 
+            Text(row.displayName ?? "—")
+                .font(.caption)
+                .foregroundStyle(row.displayName == nil ? .tertiary : .primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 110, alignment: .leading)
+
             Text(row.sessionKey)
                 .font(.system(.caption, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help(row.sessionKey)
+                .frame(width: 180, alignment: .leading)
 
-            if let cwd = row.cwd {
-                Text("·")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Text((cwd as NSString).lastPathComponent)
-                    .font(.caption.italic())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(cwd)
-            }
+            Text(row.cwd ?? "—")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(row.cwd == nil ? .tertiary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: 200, alignment: .leading)
 
-            Spacer()
+            Text(row.lastPrompt ?? row.firstPrompt ?? "—")
+                .font(.caption)
+                .foregroundStyle(row.lastPrompt == nil && row.firstPrompt == nil ? .tertiary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            if let pid = row.pid {
-                Text("pid \(pid)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
+            Text(row.pid.map { String($0) } ?? "—")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 70, alignment: .trailing)
 
             Text(row.lastSeenRelative)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
+                .frame(width: 80, alignment: .trailing)
+
+            Color.clear.frame(width: 22)
         }
         .frame(height: 28)
         .contentShape(Rectangle())
+        .help(sessionRowTooltip(row))
         .opacity(0.75)
     }
 }

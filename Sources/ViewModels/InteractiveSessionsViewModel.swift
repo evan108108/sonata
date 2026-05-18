@@ -21,7 +21,15 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
 
     let cwd: URL
     let terminalView: LocalProcessTerminalView
-    private let sessionId: String
+    let sessionId: String
+
+    /// Stable MCP-side identifier for this tab — what shows up as the
+    /// sessionKey in MCPSessionRegistry, used by the dashboard's
+    /// Connected/Unconnected sections to find the human-readable name
+    /// ("Session 1" / "My Session") attached to the tab.
+    var mcpSessionKey: String {
+        "session-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
+    }
 
     init(id: UUID = UUID(), name: String, cwd: URL) {
         self.id = id
@@ -42,9 +50,8 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         // Per plan §6: opt-in in-proc MCP. SessionKey is a stable prefix
         // of the existing UUID so it satisfies MCPSessionKey.isValid
         // (1-128 [A-Za-z0-9_-]). Flag unset → behaviour unchanged.
-        let mcpSessionKey = "session-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
         let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
-            sessionKey: String(mcpSessionKey),
+            sessionKey: mcpSessionKey,
             role: .interactive,
             slotLabel: "interactive"
         )

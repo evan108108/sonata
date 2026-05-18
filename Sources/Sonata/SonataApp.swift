@@ -149,12 +149,17 @@ func ensureSonaLauncher() {
         unalias sona 2>/dev/null
         sona() {
             local sid
+            local resuming=0
             local i
             for ((i=1; i<=$#; i++)); do
-                if [[ "${@[i]}" == "--resume" && $((i+1)) -le $# ]]; then
-                    sid="${@[i+1]}"
-                    break
-                fi
+                case "${@[i]}" in
+                    --resume|--continue)
+                        resuming=1
+                        if [[ "${@[i]}" == "--resume" && $((i+1)) -le $# && "${@[i+1]}" != -* ]]; then
+                            sid="${@[i+1]}"
+                        fi
+                        ;;
+                esac
             done
             : ${sid:=$(uuidgen | tr 'A-Z' 'a-z')}
             # Pre-warm Sonata's session registry so the dashboard shows
@@ -167,12 +172,24 @@ func ensureSonaLauncher() {
                 -H "Content-Type: application/json" \\
                 -d '{"jsonrpc":"2.0","method":"ping","id":0}' \\
                 http://localhost:3211/mcp >/dev/null 2>&1 || true
-            SONA_SESSION_ID=$sid CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 \\
-                exec $HOME/bin/claude-patched \\
-                    --session-id $sid \\
-                    --dangerously-skip-permissions \\
-                    --dangerously-load-development-channels server:sonata-bridge \\
-                    "$@"
+            # On --resume, omit --session-id: claude rejects the combo
+            # unless --fork-session is also set. The resumed id is already
+            # pinned by --resume, and SONA_SESSION_ID still carries the
+            # bearer for the MCP client.
+            if (( resuming )); then
+                SONA_SESSION_ID=$sid CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 \\
+                    $HOME/bin/claude-patched \\
+                        --dangerously-skip-permissions \\
+                        --dangerously-load-development-channels server:sonata-bridge \\
+                        "$@"
+            else
+                SONA_SESSION_ID=$sid CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 \\
+                    $HOME/bin/claude-patched \\
+                        --session-id $sid \\
+                        --dangerously-skip-permissions \\
+                        --dangerously-load-development-channels server:sonata-bridge \\
+                        "$@"
+            fi
         }
         \(endMarker)
         """

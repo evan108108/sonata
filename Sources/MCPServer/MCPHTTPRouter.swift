@@ -228,7 +228,7 @@ enum MCPHTTPRouter {
         registry: MCPSessionRegistry,
         logger: Logger
     ) async -> Response {
-        let (sessionKey, needsHandshake) = deriveSessionKey(from: request.headers)
+        let (sessionKey, _) = deriveSessionKey(from: request.headers)
         guard MCPSessionKey.isValid(sessionKey) else {
             return Response(status: .badRequest)
         }
@@ -238,8 +238,7 @@ enum MCPHTTPRouter {
         }
         let writer = MCPSSEWriter()
         let state = await registry.getOrCreate(sessionKey) {
-            needsHandshake ? .interactive
-                : await inferRole(sessionKey: sessionKey, dbPool: registry.dbPool)
+            await inferRole(sessionKey: sessionKey, dbPool: registry.dbPool)
         }
         await state.attachSSE(writer)
         writer.sendKeepAlive()
@@ -250,29 +249,18 @@ enum MCPHTTPRouter {
         headers[HTTPField.Name("Connection")!] = "keep-alive"
         headers[HTTPField.Name("X-Accel-Buffering")!] = "no"
 
+        // Single eviction rule for the whole system: when this SSE
+        // stream's HTTP connection closes (peer disconnect, network
+        // drop, claude exits, anything), fully evict the registry
+        // entry. No timers, no age, no PID checks. "Connection up +
+        // sessionKey from bearer" == registered. Connection gone ==
+        // not registered.
         writer.setOnClose { [weak writer] in
             guard let writer else { return }
-            Task { await state.detachSSE(writer) }
-        }
-
-        if needsHandshake {
-            // Push a one-shot instructional channel notification telling
-            // the session to identify itself. The session reads
-            // ~/.claude/sessions/$PPID.json and calls sonata_identify.
-            let params: [String: Any] = [
-                "content": """
-                    Sonata: you're connected but unidentified (SONA_SESSION_ID env var was \
-                    not set on your launch). Read ~/.claude/sessions/$PPID.json and call \
-                    the sonata_identify MCP tool with sessionId, cwd, kind, and pid from \
-                    that file. Your temporary id is \(sessionKey).
-                    """,
-                "meta": [
-                    "event_type": "sonata_identify_request",
-                    "temp_session_key": sessionKey,
-                ],
-            ]
-            await state.pushNotification(
-                method: "notifications/claude/channel", params: params)
+            Task {
+                await state.detachSSE(writer)
+                await registry.evict(sessionKey)
+            }
         }
 
         let body = ResponseBody(asyncSequence: writer.stream)
@@ -381,7 +369,10 @@ enum MCPHTTPRouter {
 
         writer.setOnClose { [weak writer] in
             guard let writer else { return }
-            Task { await state.detachSSE(writer) }
+            Task {
+                await state.detachSSE(writer)
+                await registry.evict(sessionKey)
+            }
         }
         let body = ResponseBody(asyncSequence: writer.stream)
         return Response(status: .ok, headers: headers, body: body)

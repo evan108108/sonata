@@ -56,6 +56,20 @@ struct AllSessionsRow: Identifiable, Sendable, Equatable {
     /// updatedAt.
     let lastSeenMs: Int64
 
+    /// First substantive user message in the transcript (skipping
+    /// `<system-reminder>` wraps + post-compaction continuation blobs).
+    /// Nil if the transcript can't be located or has no qualifying message.
+    let firstPrompt: String?
+
+    /// Most recent substantive user message in the transcript. Same
+    /// filter as firstPrompt.
+    let lastPrompt: String?
+
+    /// Human-readable name when known (e.g. "Session 1", "My Session"
+    /// for Interactive Sessions tabs that the user has named). Nil for
+    /// external/sona-launched sessions where Sonata has no tab name.
+    let displayName: String?
+
     var id: String { sessionKey }
 
     var lastSeenRelative: String {
@@ -84,13 +98,53 @@ final class AllSessionsViewModel: ObservableObject {
     func fetch() async {
         var collected: [AllSessionsRow] = []
 
-        // 1. MCP-attached sessions from the registry.
+        // Build {mcpSessionKey: name} from Interactive Session tabs so we
+        // can label sessions like "Session 1" / "My Session" in the
+        // dashboard instead of just showing the bare sessionKey.
+        let interactiveSessionNames: [String: String] = Dictionary(
+            uniqueKeysWithValues: InteractiveSessionsViewModel.shared.tabs.map {
+                ($0.mcpSessionKey, $0.name)
+            }
+        )
+
+        // 1. Pre-scan ~/.claude/sessions/<pid>.json so we can look up
+        // each live claude's pid + cwd + kind by its claude session id.
+        // Used by BOTH the registry pass (to populate cwd/pid on Connected
+        // rows whose sessionKey == claude session id, i.e. sona-launched)
+        // AND the Unconnected pass (rows backed only by the filesystem).
+        struct ClaudeProcessInfo {
+            let pid: Int
+            let cwd: String?
+            let kindRaw: String
+            let updatedAt: Int64
+        }
+        var byClaudeSessionId: [String: ClaudeProcessInfo] = [:]
+        let sessionsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions")
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: sessionsDir.path) {
+            for entry in entries where entry.hasSuffix(".json") {
+                guard let pid = Int(String(entry.dropLast(".json".count))) else { continue }
+                guard kill(pid_t(pid), 0) == 0 else { continue }
+                guard let data = try? Data(contentsOf: sessionsDir.appendingPathComponent(entry)),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let sid = json["sessionId"] as? String
+                else { continue }
+                let updatedAt = (json["updatedAt"] as? Int64)
+                    ?? (json["updatedAt"] as? Double).map { Int64($0) }
+                    ?? (json["startedAt"] as? Int64)
+                    ?? 0
+                byClaudeSessionId[sid] = ClaudeProcessInfo(
+                    pid: pid,
+                    cwd: json["cwd"] as? String,
+                    kindRaw: (json["kind"] as? String) ?? "interactive",
+                    updatedAt: updatedAt
+                )
+            }
+        }
+
+        // 2. MCP-attached sessions from the registry.
         // attachedIds collects both sessionKey AND claudeSessionId so the
-        // ~/.claude/sessions pass can dedup either way:
-        //   - sona-launched: sessionKey == claude session uuid (bearer)
-        //   - identified anon-XXX: claudeSessionId is the uuid (set via sonata_identify)
-        //   - legacy workers/supervisor: sessionKey is workerId, no uuid match
-        //     (handled by the cwd-prefix filter below)
+        // Unconnected pass can dedup either way.
         var attachedIds: Set<String> = []
         if let reg = MCPSessionRegistry.shared {
             let snaps = await reg.snapshot()
@@ -108,16 +162,27 @@ final class AllSessionsViewModel: ObservableObject {
                     kind = .interactive
                     section = .connected
                 }
+                // Look up the backing claude process by matching sessionKey
+                // to a claude session id. Works for sona-launched sessions
+                // (bearer == sessionKey == claude session id). Workers fall
+                // through (sessionKey == workerId, not in the map).
+                let proc = byClaudeSessionId[snap.sessionKey]
+                let cwd = snap.cwd ?? proc?.cwd
+                let (first, last) = Self.transcriptPrompts(
+                    sessionId: snap.sessionKey, cwd: cwd)
                 collected.append(AllSessionsRow(
                     sessionKey: snap.sessionKey,
-                    claudeSessionId: snap.claudeSessionId,
+                    claudeSessionId: snap.claudeSessionId ?? snap.sessionKey,
                     kind: kind,
                     section: section,
-                    cwd: snap.cwd,
-                    pid: snap.pid,
+                    cwd: cwd,
+                    pid: snap.pid ?? proc?.pid,
                     hasSSE: snap.hasSSE,
                     inFlightEventId: snap.inFlightEventId,
-                    lastSeenMs: snap.lastContactedAt
+                    lastSeenMs: snap.lastContactedAt,
+                    firstPrompt: first,
+                    lastPrompt: last,
+                    displayName: interactiveSessionNames[snap.sessionKey]
                 ))
                 attachedIds.insert(snap.sessionKey)
                 if let csid = snap.claudeSessionId {
@@ -126,55 +191,34 @@ final class AllSessionsViewModel: ObservableObject {
             }
         }
 
-        // 2. Live-but-unconnected claudes from ~/.claude/sessions/.
-        // These are claude processes that Sonata can see via the
-        // per-PID metadata files but that aren't currently MCP-attached
-        // (typically: launched without `sona`, or before SONA_SESSION_ID
-        // env wiring was in place).
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/sessions")
-        if let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
-            for entry in entries where entry.hasSuffix(".json") {
-                guard let pid = Int(String(entry.dropLast(".json".count))) else { continue }
-                // Only show live processes.
-                guard kill(pid_t(pid), 0) == 0 else { continue }
-                guard let data = try? Data(contentsOf: dir.appendingPathComponent(entry)),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else { continue }
-                let sessionId = json["sessionId"] as? String ?? entry
-                // If this claude is already MCP-attached, skip — it shows up
-                // in workers/connected via the registry pass.
-                if attachedIds.contains(sessionId) { continue }
-                // Sonata-internal processes (workers, supervisor) belong in
-                // the Workers section and are surfaced via WorkerManager.
-                // Filter them out of Unconnected by cwd prefix so they never
-                // double-list as "external claudes."
-                let cwdField = json["cwd"] as? String ?? ""
-                if cwdField.hasPrefix("\(NSHomeDirectory())/.sonata/") { continue }
-                let kindRaw = (json["kind"] as? String) ?? "interactive"
-                let kind: AllSessionsRow.Kind
-                switch kindRaw.lowercased() {
-                case "worker": kind = .worker
-                case "supervisor": kind = .supervisor
-                default: kind = .interactive
-                }
-                let cwd = json["cwd"] as? String
-                let updatedAt = (json["updatedAt"] as? Int64)
-                    ?? (json["updatedAt"] as? Double).map { Int64($0) }
-                    ?? (json["startedAt"] as? Int64)
-                    ?? 0
-                collected.append(AllSessionsRow(
-                    sessionKey: sessionId,
-                    claudeSessionId: sessionId,
-                    kind: kind,
-                    section: .unconnected,
-                    cwd: cwd,
-                    pid: pid,
-                    hasSSE: false,
-                    inFlightEventId: nil,
-                    lastSeenMs: updatedAt
-                ))
+        // 3. Unconnected: live claude processes NOT in the registry.
+        // Filtered: Sonata-internal processes (cwd under ~/.sonata/) are
+        // hidden — they belong in the Workers section.
+        let sonataInternalPrefix = "\(NSHomeDirectory())/.sonata/"
+        for (sid, proc) in byClaudeSessionId {
+            if attachedIds.contains(sid) { continue }
+            if let cwd = proc.cwd, cwd.hasPrefix(sonataInternalPrefix) { continue }
+            let kind: AllSessionsRow.Kind
+            switch proc.kindRaw.lowercased() {
+            case "worker": kind = .worker
+            case "supervisor": kind = .supervisor
+            default: kind = .interactive
             }
+            let (first, last) = Self.transcriptPrompts(sessionId: sid, cwd: proc.cwd)
+            collected.append(AllSessionsRow(
+                sessionKey: sid,
+                claudeSessionId: sid,
+                kind: kind,
+                section: .unconnected,
+                cwd: proc.cwd,
+                pid: proc.pid,
+                hasSSE: false,
+                inFlightEventId: nil,
+                lastSeenMs: proc.updatedAt,
+                firstPrompt: first,
+                lastPrompt: last,
+                displayName: interactiveSessionNames[sid]
+            ))
         }
 
         // Sort within each section: workers by sessionKey, others by recency.
@@ -193,6 +237,99 @@ final class AllSessionsViewModel: ObservableObject {
         case .connected: return 1
         case .unconnected: return 2
         }
+    }
+
+    /// Returns (firstPrompt, lastPrompt) by reading the head + tail of
+    /// the session's transcript .jsonl. Both nil if the file can't be
+    /// located or has no qualifying user message.
+    /// Transcript path: ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl
+    /// where encoded-cwd has `/` and `.` replaced with `-`.
+    static func transcriptPrompts(sessionId: String, cwd: String?)
+        -> (first: String?, last: String?) {
+        guard let cwd = cwd else { return (nil, nil) }
+        let encoded = cwd
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let path = "\(NSHomeDirectory())/.claude/projects/\(encoded)/\(sessionId).jsonl"
+        guard let fh = FileHandle(forReadingAtPath: path) else { return (nil, nil) }
+        defer { try? fh.close() }
+
+        let fileSize: Int = {
+            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
+        }()
+        guard fileSize > 0 else { return (nil, nil) }
+
+        // Head: first 16 KiB for the first prompt.
+        let headBytes = min(16 * 1024, fileSize)
+        let headData: Data = (try? fh.read(upToCount: headBytes)) ?? Data()
+        let first = headData
+            .split(separator: 0x0a /* newline */)
+            .lazy
+            .compactMap { Self.extractUserPrompt(fromLine: Data($0)) }
+            .first
+
+        // Tail: last 128 KiB for the most recent prompt. Scan reversed.
+        let tailBytes = min(128 * 1024, fileSize)
+        let tailOffset = UInt64(fileSize - tailBytes)
+        try? fh.seek(toOffset: tailOffset)
+        let tailData: Data = (try? fh.read(upToCount: tailBytes)) ?? Data()
+        let last = tailData
+            .split(separator: 0x0a)
+            .reversed()
+            .lazy
+            .compactMap { Self.extractUserPrompt(fromLine: Data($0)) }
+            .first
+
+        return (first, last)
+    }
+
+    /// Parse one .jsonl line; return the prompt text if it's a
+    /// substantive user message. Filters out tool results, channel
+    /// pushes, system-reminder wrappers, post-compaction continuation
+    /// blobs, and local-command echoes.
+    private static func extractUserPrompt(fromLine line: Data) -> String? {
+        guard !line.isEmpty,
+              let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              (obj["type"] as? String) == "user",
+              let msg = obj["message"] as? [String: Any]
+        else { return nil }
+
+        // content can be:
+        //   - String (typical user-typed prompt)
+        //   - Array of blocks (image-bearing prompts have a "text"
+        //     block alongside an "image" block; tool_result messages
+        //     have only "tool_result" blocks)
+        var text: String?
+        if let s = msg["content"] as? String {
+            text = s
+        } else if let arr = msg["content"] as? [[String: Any]] {
+            // Pick the first text block; tool_result-only arrays
+            // return nil because no text block matches.
+            for block in arr where (block["type"] as? String) == "text" {
+                if let t = block["text"] as? String, !t.isEmpty {
+                    text = t
+                    break
+                }
+            }
+        }
+
+        guard let t = text, !t.isEmpty else { return nil }
+        // Filter known non-prompt wrappers — user-typed prompts never
+        // start with any of these.
+        let nonPromptPrefixes = [
+            "<system-reminder>",
+            "<local-command-caveat>",
+            "<local-command-stdout>",
+            "<command-name>",
+            "<command-message>",
+            "<command-args>",
+            "<channel source=",
+            "This session is being continued",
+        ]
+        for prefix in nonPromptPrefixes {
+            if t.hasPrefix(prefix) { return nil }
+        }
+        return t
     }
 
     /// Send a DM via the existing `/api/dm/send` action. fromSessionId is
