@@ -44,9 +44,102 @@ enum MCPToolHandlers {
                 actionRegistry: actionRegistry, dbPool: dbPool)
         case "sonata_identify":
             return await sonataIdentify(args: args, state: state)
+        case "sonar_dm_broadcast":
+            return await sonarDMBroadcast(
+                args: args, sessionKey: sessionKey, registry: registry, dbPool: dbPool)
         default:
             return (false, "Unknown tool: \(toolName)")
         }
+    }
+
+    /// Fan a DM to every SSE-attached session matching the optional
+    /// kind filter. Used for blasts that don't have a specific
+    /// recipient — e.g. "any human, please ack" or "all workers,
+    /// pause." Persists each delivery into dm_messages so backfill
+    /// via dm_inbox works the same as for unicast DMs.
+    private static func sonarDMBroadcast(
+        args: [String: Any],
+        sessionKey: String,
+        registry: MCPSessionRegistry,
+        dbPool: DatabasePool
+    ) async -> (success: Bool, result: String) {
+        guard let body = args["body"] as? String, !body.isEmpty else {
+            return (false, "sonar_dm_broadcast: body required")
+        }
+        if body.utf8.count > 256 * 1024 {
+            return (false, "sonar_dm_broadcast: body exceeds 256 KiB")
+        }
+        let filterRaw = (args["filter"] as? String)?.lowercased() ?? "all"
+        let context = args["context"] as? String
+        let metaJson: String?
+        if let metaDict = args["meta"] as? [String: Any] {
+            metaJson = (try? JSONSerialization.data(
+                withJSONObject: metaDict, options: [.sortedKeys])).flatMap {
+                    String(data: $0, encoding: .utf8)
+                }
+        } else {
+            metaJson = nil
+        }
+
+        let allow: (SessionRole) -> Bool
+        switch filterRaw {
+        case "worker", "workers": allow = { $0 == .worker }
+        case "interactive", "humans": allow = { $0 == .interactive }
+        case "supervisor": allow = { $0 == .supervisor }
+        case "all", "": allow = { _ in true }
+        default:
+            return (false, "sonar_dm_broadcast: unknown filter '\(filterRaw)' — use all|workers|interactive|supervisor")
+        }
+
+        let snapshots = await registry.snapshot()
+        var delivered: [String] = []
+        var skipped = 0
+        let now = nowMs()
+        for snap in snapshots {
+            guard allow(snap.role), snap.hasSSE else { skipped += 1; continue }
+            if snap.sessionKey == sessionKey { skipped += 1; continue }  // don't echo to sender
+            let messageId = MCPTokenGenerator.newToken().prefix(32)
+            let pushed = await registry.deliverDM(
+                target: snap.sessionKey,
+                messageId: String(messageId),
+                body: body,
+                fromSessionId: sessionKey,
+                context: context,
+                metaJson: metaJson,
+                sentAtMs: now
+            )
+            if pushed {
+                delivered.append(snap.sessionKey)
+                let env = DMEnvelope(
+                    messageId: String(messageId),
+                    fromSessionId: sessionKey,
+                    fromPubkey: nil,
+                    fromPeerId: nil,
+                    targetSessionId: snap.sessionKey,
+                    body: body,
+                    context: context,
+                    sentAtMs: now,
+                    receivedAtMs: now,
+                    metaJson: metaJson
+                )
+                try? await dbPool.write { db in
+                    _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+                }
+            } else {
+                skipped += 1
+            }
+        }
+
+        let payload: [String: Any] = [
+            "filter": filterRaw,
+            "delivered_count": delivered.count,
+            "skipped_count": skipped,
+            "delivered_to": delivered,
+        ]
+        let json = (try? JSONSerialization.data(
+            withJSONObject: payload, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return (true, json)
     }
 
     /// Self-registration call. Non-sona-launched sessions land with a
@@ -353,6 +446,20 @@ enum MCPToolSchemas {
                     "meta": ["type": "object", "description": "Optional ≤4KB JSON metadata blob"],
                 ],
                 "required": ["target_session_id", "body"],
+            ],
+        ],
+        [
+            "name": "sonar_dm_broadcast",
+            "description": "Fan a DM to every SSE-attached session matching the optional kind filter ('all'|'workers'|'interactive'|'supervisor'; default 'all'). Excludes the sender. Persists each delivery into dm_messages.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "body": ["type": "string", "description": "Message body, ≤ 256 KiB"],
+                    "filter": ["type": "string", "description": "Recipient kind filter (default 'all')"],
+                    "context": ["type": "string", "description": "Optional context string"],
+                    "meta": ["type": "object", "description": "Optional ≤4KB JSON metadata blob"],
+                ],
+                "required": ["body"],
             ],
         ],
         [
