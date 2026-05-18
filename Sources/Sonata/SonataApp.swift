@@ -52,15 +52,28 @@ func ensureGlobalMCPServers() {
     // 2. Register in both ~/.claude/mcp.json (Claude Code) and ~/.claude.json (Claude Desktop)
     let memServerPath = mcpDir.appendingPathComponent("mem-server.ts").path
 
-    // Memory remains stdio (own migration). sonata-bridge is no longer
-    // written here — the HTTP+SSE entry is installed later in the boot
-    // sequence by rewriteGlobalSonataBridgeToHTTP() once the in-app MCP
-    // server is up and the orchestrator credential has been minted.
+    // Memory remains stdio (its own migration).
+    // sonata-bridge: HTTP+SSE entry pointing at /mcp (no path), with
+    // the bearer = ${SONA_SESSION_ID} env var. Claude substitutes the
+    // env var at request time → the bearer becomes the sessionKey.
+    //   - sona-launched sessions: SONA_SESSION_ID set by the alias to
+    //     a fresh UUID → bearer == sessionKey == claude session id.
+    //   - non-sona launches: env var unset → bearer arrives as the
+    //     literal "${SONA_SESSION_ID}" → Sonata mints anon-XXX and
+    //     pushes the sonata_identify handshake notification.
+    // See ~/.sonata/wiki/sonata/mcp-identity.md.
     let requiredServers: [String: [String: Any]] = [
         "memory": [
             "type": "stdio",
             "command": "bun",
             "args": ["run", memServerPath],
+        ],
+        "sonata-bridge": [
+            "type": "http",
+            "url": "http://localhost:\(sonataPort)/mcp",
+            "headers": [
+                "Authorization": "Bearer ${SONA_SESSION_ID}",
+            ],
         ],
     ]
 
@@ -102,45 +115,94 @@ func ensureGlobalMCPServers() {
     }
 }
 
-/// Phase C.5 — Rewrite the `sonata-bridge` entry in the global Claude Code
-/// MCP configs (~/.claude.json and ~/.claude/mcp.json) to point at the
-/// in-app HTTP+SSE MCP server. External launchers that load these configs
-/// (terminal `claude`, `sona` alias without --mcp-config, per-project
-/// sessions that don't override) inherit the orchestrator session and
-/// stop spawning bun stdio bridges.
+/// Install / refresh the `sona` shell launcher in ~/.zshrc.
 ///
-/// Token rotates on every Sonata boot — both files get re-written, both
-/// files get the same fresh token. Stale tokens in the file simply 401
-/// on first use; the user re-launches and gets the fresh one.
-func rewriteGlobalSonataBridgeToHTTP(
-    home: URL, sessionKey: String, bearerToken: String, port: Int
-) {
-    let httpEntry: [String: Any] = [
-        "type": "http",
-        "url": "http://localhost:\(port)/mcp/\(sessionKey)",
-        "headers": ["Authorization": "Bearer \(bearerToken)"],
-    ]
-    let configPaths = [
-        home.appendingPathComponent(".claude/mcp.json"),
-        home.appendingPathComponent(".claude.json"),
-    ]
-    for configPath in configPaths {
-        do {
-            var json: [String: Any] = [:]
-            if let data = try? Data(contentsOf: configPath) {
-                json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-            }
-            var mcpServers = json["mcpServers"] as? [String: Any] ?? [:]
-            mcpServers["sonata-bridge"] = httpEntry
-            json["mcpServers"] = mcpServers
-            let output = try JSONSerialization.data(
-                withJSONObject: json,
-                options: [.prettyPrinted, .sortedKeys])
-            try output.write(to: configPath)
-            sonataFileLog("Phase C.5: rewrote 'sonata-bridge' entry in \(configPath.lastPathComponent) → HTTP /mcp/\(sessionKey)")
-        } catch {
-            sonataFileLog("Phase C.5: failed to rewrite \(configPath.lastPathComponent) — \(error)")
+/// The launcher is a small zsh function that mints (or reuses, for
+/// --resume) a UUID per claude session and sets SONA_SESSION_ID in the
+/// claude process env. Claude's HTTP MCP client substitutes ${SONA_SESSION_ID}
+/// into the bearer header from ~/.claude.json, so the bearer equals
+/// the session id — see ~/.sonata/wiki/sonata/mcp-identity.md.
+///
+/// Managed via begin/end markers (same pattern as rbenv, pyenv, conda).
+/// On every Sonata boot:
+///   - if the block is present and its body matches what we want → no-op
+///   - if the block is present but drifted (older version, edited by
+///     hand, etc.) → replace in place
+///   - if the block is absent → append to the end of ~/.zshrc
+/// Inside the block we run `unalias sona 2>/dev/null` so any legacy
+/// `alias sona=…` defined earlier in the file is wiped — the function
+/// still wins because it's defined last.
+///
+/// On each modification we write the previous ~/.zshrc to
+/// ~/.zshrc.sonata-backup-<epoch> as a recoverable snapshot.
+func ensureSonaLauncher() {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let zshrc = home.appendingPathComponent(".zshrc")
+    let beginMarker = "# >>> sona-launcher (managed by Sonata — do not edit) >>>"
+    let endMarker = "# <<< sona-launcher <<<"
+    let expectedBlock = """
+        \(beginMarker)
+        # Sonata-managed `sona` launcher. Mints a per-session UUID and
+        # sets SONA_SESSION_ID so claude's HTTP MCP client substitutes
+        # it into the sonata-bridge bearer header in ~/.claude.json.
+        # See ~/.sonata/wiki/sonata/mcp-identity.md.
+        unalias sona 2>/dev/null
+        sona() {
+            local sid
+            local i
+            for ((i=1; i<=$#; i++)); do
+                if [[ "${@[i]}" == "--resume" && $((i+1)) -le $# ]]; then
+                    sid="${@[i+1]}"
+                    break
+                fi
+            done
+            : ${sid:=$(uuidgen | tr 'A-Z' 'a-z')}
+            SONA_SESSION_ID=$sid CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 \\
+                exec $HOME/bin/claude-patched \\
+                    --session-id $sid \\
+                    --dangerously-skip-permissions \\
+                    --dangerously-load-development-channels server:sonata-bridge \\
+                    "$@"
         }
+        \(endMarker)
+        """
+
+    let current: String
+    do {
+        current = try String(contentsOf: zshrc, encoding: .utf8)
+    } catch {
+        // No ~/.zshrc → don't create one. Some shells use ~/.zprofile,
+        // others none at all. Logging is enough.
+        sonataFileLog("sona-launcher: ~/.zshrc not present — skipping (sona alias not managed)")
+        return
+    }
+
+    let newContent: String
+    if let beginRange = current.range(of: beginMarker),
+       let endRange = current.range(of: endMarker, range: beginRange.upperBound..<current.endIndex) {
+        let existing = String(current[beginRange.lowerBound..<endRange.upperBound])
+            + endMarker.suffix(0)  // include end marker (already in range)
+        let blockRange = beginRange.lowerBound..<current.index(endRange.lowerBound, offsetBy: endMarker.count)
+        let existingFull = String(current[blockRange])
+        if existingFull == expectedBlock {
+            return  // already up to date
+        }
+        newContent = current.replacingCharacters(in: blockRange, with: expectedBlock)
+        sonataFileLog("sona-launcher: ~/.zshrc block drifted — refreshing")
+        _ = existing  // suppress unused
+    } else {
+        let trimmed = current.hasSuffix("\n") ? current : current + "\n"
+        newContent = trimmed + "\n" + expectedBlock + "\n"
+        sonataFileLog("sona-launcher: appending block to ~/.zshrc")
+    }
+
+    let backup = home.appendingPathComponent(
+        ".zshrc.sonata-backup-\(Int(Date().timeIntervalSince1970))")
+    try? current.write(to: backup, atomically: true, encoding: .utf8)
+    do {
+        try newContent.write(to: zshrc, atomically: true, encoding: .utf8)
+    } catch {
+        sonataFileLog("sona-launcher: write failed — \(error). backup at \(backup.path)")
     }
 }
 
@@ -349,6 +411,9 @@ struct SonataApp: App {
         // Ensure memory + sonata-bridge MCP servers are in global ~/.claude.json
         ensureGlobalMCPServers()
 
+        // Install/refresh the `sona` shell launcher in ~/.zshrc
+        ensureSonaLauncher()
+
         // Ensure worker + supervisor role directories exist with CLAUDE.md
         ensureRoleDirectories()
 
@@ -469,35 +534,10 @@ struct SonataApp: App {
                 await mcpEventPusher.start()
                 logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
 
-                // Phase C.5 — provision the stable "orchestrator" session for
-                // external launchers (sona alias, terminal `claude`, etc.).
-                // Writes the per-session config to ~/.sonata/mcp-cfg/orchestrator.json,
-                // copies it to the well-known ~/.sonata/mcp-config-orchestrator.json
-                // for shell aliases, and rewrites the sonata-bridge entry in
-                // ~/.claude.json and ~/.claude/mcp.json to point at HTTP+SSE.
-                do {
-                    let cred = try await MCPClaudeConfigWriter.writeAndRegister(
-                        sessionKey: "orchestrator",
-                        role: .interactive,
-                        registry: mcpRegistry,
-                        port: port,
-                        persistToken: true
-                    )
-                    let fm = FileManager.default
-                    let home = fm.homeDirectoryForCurrentUser
-                    let stableDst = home.appendingPathComponent(".sonata/mcp-config-orchestrator.json")
-                    try? fm.removeItem(at: stableDst)
-                    try? fm.copyItem(at: cred.configPath, to: stableDst)
-                    rewriteGlobalSonataBridgeToHTTP(
-                        home: home,
-                        sessionKey: "orchestrator",
-                        bearerToken: cred.bearerToken,
-                        port: port
-                    )
-                    logger.info("Phase C.5 — orchestrator credential provisioned; external launchers will use http://127.0.0.1:\(port)/mcp/orchestrator")
-                } catch {
-                    logger.warning("Phase C.5 orchestrator provisioning failed: \(error)")
-                }
+                // Orchestrator singleton retired (2026-05-18). External
+                // launchers identify themselves via bearer = sessionKey
+                // (set by SONA_SESSION_ID env var via the sona alias).
+                // See ~/.sonata/wiki/sonata/mcp-identity.md.
 
                 // Serve web dashboard files (HTML/CSS/JS)
                 let webPaths = [
