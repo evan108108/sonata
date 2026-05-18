@@ -63,6 +63,29 @@ final class MCPPreMergeGatesTests: XCTestCase {
             "Phase A smoke test source missing at \(url.path); G5 backstop violated")
     }
 
+    /// Pin: worker_spawn is on the ActionRegistry surface so the supervisor
+    /// can call it via the `memory` MCP server (which auto-exposes every
+    /// non-httpOnly SonataAction). Mirrors testToolsListReturnsExactlyThe-
+    /// BridgeToolSet in spirit — surface-only assertion, no handler call,
+    /// so the test doesn't trigger a real worker spawn through
+    /// WorkerManager.shared. 2026-05-18 incident: supervisor had no MCP
+    /// path to refill a stuck-at-1/2 pool; this tool is that path.
+    func testWorkerSpawnIsOnTheSupervisorMCPSurface() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        // Pinned peers: worker_purge already lets the supervisor drop
+        // stale registrations; worker_spawn is the new admit-side peer.
+        XCTAssertNotNil(h.actionRegistry.action(named: "worker_purge"),
+            "worker_purge is the existing supervisor-callable peer")
+        XCTAssertNotNil(h.actionRegistry.action(named: "worker_spawn"),
+            "worker_spawn must be registered so the supervisor can self-heal under-capacity pool states (2026-05-18 incident)")
+
+        let names = Set(h.actionRegistry.mcpToolSchemas().compactMap { $0["name"] as? String })
+        XCTAssertTrue(names.contains("worker_spawn"),
+            "worker_spawn must appear in mcpToolSchemas() so the memory MCP server lists it on tools/list")
+    }
+
     /// G4 is external: confirm Claude Code v2.1.50+ ships --mcp-config with
     /// exclusive-config semantics AND supports headers in type=http entries.
     /// Verified manually before Phase A; documented here so the gate is

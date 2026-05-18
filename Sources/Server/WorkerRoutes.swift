@@ -113,3 +113,8 @@ struct PurgeResponse: Encodable {
     let purged: Int
     let success = true
 }
+
+struct SpawnResponse: Encodable {
+    let spawned: [String]
+    let success = true
+}
