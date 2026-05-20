@@ -220,6 +220,26 @@ struct ContactDetailView: View {
                     }
                 }
 
+                // Inbound-email approval toggle. Flipping this updates
+                // contacts.autoAllowEmail so EmailHandler will dispatch
+                // inbound messages from this sender to a worker. Unapproved
+                // senders are quarantined as pending_approval and surface
+                // via the [APPROVAL NEEDED] reply flow.
+                Toggle(isOn: Binding(
+                    get: { contact.autoAllowEmail },
+                    set: { newValue in
+                        Task { await vm.setEmailApproval(email: contact.email, approved: newValue) }
+                    }
+                )) {
+                    HStack(spacing: 6) {
+                        Image(systemName: contact.autoAllowEmail ? "envelope.badge.shield.half.filled" : "envelope.badge")
+                            .foregroundStyle(contact.autoAllowEmail ? .green : .secondary)
+                        Text(contact.autoAllowEmail ? "Approved — inbound email is dispatched" : "Unapproved — inbound email is quarantined")
+                            .font(.subheadline)
+                    }
+                }
+                .toggleStyle(.switch)
+
                 Divider()
 
                 LazyVGrid(
@@ -316,6 +336,9 @@ struct ContactEditSheet: View {
     @State private var model = ""
     @State private var systemPrompt = ""
     @State private var notes = ""
+    @State private var peerKind = "invoked"   // 'invoked' (default) | 'federated'
+    @State private var peerEndpoint = ""
+    @State private var peerPubkey = ""
     @State private var saving = false
 
     var isEditing: Bool { contact != nil }
@@ -348,20 +371,40 @@ struct ContactEditSheet: View {
                 }
 
                 if type == "ai" {
-                    Section("AI Details") {
-                        TextField("Provider (openai, anthropic, google)", text: $provider)
-                        TextField("Model (gpt-4o, claude-opus-4, etc.)", text: $model)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("System Prompt")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            TextEditor(text: $systemPrompt)
+                    Section("Peer Kind") {
+                        Picker("Kind", selection: $peerKind) {
+                            Text("Invoked (Sona calls the model)").tag("invoked")
+                            Text("Federated (peer runs itself)").tag("federated")
+                        }
+                        .pickerStyle(.segmented)
+                        Text(peerKind == "invoked"
+                            ? "Sona makes API calls on the peer's behalf using the Provider/Model/System Prompt below."
+                            : "Peer runs its own Sonata + Claude Code instance. Sona communicates over the network using Endpoint and Pubkey.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if peerKind == "invoked" {
+                        Section("AI Details") {
+                            TextField("Provider (openai, anthropic, google)", text: $provider)
+                            TextField("Model (gpt-4o, claude-opus-4, etc.)", text: $model)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("System Prompt")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                TextEditor(text: $systemPrompt)
+                                    .font(.body.monospaced())
+                                    .frame(minHeight: 100)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(.separator, lineWidth: 0.5)
+                                    )
+                            }
+                        }
+                    } else {
+                        Section("Federation") {
+                            TextField("Peer endpoint (e.g. 192.168.0.17:3211)", text: $peerEndpoint)
+                            TextField("Peer pubkey (hex)", text: $peerPubkey)
                                 .font(.body.monospaced())
-                                .frame(minHeight: 100)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(.separator, lineWidth: 0.5)
-                                )
                         }
                     }
                 }
@@ -390,15 +433,22 @@ struct ContactEditSheet: View {
                 Button(isEditing ? "Save" : "Add Contact") {
                     saving = true
                     Task {
+                        // For federated peers, deliberately clear invoked-only
+                        // fields. Same in reverse: an invoked peer doesn't keep
+                        // a stale endpoint/pubkey.
+                        let isFederated = type == "ai" && peerKind == "federated"
                         let ok = await vm.upsert(
                             name: name,
                             email: email,
                             type: type,
                             role: role.isEmpty ? nil : role,
-                            provider: provider.isEmpty ? nil : provider,
-                            model: model.isEmpty ? nil : model,
-                            systemPrompt: systemPrompt.isEmpty ? nil : systemPrompt,
-                            notes: notes.isEmpty ? nil : notes
+                            provider: (type == "ai" && peerKind == "invoked" && !provider.isEmpty) ? provider : nil,
+                            model: (type == "ai" && peerKind == "invoked" && !model.isEmpty) ? model : nil,
+                            systemPrompt: (type == "ai" && peerKind == "invoked" && !systemPrompt.isEmpty) ? systemPrompt : nil,
+                            notes: notes.isEmpty ? nil : notes,
+                            peerKind: type == "ai" ? peerKind : nil,
+                            peerEndpoint: isFederated && !peerEndpoint.isEmpty ? peerEndpoint : nil,
+                            peerPubkey: isFederated && !peerPubkey.isEmpty ? peerPubkey : nil
                         )
                         saving = false
                         if ok { dismiss() }
@@ -421,6 +471,9 @@ struct ContactEditSheet: View {
                 model = c.model ?? ""
                 systemPrompt = c.systemPrompt ?? ""
                 notes = c.notes ?? ""
+                // Default to 'invoked' when the row predates v13 and has
+                // no peerKind — preserves backward-compat for older AI contacts.
+                peerKind = c.peerKind ?? "invoked"
             }
         }
     }
