@@ -14,6 +14,7 @@ enum SonataTab: Int, CaseIterable {
     case settings = 0
     case plugins = 11
     case studio = 12
+    case sessions = 13
 }
 
 // FocusedValue key so .commands{} in SonataApp can switch tabs
@@ -29,7 +30,7 @@ extension FocusedValues {
 }
 
 struct ContentView: View {
-    @State private var selectedTab: SonataTab = .dashboard
+    @State private var selectedTab: SonataTab = .sessions
     @State private var inTransit: Bool = false
     @ObservedObject private var workerManager = WorkerManager.shared
     @StateObject private var searchVM = SearchViewModel()
@@ -42,6 +43,7 @@ struct ContentView: View {
     private var navItems: [NavRailItem] {
         [
             NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
+            NavRailItem(tab: .sessions, label: "Sessions", systemImage: "bubble.left.and.bubble.right.fill"),
             NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill", badge: workerManager.busyWorkerCount),
             NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist", badge: railCounts.activeTaskCount),
             NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
@@ -134,6 +136,33 @@ struct ContentView: View {
             if let pool = dbPool {
                 unreadCounts.start(dbPool: pool)
                 railCounts.start(dbPool: pool)
+
+                // Restore persisted Interactive Sessions tabs from the v14
+                // table — bootstrap returns the count it restored. Only
+                // auto-spawn "Sonata Default" if NOTHING was restored.
+                // Closed-the-default-but-kept-others = no resurrection.
+                let restoredCount = InteractiveSessionsViewModel.shared.bootstrap(dbPool: pool)
+                if restoredCount == 0, InteractiveSessionsViewModel.shared.tabs.isEmpty {
+                    let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+                    let cwd = URL(fileURLWithPath: "\(home)/.sonata/session/default")
+                    InteractiveSessionsViewModel.shared.addTab(
+                        name: "Sonata Default",
+                        cwd: cwd
+                    )
+                }
+            }
+            // FB15513599 prevention on the INITIAL mount: if the launch tab
+            // is a NavigationSplitView one, briefly flash an empty view
+            // (one runloop tick) so the NSToolbar gets a clean initial
+            // setup. Without this, launching directly into Sessions / Workers
+            // / Studio loses toolbar items the same way swap-without-transit
+            // does. The .onChange handler below covers subsequent swaps.
+            let splitViewTabs: Set<SonataTab> = [.workers, .studio, .sessions]
+            if splitViewTabs.contains(selectedTab) {
+                inTransit = true
+                DispatchQueue.main.async {
+                    inTransit = false
+                }
             }
         }
         .onChange(of: dbPool.map(ObjectIdentifier.init)) { _, _ in
@@ -143,16 +172,16 @@ struct ContentView: View {
             }
         }
         // FB15513599 workaround: swapping one NavigationSplitView for another
-        // corrupts the window's NSToolbar (sidebar-toggle item gets lost).
-        // Hitting a non-NavigationSplitView view in between clears the state,
-        // which is what users noticed manually. We do that automatically: when
-        // switching Workers <-> Studio, flash an empty view for one runloop
-        // tick so the NSToolbar can fully tear down before the next mount.
+        // corrupts the window's NSToolbar (sidebar-toggle item gets lost,
+        // toolbar items disappear). Hitting a non-NavigationSplitView view
+        // in between clears the state. We do that automatically by flashing
+        // an empty view for one runloop tick whenever the user switches
+        // BETWEEN two NavigationSplitView tabs.
         .onChange(of: selectedTab) { oldValue, newValue in
-            let isWorkersStudioSwap =
-                (oldValue == .workers && newValue == .studio) ||
-                (oldValue == .studio && newValue == .workers)
-            guard isWorkersStudioSwap else { return }
+            let splitViewTabs: Set<SonataTab> = [.workers, .studio, .sessions]
+            guard splitViewTabs.contains(oldValue),
+                  splitViewTabs.contains(newValue),
+                  oldValue != newValue else { return }
             inTransit = true
             DispatchQueue.main.async {
                 inTransit = false
@@ -188,6 +217,8 @@ struct ContentView: View {
     @ViewBuilder
     private var actualDestinationView: some View {
         switch selectedTab {
+        case .sessions:
+            SessionsView()
         case .workers:
             WorkersView()
         case .memory:

@@ -98,12 +98,23 @@ final class AllSessionsViewModel: ObservableObject {
     func fetch() async {
         var collected: [AllSessionsRow] = []
 
-        // Build {mcpSessionKey: name} from Interactive Session tabs so we
-        // can label sessions like "Session 1" / "My Session" in the
+        // Build {sessionId: name} from Interactive Session tabs so we can
+        // label sessions like "Sonata Default" / "My Session" in the
         // dashboard instead of just showing the bare sessionKey.
+        //
+        // Keyed by sessionId (the raw UUID) rather than mcpSessionKey
+        // because sona-launched sessions register with the MCP transport
+        // using bearer = SONA_SESSION_ID = sessionId, not the prefixed
+        // mcpSessionKey form. The in-proc-MCP path uses mcpSessionKey, but
+        // it's opt-in (flag-gated) and not the default for the in-rail
+        // Sessions tab — so the dict key has to match what actually
+        // registers.
         let interactiveSessionNames: [String: String] = Dictionary(
-            uniqueKeysWithValues: InteractiveSessionsViewModel.shared.tabs.map {
-                ($0.mcpSessionKey, $0.name)
+            uniqueKeysWithValues: InteractiveSessionsViewModel.shared.tabs.flatMap {
+                // Index under BOTH so we cover the (rare) in-proc-MCP case
+                // too — if mcpSessionKey happens to be the real registered
+                // key for a given tab, the lookup still resolves.
+                [($0.sessionId, $0.name), ($0.mcpSessionKey, $0.name)]
             }
         )
 

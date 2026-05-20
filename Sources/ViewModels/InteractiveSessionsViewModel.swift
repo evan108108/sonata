@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import SwiftTerm
 import AppKit
 import SwiftUI
@@ -18,6 +19,12 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     let id: UUID
     @Published var name: String
     @Published var state: InteractiveSessionState = .starting
+    /// One-shot trigger so the rail-side `SessionsView` row can ask its
+    /// inline TextField to enter rename mode from the right-click context
+    /// menu. Set to true, the row observes the change and flips itself
+    /// back to false. Not a true command-pattern; just a published bool
+    /// that's enough for v0 of the in-rail Sessions UI.
+    @Published var beginRenameRequested: Bool = false
 
     let cwd: URL
     let terminalView: LocalProcessTerminalView
@@ -31,16 +38,56 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         "session-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
     }
 
+    /// True when the tab was restored from the v14 `interactiveSessions`
+    /// table and should re-attach via `--resume <sessionId>` instead of
+    /// minting a fresh session. Flipped to false after a Restart so the
+    /// fallback path (--session-id) gets tried if the first --resume
+    /// attempt failed.
+    private(set) var resume: Bool
+
+    /// Wall-clock time of the most recent spawn. Used to detect "--resume
+    /// failed almost immediately" (claude exits ~instantly with code 1
+    /// when ~/.claude/projects/<...>/<sessionId>.jsonl is missing — the
+    /// common case for sessions that never had any conversation). On a
+    /// quick exit in resume mode, we silently fall back to --session-id
+    /// instead of showing the user a "Session ended" error screen for a
+    /// failure that wasn't theirs.
+    private var lastSpawnAt: Date = .distantPast
+
     init(id: UUID = UUID(), name: String, cwd: URL) {
         self.id = id
         self.name = name
         self.cwd = cwd
         self.sessionId = UUID().uuidString.lowercased()
+        self.resume = false
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
         super.init()
         terminalView.processDelegate = self
     }
+
+    /// Variant used when bootstrapping from the persistence table on app
+    /// launch: caller supplies the prior `sessionId` so Claude Code can
+    /// re-attach with `--resume`. Setting `resume: true` flips the spawn
+    /// path to use `--resume <sessionId>` instead of `--session-id`.
+    init(id: UUID, name: String, cwd: URL, sessionId: String, resume: Bool) {
+        self.id = id
+        self.name = name
+        self.cwd = cwd
+        self.sessionId = sessionId
+        self.resume = resume
+        self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        terminalView.applyWarmChrome()
+        super.init()
+        terminalView.processDelegate = self
+    }
+
+    /// Used by the rail's Restart button after a failed --resume (e.g. the
+    /// session file at ~/.claude/sessions/<sessionId>.json was pruned).
+    /// Flipping `resume` to false on Restart means the next spawn uses
+    /// `--session-id` and starts a fresh conversation with the same
+    /// sessionId, keeping the persistence row stable across the retry.
+    func clearResumeFlag() { resume = false }
 
     // MARK: - Lifecycle
 
@@ -58,7 +105,16 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: inProcExtras != nil)
 
         var args: [String] = []
-        args.append(contentsOf: ["--session-id", sessionId])
+        // `--resume <id>` and `--session-id <id>` are mutually exclusive in
+        // Claude Code (claude rejects the combo unless --fork-session is set,
+        // per ~/.zshrc sona launcher comment). When restoring a persisted
+        // tab we want to re-attach to the prior conversation, so use
+        // --resume. Fresh tabs (or post-Restart fallbacks) get --session-id.
+        if resume {
+            args.append(contentsOf: ["--resume", sessionId])
+        } else {
+            args.append(contentsOf: ["--session-id", sessionId])
+        }
         args.append("--dangerously-skip-permissions")
         args.append(contentsOf: ["--dangerously-load-development-channels", "server:sonata-bridge"])
         args.append(contentsOf: ["--model", "claude-opus-4-7"])
@@ -75,6 +131,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             return
         }
 
+        lastSpawnAt = Date()
         terminalView.startProcess(
             executable: binary,
             args: args,
@@ -107,7 +164,23 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     nonisolated func processTerminated(source: SwiftTerm.TerminalView, exitCode: Int32?) {
         let code = exitCode
         Task { @MainActor [weak self] in
-            self?.state = .stopped(exitCode: code)
+            guard let self else { return }
+            let elapsed = Date().timeIntervalSince(self.lastSpawnAt)
+            // Quick-exit in --resume mode = the session file claude was
+            // trying to re-attach to didn't exist (or was empty). Most
+            // commonly: the prior tab spawned but never had any user
+            // input, so claude never wrote a history file. Silently
+            // re-spawn with --session-id (fresh conversation, same
+            // sessionId so the persistence row stays valid).
+            if self.resume, elapsed < 3.0 {
+                self.resume = false
+                self.state = .starting
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    self?.spawn()
+                }
+                return
+            }
+            self.state = .stopped(exitCode: code)
         }
     }
 }
@@ -203,6 +276,12 @@ final class InteractiveSessionsViewModel: ObservableObject {
     /// Remembered when the window closes so reopening selects the same tab.
     private(set) var lastActiveTabId: UUID?
 
+    /// DB pool used to read / write the persistence table (migration v14).
+    /// Set by `bootstrap(dbPool:)`; nil = persistence disabled (no-op for all
+    /// store calls, so old tests / preview code keeps working).
+    private var dbPool: DatabasePool?
+    private var bootstrapped = false
+
     private init() {
         NotificationCenter.default.addObserver(
             self,
@@ -210,6 +289,58 @@ final class InteractiveSessionsViewModel: ObservableObject {
             name: NSApplication.willTerminateNotification,
             object: nil
         )
+    }
+
+    // MARK: - Persistence bootstrap
+
+    /// Load persisted sessions from the v14 `interactiveSessions` table and
+    /// recreate each tab with --resume. Returns the count of tabs that were
+    /// restored; callers (ContentView's .onAppear) decide whether to
+    /// auto-spawn a "Sonata Default" based on the result (zero → yes,
+    /// non-zero → no).
+    ///
+    /// Idempotent — subsequent calls are a no-op so .onAppear can fire
+    /// multiple times without duplicating tabs.
+    @discardableResult
+    func bootstrap(dbPool: DatabasePool) -> Int {
+        guard !bootstrapped else { return tabs.count }
+        bootstrapped = true
+        self.dbPool = dbPool
+
+        let rows = InteractiveSessionsStore.loadAll(dbPool: dbPool)
+        guard !rows.isEmpty else { return 0 }
+
+        var lastActiveId: UUID?
+        for row in rows {
+            guard let uuid = UUID(uuidString: row.id) else { continue }
+            let tab = InteractiveSessionTab(
+                id: uuid,
+                name: row.name,
+                cwd: URL(fileURLWithPath: row.cwd),
+                sessionId: row.sessionId,
+                resume: true
+            )
+            tabs.append(tab)
+            if row.wasActive == 1 { lastActiveId = uuid }
+        }
+        // Pick the previously-active tab if we have one, else the first.
+        if let lastActiveId, tabs.contains(where: { $0.id == lastActiveId }) {
+            activeTabId = lastActiveId
+            self.lastActiveTabId = lastActiveId
+        } else if let first = tabs.first {
+            activeTabId = first.id
+            self.lastActiveTabId = first.id
+        }
+        // Spawn each tab on the next runloop tick so the view model is
+        // settled before the SwiftTerm pty starts and starts firing
+        // process-state callbacks.
+        let restoredTabs = tabs
+        DispatchQueue.main.async {
+            for tab in restoredTabs {
+                tab.spawn()
+            }
+        }
+        return tabs.count
     }
 
     deinit {
@@ -224,11 +355,22 @@ final class InteractiveSessionsViewModel: ObservableObject {
         let name = "Session \(index)"
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         let cwd = URL(fileURLWithPath: "\(home)/.sonata/session/session\(index)")
+        return addTab(name: name, cwd: cwd)
+    }
 
-        let tab = InteractiveSessionTab(name: name, cwd: cwd)
+    /// Variant used by the rail-side "New Session" sheet: caller supplies the
+    /// display name and working directory directly (cwd is typically picked
+    /// from NSOpenPanel). The process is spawned with currentDirectory =
+    /// cwd.path, same as the default-path variant. Trims the name and falls
+    /// back to a "Session <N>" auto-name if it's empty.
+    @discardableResult
+    func addTab(name: String, cwd: URL) -> InteractiveSessionTab {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = trimmed.isEmpty ? "Session \(nextSessionIndex())" : trimmed
+        let tab = InteractiveSessionTab(name: finalName, cwd: cwd)
         tabs.append(tab)
+        persistTab(tab, position: tabs.count - 1)
         selectTab(id: tab.id)
-
         DispatchQueue.main.async {
             tab.spawn()
         }
@@ -240,6 +382,15 @@ final class InteractiveSessionsViewModel: ObservableObject {
         let tab = tabs[idx]
         tab.terminate()
         tabs.remove(at: idx)
+        if let pool = dbPool {
+            InteractiveSessionsStore.delete(dbPool: pool, id: tab.id.uuidString.lowercased())
+            // Renumber survivors so positions stay contiguous and ordered
+            // for the next bootstrap.
+            InteractiveSessionsStore.updatePositions(
+                dbPool: pool,
+                ids: tabs.map { $0.id.uuidString.lowercased() }
+            )
+        }
 
         if activeTabId == id {
             // Prefer the tab to the right; if none, the previous one; else nil.
@@ -264,19 +415,51 @@ final class InteractiveSessionsViewModel: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         tab.name = trimmed
+        if let pool = dbPool {
+            InteractiveSessionsStore.updateName(
+                dbPool: pool,
+                id: tab.id.uuidString.lowercased(),
+                name: trimmed
+            )
+        }
     }
 
     func selectTab(id: UUID) {
         activeTabId = id
         lastActiveTabId = id
+        if let pool = dbPool {
+            InteractiveSessionsStore.setActive(dbPool: pool, id: id.uuidString.lowercased())
+        }
     }
 
     func restartTab(id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        // If the original --resume failed (session file pruned, etc.), flip
+        // the flag so the next spawn falls back to --session-id and starts
+        // a fresh conversation under the same sessionId. The persistence
+        // row stays put, so future restarts only need to fall through this
+        // path once.
+        tab.clearResumeFlag()
         tab.terminate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             tab.spawn()
         }
+    }
+
+    /// Persist a freshly-created tab to the v14 table. Called from addTab
+    /// after the tab is appended to `tabs`. No-op if dbPool isn't set yet
+    /// (early code paths before bootstrap).
+    private func persistTab(_ tab: InteractiveSessionTab, position: Int) {
+        guard let pool = dbPool else { return }
+        InteractiveSessionsStore.upsert(
+            dbPool: pool,
+            id: tab.id.uuidString.lowercased(),
+            sessionId: tab.sessionId,
+            name: tab.name,
+            cwd: tab.cwd.path,
+            position: position,
+            wasActive: tab.id == activeTabId
+        )
     }
 
     /// Called by the window controller when the window is reopened — restores

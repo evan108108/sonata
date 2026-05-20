@@ -859,5 +859,33 @@ extension DatabaseMigrator {
             try db.execute(sql:
                 "UPDATE contacts SET peerKind = 'invoked' WHERE type = 'ai' AND peerKind IS NULL")
         }
+
+        // v14: persist Interactive Sessions across Sonata restarts. Each
+        // session in the in-rail "Sessions" tab gets a row here. On launch
+        // the tabs are restored in `position` order via Claude Code's
+        // `--resume <sessionId>` flag, which re-attaches to the prior
+        // session file at ~/.claude/sessions/<sessionId>.json. If a session
+        // row exists but the underlying file was pruned, the spawn fails
+        // and the user gets a Restart button.
+        //
+        // Closing a tab via the rail's context menu deletes the row;
+        // process termination does NOT (so users can hit Restart). The
+        // "Sonata Default" auto-spawn only fires when the table is empty.
+        registerMigration("v14_interactive_sessions") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS interactiveSessions (
+                    id         TEXT PRIMARY KEY,
+                    sessionId  TEXT NOT NULL,
+                    name       TEXT NOT NULL,
+                    cwd        TEXT NOT NULL,
+                    position   INTEGER NOT NULL DEFAULT 0,
+                    wasActive  INTEGER NOT NULL DEFAULT 0,
+                    createdAt  INTEGER NOT NULL,
+                    updatedAt  INTEGER NOT NULL
+                )
+            """)
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS interactiveSessions_by_position ON interactiveSessions(position)")
+        }
     }
 }

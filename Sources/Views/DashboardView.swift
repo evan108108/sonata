@@ -184,7 +184,9 @@ struct DashboardView: View {
                 // section is small (two buttons) and accessing live agent surfaces
                 // shouldn't require remembering where it scrolled to.
                 Divider()
-                SessionsSection(sessionsVM: sessionsVM)
+                SessionsSection(sessionsVM: sessionsVM) {
+                    selectedTab = .sessions
+                }
                     .padding(.horizontal)
                     .padding(.vertical, 8)
                     .background(.ultraThinMaterial)
@@ -1027,6 +1029,7 @@ private struct LiveWorkerRow: View {
 
 private struct SessionsSection: View {
     @ObservedObject var sessionsVM: InteractiveSessionsViewModel
+    let onOpenInteractiveSessions: () -> Void
 
     var body: some View {
         // No headline — the launchers themselves are self-explanatory in the
@@ -1040,20 +1043,22 @@ private struct SessionsSection: View {
                 action: { SupervisorWindowController.shared.show() }
             )
 
+            // Routes to the in-rail Sessions tab now (the standalone
+            // InteractiveSessionsWindowController is dead code — the rail
+            // owns this experience).
             SessionLaunchCard(
                 title: "Interactive Sessions",
                 icon: "bubble.left.and.bubble.right.fill",
                 tint: .purple,
                 badge: badgeText,
-                action: { InteractiveSessionsWindowController.shared.show() }
+                action: { onOpenInteractiveSessions() }
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Tab count when the window is open, otherwise nothing.
+    /// Active tab count from the in-rail Sessions tab.
     private var badgeText: String? {
-        guard InteractiveSessionsWindowController.shared.isVisible else { return nil }
         let n = sessionsVM.tabs.count
         return n > 0 ? "\(n)" : nil
     }

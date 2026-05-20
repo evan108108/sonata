@@ -868,10 +868,9 @@ struct SonataApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .option])
 
-                Button("Interactive Sessions") {
-                    InteractiveSessionsWindowController.shared.show()
-                }
-                .keyboardShortcut("i", modifiers: [.command, .option])
+                // "Interactive Sessions" menu item retired — the in-rail
+                // "Sessions" tab owns this experience now. Use ⌘1-9 or
+                // click the rail's Sessions icon.
 
                 Button("Logs") {
                     LogsWindowController.shared.show()
