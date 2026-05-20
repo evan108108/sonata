@@ -214,7 +214,11 @@ struct SettingsView: View {
 
                     // MARK: - Workers Section
                     collapsibleSection("Workers", icon: "arrow.triangle.2.circlepath", expanded: $workerExpanded) {
-                        WorkerCyclingSettingsView()
+                        VStack(alignment: .leading, spacing: 0) {
+                            WorkerCyclingSettingsView()
+                            Divider().padding(.vertical, 4)
+                            WorkerToolRestrictionsView()
+                        }
                     }
 
                     // MARK: - Studio Section

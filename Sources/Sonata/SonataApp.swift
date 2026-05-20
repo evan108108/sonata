@@ -473,6 +473,7 @@ struct SonataApp: App {
                 registry.register(taskWatcherActions)
                 registry.register(workerActions)
                 registry.register(workerEventActions)
+                registry.register(workerToolDenialActions)
                 registry.register(inspectorAction)
                 registry.register(afkActions)
                 registry.register(dmActions)
