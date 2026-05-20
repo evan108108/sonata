@@ -27,3 +27,6 @@ plugins/*/node_modules/
 plugins/*/bin/
 plugins/*/logs/
 plugins/*/.*.bun-build
+
+# Runtime subprocess logs (plugin stdout/stderr, etc.)
+logs/

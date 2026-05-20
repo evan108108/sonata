@@ -797,5 +797,67 @@ extension DatabaseMigrator {
             try db.execute(sql:
                 "CREATE INDEX IF NOT EXISTS task_watchers_by_task ON task_watchers(taskId)")
         }
+
+        // v13: MCP unify side effects —
+        //   * workerToolDenials: empty-by-default table the HTTP-MCP transport
+        //     consults to deny specific tool names per session role. Default
+        //     empty so behavior matches pre-unify (all tools callable). The
+        //     Settings UI (Phase 2) populates this; ships with no rows.
+        //   * contacts.autoAllowEmail / blockEmail: sender-allowlist gating
+        //     for EmailHandler. Existing trusted contacts get autoAllowEmail=1
+        //     during this migration.
+        //   * contacts.peerKind / peerEndpoint / peerPubkey: support federated
+        //     peers (Scout) whose AI Details fields don't apply. Existing AI
+        //     contacts default to peerKind='invoked' so the UI still shows the
+        //     Provider/Model/SystemPrompt form for them.
+        registerMigration("v13_mcp_unify_side_effects") { db in
+            // Worker tool denylist — empty default, see plan
+            // mcp-unify-worker-surface.md § "Surface alignment".
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS workerToolDenials (
+                    toolName  TEXT PRIMARY KEY,
+                    appliesTo TEXT NOT NULL DEFAULT 'worker',
+                    reason    TEXT,
+                    addedAt   INTEGER NOT NULL,
+                    addedBy   TEXT
+                )
+            """)
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS workerToolDenials_by_role ON workerToolDenials(appliesTo)")
+
+            // Contacts schema additions. Each ALTER is wrapped in do/catch
+            // so re-running the migration on a partially-applied DB is safe.
+            do { try db.execute(sql: "ALTER TABLE contacts ADD COLUMN autoAllowEmail INTEGER NOT NULL DEFAULT 0") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE contacts ADD COLUMN blockEmail INTEGER NOT NULL DEFAULT 0") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE contacts ADD COLUMN peerKind TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE contacts ADD COLUMN peerEndpoint TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE contacts ADD COLUMN peerPubkey TEXT") } catch { /* column exists */ }
+
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS contacts_by_auto_allow ON contacts(autoAllowEmail) WHERE autoAllowEmail = 1")
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS contacts_by_block ON contacts(blockEmail) WHERE blockEmail = 1")
+
+            // Seed existing trusted addresses (idempotent — UPDATE WHERE).
+            // Scout is included so that if the row was added by hand before
+            // this migration runs, it still gets allow-listed. New installs
+            // won't have these rows yet — no-op until rows exist.
+            try db.execute(sql: """
+                UPDATE contacts SET autoAllowEmail = 1
+                WHERE LOWER(email) IN (
+                    'evan108108@gmail.com',
+                    'campbell.hyers@enginable.com',
+                    'allison.formicola@enginable.com',
+                    'sloan.mercer@agentmail.to',
+                    'scoutleader@agentmail.to'
+                )
+            """)
+
+            // Backfill peerKind for existing AI contacts to 'invoked' so the
+            // form still shows the right section. Federated peers (Scout) are
+            // set explicitly when their row is created / updated.
+            try db.execute(sql:
+                "UPDATE contacts SET peerKind = 'invoked' WHERE type = 'ai' AND peerKind IS NULL")
+        }
     }
 }

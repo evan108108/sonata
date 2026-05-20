@@ -24,50 +24,32 @@ extension EnvironmentValues {
 /// Port for the Sonata HTTP server, configurable via SONATA_PORT env var.
 let sonataPort: Int = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
 
-/// Deploy MCP bridge scripts from the app bundle to ~/.sonata/mcp/ and ensure
-/// memory + sonata-bridge MCP servers are registered in ~/.claude/mcp.json.
-/// Called on startup so every Claude Code session has access to Sona's memory.
+/// Ensure sonata-bridge MCP server is registered in ~/.claude/mcp.json, and
+/// scrub any stale `memory` stdio entry (now redundant — sonata-bridge serves
+/// the full ActionRegistry surface alongside the worker shim tools, per the
+/// mcp-unify-worker-surface plan §Step 6). Called on startup so every Claude
+/// Code session has Sona's memory through one HTTP transport.
 func ensureGlobalMCPServers() {
     let fm = FileManager.default
     let home = fm.homeDirectoryForCurrentUser
 
-    // 1. Deploy bundled MCP scripts to ~/.sonata/mcp/
-    let mcpDir = home.appendingPathComponent(".sonata/mcp")
-    try? fm.createDirectory(at: mcpDir, withIntermediateDirectories: true)
+    // Phase D — neither mem-server.ts nor sonata-bridge.ts is deployed any
+    // more. The in-app HTTP+SSE server at /mcp replaces both. Old files at
+    // ~/.sonata/mcp/{mem-server,sonata-bridge}.ts are left alone in case
+    // long-lived terminal sessions still have them loaded as stdio children;
+    // a manual cleanup step removes them after the migration soaks.
 
-    // Copy mem-server.ts from bundle (always overwrite to keep in sync with app version)
-    if let sourceURL = Bundle.module.url(forResource: "mem-server", withExtension: "ts", subdirectory: "mcp") {
-        let dest = mcpDir.appendingPathComponent("mem-server.ts")
-        try? fm.removeItem(at: dest)
-        try? fm.copyItem(at: sourceURL, to: dest)
-        sonataFileLog("MCP setup: deployed mem-server.ts to ~/.sonata/mcp/")
-    }
-
-    // Phase D — sonata-bridge.ts is no longer deployed. The in-app
-    // HTTP+SSE server replaces it. Existing ~/.sonata/mcp/sonata-bridge.ts
-    // files on disk are left alone in case long-lived terminal sessions
-    // are still holding them open as stdio children; they'll be cleaned
-    // up manually after the migration soaks.
-
-    // 2. Register in both ~/.claude/mcp.json (Claude Code) and ~/.claude.json (Claude Desktop)
-    let memServerPath = mcpDir.appendingPathComponent("mem-server.ts").path
-
-    // Memory remains stdio (its own migration).
     // sonata-bridge: HTTP+SSE entry pointing at /mcp (no path), with
     // the bearer = ${SONA_SESSION_ID} env var. Claude substitutes the
     // env var at request time → the bearer becomes the sessionKey.
-    //   - sona-launched sessions: SONA_SESSION_ID set by the alias to
-    //     a fresh UUID → bearer == sessionKey == claude session id.
+    //   - sona-launched sessions: SONA_SESSION_ID set by the sona()
+    //     shell function to a fresh UUID → bearer == sessionKey == claude
+    //     session id.
     //   - non-sona launches: env var unset → bearer arrives as the
     //     literal "${SONA_SESSION_ID}" → Sonata mints anon-XXX and
     //     pushes the sonata_identify handshake notification.
     // See ~/.sonata/wiki/sonata/mcp-identity.md.
     let requiredServers: [String: [String: Any]] = [
-        "memory": [
-            "type": "stdio",
-            "command": "bun",
-            "args": ["run", memServerPath],
-        ],
         "sonata-bridge": [
             "type": "http",
             "url": "http://localhost:\(sonataPort)/mcp",
@@ -76,6 +58,12 @@ func ensureGlobalMCPServers() {
             ],
         ],
     ]
+
+    // Names whose presence is now incorrect — drop on encounter. Was added
+    // to ~/.claude/mcp.json by previous Sonata releases; left intact it
+    // creates a double-namespace footgun (mcp__memory__mem_store AND
+    // mcp__sonata-bridge__mem_store both resolve to the same action).
+    let serversToRemove: Set<String> = ["memory"]
 
     let configPaths = [
         home.appendingPathComponent(".claude/mcp.json"),   // Claude Code
@@ -91,11 +79,14 @@ func ensureGlobalMCPServers() {
             var mcpServers = json["mcpServers"] as? [String: Any] ?? [:]
 
             var changed = false
+            for name in serversToRemove where mcpServers[name] != nil {
+                mcpServers.removeValue(forKey: name)
+                changed = true
+                sonataFileLog("MCP setup: removed stale '\(name)' from \(configPath.lastPathComponent)")
+            }
             for (name, config) in requiredServers {
                 if let existing = mcpServers[name] as? [String: Any],
-                   let existingArgs = existing["args"] as? [String],
-                   let newArgs = config["args"] as? [String],
-                   existingArgs == newArgs {
+                   (existing["url"] as? String) == (config["url"] as? String) {
                     continue  // Already correct
                 }
                 mcpServers[name] = config
@@ -144,7 +135,7 @@ func ensureSonaLauncher() {
         \(beginMarker)
         # Sonata-managed `sona` launcher. Mints a per-session UUID and
         # sets SONA_SESSION_ID so claude's HTTP MCP client substitutes
-        # it into the sonata-bridge bearer header in ~/.claude.json.
+        # it into the sonata-bridge bearer header in ~/.claude/mcp.json.
         # See ~/.sonata/wiki/sonata/mcp-identity.md.
         unalias sona 2>/dev/null
         sona() {

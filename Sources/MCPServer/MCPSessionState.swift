@@ -139,7 +139,36 @@ actor MCPSessionState {
     }
 
     private func handleToolsList(id: Any) -> String {
-        return jsonRPCResult(id: id, result: ["tools": MCPToolSchemas.all])
+        return jsonRPCResult(id: id, result: ["tools": mergedToolSchemas()])
+    }
+
+    /// Merge the worker-transport's narrow shim schemas with the full
+    /// ActionRegistry surface, narrow taking precedence on name collision.
+    /// Stable order — narrow first in declaration order, then registry
+    /// alphabetical — keeps `tools/list` responses prompt-cache friendly.
+    /// See plan: mcp-unify-worker-surface.md § Step 1.
+    private func mergedToolSchemas() -> [[String: Any]] {
+        var byName: [String: [String: Any]] = [:]
+        for schema in actionRegistry.mcpToolSchemas() {
+            if let name = schema["name"] as? String {
+                byName[name] = schema
+            }
+        }
+        for schema in MCPToolSchemas.all {
+            if let name = schema["name"] as? String {
+                byName[name] = schema
+            }
+        }
+        let narrowNames = MCPToolSchemas.all.compactMap { $0["name"] as? String }
+        var seen = Set<String>()
+        var out: [[String: Any]] = []
+        for n in narrowNames {
+            if let s = byName[n] { out.append(s); seen.insert(n) }
+        }
+        for (name, schema) in byName.sorted(by: { $0.key < $1.key }) where !seen.contains(name) {
+            out.append(schema)
+        }
+        return out
     }
 
     private func handleToolsCall(id: Any, params: [String: Any]) async -> String {
@@ -151,20 +180,65 @@ actor MCPSessionState {
             return jsonRPCError(id: id, code: -32603,
                 message: "MCP registry deallocated mid-call")
         }
-        let (success, output) = await MCPToolHandlers.handle(
-            toolName: toolName,
-            args: args,
-            role: role,
-            sessionKey: sessionKey,
-            state: self,
-            registry: registry,
-            actionRegistry: actionRegistry,
-            dbPool: dbPool
-        )
+
+        let narrowNames = Set(MCPToolSchemas.all.compactMap { $0["name"] as? String })
+
+        let (success, output): (Bool, String)
+        if narrowNames.contains(toolName) {
+            (success, output) = await MCPToolHandlers.handle(
+                toolName: toolName,
+                args: args,
+                role: role,
+                sessionKey: sessionKey,
+                state: self,
+                registry: registry,
+                actionRegistry: actionRegistry,
+                dbPool: dbPool
+            )
+        } else if let deniedReason = await checkToolDenial(toolName: toolName) {
+            let suffix = deniedReason.isEmpty ? "" : " — \(deniedReason)"
+            (success, output) = (false,
+                "Tool '\(toolName)' is denied for role '\(roleString())'\(suffix)")
+        } else {
+            (success, output) = await actionRegistry.executeMCPTool(
+                name: toolName, args: args, dbPool: dbPool
+            )
+        }
+
         let content: [[String: Any]] = [["type": "text", "text": output]]
         var result: [String: Any] = ["content": content]
         if !success { result["isError"] = true }
         return jsonRPCResult(id: id, result: result)
+    }
+
+    /// Consult the workerToolDenials table for the calling role. Returns the
+    /// deny reason (possibly empty string) when the tool is denied, nil when
+    /// allowed. Fails open on DB error — the denylist is a UI convenience
+    /// knob, not a security boundary (see plan § "Surface alignment").
+    private func checkToolDenial(toolName: String) async -> String? {
+        let roleStr = roleString()
+        do {
+            return try await dbPool.read { db in
+                let row = try Row.fetchOne(db, sql: """
+                    SELECT reason FROM workerToolDenials
+                    WHERE toolName = ?
+                      AND (',' || appliesTo || ',') LIKE '%,' || ? || ',%'
+                    """, arguments: [toolName, roleStr])
+                return row.map { ($0["reason"] as? String) ?? "" }
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[mcp] checkToolDenial DB error for \(toolName): \(error)\n".utf8))
+            return nil
+        }
+    }
+
+    private func roleString() -> String {
+        switch role {
+        case .worker: return "worker"
+        case .interactive: return "interactive"
+        case .supervisor: return "supervisor"
+        }
     }
 
     func markInFlight(eventId: String) { inFlightEventId = eventId }

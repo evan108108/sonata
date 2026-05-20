@@ -52,7 +52,7 @@ Use the AgentMail MCP tool:
 ### Step 2 — Register this session as the AFK target
 
 Call the memory tool to route the reply back via channel push:
-- Tool: `mcp__memory__afk_register`
+- Tool: `mcp__sonata-bridge__afk_register`
 - token: `{token}` (the same token in your subject line)
 
 **⚠️ DO NOT pass `sessionId` yourself.** The tool's JSON schema marks `sessionId` as "required" but the memory MCP shim auto-injects the correct value (it computes the same `claude-${ppid}` identity the sibling sonata-bridge announced as). If you pass your own Claude Code session UUID, AFKRegistry stores the registration under a sessionId that no bridge is listening on, the push silently misroutes, and Sonata logs a warning like *"sessionId X is not a known live worker or external bridge."* This footgun was diagnosed and fixed 2026-05-12 — the correct call is **token only**.
@@ -83,14 +83,14 @@ When a new turn fires with an `afk_reply` channel event:
 
 ### Multiple questions
 
-The token registration persists across questions until you call `mcp__memory__afk_unregister`. You can ask, end turn, get reply, ask again, end turn, get next reply — the same token routes them all.
+The token registration persists across questions until you call `mcp__sonata-bridge__afk_unregister`. You can ask, end turn, get reply, ask again, end turn, get next reply — the same token routes them all.
 
 ## Exiting AFK Mode (/back)
 
 When the user types `/back`, OR when you detect a "back" reply via the channel:
 
 1. Unregister the token:
-   - Tool: `mcp__memory__afk_unregister`
+   - Tool: `mcp__sonata-bridge__afk_unregister`
    - token: `{token}`
 
 2. Delete the token file:

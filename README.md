@@ -119,11 +119,11 @@ All state lives under `~/.sonata/`:
 
 Most runtime configuration — email inboxes, supervisor settings, schedules, plugins, secrets — is managed through the dashboard's Settings tab, which writes to the SQLite database.
 
-On startup Sonata registers its bundled MCP servers (`memory` and `sonata-bridge`) in `~/.claude/mcp.json` and `~/.claude.json` so every Claude Code session picks them up automatically.
+On startup Sonata registers `sonata-bridge` in `~/.claude/mcp.json` and `~/.claude.json` so every Claude Code session picks it up automatically. `sonata-bridge` is an HTTP MCP transport (`POST /mcp`) that serves the full ActionRegistry surface (~220 tools) alongside a handful of worker-only narrow shims (`complete_event`, `fail_event`, `sonata_identify`, `sonar_dm_*`, `afk_register`, `mem_task_*`) — one transport, one namespace. Any earlier `memory` stdio entry left behind by older Sonata builds is scrubbed on startup.
 
 ## MCP Tools
 
-Sonata exposes 135+ tools through its MCP server, organized by domain:
+Sonata exposes 230+ tools through its MCP server, organized by domain:
 
 | Category | Examples |
 |----------|----------|

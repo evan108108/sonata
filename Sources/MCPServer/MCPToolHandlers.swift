@@ -47,9 +47,33 @@ enum MCPToolHandlers {
         case "sonar_dm_broadcast":
             return await sonarDMBroadcast(
                 args: args, sessionKey: sessionKey, registry: registry, dbPool: dbPool)
+        case "afk_register":
+            return await afkRegister(
+                args: args, sessionKey: sessionKey,
+                actionRegistry: actionRegistry, dbPool: dbPool)
         default:
             return (false, "Unknown tool: \(toolName)")
         }
+    }
+
+    /// `afk_register` narrow shim — replaces the stdio mem-server.ts
+    /// auto-inject of `sessionId` from WORKER_ID / SONA_SESSION_ID env vars.
+    /// When the caller omits sessionId we default to the bearer-derived
+    /// sessionKey, matching the prior behavior so existing skills (afk/SKILL)
+    /// keep working. See plan § Step 4 (Option Q1c).
+    private static func afkRegister(
+        args: [String: Any],
+        sessionKey: String,
+        actionRegistry: ActionRegistry,
+        dbPool: DatabasePool
+    ) async -> (success: Bool, result: String) {
+        var coerced = args
+        let supplied = (coerced["sessionId"] as? String) ?? ""
+        if supplied.isEmpty {
+            coerced["sessionId"] = sessionKey
+        }
+        return await actionRegistry.executeMCPTool(
+            name: "afk_register", args: coerced, dbPool: dbPool)
     }
 
     /// Fan a DM to every SSE-attached session matching the optional
@@ -567,6 +591,18 @@ enum MCPToolSchemas {
                     "target_session_id": ["type": "string", "description": "Watcher session id (defaults to caller)"],
                 ],
                 "required": ["taskId"],
+            ],
+        ],
+        [
+            "name": "afk_register",
+            "description": "Register this session as the AFK target for a token. EmailHandler will route [AFK:<token>] replies here. sessionId defaults to the caller's bridge session id when omitted (narrow-shim auto-inject, replaces the prior stdio-proxy behavior).",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "token": ["type": "string", "description": "The AFK token (also embedded in the email subject)"],
+                    "sessionId": ["type": "string", "description": "Bridge session id (defaults to caller)"],
+                ],
+                "required": ["token"],
             ],
         ],
     ]
