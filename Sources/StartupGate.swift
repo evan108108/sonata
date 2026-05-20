@@ -48,7 +48,20 @@ final class StartupReadiness: ObservableObject {
 
     private var started = false
 
-    var ready: Bool { checks.allSatisfy { $0.status == .ready } }
+    /// The gate is "ready" — i.e. dismisses automatically — as soon as every
+    /// check has reached a terminal state, whether successful or not. Failed
+    /// checks no longer block dismissal: the user shouldn't have to click Skip
+    /// past a stuck-plugin row to get into the app. Failures still render
+    /// red on the overlay (briefly visible during the dismiss animation),
+    /// and the affected nav-rail item gets its own attention badge once the
+    /// app is up — see NavRailCounts.failedPluginCount.
+    var ready: Bool {
+        checks.allSatisfy { check in
+            if case .ready = check.status { return true }
+            if case .failed = check.status { return true }
+            return false
+        }
+    }
 
     /// 0...1 — fraction of checks that are ready. Failed checks count as
     /// "done" so the bar doesn't stall when something errors out (the user
@@ -138,8 +151,24 @@ final class StartupReadiness: ObservableObject {
                     let runningCount = gated.filter { $0.status == "running" }.count
                     let failedNames = gated.filter { $0.status == "failed" }.map(\.name)
                     if !failedNames.isEmpty {
+                        // First-pass recovery: try a disable→enable cycle on
+                        // each failed plugin. This mirrors the manual fix
+                        // (toggling Disable/Enable in the Plugins tab always
+                        // recovers it) without making the user wait. If the
+                        // cycle succeeds we re-poll the loop; if it doesn't,
+                        // we mark the check failed but the gate still
+                        // dismisses thanks to the relaxed `ready` rule.
+                        let stillFailed = await recoverFailedPlugins(failedNames, port: port)
+                        if stillFailed.isEmpty {
+                            // All recovered — fall through to the running-
+                            // count check on the next loop iteration.
+                            update("plugins", .running,
+                                   detail: "recovered \(failedNames.count)")
+                            try? await Task.sleep(for: .milliseconds(400))
+                            continue
+                        }
                         update("plugins",
-                               .failed("failed: \(failedNames.joined(separator: ", "))"),
+                               .failed("failed: \(stillFailed.joined(separator: ", "))"),
                                detail: "\(runningCount)/\(gated.count)")
                         return
                     }
@@ -169,6 +198,63 @@ final class StartupReadiness: ObservableObject {
         update("plugins",
                .failed("timeout — stuck: \(stuckNames.joined(separator: ", "))"),
                detail: "\(runningCount)/\(lastSnapshot.count)")
+    }
+
+    /// Attempt to recover plugins stuck at status='failed' by hitting the
+    /// disable + enable endpoints, then waiting briefly for the status to
+    /// transition back. Returns the names that remained failed after the
+    /// attempt — caller treats those as terminal failures. Each plugin gets
+    /// a single shot; the recovery doesn't loop.
+    private func recoverFailedPlugins(_ names: [String], port: Int) async -> [String] {
+        var stillFailed: [String] = []
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for name in names {
+                group.addTask {
+                    let ok = await Self.toggleDisableEnable(name: name, port: port)
+                    return (name, ok)
+                }
+            }
+            for await (name, recovered) in group where !recovered {
+                stillFailed.append(name)
+            }
+        }
+        return stillFailed
+    }
+
+    private static func toggleDisableEnable(name: String, port: Int) async -> Bool {
+        guard let disableURL = URL(string: "http://127.0.0.1:\(port)/api/plugins/\(name)/disable"),
+              let enableURL  = URL(string: "http://127.0.0.1:\(port)/api/plugins/\(name)/enable") else {
+            return false
+        }
+        var disableReq = URLRequest(url: disableURL); disableReq.httpMethod = "POST"
+        var enableReq  = URLRequest(url: enableURL);  enableReq.httpMethod  = "POST"
+        do {
+            _ = try await URLSession.shared.data(for: disableReq)
+            // Brief pause so the plugin's PID / port cleanup completes before
+            // we re-enable. Without it some plugins try to bind their port
+            // before the previous process has finished releasing it.
+            try? await Task.sleep(for: .milliseconds(400))
+            _ = try await URLSession.shared.data(for: enableReq)
+        } catch {
+            return false
+        }
+        // Poll the plugin's status row up to 8 seconds for it to return to
+        // 'running'. 8s matches the typical sonar Elixir/Erlang boot time
+        // plus a small buffer.
+        guard let listURL = URL(string: "http://127.0.0.1:\(port)/api/plugins") else {
+            return false
+        }
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            if let (data, _) = try? await URLSession.shared.data(from: listURL),
+               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]],
+               let row = arr.first(where: { ($0["name"] as? String) == name }),
+               (row["status"] as? String) == "running" {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        return false
     }
 
     /// Per-plugin warmup probe — call one real action endpoint and wait until
