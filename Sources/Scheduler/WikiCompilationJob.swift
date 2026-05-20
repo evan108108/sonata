@@ -6,7 +6,7 @@ import Logging
 ///
 /// Queries dirty wiki pages, builds a manifest of category + topic pages
 /// (with children for categories), injects the manifest into a prompt
-/// template, and creates a pending task row for the TaskOrchestrator to
+/// template, and creates a pending task row for the TaskDispatcher to
 /// dispatch to a worker.
 ///
 /// Registered with `SchedulerActor` under the name `wiki-compilation` and
@@ -87,7 +87,7 @@ enum WikiCompilationJob {
             pageManifest: pageManifest
         )
 
-        // 4. Create a pending task row for the orchestrator to dispatch.
+        // 4. Create a pending task row for the dispatcher to dispatch.
         let taskId = UUID().uuidString.lowercased()
         let title = "Wiki compilation: \(dirtyCount) pages"
         let now = nowMs()

@@ -553,7 +553,7 @@ struct SonataApp: App {
                 await mcpEventPusher.start()
                 logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
 
-                // Orchestrator singleton retired (2026-05-18). External
+                // Dispatcher singleton retired (2026-05-18). External
                 // launchers identify themselves via bearer = sessionKey
                 // (set by SONA_SESSION_ID env var via the sona alias).
                 // See ~/.sonata/wiki/sonata/mcp-identity.md.
@@ -660,9 +660,9 @@ struct SonataApp: App {
                 let friendRelay = FriendRelay(dbPool: pool)
                 await friendRelay.start()
 
-                // 4. Task Orchestrator (dispatches pending tasks to bridge workers)
-                let orchestrator = TaskOrchestrator(dbPool: pool)
-                await orchestrator.start()
+                // 4. Task Dispatcher (dispatches pending tasks to bridge workers)
+                let dispatcher = TaskDispatcher(dbPool: pool)
+                await dispatcher.start()
 
                 // 5. Health Monitor (with scheduler status closure)
                 let healthMonitor = HealthMonitor(

@@ -14,7 +14,7 @@ import Hummingbird
 //  - wikiPages has no `status` column; mem_coverage uses `pageType` surfaced as
 //    `status` to match the spirit of the planning doc.
 //  - mem_think / mem_visualize / mem_embed_backfill / mem_ingest_sessions /
-//    mem_wiki_enrich enqueue rows on the `tasks` table (drained by TaskOrchestrator
+//    mem_wiki_enrich enqueue rows on the `tasks` table (drained by TaskDispatcher
 //    via the bridge channel). They used to insert into the `backgroundJobs` table,
 //    which was drained by BackgroundJobRunner spawning `claude -p` — removed
 //    2026-05-17 per Evan directive (thread 1620020f) to reach 0 SDK usage.

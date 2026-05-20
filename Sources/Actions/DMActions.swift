@@ -22,7 +22,7 @@ import SQLite3
 struct DMRegistration: Codable, Sendable {
     let sessionId: String
     let sessionLabel: String?
-    let role: String?           // "orchestrator" | "worker" | "interactive" | caller-supplied
+    let role: String?           // "worker" | "interactive" | "supervisor" | caller-supplied
     let registeredAt: Int64
 }
 
@@ -457,7 +457,7 @@ let dmActions: [SonataAction] = [
         params: [
             ActionParam("sessionId", .string, required: true, description: "Bridge session id (regex: [A-Za-z0-9_-]{1,128})"),
             ActionParam("sessionLabel", .string, required: false, description: "Optional friendly label"),
-            ActionParam("role", .string, required: false, description: "Optional role hint: orchestrator | worker | interactive"),
+            ActionParam("role", .string, required: false, description: "Optional role hint: worker | interactive | supervisor"),
         ],
         handler: { ctx in
             let sessionId = try ctx.params.require("sessionId")

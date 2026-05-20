@@ -51,7 +51,7 @@ To install as a standard macOS app, package `.build/debug/Sonata` into an `.app`
 |  |  SQLite (GRDB)  |  |  HTTP Server     |  |  Scheduler           |  |
 |  |  FTS5 + WAL     |  |  Hummingbird     |  |  Cron + calendar     |  |
 |  +-----------------+  |  MCP over WS     |  |  Email handler       |  |
-|  +-----------------+  |  Port 3211       |  |  Task orchestrator   |  |
+|  +-----------------+  |  Port 3211       |  |  Task dispatcher     |  |
 |  |  Vector Search  |  +------------------+  |  Backup manager      |  |
 |  |  Accelerate     |  +------------------+  |  Health monitor      |  |
 |  +-----------------+  |  Channel Server  |  |  Wiki watcher        |  |
@@ -69,7 +69,7 @@ Top-level components:
 - **`Actions/`** — domain logic grouped by topic (memory, tasks, calendar, wiki, workers, plugins, and more). Each `*Actions.swift` file defines `SonataAction` values.
 - **`Server/`** — Hummingbird routes, `ActionRegistry`, `SonataAction`, and `PluginManager`. Actions auto-generate both HTTP routes and MCP tools.
 - **`MCP/`** — JSON-RPC MCP server and the channel server that pushes events to workers.
-- **`Scheduler/`** — `SchedulerActor`, cron parser, task orchestrator, email handler, backup manager, health monitor, and the filesystem watcher.
+- **`Scheduler/`** — `SchedulerActor`, cron parser, `TaskDispatcher`, email handler, backup manager, health monitor, and the filesystem watcher.
 - **`Search/`** — MeiliSearch subprocess manager and the `SearchService` abstraction.
 - **`Views/` / `ViewModels/`** — SwiftUI dashboard.
 - **`Sonata/`** — app entry point, resources, and bundled MCP bridge scripts.

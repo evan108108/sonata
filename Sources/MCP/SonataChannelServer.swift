@@ -10,7 +10,7 @@ import Logging
 /// via the channel protocol.
 ///
 /// Flow:
-/// 1. TaskOrchestrator calls `dispatchToChannel(task:)`
+/// 1. TaskDispatcher calls `dispatchToChannel(task:)`
 /// 2. This actor creates a workerEvent with the task payload
 /// 3. The channel server (TS) polls `/api/worker/events/claim`
 /// 4. Claude receives the task as a `<channel source="sonata-channel">` event

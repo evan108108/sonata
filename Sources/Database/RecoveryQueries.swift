@@ -25,7 +25,7 @@ struct RecoveryCandidate {
 /// Schema-migration safety (plan §6): on any query failure we log and return
 /// an empty array. The default boot path then proceeds without recovered
 /// workers, and `recoverOrphans()` resets stranded active tasks to `pending`
-/// on the orchestrator's first tick.
+/// on the dispatcher's first tick.
 func findStaleWorkersWithActiveWork(
     in dbPool: DatabasePool,
     cutoffMs: Int64,

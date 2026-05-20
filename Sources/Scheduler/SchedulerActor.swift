@@ -39,7 +39,7 @@ protocol ClaudeProcessRunner: Sendable {
     func run(prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String?
 }
 
-/// Default runner that creates a task for the TaskOrchestrator to dispatch via channel.
+/// Default runner that creates a task for the TaskDispatcher to dispatch via channel.
 struct DefaultClaudeRunner: ClaudeProcessRunner {
     let dbPool: DatabasePool
 
@@ -82,7 +82,7 @@ public actor SchedulerActor {
     /// Logger instance.
     private let logger: Logger
 
-    /// Claude process runner — creates tasks for orchestrator dispatch.
+    /// Claude process runner — creates tasks for dispatcher dispatch.
     private var claudeRunner: any ClaudeProcessRunner
 
     /// Registered internal functions, keyed by name.

@@ -9,7 +9,7 @@ import Logging
 /// pick it up through the MCP channel protocol. If channel dispatch fails (no idle worker
 /// claimed the event in time), the task stays `pending` and the next poll cycle retries
 /// once a worker frees up. Bridge-only: no headless `claude -p` fallback.
-actor TaskOrchestrator {
+actor TaskDispatcher {
     private let dbPool: DatabasePool
     private let logger: Logger
     private let channelServer: SonataChannelServer
@@ -19,7 +19,7 @@ actor TaskOrchestrator {
     init(dbPool: DatabasePool) {
         self.dbPool = dbPool
         self.channelServer = SonataChannelServer(dbPool: dbPool)
-        var logger = Logger(label: "sonata.orchestrator")
+        var logger = Logger(label: "sonata.dispatcher")
         logger.logLevel = .info
         self.logger = logger
     }
@@ -27,7 +27,7 @@ actor TaskOrchestrator {
     func start() {
         guard !isRunning else { return }
         isRunning = true
-        logger.info("TaskOrchestrator started (polling every 10s, dynamic concurrency)")
+        logger.info("TaskDispatcher started (polling every 10s, dynamic concurrency)")
         Task {
             await recoverOrphans()
             await pollLoop()
@@ -43,7 +43,7 @@ actor TaskOrchestrator {
             do {
                 try await poll()
             } catch {
-                logger.error("Orchestrator poll error: \(error.localizedDescription)")
+                logger.error("Dispatcher poll error: \(error.localizedDescription)")
             }
             try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
         }
@@ -64,8 +64,8 @@ actor TaskOrchestrator {
         // Find actionable tasks: pending, assigned to scheduler, not blocked,
         // and leaf-only (parent/container tasks with subtasks are skipped —
         // they have no prompt and would waste worker turns).
-        let tasks = try await dbPool.read { db -> [OrchestratorTaskRow] in
-            try OrchestratorTaskRow.fetchAll(db, sql: """
+        let tasks = try await dbPool.read { db -> [DispatcherTaskRow] in
+            try DispatcherTaskRow.fetchAll(db, sql: """
                 SELECT * FROM tasks t
                 WHERE t.status = 'pending'
                 AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL OR t.assignedTo = '')
@@ -90,7 +90,7 @@ actor TaskOrchestrator {
         }
     }
 
-    private func dispatch(_ task: OrchestratorTaskRow) async {
+    private func dispatch(_ task: DispatcherTaskRow) async {
         let taskId = task.id
         let title = task.title
         let prompt = task.prompt ?? task.title
@@ -114,7 +114,7 @@ actor TaskOrchestrator {
                 )
             }
             // Fan-out to task watchers: pending → active. Status was pending
-            // when the orchestrator picked it, so we can avoid a re-read.
+            // when the dispatcher picked it, so we can avoid a re-read.
             await fireTaskWatcherDMs(
                 taskId: taskId, oldStatus: "pending", newStatus: "active", dbPool: dbPool
             )
@@ -205,7 +205,7 @@ actor TaskOrchestrator {
 }
 
 // Simple row type for reading tasks
-private struct OrchestratorTaskRow: FetchableRecord, Codable {
+private struct DispatcherTaskRow: FetchableRecord, Codable {
     let id: String
     let title: String
     let prompt: String?
