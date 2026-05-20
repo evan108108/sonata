@@ -36,7 +36,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         self.name = name
         self.cwd = cwd
         self.sessionId = UUID().uuidString.lowercased()
-        self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
         super.init()
         terminalView.processDelegate = self

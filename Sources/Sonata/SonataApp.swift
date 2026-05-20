@@ -1020,7 +1020,7 @@ final class SupervisorWindowController: NSObject, NSWindowDelegate {
         guard window == nil else { return }
 
         // Create terminal view directly (same pattern as Worker)
-        let termView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
+        let termView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         termView.applyWarmChrome()
         let coord = SupervisorCoordinator(terminalView: termView)
         self.coordinator = coord

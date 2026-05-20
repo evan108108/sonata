@@ -35,7 +35,7 @@ class Worker: ObservableObject, Identifiable {
         self.id = "worker-\(Date().timeIntervalSince1970.description.replacingOccurrences(of: ".", with: "").suffix(10))"
         self.label = label
         self.sessionId = UUID().uuidString.lowercased()
-        self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
     }
 
@@ -45,7 +45,7 @@ class Worker: ObservableObject, Identifiable {
         self.id = workerId
         self.label = label
         self.sessionId = sessionId
-        self.terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
     }
 

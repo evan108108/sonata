@@ -19,7 +19,7 @@ final class InspectorWindowController: NSObject, LocalProcessTerminalViewDelegat
     var isOpen: Bool { window != nil }
 
     func open() {
-        let tv = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let tv = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         tv.applyWarmChrome()
         tv.processDelegate = self
         self.terminalView = tv

@@ -1,0 +1,206 @@
+import AppKit
+import Foundation
+import SwiftTerm
+
+// SwiftTerm's LocalProcessTerminalView ships text-only paste and no
+// drag-and-drop registration — so dropping a file does nothing and
+// pasting an image silently fails. This subclass wires both:
+//
+//   • Drag files / URLs / images onto the terminal → the resolved path
+//     is typed into the PTY (shell-quoted, space-separated for multi-drop).
+//   • ⌘V with file URLs, PNG, or TIFF on the pasteboard → same path
+//     insertion. ⌘V with text falls through to SwiftTerm's existing
+//     text paste.
+//   • Dropped/pasted images are saved to ~/.sonata/scratch/dropped-images/
+//     and the resulting file path is typed.
+//
+// Used by every terminal Sonata embeds (Workers, Supervisor, Live Sessions,
+// Inspector windows). Inherits from LocalProcessTerminalView so existing
+// `terminalView: LocalProcessTerminalView` annotations and delegate hookups
+// keep working unchanged — only the instantiation sites need to flip.
+//
+// We deliberately do NOT synthesize Claude Code's `[Image #N]` placeholder.
+// When Claude Code receives a file path on stdin it already does the right
+// thing (Read tool, image attachment, etc.); doing path-insertion uniformly
+// is the same outcome with less guessing about which TUI is running.
+
+final class DropEnabledTerminalView: LocalProcessTerminalView {
+
+    // MARK: Accepted pasteboard types
+
+    private static let acceptedDropTypes: [NSPasteboard.PasteboardType] = [
+        .fileURL,
+        .URL,
+        .png,
+        .tiff,
+    ]
+
+    // MARK: Lifecycle
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes(Self.acceptedDropTypes)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes(Self.acceptedDropTypes)
+    }
+
+    // MARK: Drag-and-drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return acceptedDragOperation(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        return acceptedDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = resolvePaths(from: sender.draggingPasteboard)
+        guard !paths.isEmpty else { return false }
+        sendPaths(paths)
+        return true
+    }
+
+    private func acceptedDragOperation(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // Match Terminal.app / iTerm: drop reads as a copy (the file isn't
+        // moved, just its path-as-text is inserted into the shell).
+        return resolvePaths(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    // MARK: Paste
+
+    override func paste(_ sender: Any) {
+        let pb = NSPasteboard.general
+
+        // 1) Existing plain-text path stays as-is (SwiftTerm's behavior).
+        if pb.string(forType: .string) != nil {
+            super.paste(sender)
+            return
+        }
+
+        // 2) Try fileURL / URL / image — convert to a path and type it.
+        let paths = resolvePaths(from: pb)
+        if !paths.isEmpty {
+            sendPaths(paths)
+            return
+        }
+
+        // 3) Nothing usable — fall through (will produce the SwiftTerm
+        // empty-paste no-op, which is fine).
+        super.paste(sender)
+    }
+
+    // MARK: Path resolution
+
+    /// Pull a list of filesystem paths out of a pasteboard, ordered by how
+    /// they appear in the drag/paste. Handles file URLs, http(s) URLs,
+    /// and raw image data (saved to a scratch directory and the resulting
+    /// path returned).
+    private func resolvePaths(from pasteboard: NSPasteboard) -> [String] {
+        var out: [String] = []
+
+        // File URLs come through as NSURL instances — most reliable.
+        let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+        ]
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL] {
+            for url in urls where url.isFileURL {
+                out.append(url.path)
+            }
+        }
+
+        if !out.isEmpty { return out }
+
+        // Non-file URL (e.g. dragged from Safari) → use the absolute string.
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            for url in urls {
+                out.append(url.isFileURL ? url.path : url.absoluteString)
+            }
+        }
+        if !out.isEmpty { return out }
+
+        // Image data on the clipboard (e.g. Cmd+Shift+Ctrl+4 screenshot to
+        // clipboard, dragged image from Preview, etc.) → save to scratch.
+        if let imageData = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) {
+            if let saved = saveImageToScratch(data: imageData,
+                                              preferPng: pasteboard.data(forType: .png) != nil) {
+                out.append(saved.path)
+            }
+        }
+
+        return out
+    }
+
+    /// Type each path into the PTY, shell-quoted to survive spaces and
+    /// special chars. Multi-path drops are space-separated, matching how
+    /// macOS Terminal.app handles a multi-file drop.
+    private func sendPaths(_ paths: [String]) {
+        let joined = paths.map(Self.shellQuote).joined(separator: " ")
+        // Trailing space so the cursor lands ready for the next argument
+        // (matches macOS Terminal.app behavior).
+        let typed = joined + " "
+        let bytes = Array(typed.utf8)
+        process.send(data: bytes[...])
+    }
+
+    // POSIX-shell-safe quoting: wrap in single quotes, escape any embedded
+    // single quotes via the classic `'\''` trick. Works for bash, zsh, sh.
+    static func shellQuote(_ path: String) -> String {
+        // Fast path: no characters that need quoting → leave alone.
+        let needsQuote = path.contains { ch in
+            !ch.isLetter && !ch.isNumber && !"./_-".contains(ch)
+        }
+        if !needsQuote { return path }
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        return "'\(escaped)'"
+    }
+
+    // MARK: Image scratch directory
+
+    private func saveImageToScratch(data: Data, preferPng: Bool) -> URL? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(".sonata/scratch/dropped-images", isDirectory: true)
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+        } catch {
+            NSLog("[DropEnabledTerminalView] failed to mkdir scratch dir: \(error)")
+            return nil
+        }
+
+        // Always normalize to PNG on disk — TIFF is bulky and Claude Code's
+        // image tools prefer PNG. Preview/screenshot puts PNG directly on
+        // the pasteboard; clipboard from Photoshop etc. comes as TIFF and
+        // we re-encode.
+        let imageData: Data
+        let ext: String
+        if preferPng {
+            imageData = data
+            ext = "png"
+        } else if let rep = NSBitmapImageRep(data: data),
+                  let png = rep.representation(using: .png, properties: [:]) {
+            imageData = png
+            ext = "png"
+        } else {
+            imageData = data
+            ext = "tiff"
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let filename = "drop-\(timestamp).\(ext)"
+        let dest = dir.appendingPathComponent(filename)
+
+        do {
+            try imageData.write(to: dest)
+            return dest
+        } catch {
+            NSLog("[DropEnabledTerminalView] failed to write \(dest.path): \(error)")
+            return nil
+        }
+    }
+}
