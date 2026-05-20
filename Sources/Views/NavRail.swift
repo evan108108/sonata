@@ -21,6 +21,13 @@ struct NavRail: View {
     private let moreCellHeight: CGFloat = 64
 
     @State private var showOverflow = false
+    /// Set after the first time the rail has been "primed" by either a real
+    /// click on a cell or the synthetic CGEvent we post in the More cell's
+    /// action below. Until primed, the More popover's content view drops
+    /// clicks (SwiftUI macOS popover-on-first-window-show bug — fixable
+    /// manually by clicking off-and-back or by clicking any other rail
+    /// cell first). The ghost-click does that priming for the user.
+    @State private var didPrimeRail = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -90,7 +97,51 @@ struct NavRail: View {
             railWidth: railWidth,
             cellHeight: cellHeight
         ) {
+            // Any real rail-cell click that changes the selection counts as
+            // priming. After that, the More popover behaves normally — no
+            // ghost-flicker needed.
+            if selected != item.tab {
+                didPrimeRail = true
+            }
             selected = item.tab
+        }
+    }
+
+    /// Open the More popover. On first launch, SwiftUI's popover content
+    /// drops clicks until SOMETHING has flipped the rail's binding to a new
+    /// tab (a selection change on any cell). The manual workaround was:
+    /// click Tasks/Workers/etc (anything except the currently-active tab),
+    /// then click More — popover items work after that. This synthesizes
+    /// the same effect by briefly switching to another tab and back before
+    /// opening the popover. One visible flicker the first time More is
+    /// clicked after launch; never again.
+    private func primeAndShowOverflow() {
+        if didPrimeRail {
+            showOverflow = true
+            return
+        }
+        // Pick a primary-rail tab that ISN'T the currently-selected one.
+        // (Toggling to a tab that's already selected is a no-op — the
+        // user confirmed that "must not be the active tab" empirically.)
+        let visibleTabs = items.map(\.tab)
+        guard let victim = visibleTabs.first(where: { $0 != selected }) else {
+            // Only one tab in the whole rail somehow — nothing to ghost-
+            // click to. Just open the popover and hope for the best.
+            showOverflow = true
+            return
+        }
+        let original = selected
+        selected = victim
+        didPrimeRail = true
+        // Restore + open on the next runloop tick so SwiftUI actually
+        // commits the intermediate selection change. Doing it inline
+        // collapses both assignments into one diff and the priming
+        // effect is lost.
+        DispatchQueue.main.async {
+            selected = original
+            DispatchQueue.main.async {
+                showOverflow = true
+            }
         }
     }
 
@@ -101,7 +152,7 @@ struct NavRail: View {
             railWidth: railWidth,
             cellHeight: moreCellHeight
         ) {
-            showOverflow = true
+            primeAndShowOverflow()
         }
         .popover(isPresented: $showOverflow, arrowEdge: .trailing) {
             VStack(spacing: 0) {
