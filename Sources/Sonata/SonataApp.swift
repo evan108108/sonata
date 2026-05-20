@@ -801,6 +801,14 @@ struct SonataApp: App {
             // tokens, and warm chrome are designed for dark; light mode would
             // wash them out.
             .preferredColorScheme(.dark)
+            // Override the system accent so List selections, toggles, focus
+            // rings, etc. render in Sonata's ember tone instead of macOS
+            // default blue. Without this, the Workers sidebar selection (and
+            // anything else relying on Color.accentColor) takes on the user's
+            // System Settings → Appearance → Accent Color, which collides
+            // with the warm chrome on both Sequoia 15.3 and 15.7+ point
+            // releases. See Theme.Color.selectionAccent (an ember orange).
+            .tint(Theme.Color.selectionAccent)
         }
         // Default window size on first launch (and a fallback when SwiftUI's
         // window state restoration fails — currently a regression caused by

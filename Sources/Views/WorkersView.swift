@@ -1116,17 +1116,46 @@ struct WorkersView: View {
             workerSidebarHeader
             Divider()
 
-            List(selection: $manager.selectedWorkerId) {
-                ForEach(manager.workers) { worker in
-                    WorkerSidebarRow(worker: worker)
-                        .tag(worker.id)
-                        .contextMenu {
-                            Button("Restart") { manager.restartWorker(worker) }
-                            Button("Remove", role: .destructive) { manager.removeWorker(worker) }
-                        }
+            // Custom scrollable list instead of `List(.sidebar)`. macOS's
+            // sidebar List paints selection backgrounds from
+            // NSColor.selectedContentBackgroundColor, which SwiftUI's
+            // `.tint(...)` cannot override — so .preferredColorScheme +
+            // .tint at the app root still left selection as system blue.
+            // Drawing the row background here lets us bind the highlight
+            // to Theme.Color.selectionTint and stay consistent across
+            // macOS point releases.
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(manager.workers) { worker in
+                        WorkerSidebarRow(worker: worker)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(manager.selectedWorkerId == worker.id
+                                          ? Theme.Color.selectionTint
+                                          : Color.clear)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(manager.selectedWorkerId == worker.id
+                                            ? Theme.Color.selectionAccent.opacity(0.55)
+                                            : Color.clear,
+                                            lineWidth: 0.5)
+                            )
+                            .onTapGesture {
+                                manager.selectedWorkerId = worker.id
+                            }
+                            .contextMenu {
+                                Button("Restart") { manager.restartWorker(worker) }
+                                Button("Remove", role: .destructive) { manager.removeWorker(worker) }
+                            }
+                    }
                 }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
             }
-            .listStyle(.sidebar)
 
             HStack(spacing: 8) {
                 Button(action: { showPromptCachePopover.toggle() }) {
@@ -1148,6 +1177,58 @@ struct WorkersView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        // ━━━ EXPERIMENT (2026-05-20): HouseFire shader sidebar background ━━━
+        // Reuses StartupGate's MetalFlameView for subtle warm motion behind
+        // the worker rows. Trade-off: small extra GPU load while the Workers
+        // tab is visible. To revert: delete this entire `.background { ... }`
+        // modifier AND the `.overlay(...)` divider directly below it.
+        .background(
+            ZStack {
+                // Base: warm vertical gradient — borrows all three loader
+                // ember stops so the sidebar reads as if the flame at the
+                // bottom is illuminating the surface around it. Deep ember
+                // holds the top (where the row text needs contrast); warms
+                // up through mid and peaks at the brightest "top of glow"
+                // stop at the bottom where the flame sits.
+                LinearGradient(
+                    stops: [
+                        .init(color: Theme.Color.bgEmberDeep, location: 0.00),
+                        .init(color: Theme.Color.bgEmberDeep, location: 0.35),
+                        .init(color: Theme.Color.bgEmberMid,  location: 0.70),
+                        .init(color: Theme.Color.bgEmberTop,  location: 1.00),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                MetalFlameView()
+                    .opacity(0.36)
+                    .allowsHitTesting(false)
+                // Wash for row legibility — heaviest at the top (where
+                // text contrast matters most), fading to zero at the bottom
+                // so the flame's illumination of the warm base reads
+                // without dampening.
+                LinearGradient(
+                    colors: [
+                        Theme.Color.bgDeep.opacity(0.55),
+                        Theme.Color.bgDeep.opacity(0.20),
+                        Color.clear,
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .allowsHitTesting(false)
+            }
+            .clipped()
+        )
+        // Trailing divider — without List(.sidebar)'s translucent material
+        // backdrop, the sidebar's right edge needs an explicit seam against
+        // the main panel.
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Theme.Color.dividerWarm)
+                .frame(width: 0.5)
+        }
+        // ━━━ END EXPERIMENT ━━━
     }
 
     private var workerSidebarHeader: some View {
