@@ -22,7 +22,12 @@ private func contactRowToResponseForAction(_ row: ContactRow) -> ContactResponse
         lastContactAt: row.lastContactAt,
         messageCount: row.messageCount,
         createdAt: row.createdAt,
-        updatedAt: row.updatedAt
+        updatedAt: row.updatedAt,
+        autoAllowEmail: row.autoAllowEmail,
+        blockEmail: row.blockEmail,
+        peerKind: row.peerKind,
+        peerEndpoint: row.peerEndpoint,
+        peerPubkey: row.peerPubkey
     )
 }
 
@@ -104,10 +109,15 @@ let contactActions: [SonataAction] = [
             ActionParam("email", .string, required: true, description: "Contact email"),
             ActionParam("type", .string, required: true, description: "Contact type: human, ai, or service"),
             ActionParam("role", .string, description: "Role"),
-            ActionParam("provider", .string, description: "Provider (for AI contacts)"),
-            ActionParam("model", .string, description: "Model (for AI contacts)"),
-            ActionParam("systemPrompt", .string, description: "System prompt (for AI contacts)"),
+            ActionParam("provider", .string, description: "Provider (for AI contacts, peerKind='invoked')"),
+            ActionParam("model", .string, description: "Model (for AI contacts, peerKind='invoked')"),
+            ActionParam("systemPrompt", .string, description: "System prompt (for AI contacts, peerKind='invoked')"),
             ActionParam("notes", .string, description: "Notes"),
+            ActionParam("autoAllowEmail", .integer, description: "1 = sender is allow-listed for inbound email (default 0)"),
+            ActionParam("blockEmail", .integer, description: "1 = sender's inbound email is silently dropped (default 0)"),
+            ActionParam("peerKind", .string, description: "'invoked' (Sona calls the peer's model) or 'federated' (peer runs itself)"),
+            ActionParam("peerEndpoint", .string, description: "Federated peer endpoint (e.g. '192.168.0.17:3211')"),
+            ActionParam("peerPubkey", .string, description: "Federated peer pubkey (hex)"),
         ],
         handler: { ctx in
             let name = try ctx.params.require("name")
@@ -122,6 +132,11 @@ let contactActions: [SonataAction] = [
             let model = ctx.params.string("model")
             let systemPrompt = ctx.params.string("systemPrompt")
             let notes = ctx.params.string("notes")
+            let autoAllow = ctx.params.int("autoAllowEmail") ?? 0
+            let block = ctx.params.int("blockEmail") ?? 0
+            let peerKind = ctx.params.string("peerKind")
+            let peerEndpoint = ctx.params.string("peerEndpoint")
+            let peerPubkey = ctx.params.string("peerPubkey")
 
             let now = nowMs()
 
@@ -135,12 +150,18 @@ let contactActions: [SonataAction] = [
                             sql: """
                             UPDATE contacts SET
                                 name = ?, type = ?, role = ?, provider = ?,
-                                model = ?, systemPrompt = ?, notes = ?, updatedAt = ?
+                                model = ?, systemPrompt = ?, notes = ?,
+                                autoAllowEmail = ?, blockEmail = ?,
+                                peerKind = ?, peerEndpoint = ?, peerPubkey = ?,
+                                updatedAt = ?
                             WHERE id = ?
                             """,
                             arguments: [
                                 name, type, role, provider,
-                                model, systemPrompt, notes, now,
+                                model, systemPrompt, notes,
+                                autoAllow, block,
+                                peerKind, peerEndpoint, peerPubkey,
+                                now,
                                 existing.id
                             ]
                         )
@@ -151,12 +172,20 @@ let contactActions: [SonataAction] = [
                             sql: """
                             INSERT INTO contacts
                                 (id, name, email, type, role, provider, model,
-                                 systemPrompt, notes, messageCount, createdAt, updatedAt)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                                 systemPrompt, notes, messageCount,
+                                 autoAllowEmail, blockEmail,
+                                 peerKind, peerEndpoint, peerPubkey,
+                                 createdAt, updatedAt)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                                    ?, ?,
+                                    ?, ?, ?,
+                                    ?, ?)
                             """,
                             arguments: [
                                 id, name, email, type, role,
                                 provider, model, systemPrompt, notes,
+                                autoAllow, block,
+                                peerKind, peerEndpoint, peerPubkey,
                                 now, now
                             ]
                         )
@@ -200,6 +229,59 @@ let contactActions: [SonataAction] = [
                 }
                 guard changed > 0 else {
                     throw ActionError.notFound("Contact not found")
+                }
+                return SuccessResponse()
+            } catch let e as ActionError {
+                throw e
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // POST /api/contact/email-flags — flip autoAllowEmail / blockEmail by email
+    // Lightweight one-shot used by the People UI's approve toggle. Avoids
+    // round-tripping the full contact record just to flip a flag.
+    SonataAction(
+        name: "contact_set_email_flags",
+        description: "Set the autoAllowEmail and/or blockEmail flags on a contact by email.",
+        group: "/api",
+        path: "/contact/email-flags",
+        method: .post,
+        params: [
+            ActionParam("email", .string, required: true, description: "Contact email"),
+            ActionParam("autoAllowEmail", .integer, description: "1 to allow-list, 0 to remove from allow list (default unchanged)"),
+            ActionParam("blockEmail", .integer, description: "1 to block, 0 to unblock (default unchanged)"),
+        ],
+        handler: { ctx in
+            let email = try ctx.params.require("email")
+            let autoAllow = ctx.params.int("autoAllowEmail")
+            let block = ctx.params.int("blockEmail")
+            if autoAllow == nil && block == nil {
+                throw ActionError.invalidParam("autoAllowEmail|blockEmail", "at least one flag is required")
+            }
+            let now = nowMs()
+            do {
+                let changed = try await ctx.dbPool.write { db -> Int in
+                    var sets: [String] = []
+                    var args: [any DatabaseValueConvertible] = []
+                    if let a = autoAllow {
+                        sets.append("autoAllowEmail = ?")
+                        args.append(a)
+                    }
+                    if let b = block {
+                        sets.append("blockEmail = ?")
+                        args.append(b)
+                    }
+                    sets.append("updatedAt = ?")
+                    args.append(now)
+                    args.append(email)
+                    let sql = "UPDATE contacts SET \(sets.joined(separator: ", ")) WHERE LOWER(email) = LOWER(?)"
+                    try db.execute(sql: sql, arguments: StatementArguments(args))
+                    return db.changesCount
+                }
+                guard changed > 0 else {
+                    throw ActionError.notFound("Contact not found for email \(email)")
                 }
                 return SuccessResponse()
             } catch let e as ActionError {

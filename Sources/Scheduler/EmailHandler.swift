@@ -94,6 +94,7 @@ actor EmailHandler {
         }
 
         var newEmailsByInbox: [String: [EmailRecord]] = [:]
+        var pendingApprovalByInbox: [String: [EmailRecord]] = [:]
 
         for inbox in currentInboxes {
             do {
@@ -138,6 +139,31 @@ actor EmailHandler {
                         continue
                     }
 
+                    // Sender allowlist (v13). Gate inbound dispatch on
+                    // contacts.{blockEmail,autoAllowEmail}. Unknown senders are
+                    // stored as 'pending_approval' and surfaced via the per-inbox
+                    // approval-request email at the end of this cycle. See plan
+                    // mcp-unify-worker-surface.md § Step 7.
+                    let fromAddr = Self.extractEmailAddress(from: from).lowercased()
+                    let inboxAddrLower = inbox.address.lowercased()
+
+                    let decision = await classifySender(
+                        fromAddr: fromAddr, inboxAddrLower: inboxAddrLower)
+                    switch decision {
+                    case .blocked:
+                        logger.info("EmailHandler: dropped \(lastMessageId) — sender \(fromAddr) is blocked")
+                        try? await storeEmail(record, status: "approval_rejected")
+                        knownEmailIds.insert(lastMessageId)
+                        continue
+                    case .pending:
+                        try? await storeEmail(record, status: "pending_approval")
+                        pendingApprovalByInbox[inbox.address, default: []].append(record)
+                        knownEmailIds.insert(lastMessageId)
+                        continue
+                    case .allowed:
+                        break
+                    }
+
                     newEmailsByInbox[inbox.address, default: []].append(record)
                     knownEmailIds.insert(lastMessageId)
                 }
@@ -167,9 +193,21 @@ actor EmailHandler {
             }
             // Pull out any [AFK:<token>] replies and route them via the channel
             // before falling through to the normal dispatch flow.
-            let remaining = await routeAFKReplies(newEmails)
-            if remaining.isEmpty { continue }
-            await processNewEmails(remaining, inbox: inbox)
+            let afterAFK = await routeAFKReplies(newEmails)
+            // Then pull out [APPROVAL NEEDED] reply directives (APPROVE / REJECT
+            // / DELETE) which update contacts.autoAllowEmail/blockEmail and
+            // re-dispatch any pending_approval rows on APPROVE.
+            let afterApproval = await routeApprovalReplies(afterAFK)
+            if afterApproval.isEmpty { continue }
+            await processNewEmails(afterApproval, inbox: inbox)
+        }
+
+        // Fire approval-request emails for senders quarantined this cycle.
+        // One batch email per inbox; recipient is owner_email (or the inbox
+        // itself as fallback). See plan § Step 7.
+        for (inboxAddress, pending) in pendingApprovalByInbox where !pending.isEmpty {
+            guard let inbox = currentInboxes.first(where: { $0.address == inboxAddress }) else { continue }
+            await sendApprovalRequest(emails: pending, inbox: inbox, apiKey: apiKey)
         }
     }
 
@@ -206,6 +244,270 @@ actor EmailHandler {
         }
         return leftover
     }
+
+    // MARK: - Sender Allowlist (v13)
+
+    /// Result of consulting the sender allowlist for an inbound message.
+    private enum SenderDecision {
+        case allowed
+        case blocked
+        case pending
+    }
+
+    /// Strip "Display Name <addr@host>" → "addr@host". Falls back to the raw
+    /// string when no angle-bracketed address is found.
+    static func extractEmailAddress(from raw: String) -> String {
+        // Look for the LAST `<` (some display names contain stray '<')
+        // and the first `>` after it.
+        if let lo = raw.lastIndex(of: "<"),
+           let hi = raw[lo...].firstIndex(of: ">"),
+           lo < hi {
+            let inner = raw[raw.index(after: lo)..<hi]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inner.isEmpty { return inner }
+        }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Decide whether an inbound message from `fromAddr` should be (a) dispatched
+    /// to a worker, (b) silently dropped, or (c) quarantined for explicit approval.
+    /// Order: block > allow > reply-continuity > pending. Reply-continuity allows
+    /// the message through but does NOT promote the sender to autoAllowEmail=1
+    /// (per Out-of-Scope decision in the plan).
+    private func classifySender(fromAddr: String, inboxAddrLower: String) async -> SenderDecision {
+        if fromAddr.isEmpty { return .pending }
+
+        let blocked = (try? await dbPool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM contacts WHERE LOWER(email) = ? AND blockEmail = 1)
+                """, arguments: [fromAddr])
+        }) ?? false
+        if blocked { return .blocked }
+
+        let allowed = (try? await dbPool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM contacts WHERE LOWER(email) = ? AND autoAllowEmail = 1)
+                """, arguments: [fromAddr])
+        }) ?? false
+        if allowed { return .allowed }
+
+        // Reply-continuity: if Sona has previously emailed this address from
+        // this inbox, the inbound reply is allowed but the sender is NOT auto
+        // promoted to autoAllowEmail=1 — that requires explicit APPROVE.
+        let replyToOurs = (try? await dbPool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM emails
+                    WHERE LOWER(toAddr) = ? AND LOWER(fromAddr) = ?
+                    AND status IN ('replied', 'sent'))
+                """, arguments: [fromAddr, inboxAddrLower])
+        }) ?? false
+        if replyToOurs { return .allowed }
+
+        return .pending
+    }
+
+    /// Send one batched approval-request email per inbox covering every sender
+    /// quarantined this cycle. Recipient: owner_email from coreBlocks, falling
+    /// back to the inbox address itself.
+    private func sendApprovalRequest(emails: [EmailRecord], inbox: InboxConfig, apiKey: String) async {
+        let ownerEmail: String = (try? await dbPool.read { db in
+            try String.fetchOne(db, sql:
+                "SELECT content FROM coreBlocks WHERE key = 'owner_email' AND active = 1")
+        }) ?? inbox.address
+
+        // Group entries by sender so the same address only appears once in
+        // the list, with the latest subject/preview shown.
+        var bySender: [String: EmailRecord] = [:]
+        for e in emails {
+            let addr = Self.extractEmailAddress(from: e.from).lowercased()
+            bySender[addr] = e  // last one wins
+        }
+
+        var lines: [String] = []
+        for (addr, rec) in bySender.sorted(by: { $0.key < $1.key }) {
+            let preview = rec.body
+                .replacingOccurrences(of: "\n", with: " ")
+                .prefix(160)
+            lines.append("From: \(addr)")
+            lines.append("Subject: \(rec.subject)")
+            lines.append("Preview: \(preview)")
+            lines.append("")
+        }
+
+        let body = """
+        \(bySender.count) new sender(s) tried to reach \(inbox.address) and are quarantined pending your approval:
+
+        \(lines.joined(separator: "\n"))
+        Reply with one directive per line:
+
+          APPROVE address@example.com   — trust this sender; dispatch queued + future
+          REJECT  address@example.com   — block this sender; drop queued + future
+          DELETE  address@example.com   — drop queued only; re-ask next time
+
+        Unmatched lines are ignored. Quoted prior content is ignored.
+        — Sonata EmailHandler
+        """
+
+        do {
+            try await sendMessage(
+                inboxId: inbox.address,
+                to: [ownerEmail],
+                subject: "[APPROVAL NEEDED] \(bySender.count) new sender(s) at \(inbox.address)",
+                text: body,
+                apiKey: apiKey
+            )
+            logger.info("EmailHandler: approval request sent to \(ownerEmail) for \(bySender.count) sender(s)")
+        } catch {
+            logger.error("EmailHandler: failed to send approval request — \(error)")
+        }
+    }
+
+    /// Peel off `[APPROVAL NEEDED]`-pattern replies, process their APPROVE /
+    /// REJECT / DELETE directives, mark them processed, and return leftovers.
+    private func routeApprovalReplies(_ emails: [EmailRecord]) async -> [EmailRecord] {
+        var leftover: [EmailRecord] = []
+        for email in emails {
+            let subj = email.subject
+            guard subj.contains("[APPROVAL NEEDED]")
+                  || subj.localizedCaseInsensitiveContains("Re: [APPROVAL NEEDED]")
+            else {
+                leftover.append(email)
+                continue
+            }
+            await processApprovalDirectives(body: email.body, inbox: email.inboxAddress)
+            try? await markEmailProcessed(messageId: email.messageId, success: true)
+        }
+        return leftover
+    }
+
+    /// Parse APPROVE / REJECT / DELETE directives line-by-line. Defensive
+    /// against quoted reply content and whitespace.
+    private func processApprovalDirectives(body: String, inbox: String) async {
+        for rawLine in body.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            // Ignore quoted-reply prefixes and obvious header lines.
+            if line.hasPrefix(">") || line.isEmpty { continue }
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 2 else { continue }
+            let directive = parts[0].uppercased()
+            let addr = String(parts[1]).trimmingCharacters(in: .whitespaces).lowercased()
+            // Defensive: only act on plausible email-shaped strings.
+            guard addr.contains("@"), addr.count >= 5, addr.count <= 254 else { continue }
+
+            switch directive {
+            case "APPROVE":
+                await setContactEmailFlags(email: addr, autoAllow: 1, block: 0)
+                await redispatchPending(email: addr, inbox: inbox)
+                logger.info("EmailHandler: APPROVED \(addr) — re-dispatching pending")
+            case "REJECT":
+                await setContactEmailFlags(email: addr, autoAllow: 0, block: 1)
+                await deletePending(email: addr)
+                logger.info("EmailHandler: REJECTED \(addr) — pending dropped")
+            case "DELETE":
+                await deletePending(email: addr)
+                logger.info("EmailHandler: DELETED pending for \(addr) (re-ask next time)")
+            default:
+                continue
+            }
+        }
+    }
+
+    /// Upsert contacts row by email, setting the allowlist flags. If the row
+    /// doesn't exist, create a minimal contact (type='human', no peer details)
+    /// so the flags have somewhere to live.
+    private func setContactEmailFlags(email: String, autoAllow: Int, block: Int) async {
+        let now = nowMs()
+        do {
+            try await dbPool.write { db in
+                let existing = try Row.fetchOne(db,
+                    sql: "SELECT id FROM contacts WHERE LOWER(email) = ?",
+                    arguments: [email])
+                if existing != nil {
+                    try db.execute(sql: """
+                        UPDATE contacts SET autoAllowEmail = ?, blockEmail = ?, updatedAt = ?
+                        WHERE LOWER(email) = ?
+                        """, arguments: [autoAllow, block, now, email])
+                } else {
+                    try db.execute(sql: """
+                        INSERT INTO contacts
+                            (id, name, email, type, autoAllowEmail, blockEmail,
+                             messageCount, createdAt, updatedAt)
+                        VALUES (?, ?, ?, 'human', ?, ?, 0, ?, ?)
+                        """,
+                        arguments: [
+                            newUUID(),
+                            email,           // display name = address for now
+                            email,
+                            autoAllow, block,
+                            now, now
+                        ])
+                }
+            }
+        } catch {
+            logger.error("EmailHandler: setContactEmailFlags failed for \(email) — \(error)")
+        }
+    }
+
+    /// Re-dispatch any pending_approval emails from this sender, scoped to the
+    /// given inbox. Called after APPROVE.
+    private func redispatchPending(email: String, inbox: String) async {
+        do {
+            let rows: [Row] = try dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT messageId, threadId, fromAddr, toAddr, subject, body, receivedAt
+                    FROM emails
+                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ?
+                    ORDER BY receivedAt ASC
+                    """, arguments: ["%\(email)%"])
+            }
+            if rows.isEmpty { return }
+
+            // Mark them unread; they'll be picked up by dispatchPendingUnreadEmails
+            // on the next poll cycle (avoids re-fetching from AgentMail).
+            try await dbPool.write { db in
+                try db.execute(sql: """
+                    UPDATE emails SET status = 'unread'
+                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ?
+                    """, arguments: ["%\(email)%"])
+            }
+
+            // Build EmailRecord values and dispatch via the existing path.
+            let records: [EmailRecord] = rows.map { row in
+                EmailRecord(
+                    messageId: row["messageId"],
+                    threadId: row["threadId"],
+                    from: row["fromAddr"],
+                    subject: row["subject"],
+                    body: row["body"] as? String ?? "",
+                    timestamp: ISO8601DateFormatter().string(from: Date()),
+                    inboxAddress: row["toAddr"]
+                )
+            }
+            guard let inboxConfig = currentInboxes.first(where: { $0.address == inbox }) else {
+                logger.warning("EmailHandler: redispatchPending — inbox \(inbox) not in current config; rows requeued as 'unread' for next cycle")
+                return
+            }
+            await processNewEmails(records, inbox: inboxConfig)
+        } catch {
+            logger.error("EmailHandler: redispatchPending failed for \(email) — \(error)")
+        }
+    }
+
+    /// Drop any pending_approval rows from this sender.
+    private func deletePending(email: String) async {
+        do {
+            try await dbPool.write { db in
+                try db.execute(sql: """
+                    DELETE FROM emails
+                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ?
+                    """, arguments: ["%\(email)%"])
+            }
+        } catch {
+            logger.error("EmailHandler: deletePending failed for \(email) — \(error)")
+        }
+    }
+
+    // MARK: - AFK Routing (cont'd)
 
     /// Match `[AFK:<token>]` anywhere in the subject. Token is alnum + dashes.
     static func extractAFKToken(from subject: String) -> String? {

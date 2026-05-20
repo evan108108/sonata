@@ -20,6 +20,13 @@ struct ContactRow: FetchableRecord, PersistableRecord, Codable {
     var messageCount: Int
     var createdAt: Int64
     var updatedAt: Int64
+    // v13 — sender allowlist + federated-peer schema. Defaults preserve
+    // pre-migration behavior for rows older than v13.
+    var autoAllowEmail: Int = 0
+    var blockEmail: Int = 0
+    var peerKind: String?    // 'invoked' | 'federated' | NULL
+    var peerEndpoint: String?
+    var peerPubkey: String?
 }
 
 // MARK: - Request Bodies
@@ -33,6 +40,11 @@ struct UpsertContactRequest: Decodable {
     let model: String?
     let systemPrompt: String?
     let notes: String?
+    let autoAllowEmail: Int?
+    let blockEmail: Int?
+    let peerKind: String?
+    let peerEndpoint: String?
+    let peerPubkey: String?
 }
 
 // MARK: - Response
@@ -52,6 +64,11 @@ struct ContactResponse: Encodable {
     let messageCount: Int
     let createdAt: Int64
     let updatedAt: Int64
+    let autoAllowEmail: Int
+    let blockEmail: Int
+    let peerKind: String?
+    let peerEndpoint: String?
+    let peerPubkey: String?
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -69,6 +86,11 @@ struct ContactResponse: Encodable {
         try c.encode(messageCount, forKey: .messageCount)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encode(autoAllowEmail, forKey: .autoAllowEmail)
+        try c.encode(blockEmail, forKey: .blockEmail)
+        try c.encodeIfPresent(peerKind, forKey: .peerKind)
+        try c.encodeIfPresent(peerEndpoint, forKey: .peerEndpoint)
+        try c.encodeIfPresent(peerPubkey, forKey: .peerPubkey)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -76,5 +98,7 @@ struct ContactResponse: Encodable {
         case name, email, type, role, provider, model
         case systemPrompt, notes, lastContactAt, messageCount
         case createdAt, updatedAt
+        case autoAllowEmail, blockEmail
+        case peerKind, peerEndpoint, peerPubkey
     }
 }
