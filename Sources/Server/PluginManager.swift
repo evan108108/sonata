@@ -359,6 +359,13 @@ final class PluginManager: @unchecked Sendable {
             )
 
             registry.register(proxyActions)
+            // The tool surface just grew — tell every live MCP session to
+            // re-pull tools/list. This is the moment that fixes the
+            // reconnect-while-plugin-still-booting race: a session that
+            // re-pulled before this plugin registered would otherwise hold a
+            // plugin-less surface forever (see MCPSessionRegistry
+            // .broadcastToolsListChanged).
+            Task { await MCPSessionRegistry.shared?.broadcastToolsListChanged() }
         } catch {
             sonataFileLog("Plugin \(runtime.name): discovery failed — \(error)")
         }
@@ -522,6 +529,7 @@ final class PluginManager: @unchecked Sendable {
 
         let actionNames = runtime.discoveredActions.map { "\(pluginName)_\($0.name)" }
         registry.unregister(actionNames)
+        Task { await MCPSessionRegistry.shared?.broadcastToolsListChanged() }
 
         if runtime.crashCount > backoffIntervals.count {
             runtime.status = "failed"
@@ -783,6 +791,7 @@ final class PluginManager: @unchecked Sendable {
             let actionNames = runtime.discoveredActions.map { "\(name)_\($0.name)" }
             registry.unregister(actionNames)
             runtime.discoveredActions = []
+            Task { await MCPSessionRegistry.shared?.broadcastToolsListChanged() }
 
             if runtime.mode == "managed" {
                 // Use the release's stop command to cleanly shut down the BEAM daemon

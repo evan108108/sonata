@@ -126,7 +126,14 @@ actor MCPSessionState {
         let result: [String: Any] = [
             "protocolVersion": protocolVersion,
             "capabilities": [
-                "tools": [:],
+                // listChanged:true tells the client we may emit
+                // notifications/tools/list_changed at runtime — it's what
+                // makes the client re-pull tools/list. Without it, a session
+                // that handshakes before a plugin (e.g. sonata-studio on
+                // :4200) finishes registering its actions caches a
+                // plugin-less surface for its whole lifetime. See
+                // MCPSessionRegistry.broadcastToolsListChanged + PluginManager.
+                "tools": ["listChanged": true],
                 "experimental": ["claude/channel": [:]],
             ],
             "serverInfo": [

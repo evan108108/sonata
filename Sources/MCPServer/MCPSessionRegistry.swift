@@ -119,6 +119,25 @@ actor MCPSessionRegistry {
         return true
     }
 
+    /// Push an MCP `notifications/tools/list_changed` to every SSE-attached
+    /// session so clients re-request tools/list. Called when the tool surface
+    /// changes at runtime — specifically when a plugin finishes booting and
+    /// registers its actions (PluginManager.discoverAndRegisterActions) or is
+    /// disabled/uninstalled. Without this, any session that handshook before
+    /// a plugin was ready — e.g. a reconnect right after a Sonata restart,
+    /// while sonata-studio on :4200 is still booting — caches a plugin-less
+    /// tool surface for the rest of its life. Paired with the
+    /// `tools.listChanged: true` capability advertised in
+    /// MCPSessionState.handleInitialize so clients actually honor it.
+    func broadcastToolsListChanged() async {
+        for state in sessions.values {
+            let hasSSE = await (state.sseWriter != nil)
+            guard hasSSE else { continue }
+            await state.pushNotification(
+                method: "notifications/tools/list_changed", params: [:])
+        }
+    }
+
     func tickKeepAlives() async {
         for state in sessions.values {
             if let writer = await state.sseWriter, !writer.isClosed {
