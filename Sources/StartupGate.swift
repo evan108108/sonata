@@ -132,6 +132,19 @@ final class StartupReadiness: ObservableObject {
         let deadline = Date().addingTimeInterval(30)
         var lastSnapshot: [(name: String, status: String)] = []
 
+        // Per-plugin clock for how long each has sat in 'starting'. A plugin
+        // still 'starting' past this grace window is treated as wedged and
+        // gets a one-shot disable→enable recovery — the same fix the failed-
+        // path and the manual Plugins-tab toggle use. The grace exceeds
+        // PluginManager's 15s health timeout, so a plugin that's merely booting
+        // slowly (and will flip to running/failed on its own) is never
+        // interrupted. Without this, a wedged 'starting' plugin falls through
+        // both the failed-recovery and all-running branches and the loader
+        // just spins to its 30s timeout — exactly the reported bug.
+        let stuckStartingGrace: TimeInterval = 18
+        var firstSeenStarting: [String: Date] = [:]
+        var recoveredStarting: Set<String> = []
+
         while Date() < deadline {
             do {
                 let (data, response) = try await URLSession.shared.data(from: listURL)
@@ -158,7 +171,7 @@ final class StartupReadiness: ObservableObject {
                         // cycle succeeds we re-poll the loop; if it doesn't,
                         // we mark the check failed but the gate still
                         // dismisses thanks to the relaxed `ready` rule.
-                        let stillFailed = await recoverFailedPlugins(failedNames, port: port)
+                        let stillFailed = await recoverStuckPlugins(failedNames, port: port)
                         if stillFailed.isEmpty {
                             // All recovered — fall through to the running-
                             // count check on the next loop iteration.
@@ -184,6 +197,28 @@ final class StartupReadiness: ObservableObject {
                         }
                         return
                     }
+                    // Not all running and none failed — the laggards are
+                    // 'enabled' or 'starting'. Recover any that have been wedged
+                    // in 'starting' past the grace window (one shot each), then
+                    // re-poll so the recovered plugin can reach 'running'.
+                    let startingNames = gated.filter { $0.status == "starting" }.map(\.name)
+                    let stuckStarting = stuckStartingToRecover(
+                        startingNames: startingNames,
+                        firstSeenStarting: &firstSeenStarting,
+                        recoveredStarting: recoveredStarting,
+                        now: Date(),
+                        grace: stuckStartingGrace
+                    )
+                    if !stuckStarting.isEmpty {
+                        stuckStarting.forEach { recoveredStarting.insert($0) }
+                        let stillStuck = await recoverStuckPlugins(stuckStarting, port: port)
+                        update("plugins", .running,
+                               detail: stillStuck.isEmpty
+                                   ? "recovered \(stuckStarting.count)"
+                                   : "\(runningCount)/\(gated.count)")
+                        try? await Task.sleep(for: .milliseconds(400))
+                        continue
+                    }
                     update("plugins", .running, detail: "\(runningCount)/\(gated.count)")
                     lastSnapshot = gated
                 }
@@ -200,12 +235,12 @@ final class StartupReadiness: ObservableObject {
                detail: "\(runningCount)/\(lastSnapshot.count)")
     }
 
-    /// Attempt to recover plugins stuck at status='failed' by hitting the
-    /// disable + enable endpoints, then waiting briefly for the status to
-    /// transition back. Returns the names that remained failed after the
-    /// attempt — caller treats those as terminal failures. Each plugin gets
-    /// a single shot; the recovery doesn't loop.
-    private func recoverFailedPlugins(_ names: [String], port: Int) async -> [String] {
+    /// Attempt to recover wedged plugins — either status='failed' or stuck in
+    /// status='starting' past the grace window — by hitting the disable +
+    /// enable endpoints, then waiting briefly for the status to transition to
+    /// 'running'. Returns the names that did NOT reach 'running' after the
+    /// attempt. Each plugin gets a single shot; the recovery doesn't loop.
+    private func recoverStuckPlugins(_ names: [String], port: Int) async -> [String] {
         var stillFailed: [String] = []
         await withTaskGroup(of: (String, Bool).self) { group in
             for name in names {
@@ -365,6 +400,33 @@ final class StartupReadiness: ObservableObject {
             try? await Task.sleep(for: .milliseconds(500))
         }
         update("supervisor", .failed("no fresh heartbeat in 20s"))
+    }
+}
+
+// MARK: - Stuck-'starting' detection (pure, testable)
+
+/// Decide which plugins currently in `starting` have been wedged past the
+/// grace window and should be toggled this tick. Pure decision logic, factored
+/// out of `runPlugins` so it can be unit-tested without standing up HTTP:
+///
+/// - records a first-seen timestamp for any newly-`starting` plugin (mutates
+///   `firstSeenStarting` in place);
+/// - returns names that have been `starting` for at least `grace` seconds and
+///   have not already been recovered this run (the once-only guard).
+func stuckStartingToRecover(
+    startingNames: [String],
+    firstSeenStarting: inout [String: Date],
+    recoveredStarting: Set<String>,
+    now: Date,
+    grace: TimeInterval
+) -> [String] {
+    for name in startingNames where firstSeenStarting[name] == nil {
+        firstSeenStarting[name] = now
+    }
+    return startingNames.filter { name in
+        guard !recoveredStarting.contains(name),
+              let since = firstSeenStarting[name] else { return false }
+        return now.timeIntervalSince(since) >= grace
     }
 }
 
