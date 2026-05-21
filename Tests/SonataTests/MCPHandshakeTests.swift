@@ -37,7 +37,7 @@ final class MCPHandshakeTests: XCTestCase {
             "name stays 'sonata-bridge' so existing --dangerously-load-development-channels flags keep working")
     }
 
-    func testToolsListReturnsExactlyTheBridgeToolSet() async throws {
+    func testToolsListExposesCoreToolsAndOmitsRemovedDMRegistry() async throws {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
@@ -48,16 +48,29 @@ final class MCPHandshakeTests: XCTestCase {
         let tools = try XCTUnwrap(result["tools"] as? [[String: Any]])
         let names = Set(tools.compactMap { $0["name"] as? String })
 
-        // Plan §4: the DM registry goes away entirely, so sonar_dm_register
-        // and sonar_dm_unregister do NOT appear. If a future patch adds
-        // them back this assertion catches it.
-        XCTAssertEqual(names, [
+        // The worker surface = MCPToolSchemas.all ∪ the ActionRegistry schemas
+        // (see MCPSessionState.mergedToolSchemas), so it grows whenever a new
+        // mem_task_*/worker_* tool lands. Pinning the exact set turned this
+        // test into a perpetual red the moment the surface expanded, so assert
+        // the load-bearing invariants instead: the core transport/identity
+        // tools must be present...
+        let required: Set<String> = [
             "complete_event", "fail_event",
             "sonar_dm_send", "sonar_dm_inbox", "sonar_dm_broadcast",
             "sonata_identify",
             "mem_task_list", "mem_task_get", "mem_task_create",
             "mem_task_watch", "mem_task_unwatch",
-        ])
+        ]
+        XCTAssertTrue(required.isSubset(of: names),
+            "worker tool surface is missing required tools: "
+                + "\(required.subtracting(names).sorted())")
+
+        // ...and Plan §4's removed DM registry must stay gone. If a future
+        // patch adds sonar_dm_register/sonar_dm_unregister back, this catches it.
+        let removed: Set<String> = ["sonar_dm_register", "sonar_dm_unregister"]
+        XCTAssertTrue(removed.isDisjoint(with: names),
+            "removed DM-registry tools reappeared: "
+                + "\(removed.intersection(names).sorted())")
     }
 
     func testInitializeBeforeAnyCallStillReturnsDefaultProtocolVersion() async throws {
