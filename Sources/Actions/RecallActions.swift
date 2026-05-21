@@ -202,7 +202,7 @@ private func recallFtsSearchMemories(
     db: Database, query: String, limit: Int,
     project: String?, filterTopic: String?
 ) throws -> [MemoryRow] {
-    let ftsQuery = recallBuildFTSQuery(query)
+    let ftsQuery = ftsEscape(query)
     guard !ftsQuery.isEmpty else { return [] }
 
     var sql = """
@@ -229,7 +229,7 @@ private func recallFtsSearchMemories(
 }
 
 private func recallFtsSearchEntities(db: Database, query: String, limit: Int) throws -> [EntityRow] {
-    let ftsQuery = recallBuildFTSQueryOR(query)
+    let ftsQuery = ftsEscapeOR(query)
     guard !ftsQuery.isEmpty else { return [] }
 
     return try EntityRow.fetchAll(
@@ -245,7 +245,7 @@ private func recallFtsSearchEntities(db: Database, query: String, limit: Int) th
 }
 
 private func recallFtsSearchDocuments(db: Database, query: String, limit: Int) throws -> [DocumentRow] {
-    let ftsQuery = recallBuildFTSQuery(query)
+    let ftsQuery = ftsEscape(query)
     guard !ftsQuery.isEmpty else { return [] }
 
     return try DocumentRow.fetchAll(
@@ -259,22 +259,6 @@ private func recallFtsSearchDocuments(db: Database, query: String, limit: Int) t
         """,
         arguments: [ftsQuery, limit]
     )
-}
-
-private func recallBuildFTSQuery(_ input: String) -> String {
-    let tokens = input.split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == ";" })
-        .map { String($0) }
-        .filter { !$0.isEmpty }
-    guard !tokens.isEmpty else { return "" }
-    return tokens.map { "\"\($0)\"*" }.joined(separator: " ")
-}
-
-private func recallBuildFTSQueryOR(_ input: String) -> String {
-    let tokens = input.split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == ";" })
-        .map { String($0) }
-        .filter { !$0.isEmpty }
-    guard !tokens.isEmpty else { return "" }
-    return tokens.map { "\"\($0)\"*" }.joined(separator: " OR ")
 }
 
 private func recallFetchRelations(db: Database, id: String, type: String) throws -> [RelationRow] {

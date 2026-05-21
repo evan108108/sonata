@@ -327,12 +327,15 @@ let memoryActions: [SonataAction] = [
             let type = ctx.params.string("type")
             let project = ctx.params.string("project")
 
+            let ftsQuery = ftsEscape(q)
+            guard !ftsQuery.isEmpty else { return [MemoryResponse]() }
+
             var sql = """
                 SELECT m.* FROM memories m
                 JOIN memories_fts fts ON fts.rowid = m.rowid
                 WHERE memories_fts MATCH ?
             """
-            var args: [any DatabaseValueConvertible] = [q]
+            var args: [any DatabaseValueConvertible] = [ftsQuery]
 
             if let t = type {
                 sql += " AND m.type = ?"

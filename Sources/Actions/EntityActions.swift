@@ -90,12 +90,15 @@ let entityActions: [SonataAction] = [
             let limit = ctx.params.int("limit") ?? 10
             let type = ctx.params.string("type")
 
+            let ftsQuery = ftsEscape(q)
+            guard !ftsQuery.isEmpty else { return [EntityResponse]() }
+
             var sql = """
                 SELECT e.* FROM entities e
                 JOIN entities_fts fts ON fts.rowid = e.rowid
                 WHERE entities_fts MATCH ?
             """
-            var args: [any DatabaseValueConvertible] = [q]
+            var args: [any DatabaseValueConvertible] = [ftsQuery]
 
             if let t = type {
                 sql += " AND e.type = ?"

@@ -288,6 +288,9 @@ let taskActions: [SonataAction] = [
             let q = try ctx.params.require("q")
             let limit = ctx.params.int("limit") ?? 20
 
+            let ftsQuery = ftsEscape(q)
+            guard !ftsQuery.isEmpty else { return [TaskResponse]() }
+
             do {
                 let rows = try await ctx.dbPool.read { db in
                     try TaskRow.fetchAll(db, sql: """
@@ -295,7 +298,7 @@ let taskActions: [SonataAction] = [
                         JOIN tasks_fts fts ON fts.rowid = t.rowid
                         WHERE tasks_fts MATCH ?
                         ORDER BY t.createdAt DESC LIMIT ?
-                    """, arguments: [q, limit])
+                    """, arguments: [ftsQuery, limit])
                 }
                 return rows.map(rowToTaskResp)
             } catch {

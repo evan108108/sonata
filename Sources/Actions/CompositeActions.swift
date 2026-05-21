@@ -439,6 +439,8 @@ let compositeActions: [SonataAction] = [
         mcpOnly: true,
         handler: { ctx in
             let fact = try ctx.params.require("fact")
+            let ftsQuery = ftsEscape(fact)
+            guard !ftsQuery.isEmpty else { return [MemoryResponse]() }
             do {
                 let rows = try await ctx.dbPool.read { db in
                     try MemoryRow.fetchAll(
@@ -449,7 +451,7 @@ let compositeActions: [SonataAction] = [
                         WHERE memories_fts MATCH ?
                         ORDER BY rank LIMIT 10
                         """,
-                        arguments: [fact]
+                        arguments: [ftsQuery]
                     )
                 }
                 return rows.map(memRowToResponseForComposite)
@@ -550,6 +552,8 @@ let compositeActions: [SonataAction] = [
         handler: { ctx in
             let topic = try ctx.params.require("topic")
             let limit = ctx.params.int("limit") ?? 5
+            let ftsQuery = ftsEscape(topic)
+            guard !ftsQuery.isEmpty else { return [MemoryResponse]() }
             do {
                 let rows = try await ctx.dbPool.read { db in
                     try MemoryRow.fetchAll(
@@ -560,7 +564,7 @@ let compositeActions: [SonataAction] = [
                         WHERE memories_fts MATCH ?
                         ORDER BY rank LIMIT ?
                         """,
-                        arguments: [topic, limit]
+                        arguments: [ftsQuery, limit]
                     )
                 }
                 return rows.map(memRowToResponseForComposite)

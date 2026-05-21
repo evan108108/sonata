@@ -168,12 +168,15 @@ let documentActions: [SonataAction] = [
             let docType = ctx.params.string("type")
             let project = ctx.params.string("project")
 
+            let ftsQuery = ftsEscape(q)
+            guard !ftsQuery.isEmpty else { return [DocumentResponse]() }
+
             var sql = """
                 SELECT d.* FROM documents d
                 JOIN documents_fts fts ON fts.rowid = d.rowid
                 WHERE documents_fts MATCH ?
             """
-            var args: [any DatabaseValueConvertible] = [q]
+            var args: [any DatabaseValueConvertible] = [ftsQuery]
 
             if let t = docType {
                 sql += " AND d.docType = ?"
