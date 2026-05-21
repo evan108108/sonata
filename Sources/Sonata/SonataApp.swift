@@ -770,6 +770,10 @@ struct SonataApp: App {
     @FocusedValue(\.selectedTab) var selectedTab
     @FocusedValue(\.focusSearchBar) var focusSearchBar
 
+    // Whole-window translucency, controlled by the General-settings slider.
+    // Default 1.0 (fully opaque); clamped to 0.3…1.0 where applied.
+    @AppStorage("sonata.windowOpacity") private var windowOpacity: Double = 1.0
+
     // MARK: - Studio: DBPool environment plumbing (per impl-spec §10 Diff E)
     //
     // Studio's tab-scoped StudioStore needs the DatabasePool via SwiftUI's
@@ -784,6 +788,7 @@ struct SonataApp: App {
                     .frame(minWidth: 1100, minHeight: 720)
                     .environment(\.dbPool, dbPool)
                     .warmWindowTitlebar()
+                    .windowOpacity(windowOpacity)
                     // s4a:// URL scheme handler. The Info.plist registers the
                     // scheme with macOS LaunchServices; .onOpenURL is what
                     // SwiftUI hands the resulting URL through. Boot-time pending

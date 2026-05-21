@@ -428,3 +428,42 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
         window.backgroundColor = NSColor(Theme.Color.bgDeep)
     }
 }
+
+// MARK: - Window opacity
+
+extension View {
+    /// Bind the hosting window's translucency to `opacity` (0.3…1.0). Driven by
+    /// the General-settings slider via `@AppStorage("sonata.windowOpacity")`.
+    /// SwiftUI's view opacity can't make the *window* (titlebar + chrome behind
+    /// the content) translucent — only AppKit's `NSWindow.alphaValue` does — so
+    /// this routes through a small interop view that re-applies whenever the
+    /// value changes.
+    func windowOpacity(_ opacity: Double) -> some View {
+        background(WindowOpacityConfigurator(opacity: opacity))
+    }
+}
+
+/// Applies `NSWindow.alphaValue` to the hosting window and re-applies on every
+/// `updateNSView`, so dragging the opacity slider updates the window live.
+/// Clamps to 0.3…1.0 so the window can never become fully invisible / unusable.
+private struct WindowOpacityConfigurator: NSViewRepresentable {
+    let opacity: Double
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { apply(to: v.window) }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { apply(to: nsView.window) }
+    }
+
+    private func apply(to window: NSWindow?) {
+        guard let window else { return }
+        let clamped = min(max(opacity, 0.3), 1.0)
+        if abs(window.alphaValue - clamped) > 0.001 {
+            window.alphaValue = clamped
+        }
+    }
+}

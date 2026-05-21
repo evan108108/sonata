@@ -18,6 +18,10 @@ struct SettingsView: View {
     @State private var supervisorExpanded = false
     @State private var studioExpanded = false
 
+    // Whole-window translucency. Shares the UserDefaults key the WindowGroup
+    // root reads, so dragging the slider updates the live window immediately.
+    @AppStorage("sonata.windowOpacity") private var windowOpacity: Double = 1.0
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -89,6 +93,29 @@ struct SettingsView: View {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(Theme.Color.statusRunning)
                                     .transition(.opacity)
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+
+                        Divider()
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Window Opacity")
+                                    .font(.body)
+                                Text("Make the entire Sonata window translucent")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            HStack(spacing: 10) {
+                                Slider(value: $windowOpacity, in: 0.3...1.0)
+                                    .frame(width: 180)
+                                Text("\(Int((windowOpacity * 100).rounded()))%")
+                                    .font(.body.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 44, alignment: .trailing)
                             }
                         }
                         .padding(.horizontal)
