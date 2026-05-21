@@ -30,3 +30,6 @@ plugins/*/.*.bun-build
 
 # Runtime subprocess logs (plugin stdout/stderr, etc.)
 logs/
+
+# Deploy-time binary backups
+.binary-backups/

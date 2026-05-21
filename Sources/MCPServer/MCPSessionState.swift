@@ -175,7 +175,30 @@ actor MCPSessionState {
         guard let toolName = params["name"] as? String else {
             return jsonRPCError(id: id, code: -32602, message: "Missing tool name")
         }
-        let args = params["arguments"] as? [String: Any] ?? [:]
+        // Diagnose the shape of what the client actually transmitted. Tools
+        // like mem_store fail opaquely with "Missing required parameter: X"
+        // when the arguments object never reaches us — and historically there
+        // was no server-side trace to tell an empty-args transport drop apart
+        // from a genuine handler bug (cost 9 blind retries on 2026-05-21). Log
+        // it, and below annotate the error so the failure is self-explaining
+        // in the tool result the model sees.
+        let rawArguments = params["arguments"]
+        let args = rawArguments as? [String: Any] ?? [:]
+        let argsShape: String
+        switch rawArguments {
+        case nil:
+            argsShape = "absent"
+        case is NSNull:
+            argsShape = "null"
+        case let dict as [String: Any]:
+            argsShape = dict.isEmpty
+                ? "empty-object"
+                : "keys=[\(dict.keys.sorted().joined(separator: ","))]"
+        case let other?:
+            argsShape = "wrong-type(\(type(of: other)))"
+        }
+        FileHandle.standardError.write(Data(
+            "[mcp] tools/call \(toolName) role=\(roleString()) args=\(argsShape)\n".utf8))
         guard let registry = self.registry else {
             return jsonRPCError(id: id, code: -32603,
                 message: "MCP registry deallocated mid-call")
@@ -205,7 +228,20 @@ actor MCPSessionState {
             )
         }
 
-        let content: [[String: Any]] = [["type": "text", "text": output]]
+        // When a call fails on a missing required parameter but the arguments
+        // object arrived empty/malformed, the value wasn't lost on the caller's
+        // side — the transport dropped it. Say so, so the model stops blaming
+        // its own input and retries instead of giving up.
+        var finalOutput = output
+        if !success, args.isEmpty, output.contains("Missing required parameter") {
+            finalOutput += "\n\n[server note] The 'arguments' object for tool "
+                + "'\(toolName)' arrived \(argsShape) — the parameters were not "
+                + "transmitted to the server, so this is a client/transport "
+                + "issue rather than a value missing from your call. Retry the "
+                + "tool; if it persists across retries the MCP client is "
+                + "dropping arguments."
+        }
+        let content: [[String: Any]] = [["type": "text", "text": finalOutput]]
         var result: [String: Any] = ["content": content]
         if !success { result["isError"] = true }
         return jsonRPCResult(id: id, result: result)

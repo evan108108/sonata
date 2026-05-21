@@ -189,7 +189,10 @@ enum MCPHTTPRouter {
         }
         let bodyBuffer: ByteBuffer
         do {
-            bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
+            // 64 KB silently rejected large memory writes (long
+            // conversation_summary / code_pattern / doc chunks) with an opaque
+            // "Failed to read body". 8 MB is safe on a loopback-only transport.
+            bodyBuffer = try await request.body.collect(upTo: 8 * 1024 * 1024)
         } catch {
             return jsonRPCErrorResponse(status: .badRequest, code: -32700,
                 message: "Failed to read body")
@@ -300,7 +303,9 @@ enum MCPHTTPRouter {
         }
         let bodyBuffer: ByteBuffer
         do {
-            bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
+            // See handlePostNoPath: 8 MB cap so large memory writes don't get
+            // silently rejected on this loopback-only transport.
+            bodyBuffer = try await request.body.collect(upTo: 8 * 1024 * 1024)
         } catch {
             return jsonRPCErrorResponse(status: .badRequest, code: -32700,
                 message: "Failed to read body")

@@ -140,19 +140,29 @@ struct SessionsView: View {
     private var detailPane: some View {
         if vm.tabs.isEmpty {
             emptyState
-        } else if let activeId = vm.activeTabId,
-                  let tab = vm.tabs.first(where: { $0.id == activeId }) {
-            sessionPane(for: tab)
         } else {
-            // Tabs exist but none selected — pick the first.
-            Color.clear
-                .onAppear { vm.selectTab(id: vm.tabs[0].id) }
-        }
-    }
+            ZStack {
+                // All session terminals are mounted in one stable container;
+                // only the active one is visible (isHidden toggle). This
+                // mirrors WorkersView's TerminalContainerView and avoids the
+                // NSViewRepresentable-reuse bug where switching the active
+                // tab kept showing the previous tab's terminal (SwiftUI
+                // reused the host view in place instead of rebuilding it).
+                SessionsTerminalContainer(vm: vm)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-    @ViewBuilder
-    private func sessionPane(for tab: InteractiveSessionTab) -> some View {
-        SessionDetailBody(tab: tab, vm: vm)
+                // Cover the terminal with a stopped/failed state view when
+                // the active session isn't running. EmptyView for running/
+                // starting so the live terminal shows through.
+                if let activeId = vm.activeTabId,
+                   let tab = vm.tabs.first(where: { $0.id == activeId }) {
+                    SessionStateOverlay(tab: tab, vm: vm)
+                } else {
+                    Color.clear
+                        .onAppear { vm.selectTab(id: vm.tabs[0].id) }
+                }
+            }
+        }
     }
 
     private var emptyState: some View {
@@ -262,17 +272,59 @@ private struct SessionSidebarRow: View {
     }
 }
 
-// MARK: - Detail body
+// MARK: - Terminal container (all sessions mounted, active one visible)
 
-private struct SessionDetailBody: View {
+/// Mounts every session's terminal NSView in a single stable container and
+/// toggles `isHidden` so only the active session's terminal shows. Mirrors
+/// WorkersView.TerminalContainerView. The key property: the container NSView
+/// is never rebuilt when the active tab changes — we just flip visibility —
+/// so SwiftUI can't get into the "host reused, wrong terminal shown" state
+/// that a per-tab NSViewRepresentable falls into.
+private struct SessionsTerminalContainer: NSViewRepresentable {
+    @ObservedObject var vm: InteractiveSessionsViewModel
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        return container
+    }
+
+    func updateNSView(_ container: NSView, context: Context) {
+        // Mount any session terminals not yet attached.
+        for tab in vm.tabs {
+            if tab.terminalView.superview !== container {
+                tab.terminalView.frame = container.bounds
+                tab.terminalView.autoresizingMask = [.width, .height]
+                container.addSubview(tab.terminalView)
+            }
+        }
+        // Drop terminals for sessions that no longer exist.
+        for subview in container.subviews {
+            if let term = subview as? LocalProcessTerminalView,
+               !vm.tabs.contains(where: { $0.terminalView === term }) {
+                term.removeFromSuperview()
+            }
+        }
+        // Show only the active session's terminal.
+        for tab in vm.tabs {
+            tab.terminalView.isHidden = (tab.id != vm.activeTabId)
+        }
+    }
+}
+
+// MARK: - Non-running state overlay
+
+/// Covers the terminal with a "Session ended" / "Couldn't start session"
+/// view when the active tab isn't running. Renders nothing (lets the live
+/// terminal show through) for .starting / .running.
+private struct SessionStateOverlay: View {
     @ObservedObject var tab: InteractiveSessionTab
     let vm: InteractiveSessionsViewModel
 
     var body: some View {
         switch tab.state {
         case .starting, .running:
-            SessionTerminalHost(terminalInstance: tab.terminalView)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            EmptyView()
         case .stopped(let exitCode):
             stoppedView(exitCode: exitCode)
         case .spawnFailed(let message):
@@ -301,6 +353,7 @@ private struct SessionDetailBody: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.Color.bgDeep)
     }
 
     private func spawnFailedView(message: String) -> some View {
@@ -322,28 +375,7 @@ private struct SessionDetailBody: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct SessionTerminalHost: NSViewRepresentable {
-    let terminalInstance: LocalProcessTerminalView
-
-    func makeNSView(context: Context) -> NSView {
-        let container = NSView()
-        container.wantsLayer = true
-        terminalInstance.frame = container.bounds
-        terminalInstance.autoresizingMask = [.width, .height]
-        container.addSubview(terminalInstance)
-        return container
-    }
-
-    func updateNSView(_ container: NSView, context: Context) {
-        if terminalInstance.superview !== container {
-            terminalInstance.removeFromSuperview()
-            terminalInstance.frame = container.bounds
-            terminalInstance.autoresizingMask = [.width, .height]
-            container.addSubview(terminalInstance)
-        }
+        .background(Theme.Color.bgDeep)
     }
 }
 
