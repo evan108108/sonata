@@ -152,6 +152,18 @@ export interface RawPublishWrapsResponse {
   gift_wraps: { recipient: string; event_id: string; relay_acks: RelayAck[] }[];
 }
 
+export interface RawPublishDeclarationRequest {
+  audience_address: string;
+  declaration: NostrEventLike;
+}
+
+export interface RawPublishDeclarationResponse {
+  ok: true;
+  audience_address: string;
+  declaration_event_id: string;
+  relay_acks: RelayAck[];
+}
+
 export interface DeclarationResponse {
   ok: true;
   declaration: NostrEventLike;
@@ -248,6 +260,18 @@ export class GatewayClient {
     req: RawPublishWrapsRequest,
   ): Promise<RawPublishWrapsResponse> {
     return this.post("/v0/audience/raw/publish-wraps", req);
+  }
+
+  /**
+   * Publish a re-signed kind:30520 declaration (close / reopen / boot).
+   * The gateway only mints epoch keys or grants when those routes are
+   * invoked; this route is for declaration-only state changes that don't
+   * rotate the epoch.
+   */
+  rawPublishDeclaration(
+    req: RawPublishDeclarationRequest,
+  ): Promise<RawPublishDeclarationResponse> {
+    return this.post("/v0/audience/raw/publish-declaration", req);
   }
 
   /** Public read — no NIP-98 auth needed; declarations are public. */

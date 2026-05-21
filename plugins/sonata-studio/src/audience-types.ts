@@ -27,6 +27,14 @@ export interface AudienceDeclaration {
   epochPub: string;
   members: string[];
   pending: { invitePub: string; expirationUnix: number }[];
+  /**
+   * Room lifecycle status from `fa:status` on the kind:30520. Absence on
+   * the wire is treated as "active" by the parser, so plugin code may rely
+   * on this always being set.
+   */
+  status: "active" | "closed";
+  /** `fa:closed-at` unix seconds; only meaningful when status==="closed". */
+  closedAt?: number;
 }
 
 export interface AudienceLookup {

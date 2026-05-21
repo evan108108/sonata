@@ -95,6 +95,23 @@ const ROOM_DELETE_PARAMS: ActionParam[] = [
   { name: "slug", type: "string", required: true, description: "Slug of the room to delete locally." },
 ];
 
+const ROOM_LEAVE_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to leave (member-only; founders close instead)." },
+];
+
+const ROOM_CLOSE_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to close (founder-only)." },
+];
+
+const ROOM_REOPEN_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to reopen (founder-only)." },
+];
+
+const ROOM_BOOT_PARAMS: ActionParam[] = [
+  { name: "slug", type: "string", required: true, description: "Slug of the room to boot a member from (founder-only)." },
+  { name: "member_pubkey", type: "string", required: true, description: "64-hex pubkey of the member to remove." },
+];
+
 const CARD_POST_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   { name: "track", type: "string", required: true, description: "Track slug within the room." },
@@ -364,6 +381,38 @@ export const ACTIONS: ActionDef[] = [
     params: ROOM_DELETE_PARAMS,
   },
   {
+    name: "studio_room_leave",
+    description:
+      "Federated self-removal: publish a kind:30522 with fa:status=left so peers see this Sonata depart the audience. Founders cannot leave their own room — they close it instead. Local state flips to 'left' (or 'removed' if the gateway reports we were already booted).",
+    method: "post",
+    path: "/api/room/leave",
+    params: ROOM_LEAVE_PARAMS,
+  },
+  {
+    name: "studio_room_close",
+    description:
+      "Founder-only. Republish kind:30520 with fa:status=closed; freezes the audience to mutating operations gateway-side. Local state flips to 'closed' immediately so the UI reflects the founder's intent; if the gateway POST fails, the signed declaration is queued for retry.",
+    method: "post",
+    path: "/api/room/close",
+    params: ROOM_CLOSE_PARAMS,
+  },
+  {
+    name: "studio_room_reopen",
+    description:
+      "Founder-only. Republish kind:30520 with fa:status=active; lifts the gateway-side freeze on a previously-closed room.",
+    method: "post",
+    path: "/api/room/reopen",
+    params: ROOM_REOPEN_PARAMS,
+  },
+  {
+    name: "studio_room_boot",
+    description:
+      "Founder-only. Remove a member from the audience roster by republishing kind:30520 without their pubkey. Does NOT rotate the epoch; the booted member keeps their current epoch key (v0 acceptance; see room-lifecycle §11). Rejected with 403 closed_room while the room is closed.",
+    method: "post",
+    path: "/api/room/boot",
+    params: ROOM_BOOT_PARAMS,
+  },
+  {
     name: "studio_card_post",
     description: "Post a card (kind 30530) to a room/track.",
     method: "post",
@@ -545,6 +594,22 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
   "/api/room/delete": {
     method: "post",
     handler: async (body, _q, ctx) => room.delete(body, ctx),
+  },
+  "/api/room/leave": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.leave(body, ctx),
+  },
+  "/api/room/close": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.close(body, ctx),
+  },
+  "/api/room/reopen": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.reopen(body, ctx),
+  },
+  "/api/room/boot": {
+    method: "post",
+    handler: async (body, _q, ctx) => room.boot(body, ctx),
   },
   "/api/card/post": {
     method: "post",

@@ -4,6 +4,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 import { bech32 } from "@scure/base";
 
+import { projectLeaveClaim } from "../projection/room-system-events";
 import { GatewayError, type GatewayClient, type NostrEventLike } from "../a4-client";
 import { MemoryClientError } from "../memory-client";
 import {
@@ -952,6 +953,505 @@ async function republishTrackRumor(
   });
 }
 
+// ── close / reopen (founder freeze) ─────────────────────────────────────────
+
+interface RoomCloseRequest {
+  slug?: unknown;
+}
+
+interface RoomCloseResult {
+  ok: true;
+  slug: string;
+  closed_at: number;
+  new_declaration_event_id: string;
+}
+
+interface RoomReopenRequest {
+  slug?: unknown;
+}
+
+interface RoomReopenResult {
+  ok: true;
+  slug: string;
+  new_declaration_event_id: string;
+}
+
+/**
+ * Republish kind:30520 with `fa:status=closed`. Founder-only. Roster + epoch
+ * unchanged — closing does NOT rotate keys (sonata-studio-room-lifecycle.md
+ * §4.1). On publish failure (offline, network drop), the signed declaration
+ * is parked on the local `studio_room.attributes.pending_admin_publish`
+ * field so it can be retried later (§9.13); the local state still flips to
+ * "closed" so the founder's UI reflects their expressed intent.
+ */
+export async function closeRoom(
+  body: RoomCloseRequest,
+  ctx: ActionCtx,
+): Promise<RoomCloseResult> {
+  return setRoomStatus(body, ctx, "closed");
+}
+
+export async function reopenRoom(
+  body: RoomReopenRequest,
+  ctx: ActionCtx,
+): Promise<RoomReopenResult> {
+  const result = await setRoomStatus(body, ctx, "active");
+  return {
+    ok: true,
+    slug: result.slug,
+    new_declaration_event_id: result.new_declaration_event_id,
+  };
+}
+
+async function setRoomStatus(
+  body: { slug?: unknown },
+  ctx: ActionCtx,
+  status: "closed" | "active",
+): Promise<RoomCloseResult> {
+  const slug = ensureSlug(body.slug, "slug");
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (!room.audIdPrivHex) {
+    throw new HttpError(
+      403,
+      "not_founder",
+      `only the founder can ${status === "closed" ? "close" : "reopen"} "${slug}"`,
+    );
+  }
+
+  const closedAt = Math.floor(Date.now() / 1000);
+  const buildArgs: Parameters<typeof buildAudienceDeclaration>[0] = {
+    audIdPub: room.audIdPubHex,
+    slug,
+    name: pickTitle(room.attributes),
+    epoch: room.currentEpoch,
+    epochPub: room.currentEpochPubHex,
+    members: room.members,
+    pending: currentPendingInvites(room.attributes),
+  };
+  const description = pickDescription(room.attributes);
+  if (description !== undefined) buildArgs.description = description;
+  if (status === "closed") {
+    buildArgs.status = "closed";
+    buildArgs.closedAt = closedAt;
+  } else {
+    buildArgs.status = "active";
+  }
+  const declTpl = buildAudienceDeclaration(buildArgs);
+  const audIdPriv = hexToBytes(room.audIdPrivHex);
+  const declUnsigned = {
+    pubkey: room.audIdPubHex,
+    kind: declTpl.kind,
+    created_at: declTpl.created_at,
+    tags: declTpl.tags,
+    content: declTpl.content,
+  };
+  const declSigned = __signEvent(declUnsigned, audIdPriv);
+
+  // Flip local state IMMEDIATELY (§9.13): the founder's UI must reflect
+  // their expressed intent even if the gateway POST fails. The retry queue
+  // (pending_admin_publish) reconciles later.
+  const nextAttrs: Record<string, unknown> = { ...room.attributes };
+  if (status === "closed") {
+    nextAttrs["state"] = "closed";
+    nextAttrs["closed_at_seconds"] = closedAt;
+  } else {
+    nextAttrs["state"] = "active";
+    nextAttrs["closed_at_seconds"] = null;
+  }
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: nextAttrs,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.${status === "closed" ? "close" : "reopen"}] local upsert failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  let publishedId = declSigned.id;
+  try {
+    const res = await ctx.gateway.rawPublishDeclaration({
+      audience_address: room.audienceAddress,
+      declaration: toEventLike(declSigned),
+    });
+    publishedId = res.declaration_event_id;
+    // Clear any queued retry on success.
+    await clearPendingAdminPublish(slug, nextAttrs);
+  } catch (err) {
+    // Park the signed declaration for later retry per §9.13.
+    await queuePendingAdminPublish(slug, nextAttrs, {
+      kind: status === "closed" ? "close" : "reopen",
+      declaration: toEventLike(declSigned),
+      audience_address: room.audienceAddress,
+      queued_at_ms: Date.now(),
+    });
+    throw err;
+  }
+
+  return {
+    ok: true,
+    slug,
+    closed_at: closedAt,
+    new_declaration_event_id: publishedId,
+  };
+}
+
+interface PendingAdminPublish {
+  kind: "close" | "reopen" | "boot";
+  declaration: NostrEventLike;
+  audience_address: string;
+  queued_at_ms: number;
+  attempts?: number;
+}
+
+async function queuePendingAdminPublish(
+  slug: string,
+  attrs: Record<string, unknown>,
+  entry: PendingAdminPublish,
+): Promise<void> {
+  attrs["pending_admin_publish"] = entry;
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: attrs,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room] queue pending_admin_publish for "${slug}" failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+async function clearPendingAdminPublish(
+  slug: string,
+  attrs: Record<string, unknown>,
+): Promise<void> {
+  if (!("pending_admin_publish" in attrs)) return;
+  attrs["pending_admin_publish"] = null;
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: attrs,
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Best-effort retry of any queued admin publish on this room. Called from
+ * `loadRoomCtx`-adjacent surfaces and the post-action recovery path. Caps
+ * at 5 attempts (§9.13) and gives up — leaving the queued entry in place
+ * for the user to surface as "queued; will retry when online."
+ */
+export async function retryPendingAdminPublish(
+  slug: string,
+  ctx: ActionCtx,
+): Promise<{ ok: boolean; cleared: boolean }> {
+  const ent = await entity.byNameOrNull(`studio:room:${slug}`);
+  if (!ent) return { ok: false, cleared: false };
+  const attrs = parseAttrs(ent.attributes);
+  const pending = attrs["pending_admin_publish"] as PendingAdminPublish | null;
+  if (!pending || typeof pending !== "object") return { ok: false, cleared: false };
+  const attempts = (pending.attempts ?? 0) + 1;
+  if (attempts > 5) {
+    return { ok: false, cleared: false };
+  }
+  try {
+    await ctx.gateway.rawPublishDeclaration({
+      audience_address: pending.audience_address,
+      declaration: pending.declaration,
+    });
+    attrs["pending_admin_publish"] = null;
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: attrs,
+    });
+    return { ok: true, cleared: true };
+  } catch (err) {
+    attrs["pending_admin_publish"] = { ...pending, attempts };
+    try {
+      await entity.upsert({
+        name: `studio:room:${slug}`,
+        type: "studio_room",
+        description: `Studio room ${slug}`,
+        attributes: attrs,
+      });
+    } catch {
+      // best-effort
+    }
+    return { ok: false, cleared: false };
+  }
+}
+
+// ── boot (founder removes a member) ─────────────────────────────────────────
+
+interface RoomBootRequest {
+  slug?: unknown;
+  member_pubkey?: unknown;
+}
+
+interface RoomBootResult {
+  ok: true;
+  slug: string;
+  new_declaration_event_id: string;
+  removed_pubkey: string;
+  members_after: string[];
+}
+
+/**
+ * Founder-only roster removal: republish kind:30520 with the booted pubkey
+ * dropped from the `p` tags. Does NOT rotate the epoch (forward secrecy is
+ * out of scope for v0 — see §11). Local entity is patched immediately to
+ * mirror the founder's intent; failures park the signed declaration on
+ * pending_admin_publish (same queue as close/reopen) for retry.
+ */
+export async function bootMember(
+  body: RoomBootRequest,
+  ctx: ActionCtx,
+): Promise<RoomBootResult> {
+  const slug = ensureSlug(body.slug, "slug");
+  const memberPubkey = ensureString(body.member_pubkey, "member_pubkey").toLowerCase();
+  if (!isHex64(memberPubkey)) {
+    throw new HttpError(400, "bad_request", "member_pubkey must be 64-hex");
+  }
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (!room.audIdPrivHex) {
+    throw new HttpError(403, "not_founder", `only the founder can boot members from "${slug}"`);
+  }
+  if (memberPubkey === ctx.cfg.pluginPub.toLowerCase()) {
+    throw new HttpError(400, "cannot_boot_self", "founder cannot boot themselves");
+  }
+  const exists = room.members.some((m) => m.toLowerCase() === memberPubkey);
+  if (!exists) {
+    throw new HttpError(404, "not_a_member", `pubkey ${memberPubkey} is not in roster`);
+  }
+
+  const nextMembers = room.members.filter((m) => m.toLowerCase() !== memberPubkey);
+  const buildArgs: Parameters<typeof buildAudienceDeclaration>[0] = {
+    audIdPub: room.audIdPubHex,
+    slug,
+    name: pickTitle(room.attributes),
+    epoch: room.currentEpoch,
+    epochPub: room.currentEpochPubHex,
+    members: nextMembers,
+    pending: currentPendingInvites(room.attributes),
+  };
+  const description = pickDescription(room.attributes);
+  if (description !== undefined) buildArgs.description = description;
+  // Boot keeps the room in whatever status it currently has (active).
+  // Boot-while-closed is rejected by the gateway anyway (§5.1), so we
+  // don't bother propagating the status here.
+  const declTpl = buildAudienceDeclaration(buildArgs);
+  const audIdPriv = hexToBytes(room.audIdPrivHex);
+  const declUnsigned = {
+    pubkey: room.audIdPubHex,
+    kind: declTpl.kind,
+    created_at: declTpl.created_at,
+    tags: declTpl.tags,
+    content: declTpl.content,
+  };
+  const declSigned = __signEvent(declUnsigned, audIdPriv);
+
+  // Patch local members optimistically.
+  const nextAttrs: Record<string, unknown> = {
+    ...room.attributes,
+    members: nextMembers.map((m) => m.toLowerCase()),
+  };
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: nextAttrs,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.boot] local upsert failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  let publishedId = declSigned.id;
+  try {
+    const res = await ctx.gateway.rawPublishDeclaration({
+      audience_address: room.audienceAddress,
+      declaration: toEventLike(declSigned),
+    });
+    publishedId = res.declaration_event_id;
+    await clearPendingAdminPublish(slug, nextAttrs);
+  } catch (err) {
+    await queuePendingAdminPublish(slug, nextAttrs, {
+      kind: "boot",
+      declaration: toEventLike(declSigned),
+      audience_address: room.audienceAddress,
+      queued_at_ms: Date.now(),
+    });
+    throw err;
+  }
+
+  return {
+    ok: true,
+    slug,
+    new_declaration_event_id: publishedId,
+    removed_pubkey: memberPubkey,
+    members_after: nextMembers.map((m) => m.toLowerCase()),
+  };
+}
+
+// ── leave (federated self-removal) ──────────────────────────────────────────
+
+interface RoomLeaveRequest {
+  slug?: unknown;
+}
+
+interface RoomLeaveResult {
+  ok: true;
+  slug: string;
+  leave_event_id: string;
+}
+
+/**
+ * Publish a kind:30522 with `fa:status=left` so peers see this Sonata depart
+ * the audience. Local state flips to "left" so the renderer mutes the room
+ * and disables compose. Founders cannot leave their own room — they close
+ * it instead (see closeRoom).
+ *
+ * Per §5.4, if the gateway responds 403 not_current_member the founder has
+ * already booted us; we still flip local state to "left" so the user-visible
+ * outcome is consistent with reality (they're out of the room either way).
+ */
+export async function leaveRoom(
+  body: RoomLeaveRequest,
+  ctx: ActionCtx,
+): Promise<RoomLeaveResult> {
+  const slug = ensureSlug(body.slug, "slug");
+  const room = await loadRoomCtx(slug, ctx.cfg.pluginPub);
+  if (room.audIdPrivHex) {
+    throw new HttpError(
+      400,
+      "founder_cannot_leave",
+      `founder of "${slug}" cannot leave — close the room instead`,
+    );
+  }
+
+  const claimTpl = buildAudienceClaim({
+    audIdPub: room.audIdPubHex,
+    slug,
+    epoch: room.currentEpoch,
+    // invitePub is required by the type but unused for leave (d-tag is
+    // <slug>:<epoch>:left:<claimPub>). Pass our own pub so the input is
+    // structurally valid.
+    invitePub: ctx.cfg.pluginPub,
+    inviterPub: ctx.cfg.pluginPub,
+    claimPub: ctx.cfg.pluginPub,
+    status: "left",
+  });
+  const claimUnsigned = {
+    pubkey: ctx.cfg.pluginPub.toLowerCase(),
+    kind: claimTpl.kind,
+    created_at: claimTpl.created_at,
+    tags: claimTpl.tags,
+    content: claimTpl.content,
+  };
+  const claimSigned = __signEvent(claimUnsigned, ctx.cfg.pluginPriv);
+
+  let leaveEventId = claimSigned.id;
+  let bootedAlready = false;
+  try {
+    const res = await ctx.gateway.rawClaim({
+      audience_address: room.audienceAddress,
+      claim: toEventLike(claimSigned),
+    });
+    leaveEventId = res.claim_event_id;
+  } catch (err) {
+    if (err instanceof GatewayError && err.code === "not_current_member") {
+      // Leave-while-booted race per §5.4: the founder dropped us from the
+      // roster before our leave landed. Local state still flips so the user
+      // sees consistency.
+      bootedAlready = true;
+    } else {
+      throw err;
+    }
+  }
+
+  // Patch local entity: state = "left", left_at_ms = now.
+  try {
+    await entity.upsert({
+      name: `studio:room:${slug}`,
+      type: "studio_room",
+      description: `Studio room ${slug}`,
+      attributes: {
+        ...room.attributes,
+        state: bootedAlready ? "removed" : "left",
+        left_at_ms: Date.now(),
+      },
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.leave] entity upsert for "${slug}" failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // Emit a local "left" system event so the leaver's own feed shows the
+  // departure even before any subsequent founder republish lands. Other
+  // members observe it via the founder's roster diff later (or — if the
+  // founder never republishes — not at all; the leaver's local feed is the
+  // canonical surface for this transition). The audience-stream doesn't
+  // currently fan out kind:30522 events to peers; a future widening of
+  // that stream is the path to mirroring this row on remote renderers.
+  try {
+    await projectLeaveClaim({
+      claimEventId: leaveEventId,
+      claimPubkey: ctx.cfg.pluginPub,
+      createdAt: claimSigned.created_at,
+      roomSlug: slug,
+      entity,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[room.leave] local system-event projection failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // Drop the SSE stream — leaving members don't need the live tail.
+  if (ctx.sseManager && typeof ctx.sseManager.close === "function") {
+    try {
+      await ctx.sseManager.close(slug);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.leave] sseManager.close("${slug}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  return { ok: true, slug, leave_event_id: leaveEventId };
+}
+
 // ── delete (local-only) ─────────────────────────────────────────────────────
 
 interface RoomDeleteRequest {
@@ -1116,5 +1616,17 @@ export const room = {
   },
   delete(body: unknown, ctx: ActionCtx): Promise<RoomDeleteResult> {
     return deleteRoom((body ?? {}) as RoomDeleteRequest, ctx);
+  },
+  leave(body: unknown, ctx: ActionCtx): Promise<RoomLeaveResult> {
+    return leaveRoom((body ?? {}) as RoomLeaveRequest, ctx);
+  },
+  close(body: unknown, ctx: ActionCtx): Promise<RoomCloseResult> {
+    return closeRoom((body ?? {}) as RoomCloseRequest, ctx);
+  },
+  reopen(body: unknown, ctx: ActionCtx): Promise<RoomReopenResult> {
+    return reopenRoom((body ?? {}) as RoomReopenRequest, ctx);
+  },
+  boot(body: unknown, ctx: ActionCtx): Promise<RoomBootResult> {
+    return bootMember((body ?? {}) as RoomBootRequest, ctx);
   },
 };
