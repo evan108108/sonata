@@ -17,6 +17,7 @@ struct PersistedInteractiveSession: FetchableRecord, Codable {
     let cwd: String
     let position: Int
     let wasActive: Int
+    let kind: String        // SessionKind.rawValue ("sona" | "terminal")
     let createdAt: Int64
     let updatedAt: Int64
 }
@@ -27,7 +28,7 @@ enum InteractiveSessionsStore {
         do {
             return try dbPool.read { db in
                 try PersistedInteractiveSession.fetchAll(db, sql: """
-                    SELECT id, sessionId, name, cwd, position, wasActive, createdAt, updatedAt
+                    SELECT id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt
                     FROM interactiveSessions
                     ORDER BY position ASC, createdAt ASC
                     """)
@@ -45,24 +46,26 @@ enum InteractiveSessionsStore {
         name: String,
         cwd: String,
         position: Int,
-        wasActive: Bool
+        wasActive: Bool,
+        kind: String
     ) {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         do {
             try dbPool.write { db in
                 try db.execute(sql: """
                     INSERT INTO interactiveSessions
-                        (id, sessionId, name, cwd, position, wasActive, createdAt, updatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         sessionId = excluded.sessionId,
                         name      = excluded.name,
                         cwd       = excluded.cwd,
                         position  = excluded.position,
                         wasActive = excluded.wasActive,
+                        kind      = excluded.kind,
                         updatedAt = excluded.updatedAt
                     """, arguments: [
-                        id, sessionId, name, cwd, position, wasActive ? 1 : 0, now, now
+                        id, sessionId, name, cwd, position, wasActive ? 1 : 0, kind, now, now
                     ])
             }
         } catch {

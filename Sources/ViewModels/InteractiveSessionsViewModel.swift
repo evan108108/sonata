@@ -11,6 +11,24 @@ enum InteractiveSessionState: Equatable {
     case spawnFailed(message: String)
 }
 
+/// What a session tab runs. `sona` is the full Claude Code subprocess (the
+/// default and original behavior); `terminal` is a plain interactive shell.
+/// Modeled as a first-class enum (not a bool) so more session types can be
+/// added later without reworking call sites or the persistence schema.
+enum SessionKind: String, Codable, CaseIterable, Identifiable {
+    case sona
+    case terminal
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .sona: return "Sona"
+        case .terminal: return "Terminal"
+        }
+    }
+}
+
 /// One tab in the Interactive Sessions window — owns its own SwiftTerm terminal
 /// view and Claude Code subprocess. Acts as the LocalProcessTerminalView delegate
 /// so it can react to process termination on its own without a separate coordinator.
@@ -29,6 +47,9 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     let cwd: URL
     let terminalView: LocalProcessTerminalView
     let sessionId: String
+
+    /// What this tab runs (Sona = Claude Code, terminal = plain shell).
+    let kind: SessionKind
 
     /// Stable MCP-side identifier for this tab — what shows up as the
     /// sessionKey in MCPSessionRegistry, used by the dashboard's
@@ -54,10 +75,11 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// failure that wasn't theirs.
     private var lastSpawnAt: Date = .distantPast
 
-    init(id: UUID = UUID(), name: String, cwd: URL) {
+    init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona) {
         self.id = id
         self.name = name
         self.cwd = cwd
+        self.kind = kind
         self.sessionId = UUID().uuidString.lowercased()
         self.resume = false
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
@@ -70,10 +92,11 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// launch: caller supplies the prior `sessionId` so Claude Code can
     /// re-attach with `--resume`. Setting `resume: true` flips the spawn
     /// path to use `--resume <sessionId>` instead of `--session-id`.
-    init(id: UUID, name: String, cwd: URL, sessionId: String, resume: Bool) {
+    init(id: UUID, name: String, cwd: URL, sessionId: String, resume: Bool, kind: SessionKind = .sona) {
         self.id = id
         self.name = name
         self.cwd = cwd
+        self.kind = kind
         self.sessionId = sessionId
         self.resume = resume
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
@@ -92,6 +115,42 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     // MARK: - Lifecycle
 
     func spawn() {
+        switch kind {
+        case .sona: spawnSona()
+        case .terminal: spawnTerminal()
+        }
+    }
+
+    /// Launch a plain interactive login shell — no Claude, no MCP, no
+    /// auto-confirm. Uses `$SHELL` (fallback `/bin/zsh`) and the same env/PATH
+    /// the Sona path builds, so tools on PATH and the usual tokens are present.
+    private func spawnTerminal() {
+        try? FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+
+        // omitLegacyRole: true — SONATA_ROLE=session is meaningless for a bare
+        // shell and we don't want it leaking into the user's environment.
+        let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: true)
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+
+        let terminal = terminalView.getTerminal()
+        terminal.resetToInitialState()
+
+        guard FileManager.default.isExecutableFile(atPath: shell) else {
+            state = .spawnFailed(message: "Shell not found at \(shell)")
+            return
+        }
+
+        lastSpawnAt = Date()
+        terminalView.startProcess(
+            executable: shell,
+            args: ["-l"],
+            environment: env,
+            currentDirectory: cwd.path
+        )
+        state = .running
+    }
+
+    private func spawnSona() {
         try? FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
 
         // Per plan §6: opt-in in-proc MCP. SessionKey is a stable prefix
@@ -313,12 +372,16 @@ final class InteractiveSessionsViewModel: ObservableObject {
         var lastActiveId: UUID?
         for row in rows {
             guard let uuid = UUID(uuidString: row.id) else { continue }
+            let kind = SessionKind(rawValue: row.kind) ?? .sona
             let tab = InteractiveSessionTab(
                 id: uuid,
                 name: row.name,
                 cwd: URL(fileURLWithPath: row.cwd),
                 sessionId: row.sessionId,
-                resume: true
+                // Only Sona sessions re-attach to a prior Claude conversation;
+                // a terminal has no session file to --resume.
+                resume: kind == .sona,
+                kind: kind
             )
             tabs.append(tab)
             if row.wasActive == 1 { lastActiveId = uuid }
@@ -364,10 +427,10 @@ final class InteractiveSessionsViewModel: ObservableObject {
     /// cwd.path, same as the default-path variant. Trims the name and falls
     /// back to a "Session <N>" auto-name if it's empty.
     @discardableResult
-    func addTab(name: String, cwd: URL) -> InteractiveSessionTab {
+    func addTab(name: String, cwd: URL, kind: SessionKind = .sona) -> InteractiveSessionTab {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? "Session \(nextSessionIndex())" : trimmed
-        let tab = InteractiveSessionTab(name: finalName, cwd: cwd)
+        let tab = InteractiveSessionTab(name: finalName, cwd: cwd, kind: kind)
         tabs.append(tab)
         persistTab(tab, position: tabs.count - 1)
         selectTab(id: tab.id)
@@ -458,7 +521,8 @@ final class InteractiveSessionsViewModel: ObservableObject {
             name: tab.name,
             cwd: tab.cwd.path,
             position: position,
-            wasActive: tab.id == activeTabId
+            wasActive: tab.id == activeTabId,
+            kind: tab.kind.rawValue
         )
     }
 

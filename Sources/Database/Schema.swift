@@ -887,5 +887,14 @@ extension DatabaseMigrator {
             try db.execute(sql:
                 "CREATE INDEX IF NOT EXISTS interactiveSessions_by_position ON interactiveSessions(position)")
         }
+
+        // v15: session type. Each interactive session is either the full
+        // Claude Code subprocess ('sona', the default and prior behavior) or a
+        // plain interactive shell ('terminal'). Existing rows backfill to
+        // 'sona' so restored sessions keep behaving exactly as before.
+        registerMigration("v15_session_kind") { db in
+            try db.execute(sql:
+                "ALTER TABLE interactiveSessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'sona'")
+        }
     }
 }

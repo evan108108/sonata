@@ -174,7 +174,7 @@ struct SessionsView: View {
             Text("No active sessions")
                 .font(.title3)
                 .foregroundStyle(.secondary)
-            Text("Each session is a full Claude Code subprocess.")
+            Text("Each session is a Claude Code (Sona) or a plain terminal subprocess.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Button("New session…") { showNewSessionSheet = true }
@@ -387,6 +387,7 @@ private struct NewSessionSheet: View {
 
     @State private var name: String = ""
     @State private var cwdPath: String = ""
+    @State private var kind: SessionKind = .sona
 
     var body: some View {
         VStack(spacing: 0) {
@@ -403,9 +404,15 @@ private struct NewSessionSheet: View {
 
             Form {
                 Section {
-                    TextField("Name", text: $name, prompt: Text(defaultName))
+                    Picker("Type", selection: $kind) {
+                        ForEach(SessionKind.allCases) { k in
+                            Text(k.displayName).tag(k)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    TextField("Name", text: $name, prompt: Text(defaultName(for: kind)))
                     HStack {
-                        TextField("Working directory", text: $cwdPath, prompt: Text(defaultCwd.path))
+                        TextField("Working directory", text: $cwdPath, prompt: Text(defaultCwd(for: kind).path))
                             .font(.system(.body, design: .monospaced))
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -425,24 +432,39 @@ private struct NewSessionSheet: View {
             }
             .padding()
         }
-        .frame(width: 520, height: 240)
+        .frame(width: 520, height: 290)
         .onAppear {
             // Prefill defaults once so the form reflects what would happen
             // if the user just hits Start without touching anything.
-            if name.isEmpty { name = defaultName }
-            if cwdPath.isEmpty { cwdPath = defaultCwd.path }
+            if name.isEmpty { name = defaultName(for: kind) }
+            if cwdPath.isEmpty { cwdPath = defaultCwd(for: kind).path }
+        }
+        .onChange(of: kind) { old, new in
+            // Refresh the prefilled defaults to match the newly-picked type,
+            // but only while the user hasn't customized them.
+            if name == defaultName(for: old) { name = defaultName(for: new) }
+            if cwdPath == defaultCwd(for: old).path { cwdPath = defaultCwd(for: new).path }
         }
     }
 
-    private var defaultName: String {
-        // Match InteractiveSessionsViewModel's auto-numbering scheme.
+    private func defaultName(for kind: SessionKind) -> String {
         let nextIndex = (vm.tabs.count + 1)
-        return "Session \(nextIndex)"
+        switch kind {
+        case .sona: return "Session \(nextIndex)"
+        case .terminal: return "Terminal \(nextIndex)"
+        }
     }
 
-    private var defaultCwd: URL {
+    private func defaultCwd(for kind: SessionKind) -> URL {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-        return URL(fileURLWithPath: "\(home)/.sonata/session/session\(vm.tabs.count + 1)")
+        switch kind {
+        case .sona:
+            return URL(fileURLWithPath: "\(home)/.sonata/session/session\(vm.tabs.count + 1)")
+        case .terminal:
+            // A plain shell is most useful starting from home, not a throwaway
+            // per-session scratch dir.
+            return URL(fileURLWithPath: home)
+        }
     }
 
     private func browse() {
@@ -463,11 +485,11 @@ private struct NewSessionSheet: View {
     private func start() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPath = cwdPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let useName = trimmedName.isEmpty ? defaultName : trimmedName
+        let useName = trimmedName.isEmpty ? defaultName(for: kind) : trimmedName
         let useCwd  = trimmedPath.isEmpty
-            ? defaultCwd
+            ? defaultCwd(for: kind)
             : URL(fileURLWithPath: (trimmedPath as NSString).expandingTildeInPath)
-        vm.addTab(name: useName, cwd: useCwd)
+        vm.addTab(name: useName, cwd: useCwd, kind: kind)
         onClose()
     }
 }
