@@ -171,15 +171,69 @@ function signBlossomAuthEvent(args: BlossomAuthArgs): NostrEvent {
 
 // ── S3 ──────────────────────────────────────────────────────────────────────
 
+/**
+ * Resolve S3 credentials from the storage config's macOS Keychain refs, for
+ * the headless path where no renderer injected explicit s3_credentials. The
+ * desktop renderer reads these same refs and passes them per-call; here we
+ * read them in-process so CLI / worker / bridge sessions can attach files
+ * too. Returns null if the config carries no refs or either lookup fails.
+ */
+async function resolveCredentialsFromKeychain(
+  cfg: Extract<StorageConfig, { kind: "s3" }>,
+): Promise<S3Credentials | null> {
+  const keyRef = cfg.s3_access_key_id_keychain_ref;
+  const secRef = cfg.s3_secret_access_key_keychain_ref;
+  if (!keyRef || !secRef) return null;
+  const accessKeyId = await readKeychainSecret(keyRef);
+  const secretAccessKey = await readKeychainSecret(secRef);
+  if (!accessKeyId || !secretAccessKey) return null;
+  return { access_key_id: accessKeyId, secret_access_key: secretAccessKey };
+}
+
+/**
+ * Read a generic-password secret from the user's login Keychain by account
+ * name. Mirrors `security find-generic-password -a <ref> -w`. Returns null on
+ * any failure (item missing, keychain locked, non-zero exit) so the caller
+ * can fall back cleanly.
+ */
+async function readKeychainSecret(account: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(
+      ["security", "find-generic-password", "-a", account, "-w"],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    if (proc.exitCode !== 0) return null;
+    const trimmed = out.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function uploadToS3(
   args: UploadArgs,
   cfg: Extract<StorageConfig, { kind: "s3" }>,
 ): Promise<UploadResult> {
+  let creds: S3Credentials;
   const credsResult = validateS3Credentials(args.s3Credentials);
-  if (!credsResult.ok) {
-    throw new StorageUploadError(400, "missing_s3_credentials", credsResult.error);
+  if (credsResult.ok) {
+    // Renderer (desktop UI) path: it read the Keychain refs and passed
+    // explicit creds in the action body.
+    creds = credsResult.credentials;
+  } else {
+    // Headless path (CLI / worker / bridge MCP call): there's no renderer to
+    // inject s3_credentials, so resolve the config's Keychain refs ourselves
+    // via the macOS `security` CLI — same items the renderer reads. This is
+    // what lets a non-UI session attach files. Falls back to the original
+    // validation error if the refs are absent or unreadable.
+    const fromKeychain = await resolveCredentialsFromKeychain(cfg);
+    if (!fromKeychain) {
+      throw new StorageUploadError(400, "missing_s3_credentials", credsResult.error);
+    }
+    creds = fromKeychain;
   }
-  const creds: S3Credentials = credsResult.credentials;
 
   // Object key: studio/<roomSlug>/<sha256>. Single bucket can host many rooms.
   const objectKey = `studio/${args.roomSlug}/${args.ciphertextSha256Hex}`;
