@@ -240,11 +240,13 @@ extension LocalProcessTerminalView {
         nativeBackgroundColor = NSColor(Theme.Color.bgDeep)
     }
 
-    /// Recolor terminal *text* to the Solarized Dark palette — the default
-    /// foreground plus the 16 ANSI colors — while leaving the background as the
-    /// warm chrome from `applyWarmChrome()`. Used by terminal-backed sessions
-    /// so program output reads in Solarized tones over Sonata's ember surface.
-    func applySolarizedText() {
+    /// Apply a warm, readable color treatment to a session terminal: a cream
+    /// foreground (the app's text-on-ember tone) plus a vibrant, warm-leaning
+    /// 16-color ANSI palette, while the background stays the warm chrome from
+    /// `applyWarmChrome()`. Replaces the muted-gray default text with something
+    /// legible and gives colored output (ls, git, …) a lively look over Sonata's
+    /// ember surface.
+    func applyWarmTerminalColors() {
         func c(_ hex: UInt32) -> SwiftTerm.Color {
             let r = UInt16((hex >> 16) & 0xff)
             let g = UInt16((hex >> 8) & 0xff)
@@ -252,14 +254,92 @@ extension LocalProcessTerminalView {
             // Scale 0–255 → 0–65535 (×257 maps 0xff to 0xffff exactly).
             return SwiftTerm.Color(red: r &* 257, green: g &* 257, blue: b &* 257)
         }
-        // base0 — Solarized's default body-text tone.
-        nativeForegroundColor = NSColor(srgbRed: 0x83 / 255.0, green: 0x94 / 255.0, blue: 0x96 / 255.0, alpha: 1)
+        // Default (un-colored) text → the user's chosen terminal text color
+        // (Settings → General). Defaults to Classic White; many pick Phosphor
+        // Green. Read from UserDefaults so this works outside a SwiftUI View.
+        nativeForegroundColor = TerminalTextColorSetting.currentNSColor
         installColors([
-            c(0x073642), c(0xdc322f), c(0x859900), c(0xb58900),  // 0-3:  base02, red, green, yellow
-            c(0x268bd2), c(0xd33682), c(0x2aa198), c(0xeee8d5),  // 4-7:  blue, magenta, cyan, base2
-            c(0x002b36), c(0xcb4b16), c(0x586e75), c(0x657b83),  // 8-11: base03, orange, base01, base00
-            c(0x839496), c(0x6c71c4), c(0x93a1a1), c(0xfdf6e3),  // 12-15: base0, violet, base1, base3
+            c(0x33271e), c(0xe5534b), c(0x8fbf52), c(0xd9a441),  // 0-3:  black, red, green, yellow
+            c(0x4a9fe0), c(0xd061a8), c(0x43b5a0), c(0xede4d1),  // 4-7:  blue, magenta, cyan, white
+            c(0x6b5544), c(0xf26d63), c(0xa6d35f), c(0xecc25a),  // 8-11: br black, red, green, yellow
+            c(0x6bb6ee), c(0xe07cc0), c(0x5fccb8), c(0xfdf6e3),  // 12-15: br blue, magenta, cyan, white
         ])
+    }
+}
+
+// MARK: - Window opacity setting
+//
+// Single source of truth for the whole-window translucency setting. Both the
+// App (which applies it to NSWindow.alphaValue) and SettingsView (the slider)
+// reference these so the key and default can never drift apart.
+enum WindowOpacitySetting {
+    static let key = "sonata.windowOpacity"
+    static let defaultValue: Double = 0.93
+}
+
+// MARK: - Terminal text color setting
+//
+// The default (un-colored) foreground for *session* terminals (Sona + Terminal
+// kinds; Workers are intentionally left on the neutral default). Persisted as a
+// "#RRGGBB" hex string in UserDefaults so it's readable both from SwiftUI
+// (@AppStorage in SettingsView) and from `applyWarmTerminalColors()`, which runs
+// outside any View.
+enum TerminalTextColorSetting {
+    static let key = "sonata.terminalTextColorHex"
+
+    /// Soft Gray — the default. Matches SwiftTerm's own default foreground
+    /// (#8A8A8A), a muted neutral that's easier on the eyes than pure white.
+    /// (Phosphor Green is the popular pick; Classic White stays an option.)
+    static let defaultHex = "#8A8A8A"
+
+    struct Preset { let name: String; let hex: String }
+
+    /// Preset swatches shown in Settings, in display order.
+    static let presets: [Preset] = [
+        Preset(name: "Soft Gray",      hex: "#8A8A8A"),
+        Preset(name: "Classic White",  hex: "#FFFFFF"),
+        Preset(name: "Phosphor Green", hex: "#3CFF3C"),
+        Preset(name: "Amber",          hex: "#FFB000"),
+        Preset(name: "Ember",          hex: "#FF8C33"),
+        Preset(name: "Cream",          hex: "#EFE3C8"),
+    ]
+
+    static var currentHex: String {
+        UserDefaults.standard.string(forKey: key) ?? defaultHex
+    }
+
+    static var currentNSColor: NSColor {
+        NSColor(hexString: currentHex) ?? .white
+    }
+}
+
+extension Notification.Name {
+    /// Posted when the terminal text color setting changes, so every themed
+    /// terminal (sessions + supervisor) can re-apply it live.
+    static let sonataTerminalColorsChanged = Notification.Name("sonata.terminalColorsChanged")
+}
+
+extension NSColor {
+    /// Parse a "#RRGGBB" / "RRGGBB" hex string into an sRGB color.
+    convenience init?(hexString: String) {
+        var s = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self.init(
+            srgbRed: CGFloat((v >> 16) & 0xff) / 255.0,
+            green: CGFloat((v >> 8) & 0xff) / 255.0,
+            blue: CGFloat(v & 0xff) / 255.0,
+            alpha: 1
+        )
+    }
+
+    /// "#RRGGBB" for this color, converted to sRGB. nil if it can't be mapped.
+    var hexString: String? {
+        guard let c = usingColorSpace(.sRGB) else { return nil }
+        let r = Int((c.redComponent * 255).rounded())
+        let g = Int((c.greenComponent * 255).rounded())
+        let b = Int((c.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
     }
 }
 

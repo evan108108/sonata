@@ -20,7 +20,7 @@ struct SettingsView: View {
 
     // Whole-window translucency. Shares the UserDefaults key the WindowGroup
     // root reads, so dragging the slider updates the live window immediately.
-    @AppStorage("sonata.windowOpacity") private var windowOpacity: Double = 1.0
+    @AppStorage(WindowOpacitySetting.key) private var windowOpacity: Double = WindowOpacitySetting.defaultValue
 
     var body: some View {
         VStack(spacing: 0) {
@@ -120,6 +120,10 @@ struct SettingsView: View {
                         }
                         .padding(.horizontal)
                         .padding(.vertical, 8)
+
+                        Divider()
+
+                        TerminalTextColorRow()
                     }
                     .background(.background)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -442,6 +446,69 @@ struct SettingsView: View {
             return String(repeating: "*", count: value.count)
         }
         return String(value.prefix(4)) + String(repeating: "*", count: value.count - 8) + String(value.suffix(4))
+    }
+}
+
+// MARK: - Terminal Text Color row
+
+/// General-settings row: pick the default text color for session terminals
+/// (Sona, Terminal, Supervisor) from preset swatches or a custom color. Writes
+/// the chosen "#RRGGBB" to UserDefaults and broadcasts so open terminals
+/// re-color live. Workers keep the neutral default.
+private struct TerminalTextColorRow: View {
+    @AppStorage(TerminalTextColorSetting.key) private var hex: String = TerminalTextColorSetting.defaultHex
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Terminal Text Color")
+                    .font(.body)
+                Text("Default text color for Sona, Terminal & Supervisor sessions")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 8) {
+                ForEach(TerminalTextColorSetting.presets, id: \.hex) { preset in
+                    swatch(preset)
+                }
+                ColorPicker("", selection: customBinding, supportsOpacity: false)
+                    .labelsHidden()
+                    .help("Custom color")
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+
+    private func swatch(_ preset: TerminalTextColorSetting.Preset) -> some View {
+        let isSelected = hex.uppercased() == preset.hex.uppercased()
+        return Button {
+            hex = preset.hex
+            broadcast()
+        } label: {
+            Circle()
+                .fill(Color(nsColor: NSColor(hexString: preset.hex) ?? .white))
+                .frame(width: 20, height: 20)
+                .overlay(Circle().stroke(Theme.Color.selectionAccent, lineWidth: isSelected ? 2 : 0))
+                .overlay(Circle().stroke(.white.opacity(0.15), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .help(preset.name)
+    }
+
+    private var customBinding: Binding<Color> {
+        Binding(
+            get: { Color(nsColor: NSColor(hexString: hex) ?? .white) },
+            set: { newColor in
+                hex = NSColor(newColor).hexString ?? hex
+                broadcast()
+            }
+        )
+    }
+
+    private func broadcast() {
+        NotificationCenter.default.post(name: .sonataTerminalColorsChanged, object: nil)
     }
 }
 

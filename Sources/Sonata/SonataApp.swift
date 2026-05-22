@@ -772,7 +772,7 @@ struct SonataApp: App {
 
     // Whole-window translucency, controlled by the General-settings slider.
     // Default 1.0 (fully opaque); clamped to 0.3…1.0 where applied.
-    @AppStorage("sonata.windowOpacity") private var windowOpacity: Double = 1.0
+    @AppStorage(WindowOpacitySetting.key) private var windowOpacity: Double = WindowOpacitySetting.defaultValue
 
     // MARK: - Studio: DBPool environment plumbing (per impl-spec §10 Diff E)
     //
@@ -1026,6 +1026,7 @@ final class SupervisorWindowController: NSObject, NSWindowDelegate {
         // Create terminal view directly (same pattern as Worker)
         let termView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         termView.applyWarmChrome()
+        termView.enableWarmTerminalColors()  // same themed text/palette as sessions
         let coord = SupervisorCoordinator(terminalView: termView)
         self.coordinator = coord
         termView.processDelegate = coord

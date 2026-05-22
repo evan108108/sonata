@@ -150,7 +150,9 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         case .sona, .terminal:
             let tv = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
             tv.applyWarmChrome()
-            tv.applySolarizedText()
+            // NOTE: warm text colors are enabled in spawn(), *after*
+            // resetToInitialState() — that reset wipes the terminal palette, so
+            // applying it here would be undone before the shell runs.
             self.terminal = tv
             self.webView = nil
         case .webview:
@@ -209,6 +211,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
         termView.getTerminal().resetToInitialState()
+        (termView as? DropEnabledTerminalView)?.enableWarmTerminalColors()
 
         guard FileManager.default.isExecutableFile(atPath: shell) else {
             state = .spawnFailed(message: "Shell not found at \(shell)")
@@ -258,6 +261,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         }
 
         termView.getTerminal().resetToInitialState()
+        (termView as? DropEnabledTerminalView)?.enableWarmTerminalColors()
 
         let binary = InteractiveSessionTab.claudeBinary
         guard FileManager.default.isExecutableFile(atPath: binary) || binary == "claude" else {

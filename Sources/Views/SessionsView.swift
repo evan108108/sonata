@@ -295,6 +295,7 @@ private struct SessionsTerminalContainer: NSViewRepresentable {
 
     final class Coordinator {
         weak var catcher: SessionDropCatcher?
+        var lastFocusedId: UUID?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -347,6 +348,21 @@ private struct SessionsTerminalContainer: NSViewRepresentable {
         // z-order in case a freshly-mounted content view jumped ahead).
         if let catcher, catcher.superview === container {
             container.addSubview(catcher)
+        }
+
+        // Focus the active session's content once it's unhidden + in the window
+        // so typing lands immediately on tab switch / section entry — only when
+        // the active tab actually changes, so we never steal focus mid-use.
+        // (The VM's focusContent races the SwiftUI visibility update; doing it
+        // here, after isHidden is set, is reliable.)
+        if vm.activeTabId != context.coordinator.lastFocusedId {
+            context.coordinator.lastFocusedId = vm.activeTabId
+            if let id = vm.activeTabId,
+               let tab = vm.tabs.first(where: { $0.id == id }),
+               tab.kind.isTerminalBacked {
+                let content = tab.contentView
+                DispatchQueue.main.async { content.window?.makeFirstResponder(content) }
+            }
         }
     }
 }

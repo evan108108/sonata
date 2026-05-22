@@ -40,11 +40,62 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         registerForDraggedTypes(Self.acceptedDropTypes)
+        observeTerminalColorChanges()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerForDraggedTypes(Self.acceptedDropTypes)
+        observeTerminalColorChanges()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self, name: .sonataTerminalColorsChanged, object: nil)
+    }
+
+    private func observeTerminalColorChanges() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleTerminalColorsChanged),
+            name: .sonataTerminalColorsChanged, object: nil)
+    }
+
+    @objc private func handleTerminalColorsChanged() {
+        // Only terminals that opted into the themed colors re-apply (workers
+        // stay on the neutral default).
+        if warmColorsEnabled { applyWarmTerminalColors() }
+    }
+
+    // MARK: Warm terminal colors (sticky)
+    //
+    // SwiftTerm's `setupOptions(width:height:)` resets `terminal.foregroundColor`
+    // and the palette to defaults on every layout/resize, which clobbers a
+    // one-shot color application. So we remember the intent and re-assert the
+    // warm palette whenever the view mounts or finishes resizing.
+
+    private var warmColorsEnabled = false
+
+    /// Turn on the warm color treatment for this terminal and apply it now. Safe
+    /// to call before the view is in a window — it'll re-assert on mount.
+    func enableWarmTerminalColors() {
+        warmColorsEnabled = true
+        applyWarmTerminalColors()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Re-assert after the mount/layout pass (which runs setupOptions and
+        // resets colors) has completed.
+        if warmColorsEnabled, window != nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.warmColorsEnabled else { return }
+                self.applyWarmTerminalColors()
+            }
+        }
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        if warmColorsEnabled { applyWarmTerminalColors() }
     }
 
     // MARK: Drag-and-drop
