@@ -1256,7 +1256,7 @@ struct WorkersView: View {
 
     private var emptyState: some View {
         VStack(spacing: 16) {
-            Image(systemName: "terminal.fill")
+            Image(systemName: "bolt.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
             Text("No Workers Running")
@@ -1281,28 +1281,32 @@ struct WorkerSidebarRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(worker.status.color)
-                .frame(width: 8, height: 8)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(worker.label)
-                    .font(.system(.body, design: .monospaced))
-                HStack(spacing: 4) {
-                    Text(worker.status.rawValue)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if worker.status == .busy && !worker.currentTask.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(worker.currentTask)
+            // Worker icon tinted + glowing in the status color, baseline-aligned
+            // with the label — mirrors the Sessions sidebar's kind icon. The
+            // glow replaces the old status dot so the row conveys both "this is
+            // a worker" and its liveness in one mark.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                statusIcon
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(worker.label)
+                        .font(.system(.body, design: .monospaced))
+                    HStack(spacing: 4) {
+                        Text(worker.status.rawValue)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        if !worker.currentEventId.isEmpty {
-                            Text(liveMonitoringLine(worker))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                    }
+                    if worker.status == .busy && !worker.currentTask.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(worker.currentTask)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                            if !worker.currentEventId.isEmpty {
+                                Text(liveMonitoringLine(worker))
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
                         }
                     }
                 }
@@ -1329,6 +1333,17 @@ struct WorkerSidebarRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// Worker icon tinted + glowing in the status color so each row conveys
+    /// liveness without a separate dot — same treatment as the Sessions
+    /// sidebar's kind icon (state colors come from `WorkerStatus.color`).
+    private var statusIcon: some View {
+        Image(systemName: "bolt.fill")
+            .font(.system(size: 12))
+            .foregroundStyle(worker.status.color)
+            .shadow(color: worker.status.color.opacity(0.75), radius: 4)
+            .frame(width: 16, alignment: .center)
     }
 
     private func liveMonitoringLine(_ worker: Worker) -> String {

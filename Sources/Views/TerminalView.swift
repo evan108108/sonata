@@ -21,6 +21,12 @@ struct SwiftTermView: NSViewRepresentable {
 struct TerminalContainerView: NSViewRepresentable {
     @EnvironmentObject var manager: WorkerManager
 
+    final class Coordinator {
+        var lastFocusedId: String?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         container.wantsLayer = true
@@ -48,6 +54,20 @@ struct TerminalContainerView: NSViewRepresentable {
         // Show only the selected worker's terminal
         for worker in manager.workers {
             worker.terminalView.isHidden = (worker.id != manager.selectedWorkerId)
+        }
+
+        // Focus the selected worker's terminal once it's unhidden + in the
+        // window so typing lands immediately on worker-switch / section entry —
+        // only when the selection actually changes, so we never steal focus
+        // mid-use. Mirrors SessionsTerminalContainer's focus routing (doing it
+        // here, after isHidden is set, is reliable; .onAppear races visibility).
+        if manager.selectedWorkerId != context.coordinator.lastFocusedId {
+            context.coordinator.lastFocusedId = manager.selectedWorkerId
+            if let id = manager.selectedWorkerId,
+               let worker = manager.workers.first(where: { $0.id == id }) {
+                let view = worker.terminalView
+                DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+            }
         }
     }
 }

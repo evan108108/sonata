@@ -44,7 +44,7 @@ struct ContentView: View {
         [
             NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
             NavRailItem(tab: .sessions, label: "Sessions", systemImage: "bubble.left.and.bubble.right.fill"),
-            NavRailItem(tab: .workers, label: "Workers", systemImage: "terminal.fill", badge: workerManager.busyWorkerCount),
+            NavRailItem(tab: .workers, label: "Workers", systemImage: "bolt.fill", badge: workerManager.busyWorkerCount),
             NavRailItem(tab: .tasks, label: "Tasks", systemImage: "checklist", badge: railCounts.activeTaskCount),
             NavRailItem(tab: .schedule, label: "Schedule", systemImage: "calendar"),
             NavRailItem(tab: .memory, label: "Memory", systemImage: "brain.head.profile"),
