@@ -453,7 +453,7 @@ struct SonataApp: App {
                 // Create scheduler early so routes can reference it
                 // MeiliSearch full-text search subsystem
                 let meili = MeiliSearchManager()
-                await meili.start()
+                await meili.start(dbPool: pool)
                 await meili.ensureIndexes()
 
                 let scheduler = SchedulerActor(dbPool: pool)

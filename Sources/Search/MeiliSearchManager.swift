@@ -11,6 +11,9 @@ actor MeiliSearchManager: SearchService {
     private let logger: Logger
     private var masterKey: String = ""
     private let session = URLSession.shared
+    /// Stashed so the first-run download path can build + backfill indexes itself
+    /// once the binary lands (SonataApp's inline calls ran while Meili was down).
+    private var dbPool: DatabasePool?
 
     private var baseURL: String { "http://127.0.0.1:\(port)" }
 
@@ -38,7 +41,9 @@ actor MeiliSearchManager: SearchService {
 
     // MARK: - Lifecycle
 
-    func start() async {
+    func start(dbPool: DatabasePool? = nil) async {
+        self.dbPool = dbPool
+
         // Load or generate master key
         if let existing = try? String(contentsOfFile: keyFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            !existing.isEmpty {
@@ -51,13 +56,31 @@ actor MeiliSearchManager: SearchService {
         // Create data directory
         try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
 
-        // Find the binary
-        let binaryPath = findBinary()
-        guard let binaryPath = binaryPath else {
-            logger.error("MeiliSearch binary not found — search will be unavailable")
+        // Fast path: binary already present (bundle / Homebrew / prior download).
+        // Launch synchronously so the caller's ensureIndexes()/backfill run in order.
+        if let path = await BinaryProvisioner.shared.cachedPath(of: .meilisearch) {
+            await launch(binaryPath: path)
             return
         }
 
+        // Slow path (first run only): the ~122 MB binary isn't installed. Download
+        // it in the background so we DON'T stall the HTTP server / services boot,
+        // then launch and build + backfill the indexes ourselves — the caller's
+        // inline ensureIndexes()/backfill already ran while Meili was down (no-ops).
+        logger.info("MeiliSearch binary not present — downloading on first run; search unavailable until ready")
+        Task {
+            guard let path = await BinaryProvisioner.shared.provision(.meilisearch) else {
+                logger.error("MeiliSearch provisioning failed — search will be unavailable")
+                return
+            }
+            await self.launch(binaryPath: path)
+            await self.firstRunIndexAndBackfill()
+        }
+    }
+
+    /// Kill any orphan, launch the subprocess, wait for health. Shared by the
+    /// cached-path and post-download paths.
+    private func launch(binaryPath: String) async {
         // Kill any orphaned MeiliSearch process from a previous run
         killExistingMeiliSearch()
 
@@ -98,6 +121,19 @@ actor MeiliSearchManager: SearchService {
         } else {
             logger.error("MeiliSearch failed health check after 10s")
         }
+    }
+
+    /// First-run-after-download: build indexes and backfill content once Meili is
+    /// actually up. Only reached on the download path; the normal boot does this
+    /// via the caller right after `start()` returns.
+    private func firstRunIndexAndBackfill() async {
+        guard process != nil else { return }
+        await ensureIndexes()
+        if let pool = dbPool {
+            await backfillWiki(dbPool: pool)
+            await backfillArchive(dbPool: pool)
+        }
+        await backfillDocs()
     }
 
     func shutdown() {
@@ -455,31 +491,6 @@ actor MeiliSearchManager: SearchService {
         let base = (filename as NSString).lastPathComponent
         let stem = (base as NSString).deletingPathExtension
         return stem.isEmpty ? filename : stem
-    }
-
-    // MARK: - Binary Discovery
-
-    private func findBinary() -> String? {
-        let fm = FileManager.default
-
-        // 1. Check app bundle — resolve from executable path
-        if let execPath = Bundle.main.executablePath {
-            let contentsDir = (execPath as NSString).deletingLastPathComponent + "/.."
-            let resolved = (contentsDir as NSString).standardizingPath
-            let resourceBinary = resolved + "/Resources/bin/meilisearch"
-            if fm.isExecutableFile(atPath: resourceBinary) {
-                return resourceBinary
-            }
-        }
-
-        // 2. Check common Homebrew paths
-        for path in ["/opt/homebrew/bin/meilisearch", "/usr/local/bin/meilisearch"] {
-            if fm.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-
-        return nil
     }
 
     // MARK: - HTTP Helpers

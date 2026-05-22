@@ -6,7 +6,7 @@ import GRDB
 protocol SearchService: Sendable {
 
     // MARK: - Lifecycle
-    func start() async
+    func start(dbPool: DatabasePool?) async
     func shutdown() async
     func isHealthy() async -> Bool
     func ensureIndexes() async
