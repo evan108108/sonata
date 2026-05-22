@@ -357,19 +357,76 @@ extension View {
     /// Apply directly inside the `sidebar:` closure of NavigationSplitView:
     ///
     ///   NavigationSplitView { mySidebarList.warmSidebar() } detail: { ... }
-    func warmSidebar() -> some View {
+    ///
+    /// `flame: true` swaps the subtle texture for the ember gradient +
+    /// HouseFire shader + legibility wash (the Sessions / Workers look). The
+    /// bottom-bright ember gradient is part of the flame treatment — it reads
+    /// as the flame's light spilling onto the surface, so it's deliberately
+    /// *not* applied when there's no flame (a bottom-lit gradient with no light
+    /// source looks unmotivated; the flame-off branch keeps its top-lit
+    /// texture instead). Opt-in (default off) because on long lists — Tasks,
+    /// Wiki, People — the flame at the bottom makes the lower rows hard to
+    /// read; reserve it for the short, "alive" sidebars. Either way the sidebar
+    /// gets a trailing hairline so it separates cleanly from the detail pane.
+    func warmSidebar(flame: Bool = false) -> some View {
         self
             .scrollContentBackground(.hidden)
             .background {
                 ZStack {
-                    Theme.Color.bgMid
-                    // Switch which texture is active by changing
-                    // `Theme.activeSidebarTexture` below. Both implementations
-                    // stay defined so we can A/B compare without rewriting.
-                    Theme.activeSidebarTexture.view
+                    if flame {
+                        LinearGradient(
+                            stops: [
+                                .init(color: Theme.Color.bgEmberDeep, location: 0.00),
+                                .init(color: Theme.Color.bgEmberDeep, location: 0.35),
+                                .init(color: Theme.Color.bgEmberMid,  location: 0.70),
+                                .init(color: Theme.Color.bgEmberTop,  location: 1.00),
+                            ],
+                            startPoint: .top, endPoint: .bottom
+                        )
+                        MetalFlameView()
+                            .opacity(0.30)
+                            .allowsHitTesting(false)
+                        // Wash heaviest at top (where row text needs contrast),
+                        // fading to clear at the bottom where the flame sits.
+                        LinearGradient(
+                            colors: [
+                                Theme.Color.bgDeep.opacity(0.55),
+                                Theme.Color.bgDeep.opacity(0.20),
+                                SwiftUI.Color.clear,
+                            ],
+                            startPoint: .top, endPoint: .bottom
+                        )
+                        .allowsHitTesting(false)
+                    } else {
+                        Theme.Color.bgMid
+                        // Switch which texture is active by changing
+                        // `Theme.activeSidebarTexture` below. Both implementations
+                        // stay defined so we can A/B compare without rewriting.
+                        Theme.activeSidebarTexture.view
+                    }
                 }
                 .ignoresSafeArea()
             }
+            .overlay(alignment: .trailing) {
+                Rectangle()
+                    .fill(Theme.Color.dividerWarm)
+                    .frame(width: 0.5)
+            }
+    }
+
+    /// One call for every `NavigationSplitView` sidebar: the shared resizable
+    /// width range (so all sidebars resize identically and default to the same
+    /// width) plus the warm treatment (+ optional flame). Apply to the view in
+    /// the `sidebar:` closure. HSplitView-based panes (People, Email) can't use
+    /// `navigationSplitViewColumnWidth`, so they call `warmSidebar()` directly.
+    func sonataSidebar(flame: Bool = false) -> some View {
+        self
+            .navigationSplitViewColumnWidth(
+                min: Theme.Sidebar.minWidth,
+                ideal: Theme.Sidebar.idealWidth,
+                max: Theme.Sidebar.maxWidth
+            )
+            .warmSidebar(flame: flame)
     }
 
     /// Make the window's titlebar match the chrome shell. Applied at the
@@ -410,6 +467,17 @@ extension Theme {
     /// The texture currently used by `warmSidebar()`. Change this one line
     /// to flip the entire app's sidebar look.
     static let activeSidebarTexture: SidebarTexture = .hatch
+
+    /// Shared sidebar metrics so every NavigationSplitView sidebar (Sessions,
+    /// Workers, Wiki, Files, Studio, …) defaults to the same width and resizes
+    /// over the same range. Column width is persisted per scene and shared
+    /// across the swapped split-view tabs, so keeping these equal also avoids
+    /// "whichever sidebar showed first wins" drift on a fresh launch.
+    enum Sidebar {
+        static let minWidth: CGFloat = 220
+        static let idealWidth: CGFloat = 320
+        static let maxWidth: CGFloat = 460
+    }
 }
 
 /// Option 2 — subtle vertical gradient. Top stop a hint lighter than the

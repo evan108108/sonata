@@ -59,7 +59,9 @@ struct EmailView: View {
                         }
                     }
                     .listStyle(.sidebar)
-                    .frame(minWidth: 300)
+                    .frame(minWidth: Theme.Sidebar.minWidth,
+                           idealWidth: Theme.Sidebar.idealWidth,
+                           maxWidth: Theme.Sidebar.maxWidth)
                     .warmSidebar()
 
                     // Detail pane

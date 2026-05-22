@@ -116,6 +116,9 @@ struct ContactsView: View {
                 }
             }
         }
+        .frame(minWidth: Theme.Sidebar.minWidth,
+               idealWidth: Theme.Sidebar.idealWidth,
+               maxWidth: Theme.Sidebar.maxWidth)
         .warmSidebar()
     }
 

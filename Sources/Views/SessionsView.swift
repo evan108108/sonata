@@ -16,7 +16,7 @@ struct SessionsView: View {
     var body: some View {
         NavigationSplitView {
             sessionsSidebar
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
+                .sonataSidebar(flame: true)
         } detail: {
             detailPane
         }
@@ -81,42 +81,9 @@ struct SessionsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        // Same flame + warm-gradient treatment as the Workers sidebar.
-        // Keep this in sync visually if WorkersView's background ever
-        // changes; an extracted helper feels like premature DRY.
-        .background(
-            ZStack {
-                LinearGradient(
-                    stops: [
-                        .init(color: Theme.Color.bgEmberDeep, location: 0.00),
-                        .init(color: Theme.Color.bgEmberDeep, location: 0.35),
-                        .init(color: Theme.Color.bgEmberMid,  location: 0.70),
-                        .init(color: Theme.Color.bgEmberTop,  location: 1.00),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                MetalFlameView()
-                    .opacity(0.30)
-                    .allowsHitTesting(false)
-                LinearGradient(
-                    colors: [
-                        Theme.Color.bgDeep.opacity(0.55),
-                        Theme.Color.bgDeep.opacity(0.20),
-                        Color.clear,
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .allowsHitTesting(false)
-            }
-            .clipped()
-        )
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Theme.Color.dividerWarm)
-                .frame(width: 0.5)
-        }
+        // Background, flame, and trailing stroke now come from
+        // `.sonataSidebar(flame: true)` applied in the NavigationSplitView
+        // sidebar closure — single source of truth shared with every sidebar.
     }
 
     private var sidebarHeader: some View {

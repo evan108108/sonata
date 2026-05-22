@@ -16,9 +16,7 @@ struct StudioView: View {
                 store: store,
                 selectedRoom: $selectedRoom
             )
-            .frame(minWidth: 220, idealWidth: 240, maxWidth: 320)
-            .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
-            .warmSidebar()
+            .sonataSidebar()
         } detail: {
             // Resolve `selectedRoom` through the live `store.rooms` array on
             // every render — without this, the detail pane keeps the snapshot

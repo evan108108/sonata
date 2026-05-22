@@ -259,8 +259,7 @@ struct WikiView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 6)
             }
-            .frame(minWidth: 260)
-            .warmSidebar()
+            .sonataSidebar()
         } detail: {
             if let page = selectedPage {
                 WikiDetailView(
