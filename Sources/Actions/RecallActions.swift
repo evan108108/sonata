@@ -555,11 +555,10 @@ let recallActions: [SonataAction] = [
 
                 // Concurrent: Vector search
                 let vectorTask: Task<[String: Double], Never> = Task {
-                    guard let apiKey = SecretStore.get("OPENROUTER_API_KEY"), !apiKey.isEmpty else {
-                        return [:]
-                    }
                     do {
-                        let queryEmbedding = try await generateEmbedding(text: topic, apiKey: apiKey)
+                        // local nomic or OpenRouter per EmbeddingProvider.current; any
+                        // failure (e.g. no key) falls back to empty → keyword recall.
+                        let queryEmbedding = try await embedText(topic, isQuery: true)
                         let rows: [(String, Data)] = try await dbPool.read { db in
                             try Row.fetchAll(db, sql: "SELECT memoryId, embedding FROM memoryEmbeddings")
                                 .map { row in (row["memoryId"] as String, row["embedding"] as Data) }

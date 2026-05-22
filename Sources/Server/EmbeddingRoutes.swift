@@ -69,6 +69,46 @@ func generateEmbedding(text: String, apiKey: String) async throws -> [Float] {
     return first.embedding
 }
 
+/// Which embedding backend to use. Default = OpenRouter (unchanged behavior).
+/// Set UserDefaults "sonata.embeddingProvider" = "local" (or env
+/// SONATA_EMBEDDING_PROVIDER=local) to use the local nomic-embed-text-v1.5
+/// served by llama-server (EmbeddingServerManager).
+enum EmbeddingProvider: String {
+    case openRouter
+    case local
+
+    static var current: EmbeddingProvider {
+        let raw = UserDefaults.standard.string(forKey: "sonata.embeddingProvider")
+            ?? ProcessInfo.processInfo.environment["SONATA_EMBEDDING_PROVIDER"]
+        return raw == "local" ? .local : .openRouter
+    }
+
+    /// Model identifier persisted alongside stored embeddings, so a later
+    /// re-embed/migration can tell which vectors came from which model.
+    var modelId: String {
+        switch self {
+        case .openRouter: return "openai/text-embedding-3-small"
+        case .local:      return "nomic-embed-text-v1.5"
+        }
+    }
+}
+
+/// Pluggable embedding entrypoint. Routes to the local llama-server or OpenRouter
+/// per `EmbeddingProvider.current`. `isQuery` selects nomic's task prefix
+/// (search_query vs search_document); OpenRouter ignores it. Throws
+/// `EmbeddingError.missingApiKey` when OpenRouter is selected without a key.
+func embedText(_ text: String, isQuery: Bool) async throws -> [Float] {
+    switch EmbeddingProvider.current {
+    case .local:
+        return try await EmbeddingServerManager.shared.embed(text, isQuery: isQuery)
+    case .openRouter:
+        guard let apiKey = SecretStore.get("OPENROUTER_API_KEY"), !apiKey.isEmpty else {
+            throw EmbeddingError.missingApiKey
+        }
+        return try await generateEmbedding(text: text, apiKey: apiKey)
+    }
+}
+
 enum EmbeddingError: Error, LocalizedError {
     case apiError(statusCode: Int, body: String)
     case noData

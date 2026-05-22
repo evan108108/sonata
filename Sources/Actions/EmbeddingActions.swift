@@ -56,20 +56,16 @@ let embeddingActions: [SonataAction] = [
             ActionParam("createdAt", .integer, description: "Override createdAt (epoch ms)"),
         ],
         handler: { ctx in
-            guard let apiKey = SecretStore.get("OPENROUTER_API_KEY"), !apiKey.isEmpty else {
-                throw ActionError.custom("OPENROUTER_API_KEY not set", .internalServerError)
-            }
-
             let content = try ctx.params.require("content")
             let type = try ctx.params.require("type")
             guard validMemoryTypesForEmbeddingAction.contains(type) else {
                 throw ActionError.invalidParam("type", "Invalid memory type '\(type)'")
             }
 
-            // Generate embedding
+            // Generate embedding (local nomic or OpenRouter per EmbeddingProvider.current)
             let embedding: [Float]
             do {
-                embedding = try await generateEmbedding(text: content, apiKey: apiKey)
+                embedding = try await embedText(content, isQuery: false)
             } catch {
                 throw ActionError.custom("Embedding generation failed: \(error.localizedDescription)", .internalServerError)
             }
@@ -116,7 +112,7 @@ let embeddingActions: [SonataAction] = [
                         """,
                         arguments: [
                             embeddingId, memoryId, embeddingBlob,
-                            "openai/text-embedding-3-small", embedding.count,
+                            EmbeddingProvider.current.modelId, embedding.count,
                             contentHash, createdAt
                         ]
                     )
@@ -141,17 +137,13 @@ let embeddingActions: [SonataAction] = [
             ActionParam("limit", .integer, description: "Max results (default 10)"),
         ],
         handler: { ctx in
-            guard let apiKey = SecretStore.get("OPENROUTER_API_KEY"), !apiKey.isEmpty else {
-                throw ActionError.custom("OPENROUTER_API_KEY not set", .internalServerError)
-            }
-
             let q = try ctx.params.require("q")
             let limit = ctx.params.int("limit") ?? 10
 
-            // Generate query embedding
+            // Generate query embedding (local nomic or OpenRouter per EmbeddingProvider.current)
             let queryEmbedding: [Float]
             do {
-                queryEmbedding = try await generateEmbedding(text: q, apiKey: apiKey)
+                queryEmbedding = try await embedText(q, isQuery: true)
             } catch {
                 throw ActionError.custom("Embedding generation failed: \(error.localizedDescription)", .internalServerError)
             }
