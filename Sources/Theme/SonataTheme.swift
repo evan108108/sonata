@@ -528,6 +528,76 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
         // content starts under the titlebar boundary instead of behind it,
         // which is barely noticeable since the colors match.
         window.backgroundColor = NSColor(Theme.Color.bgDeep)
+
+        // Persist + restore the window frame ourselves. SwiftUI's WindowGroup
+        // restoration (and even AppKit's setFrameAutosaveName) don't survive our
+        // transparent-titlebar interop — the size kept resetting to .defaultSize
+        // on every launch. WindowFramePersistence saves the frame to UserDefaults
+        // on resize/move and re-asserts the saved frame just after launch to win
+        // over SwiftUI re-imposing its default size.
+        WindowFramePersistence.shared.attach(to: window)
+    }
+}
+
+/// Manual main-window frame persistence (see WindowChromeConfigurator). Saves
+/// the frame to UserDefaults whenever it changes and restores it on launch,
+/// re-asserting once after a short delay because SwiftUI re-applies its default
+/// size right after our first restore.
+@MainActor
+final class WindowFramePersistence {
+    static let shared = WindowFramePersistence()
+
+    static let key = "sonata.mainWindowFrame"
+
+    /// Window size used on first launch (and whenever no valid saved frame
+    /// exists). Single source of truth for the default dimensions.
+    static let defaultSize = CGSize(width: 1300, height: 800)
+
+    private weak var window: NSWindow?
+    private var attached = false
+
+    /// The size to open the window at, read from the saved frame if present.
+    /// Fed into the scene's `.defaultSize` so the window opens at the restored
+    /// size directly — avoiding the flash of opening at the hardcoded default
+    /// and then resizing. (Position still settles via `restore()`.)
+    static var initialSize: CGSize {
+        if let saved = UserDefaults.standard.string(forKey: key) {
+            let f = NSRectFromString(saved)
+            if f.width >= 400, f.height >= 300 { return CGSize(width: f.width, height: f.height) }
+        }
+        return defaultSize
+    }
+
+    func attach(to window: NSWindow) {
+        guard !attached else { return }
+        attached = true
+        self.window = window
+
+        restore()
+        // SwiftUI re-imposes its default size right after we restore, so apply
+        // again once its initial layout has settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.restore() }
+
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(save),
+            name: NSWindow.didResizeNotification, object: window)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(save),
+            name: NSWindow.didMoveNotification, object: window)
+    }
+
+    private func restore() {
+        guard let window,
+              let saved = UserDefaults.standard.string(forKey: Self.key) else { return }
+        let frame = NSRectFromString(saved)
+        // Guard against a garbage / zero frame locking the window tiny.
+        guard frame.width >= 400, frame.height >= 300 else { return }
+        window.setFrame(frame, display: true)
+    }
+
+    @objc private func save() {
+        guard let window else { return }
+        UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: Self.key)
     }
 }
 

@@ -819,7 +819,7 @@ struct SonataApp: App {
         // window state restoration fails — currently a regression caused by
         // our AppKit titlebar interop, TODO investigate). Picked to be roomy
         // on a 13" MBP without overflowing.
-        .defaultSize(width: 1300, height: 800)
+        .defaultSize(WindowFramePersistence.initialSize)
         .commands {
             // Tab navigation: Cmd+1 through Cmd+9, Cmd+0
             CommandGroup(after: .toolbar) {
