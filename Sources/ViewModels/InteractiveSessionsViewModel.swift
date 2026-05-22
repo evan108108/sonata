@@ -118,6 +118,18 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// failure that wasn't theirs.
     private var lastSpawnAt: Date = .distantPast
 
+    /// True for a bootstrap-restored Terminal tab that should replay its saved
+    /// scrollback log once, before the fresh shell starts. One-shot (cleared
+    /// after the first spawn so a manual Restart doesn't re-replay).
+    var shouldReplayScrollback = false
+
+    /// Per-session scrollback log file. Terminal sessions tee their output here
+    /// so the on-screen history survives a restart. Keyed by the stable tab id.
+    static func scrollbackLogURL(for id: UUID) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".sonata/scrollback/\(id.uuidString.lowercased()).log")
+    }
+
     /// Fresh tab (mints a new sessionId, resume off).
     convenience init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona, url: URL? = nil) {
         self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
@@ -153,6 +165,11 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             // NOTE: warm text colors are enabled in spawn(), *after*
             // resetToInitialState() — that reset wipes the terminal palette, so
             // applying it here would be undone before the shell runs.
+            // Capture scrollback for plain Terminal sessions only (Sona has its
+            // own --resume history; Workers/Supervisor don't persist output).
+            if kind == .terminal {
+                tv.scrollbackLogURL = Self.scrollbackLogURL(for: id)
+            }
             self.terminal = tv
             self.webView = nil
         case .webview:
@@ -211,11 +228,20 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
         termView.getTerminal().resetToInitialState()
+        termView.getTerminal().changeScrollback(5000)  // keep more history than the 500 default
         (termView as? DropEnabledTerminalView)?.enableWarmTerminalColors()
 
         guard FileManager.default.isExecutableFile(atPath: shell) else {
             state = .spawnFailed(message: "Shell not found at \(shell)")
             return
+        }
+
+        // Replay prior scrollback into the (just-reset) terminal before the new
+        // shell starts, so a restored session shows its history above the fresh
+        // prompt. One-shot — only for a bootstrap-restored tab.
+        if shouldReplayScrollback {
+            shouldReplayScrollback = false
+            replayScrollback(into: termView)
         }
 
         lastSpawnAt = Date()
@@ -226,6 +252,68 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             currentDirectory: cwd.path
         )
         state = .running
+    }
+
+    /// Feed the saved scrollback log into the terminal as read-only history.
+    /// Feeding bypasses dataReceived, so it isn't re-captured; the live shell's
+    /// output then appends to the same log after this.
+    private func replayScrollback(into termView: LocalProcessTerminalView) {
+        let url = InteractiveSessionTab.scrollbackLogURL(for: id)
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
+        let tail = Array(data.suffix(DropEnabledTerminalView.scrollbackMaxBytes))
+        // Replay a flattened transcript: keep text + newlines + color (SGR), but
+        // strip cursor-movement and erase sequences. Re-running an interactive
+        // shell's raw control codes at a different terminal size makes its prompt
+        // redraws erase the replayed history — a flat colored dump renders the
+        // full output reliably.
+        let flat = InteractiveSessionTab.flattenForReplay(tail)
+        termView.feed(byteArray: flat[...])
+        termView.feed(text: "\r\n\u{1b}[2m── session restored ──\u{1b}[0m\r\n")
+    }
+
+    /// Strip cursor-positioning / erase control from a captured terminal byte
+    /// stream, keeping printable bytes, newline/CR/tab, and SGR (color) escapes.
+    /// Drops other CSI sequences (cursor moves, erases), OSC sequences (titles),
+    /// and other escapes — leaving a linear, colored transcript safe to replay.
+    nonisolated static func flattenForReplay(_ bytes: [UInt8]) -> [UInt8] {
+        let esc: UInt8 = 0x1b
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        let n = bytes.count
+        while i < n {
+            let b = bytes[i]
+            if b != esc {
+                // Keep printable (≥ 0x20, excl. DEL), plus LF / CR / TAB.
+                if b == 0x0a || b == 0x0d || b == 0x09 || (b >= 0x20 && b != 0x7f) {
+                    out.append(b)
+                }
+                i += 1
+                continue
+            }
+            // ESC sequence.
+            guard i + 1 < n else { break }
+            let kind = bytes[i + 1]
+            if kind == 0x5b { // '[' → CSI: scan to final byte (0x40...0x7e)
+                var j = i + 2
+                while j < n, !(bytes[j] >= 0x40 && bytes[j] <= 0x7e) { j += 1 }
+                guard j < n else { break }
+                if bytes[j] == 0x6d { out.append(contentsOf: bytes[i...j]) } // 'm' = SGR, keep
+                i = j + 1
+            } else if kind == 0x5d { // ']' → OSC: drop until BEL or ST (ESC \)
+                var j = i + 2
+                while j < n {
+                    if bytes[j] == 0x07 { j += 1; break }
+                    if bytes[j] == esc, j + 1 < n, bytes[j + 1] == 0x5c { j += 2; break }
+                    j += 1
+                }
+                i = j
+            } else {
+                // Other escape (charset selection, etc.) — drop ESC + next byte.
+                i += 2
+            }
+        }
+        return out
     }
 
     private func spawnSona() {
@@ -261,6 +349,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         }
 
         termView.getTerminal().resetToInitialState()
+        termView.getTerminal().changeScrollback(5000)  // keep more history than the 500 default
         (termView as? DropEnabledTerminalView)?.enableWarmTerminalColors()
 
         let binary = InteractiveSessionTab.claudeBinary
@@ -504,6 +593,8 @@ final class InteractiveSessionsViewModel: ObservableObject {
                 kind: kind,
                 url: row.url.flatMap { URL(string: $0) }
             )
+            // Restored Terminal sessions replay their saved scrollback once.
+            tab.shouldReplayScrollback = (kind == .terminal)
             tabs.append(tab)
             if row.wasActive == 1 { lastActiveId = uuid }
         }
@@ -565,6 +656,7 @@ final class InteractiveSessionsViewModel: ObservableObject {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
         let tab = tabs[idx]
         tab.terminate()
+        if tab.kind == .terminal { handleScrollbackOnClose(tab) }
         tabs.remove(at: idx)
         if let pool = dbPool {
             InteractiveSessionsStore.delete(dbPool: pool, id: tab.id.uuidString.lowercased())
@@ -591,6 +683,75 @@ final class InteractiveSessionsViewModel: ObservableObject {
             } else {
                 activeTabId = nil
             }
+        }
+    }
+
+    /// On closing a Terminal session: if its scrollback log holds meaningful
+    /// activity, dispatch a background task to summarize it into memory and then
+    /// delete the log. Trivial/empty logs are just deleted inline.
+    private func handleScrollbackOnClose(_ tab: InteractiveSessionTab) {
+        let logURL = InteractiveSessionTab.scrollbackLogURL(for: tab.id)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path)
+        let bytes = (attrs?[.size] as? Int) ?? 0
+        guard bytes > 0 else { return }
+        if bytes > 512 {
+            // Leave the log on disk — the dispatched task reads it, writes the
+            // memory, then deletes it itself.
+            enqueueScrollbackSummary(name: tab.name, cwd: tab.cwd.path, logURL: logURL)
+        } else {
+            try? FileManager.default.removeItem(at: logURL)  // nothing worth summarizing
+        }
+    }
+
+    /// Insert a `pending` task the dispatcher hands to a bridge worker: read the
+    /// scrollback log, write a concise memory of what the session did, then
+    /// delete the log. (The worker has mem_store + file tools.)
+    private func enqueueScrollbackSummary(name: String, cwd: String, logURL: URL) {
+        guard let pool = dbPool else { return }
+        let path = logURL.path
+        let prompt = """
+        A plain terminal session in the Sonata app was just closed. Its full \
+        on-screen output (scrollback) is saved at:
+          \(path)
+
+        The session was named "\(name)" and ran in directory: \(cwd)
+
+        Do the following:
+        1. Read the scrollback log file at the path above.
+        2. If it contains meaningful activity, write ONE concise memory \
+        summarizing what happened — the notable commands run, what they \
+        accomplished, any errors or important output, and the overall outcome. \
+        Use the mem_store tool with type "conversation_summary", tags \
+        ["terminal-session","scrollback-summary"], and include the session name \
+        in the content. Keep it tight (a few sentences) — a record of what was \
+        done, not a transcript.
+        3. If the log is empty or only a shell prompt with no real activity, \
+        skip the memory.
+        4. After step 2 (or 3), delete the log file: rm -f "\(path)"
+
+        The log may contain terminal escape codes; ignore the formatting noise \
+        and focus on the actual commands and output.
+        """
+        let taskId = UUID().uuidString.lowercased()
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        do {
+            try pool.write { db in
+                try db.execute(sql: """
+                    INSERT INTO tasks (id, title, prompt, status, priority, assignedTo, source, workingDir, model, maxTurns, createdAt, updatedAt)
+                    VALUES (?, ?, ?, 'pending', 'low', 'scheduler', 'session-scrollback', ?, ?, ?, ?, ?)
+                """, arguments: [
+                    taskId,
+                    "Summarize terminal session: \(name)",
+                    prompt,
+                    NSHomeDirectory(),
+                    "claude-sonnet-4-6",
+                    20,
+                    now,
+                    now,
+                ])
+            }
+        } catch {
+            NSLog("[scrollback] failed to enqueue summary task: \(error)")
         }
     }
 

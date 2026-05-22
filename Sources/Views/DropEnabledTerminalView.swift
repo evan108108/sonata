@@ -51,6 +51,7 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
 
     deinit {
         NotificationCenter.default.removeObserver(self, name: .sonataTerminalColorsChanged, object: nil)
+        try? scrollbackHandle?.close()
     }
 
     private func observeTerminalColorChanges() {
@@ -63,6 +64,64 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
         // Only terminals that opted into the themed colors re-apply (workers
         // stay on the neutral default).
         if warmColorsEnabled { applyWarmTerminalColors() }
+    }
+
+    // MARK: Scrollback capture
+    //
+    // When `scrollbackLogURL` is set (Terminal-kind sessions only), every byte
+    // the process prints is appended to that file so the session's on-screen
+    // history can be replayed after a restart. dataReceived is delivered on the
+    // main queue (LocalProcess default), so this stays on the main actor.
+
+    static let scrollbackMaxBytes = 5 * 1024 * 1024
+
+    /// File the session's output is teed into. Set by InteractiveSessionTab for
+    /// `.terminal` sessions; nil for everything else (Sona/Workers/Supervisor),
+    /// which don't capture scrollback.
+    var scrollbackLogURL: URL?
+
+    private var scrollbackHandle: FileHandle?
+    private var scrollbackBytes: Int = 0
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        appendScrollback(slice)
+        super.dataReceived(slice: slice)
+    }
+
+    private func appendScrollback(_ slice: ArraySlice<UInt8>) {
+        guard let url = scrollbackLogURL else { return }
+        if scrollbackHandle == nil { openScrollbackHandle(url) }
+        guard let handle = scrollbackHandle else { return }
+        do {
+            try handle.write(contentsOf: Data(slice))
+            scrollbackBytes += slice.count
+            if scrollbackBytes > Self.scrollbackMaxBytes { trimScrollback(url) }
+        } catch {
+            // Capture is best-effort; never let a logging failure disrupt the PTY.
+        }
+    }
+
+    private func openScrollbackHandle(_ url: URL) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
+        scrollbackHandle = try? FileHandle(forWritingTo: url)
+        // Append after any existing content (so replay history is preserved
+        // across restarts) and seed the byte counter from the current size.
+        scrollbackBytes = Int((try? scrollbackHandle?.seekToEnd()) ?? 0)
+    }
+
+    /// Keep only the last half of the cap when the log grows past it, so a
+    /// long-running session can't grow the file unbounded. Trimming may clip an
+    /// escape sequence, which is acceptable for a replay buffer.
+    private func trimScrollback(_ url: URL) {
+        try? scrollbackHandle?.close()
+        scrollbackHandle = nil
+        if let data = try? Data(contentsOf: url) {
+            let kept = data.suffix(Self.scrollbackMaxBytes / 2)
+            try? kept.write(to: url)
+        }
+        openScrollbackHandle(url)
     }
 
     // MARK: Warm terminal colors (sticky)
