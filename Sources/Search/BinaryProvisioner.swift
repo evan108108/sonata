@@ -25,6 +25,10 @@ struct ManagedBinary: Sendable {
         case rawBinary                              // the download IS the executable
         case tarGz(binaryPathInArchive: String)     // extract, binary at this relative path
         case zip(binaryPathInArchive: String)
+        // Extract the WHOLE archive into a versioned dir and run `binaryName` in
+        // place — for binaries that ship with sibling dylibs (e.g. llama-server,
+        // rpath @loader_path). The dir is kept; the binary is located recursively.
+        case archiveDir(binaryName: String)
     }
 
     struct Source: Sendable {
@@ -85,8 +89,13 @@ actor BinaryProvisioner {
         for path in spec.systemPaths where fm.isExecutableFile(atPath: path) {
             return path
         }
-        let cached = cacheURL(for: spec).path
-        if fm.isExecutableFile(atPath: cached) { return cached }
+        if case .archiveDir(let binName)? = spec.sources[BinaryArch.current]?.packaging {
+            let dir = cacheURL(for: spec).path
+            if let found = findFile(named: binName, under: dir), fm.isExecutableFile(atPath: found) { return found }
+        } else {
+            let cached = cacheURL(for: spec).path
+            if fm.isExecutableFile(atPath: cached) { return cached }
+        }
         return nil
     }
 
@@ -150,6 +159,20 @@ actor BinaryProvisioner {
         let finalURL = cacheURL(for: spec)
         try? fm.removeItem(at: finalURL)
 
+        // archiveDir: extract the WHOLE archive into the versioned dir and run the
+        // binary in place — it keeps its sibling dylibs (rpath @loader_path).
+        if case .archiveDir(let binName) = source.packaging {
+            try fm.createDirectory(at: finalURL, withIntermediateDirectories: true)
+            try extractArchive(data: data, ext: archiveExt(source.url), into: finalURL)
+            guard let binPath = findFile(named: binName, under: finalURL.path) else {
+                throw ProvisionError.binaryNotFoundInArchive
+            }
+            try fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o755))], ofItemAtPath: binPath)
+            stripQuarantine(binPath)
+            cleanStaleVersions(spec: spec, keeping: finalURL.lastPathComponent)
+            return binPath
+        }
+
         switch source.packaging {
         case .rawBinary:
             try data.write(to: finalURL)
@@ -157,12 +180,47 @@ actor BinaryProvisioner {
             try extract(data: data, ext: "tar.gz", innerPath: inner, to: finalURL)
         case .zip(let inner):
             try extract(data: data, ext: "zip", innerPath: inner, to: finalURL)
+        case .archiveDir:
+            break // handled above
         }
 
         try fm.setAttributes([.posixPermissions: NSNumber(value: Int16(0o755))], ofItemAtPath: finalURL.path)
         stripQuarantine(finalURL.path)
         cleanStaleVersions(spec: spec, keeping: finalURL.lastPathComponent)
         return finalURL.path
+    }
+
+    /// Extract an entire archive into `dir` (vs plucking one binary).
+    private func extractArchive(data: Data, ext: String, into dir: URL) throws {
+        let fm = FileManager.default
+        let archive = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
+        try data.write(to: archive)
+        defer { try? fm.removeItem(at: archive) }
+        let proc = Process()
+        if ext == "zip" {
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            proc.arguments = ["-x", "-k", archive.path, dir.path]
+        } else {
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            proc.arguments = ["-xzf", archive.path, "-C", dir.path]
+        }
+        proc.standardError = FileHandle.nullDevice
+        try proc.run(); proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { throw ProvisionError.extractionFailed }
+    }
+
+    private func archiveExt(_ url: URL) -> String { url.path.hasSuffix(".zip") ? "zip" : "tar.gz" }
+
+    /// Recursively find the first regular file named `name` under `dir`.
+    private func findFile(named name: String, under dir: String) -> String? {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(atPath: dir) else { return nil }
+        for case let rel as String in en where (rel as NSString).lastPathComponent == name {
+            let full = dir + "/" + rel
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: full, isDirectory: &isDir), !isDir.boolValue { return full }
+        }
+        return nil
     }
 
     private func extract(data: Data, ext: String, innerPath: String, to finalURL: URL) throws {
@@ -241,5 +299,42 @@ extension ManagedBinary {
                 packaging: .rawBinary
             ),
         ]
+    )
+
+    /// llama.cpp server — runs nomic embeddings locally. Sonata manages it as an
+    /// internal subprocess (like MeiliSearch), NOT a user-installed daemon. The
+    /// macOS release ships `llama-server` + its dylibs flat in one dir with
+    /// @loader_path rpath, so it runs in place once extracted. ~10 MB.
+    /// arm64 asset verified (build b9286); x86_64 name follows the same release
+    /// pattern (verify before an Intel ship).
+    static let llamaServer = ManagedBinary(
+        name: "llama-server",
+        version: "b9286",
+        systemPaths: ["/opt/homebrew/bin/llama-server", "/usr/local/bin/llama-server"],
+        sources: [
+            .arm64: .init(
+                url: URL(string: "https://github.com/ggml-org/llama.cpp/releases/download/b9286/llama-b9286-bin-macos-arm64-kleidiai.tar.gz")!,
+                sha256: nil,
+                packaging: .archiveDir(binaryName: "llama-server")
+            ),
+            .x86_64: .init(
+                url: URL(string: "https://github.com/ggml-org/llama.cpp/releases/download/b9286/llama-b9286-bin-macos-x64.tar.gz")!,
+                sha256: nil,
+                packaging: .archiveDir(binaryName: "llama-server")
+            ),
+        ]
+    )
+
+    /// nomic-embed-text-v1.5 (Q8_0 GGUF, 768-dim, retrieval-trained) — the local
+    /// embedding model. Arch-independent (same file both arches). ~146 MB.
+    static let nomicEmbedModel = ManagedBinary(
+        name: "nomic-embed-text-v1.5",
+        version: "Q8_0",
+        systemPaths: [],
+        sources: {
+            let url = URL(string: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf")!
+            let src = ManagedBinary.Source(url: url, sha256: nil, packaging: .rawBinary)
+            return [.arm64: src, .x86_64: src]
+        }()
     )
 }
