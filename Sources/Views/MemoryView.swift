@@ -139,40 +139,36 @@ struct MemoryView: View {
                 .padding(.horizontal)
                 .padding(.top)
 
-                // Filter controls
-                HStack(spacing: 12) {
+                // Filter controls — kept compact so they fit the sidebar width.
+                HStack(spacing: 10) {
                     Picker("Type", selection: $typeFilter) {
                         ForEach(memoryTypes, id: \.self) { t in
                             Text(t == "all" ? "All Types" : t.replacingOccurrences(of: "_", with: " ").capitalized)
                                 .tag(t)
                         }
                     }
+                    .labelsHidden()
                     .pickerStyle(.menu)
-                    .frame(maxWidth: 180)
+                    .fixedSize()
                     .onChange(of: typeFilter) { _, _ in
                         triggerSearch()
                     }
 
+                    Spacer(minLength: 0)
+
                     HStack(spacing: 4) {
-                        Text("Min:")
+                        Text("Min")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text("\(Int(minImportance))")
                             .font(.caption.monospacedDigit())
-                            .frame(width: 16)
+                            .frame(width: 14)
                         Slider(value: $minImportance, in: 0...10, step: 1)
-                            .frame(maxWidth: 100)
+                            .frame(width: 90)
                             .onChange(of: minImportance) { _, _ in
                                 triggerSearch()
                             }
                     }
-
-                    TextField("Project", text: $projectFilter)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 120)
-                        .onSubmit { triggerSearch() }
-
-                    Spacer()
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
@@ -207,12 +203,17 @@ struct MemoryView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(memories, selection: $selectedMemory) { mem in
-                        MemoryListRow(memory: mem)
-                            .tag(mem)
-                            .contentShape(Rectangle())
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(memories) { mem in
+                                MemoryListRow(memory: mem)
+                                    .sidebarRowSelection(selectedMemory?.id == mem.id)
+                                    .onTapGesture { selectedMemory = mem }
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 4)
                     }
-                    .listStyle(.inset)
                 }
 
                 // Stats bar
@@ -227,8 +228,7 @@ struct MemoryView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 6)
             }
-            .frame(minWidth: 340)
-            .warmSidebar()
+            .sonataSidebar()
         } detail: {
             if let mem = selectedMemory {
                 MemoryDetailView(memory: mem)
@@ -350,19 +350,12 @@ private struct MemoryListRow: View {
                         .padding(.vertical, 1)
                         .background(memory.typeColor.opacity(0.15), in: Capsule())
 
-                    if let tags = memory.tags, !tags.isEmpty {
-                        ForEach(tags.prefix(3), id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Spacer()
-
                     Text(memory.createdDate.formatted(.relative(presentation: .named)))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
                 }
             }
 

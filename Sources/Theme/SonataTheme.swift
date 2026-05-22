@@ -429,6 +429,29 @@ extension View {
             .warmSidebar(flame: flame)
     }
 
+    /// Warm sidebar-row selection used across every sidebar. macOS's `List`
+    /// paints selection from `NSColor.selectedContentBackgroundColor` (system
+    /// blue) and SwiftUI's `.tint` can't override it — so selectable sidebars
+    /// use a `ScrollView` + `LazyVStack` of rows and call this for the
+    /// highlight: the ember `selectionTint` fill + a faint `selectionAccent`
+    /// hairline, identical to Sessions and Workers. Pair with `.onTapGesture`
+    /// to set the selection.
+    func sidebarRowSelection(_ isSelected: Bool) -> some View {
+        self
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Theme.Color.selectionTint : SwiftUI.Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isSelected ? Theme.Color.selectionAccent.opacity(0.55) : SwiftUI.Color.clear,
+                            lineWidth: 0.5)
+            )
+    }
+
     /// Make the window's titlebar match the chrome shell. Applied at the
     /// WindowGroup root so every window opened from the WindowGroup picks it
     /// up. Uses AppKit interop because SwiftUI's `.toolbarBackground(_:for:
