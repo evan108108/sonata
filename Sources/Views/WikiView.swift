@@ -218,7 +218,10 @@ struct WikiView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(treeNodes, children: \.children, selection: $selectedNodeId) { node in
+                    // No `selection:` binding — macOS would paint it system blue;
+                    // we drive selection via tap + the warm sidebarRowSelection
+                    // pill instead. `children:` still gives the disclosure tree.
+                    List(treeNodes, children: \.children) { node in
                         HStack(spacing: 6) {
                             Image(systemName: node.icon)
                                 .foregroundStyle(node.children != nil ? Theme.Color.accentRust : .secondary)
@@ -230,7 +233,13 @@ struct WikiView: View {
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
+                            Spacer(minLength: 0)
                         }
+                        .sidebarRowSelection(selectedNodeId == node.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedNodeId = node.id }
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                     }
                     .listStyle(.sidebar)
                     .onChange(of: selectedNodeId) { _, newId in

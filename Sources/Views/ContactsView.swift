@@ -108,11 +108,16 @@ struct ContactsView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $selectedContact) {
-                    ForEach(vm.filteredContacts) { contact in
-                        ContactListRow(contact: contact)
-                            .tag(contact)
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(vm.filteredContacts) { contact in
+                            ContactListRow(contact: contact)
+                                .sidebarRowSelection(selectedContact?.id == contact.id)
+                                .onTapGesture { selectedContact = contact }
+                        }
                     }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
                 }
             }
         }

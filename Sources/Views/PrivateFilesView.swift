@@ -62,10 +62,13 @@ struct PrivateFilesView: View {
 
                 Divider()
 
-                List(tree, children: \.children, selection: $selectedNodeId) { node in
+                // No `selection:` binding — drives selection via tap + the warm
+                // sidebarRowSelection pill (no system-blue highlight); `children:`
+                // keeps the disclosure tree.
+                List(tree, children: \.children) { node in
                     HStack(spacing: 6) {
                         Image(systemName: node.icon)
-                            .foregroundStyle(node.isDirectory ? .blue : .secondary)
+                            .foregroundStyle(node.isDirectory ? Theme.Color.accentRust : .secondary)
                             .frame(width: 16)
                         Text(node.name)
                             .lineLimit(1)
@@ -76,6 +79,11 @@ struct PrivateFilesView: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
+                    .sidebarRowSelection(selectedNodeId == node.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedNodeId = node.id }
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 }
                 .listStyle(.sidebar)
                 .onChange(of: selectedNodeId) { _, newId in

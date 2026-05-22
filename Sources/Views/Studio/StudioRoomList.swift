@@ -104,7 +104,7 @@ struct StudioRoomList: View {
             } label: {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.Color.selectionAccent)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -297,6 +297,11 @@ private struct StudioRoomRow: View {
         .padding(.vertical, 6)
         .background(rowBackground)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(isSelected ? Theme.Color.selectionAccent.opacity(0.55) : Color.clear,
+                        lineWidth: 0.5)
+        )
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.10)) {
                 isHovering = hovering
@@ -317,7 +322,6 @@ private struct StudioRoomRow: View {
     }
 
     private var titleColor: Color {
-        if isSelected { return Color.accentColor }
         if room.state == "pending-grant" { return .secondary }
         return .primary
     }
@@ -343,12 +347,12 @@ private struct StudioRoomRow: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
-            .background(Color.accentColor, in: Capsule())
+            .background(Theme.Color.selectionAccent, in: Capsule())
     }
 
     private var rowBackground: Color {
         if isSelected {
-            return Color.accentColor.opacity(0.15)
+            return Theme.Color.selectionTint
         }
         if isHovering {
             return Color.primary.opacity(0.06)

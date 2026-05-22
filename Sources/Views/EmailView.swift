@@ -52,13 +52,17 @@ struct EmailView: View {
             } else {
                 HSplitView {
                     // Email list
-                    List(selection: $selectedEmail) {
-                        ForEach(vm.emails) { email in
-                            EmailListRow(email: email)
-                                .tag(email)
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(vm.emails) { email in
+                                EmailListRow(email: email)
+                                    .sidebarRowSelection(selectedEmail?._id == email._id)
+                                    .onTapGesture { selectedEmail = email }
+                            }
                         }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 4)
                     }
-                    .listStyle(.sidebar)
                     .frame(minWidth: Theme.Sidebar.minWidth,
                            idealWidth: Theme.Sidebar.idealWidth,
                            maxWidth: Theme.Sidebar.maxWidth)

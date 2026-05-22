@@ -1551,7 +1551,7 @@ final class StudioStore: ObservableObject {
         SELECT id, name, description, attributes, createdAt, updatedAt
         FROM entities
         WHERE type = 'studio_room'
-        ORDER BY updatedAt DESC
+        ORDER BY createdAt ASC
         """
 
     nonisolated static let SQL_TRACKS_IN_ROOM = """
