@@ -22,27 +22,39 @@ final class SessionKindPersistenceTests: XCTestCase {
         let pool = try migratedPool()
         InteractiveSessionsStore.upsert(
             dbPool: pool, id: "id-sona", sessionId: "s1", name: "Session 1",
-            cwd: "/tmp", position: 0, wasActive: true, kind: "sona")
+            cwd: "/tmp", position: 0, wasActive: true, kind: "sona", url: nil)
         InteractiveSessionsStore.upsert(
             dbPool: pool, id: "id-term", sessionId: "s2", name: "Terminal 1",
-            cwd: "/tmp", position: 1, wasActive: false, kind: "terminal")
+            cwd: "/tmp", position: 1, wasActive: false, kind: "terminal", url: nil)
+        InteractiveSessionsStore.upsert(
+            dbPool: pool, id: "id-web", sessionId: "s3", name: "Web 1",
+            cwd: "/tmp", position: 2, wasActive: false, kind: "webview",
+            url: "https://example.com")
 
         let rows = InteractiveSessionsStore.loadAll(dbPool: pool)
-        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.count, 3)
         XCTAssertEqual(rows.first(where: { $0.id == "id-sona" })?.kind, "sona")
         XCTAssertEqual(rows.first(where: { $0.id == "id-term" })?.kind, "terminal")
+        // Web sessions round-trip both kind and url; non-web rows keep url nil.
+        let web = rows.first(where: { $0.id == "id-web" })
+        XCTAssertEqual(web?.kind, "webview")
+        XCTAssertEqual(web?.url, "https://example.com")
+        XCTAssertNil(rows.first(where: { $0.id == "id-sona" })?.url)
     }
 
     func testUpsertUpdatesKindOnConflict() throws {
         let pool = try migratedPool()
         InteractiveSessionsStore.upsert(
             dbPool: pool, id: "x", sessionId: "s", name: "n",
-            cwd: "/tmp", position: 0, wasActive: false, kind: "sona")
-        // Re-upsert same id with a different kind — ON CONFLICT must update it.
+            cwd: "/tmp", position: 0, wasActive: false, kind: "sona", url: nil)
+        // Re-upsert same id with a different kind + url — ON CONFLICT must update both.
         InteractiveSessionsStore.upsert(
             dbPool: pool, id: "x", sessionId: "s", name: "n",
-            cwd: "/tmp", position: 0, wasActive: false, kind: "terminal")
-        XCTAssertEqual(InteractiveSessionsStore.loadAll(dbPool: pool).first?.kind, "terminal")
+            cwd: "/tmp", position: 0, wasActive: false, kind: "webview",
+            url: "https://anthropic.com")
+        let row = InteractiveSessionsStore.loadAll(dbPool: pool).first
+        XCTAssertEqual(row?.kind, "webview")
+        XCTAssertEqual(row?.url, "https://anthropic.com")
     }
 
     func testV15ColumnDefaultsToSonaWhenOmitted() throws {
@@ -65,10 +77,15 @@ final class SessionKindPersistenceTests: XCTestCase {
     func testSessionKindRawValueParsing() {
         XCTAssertEqual(SessionKind(rawValue: "sona"), .sona)
         XCTAssertEqual(SessionKind(rawValue: "terminal"), .terminal)
+        XCTAssertEqual(SessionKind(rawValue: "webview"), .webview)
         XCTAssertNil(SessionKind(rawValue: "future-type"))
         // The bootstrap path uses `?? .sona`, so an unknown persisted value
         // degrades safely to the default rather than dropping the session.
         XCTAssertEqual(SessionKind(rawValue: "future-type") ?? .sona, .sona)
-        XCTAssertEqual(Set(SessionKind.allCases), [.sona, .terminal])
+        XCTAssertEqual(Set(SessionKind.allCases), [.sona, .terminal, .webview])
+        // Web is the only non-terminal-backed kind.
+        XCTAssertFalse(SessionKind.webview.isTerminalBacked)
+        XCTAssertTrue(SessionKind.sona.isTerminalBacked)
+        XCTAssertTrue(SessionKind.terminal.isTerminalBacked)
     }
 }

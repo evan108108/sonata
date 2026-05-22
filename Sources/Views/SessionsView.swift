@@ -23,6 +23,9 @@ struct SessionsView: View {
         .sheet(isPresented: $showNewSessionSheet) {
             NewSessionSheet(vm: vm) { showNewSessionSheet = false }
         }
+        // Entering the Sessions section drops focus into the active session so
+        // the user can start typing immediately (terminal-backed kinds).
+        .onAppear { vm.focusActiveContent() }
     }
 
     // MARK: - Sidebar
@@ -174,7 +177,7 @@ struct SessionsView: View {
             Text("No active sessions")
                 .font(.title3)
                 .foregroundStyle(.secondary)
-            Text("Each session is a Claude Code (Sona) or a plain terminal subprocess.")
+            Text("A session can be Claude Code (Sona), a plain terminal, or a web view.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Button("New session…") { showNewSessionSheet = true }
@@ -195,8 +198,10 @@ private struct SessionSidebarRow: View {
     @FocusState private var renameFocused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            statusDot
+        // Baseline-align the kind icon with the title row rather than centering
+        // it across the title + subtitle stack.
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            kindIcon
             VStack(alignment: .leading, spacing: 2) {
                 if isRenaming {
                     TextField("", text: $editText)
@@ -213,7 +218,7 @@ private struct SessionSidebarRow: View {
                         .font(.system(.body))
                         .lineLimit(1)
                 }
-                Text(tab.cwd.lastPathComponent)
+                Text(tab.subtitle)
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -230,13 +235,18 @@ private struct SessionSidebarRow: View {
         }
     }
 
-    private var statusDot: some View {
-        Circle()
-            .fill(dotColor)
-            .frame(width: 8, height: 8)
+    /// Kind icon (flame / terminal / globe) tinted + glowing in the session's
+    /// state color, so the row conveys both *what* the session is and *how*
+    /// it's doing without a separate status dot.
+    private var kindIcon: some View {
+        Image(systemName: tab.kind.iconName)
+            .font(.system(size: 12))
+            .foregroundStyle(stateColor)
+            .shadow(color: stateColor.opacity(0.75), radius: 4)
+            .frame(width: 16, alignment: .center)
     }
 
-    private var dotColor: SwiftUI.Color {
+    private var stateColor: SwiftUI.Color {
         switch tab.state {
         case .starting: return .yellow
         case .running: return .green
@@ -283,32 +293,99 @@ private struct SessionSidebarRow: View {
 private struct SessionsTerminalContainer: NSViewRepresentable {
     @ObservedObject var vm: InteractiveSessionsViewModel
 
+    final class Coordinator {
+        weak var catcher: SessionDropCatcher?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         container.wantsLayer = true
+
+        // App-level drop target layered on top of the session content. The
+        // embedded SwiftTerm view declines file drops while Claude Code's TUI
+        // is running (the raw path would hit Claude's input instead), so we
+        // catch the drop here and forward the resolved path into the active
+        // session's terminal. hitTest → nil keeps mouse/clicks passing through
+        // to the terminal below.
+        let catcher = SessionDropCatcher(frame: container.bounds)
+        catcher.autoresizingMask = [.width, .height]
+        catcher.onPaths = { [vm] paths in vm.handleDroppedPaths(paths) }
+        container.addSubview(catcher)
+        context.coordinator.catcher = catcher
+
         return container
     }
 
     func updateNSView(_ container: NSView, context: Context) {
-        // Mount any session terminals not yet attached.
+        let catcher = context.coordinator.catcher
+
+        // Mount any session content views (terminal or webview) not yet
+        // attached — below the drop catcher so it stays frontmost.
         for tab in vm.tabs {
-            if tab.terminalView.superview !== container {
-                tab.terminalView.frame = container.bounds
-                tab.terminalView.autoresizingMask = [.width, .height]
-                container.addSubview(tab.terminalView)
+            let content = tab.contentView
+            if content.superview !== container {
+                content.frame = container.bounds
+                content.autoresizingMask = [.width, .height]
+                container.addSubview(content, positioned: .below, relativeTo: catcher)
             }
         }
-        // Drop terminals for sessions that no longer exist.
+        // Drop content views for sessions that no longer exist (identity-based
+        // so it works for both terminals and webviews). Never remove the catcher.
         for subview in container.subviews {
-            if let term = subview as? LocalProcessTerminalView,
-               !vm.tabs.contains(where: { $0.terminalView === term }) {
-                term.removeFromSuperview()
+            if subview === catcher { continue }
+            if !vm.tabs.contains(where: { $0.contentView === subview }) {
+                subview.removeFromSuperview()
             }
         }
-        // Show only the active session's terminal.
+        // Show only the active session's content.
         for tab in vm.tabs {
-            tab.terminalView.isHidden = (tab.id != vm.activeTabId)
+            tab.contentView.isHidden = (tab.id != vm.activeTabId)
         }
+        // Keep the catcher frontmost (re-adding moves it to the top of the
+        // z-order in case a freshly-mounted content view jumped ahead).
+        if let catcher, catcher.superview === container {
+            container.addSubview(catcher)
+        }
+    }
+}
+
+/// Transparent, top-most drop target for the sessions detail pane. Registered
+/// for file / URL / image drags but returns nil from `hitTest` so mouse events
+/// fall through to the terminal/webview below. AppKit resolves drag
+/// destinations by view geometry + registered types (not `hitTest`), so this
+/// still receives drops — letting the app accept file drops even when the
+/// embedded SwiftTerm view declines them under Claude Code's full-screen TUI.
+final class SessionDropCatcher: NSView {
+    var onPaths: (([String]) -> Void)?
+
+    private static let acceptedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .URL, .png, .tiff]
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes(Self.acceptedTypes)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes(Self.acceptedTypes)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { operation(for: sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { operation(for: sender) }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = DropEnabledTerminalView.resolvePaths(from: sender.draggingPasteboard)
+        guard !paths.isEmpty else { return false }
+        onPaths?(paths)
+        return true
+    }
+
+    private func operation(for sender: NSDraggingInfo) -> NSDragOperation {
+        DropEnabledTerminalView.resolvePaths(from: sender.draggingPasteboard).isEmpty ? [] : .copy
     }
 }
 
@@ -387,6 +464,7 @@ private struct NewSessionSheet: View {
 
     @State private var name: String = ""
     @State private var cwdPath: String = ""
+    @State private var urlString: String = ""
     @State private var kind: SessionKind = .sona
 
     var body: some View {
@@ -411,12 +489,20 @@ private struct NewSessionSheet: View {
                     }
                     .pickerStyle(.segmented)
                     TextField("Name", text: $name, prompt: Text(defaultName(for: kind)))
-                    HStack {
-                        TextField("Working directory", text: $cwdPath, prompt: Text(defaultCwd(for: kind).path))
+                    if kind == .webview {
+                        TextField("URL", text: $urlString, prompt: Text("https://example.com"))
                             .font(.system(.body, design: .monospaced))
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Button("Browse…") { browse() }
+                            .textContentType(.URL)
+                    } else {
+                        HStack {
+                            TextField("Working directory", text: $cwdPath, prompt: Text(defaultCwd(for: kind).path))
+                                .font(.system(.body, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("Browse…") { browse() }
+                        }
                     }
                 }
             }
@@ -452,6 +538,7 @@ private struct NewSessionSheet: View {
         switch kind {
         case .sona: return "Session \(nextIndex)"
         case .terminal: return "Terminal \(nextIndex)"
+        case .webview: return "Web \(nextIndex)"
         }
     }
 
@@ -460,11 +547,21 @@ private struct NewSessionSheet: View {
         switch kind {
         case .sona:
             return URL(fileURLWithPath: "\(home)/.sonata/session/session\(vm.tabs.count + 1)")
-        case .terminal:
-            // A plain shell is most useful starting from home, not a throwaway
-            // per-session scratch dir.
+        case .terminal, .webview:
+            // A plain shell / web session has no meaningful scratch dir, so
+            // anchor at home rather than a throwaway per-session directory.
             return URL(fileURLWithPath: home)
         }
+    }
+
+    /// Parse the user's URL text, prepending `https://` when no scheme is
+    /// given (so "example.com" works). Returns nil for empty/invalid input.
+    private func normalizedURL() -> URL? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let withScheme = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: withScheme), url.host != nil else { return nil }
+        return url
     }
 
     private func browse() {
@@ -484,8 +581,17 @@ private struct NewSessionSheet: View {
 
     private func start() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedPath = cwdPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let useName = trimmedName.isEmpty ? defaultName(for: kind) : trimmedName
+
+        if kind == .webview {
+            // Require a valid URL; if it's missing/garbage, keep the sheet open.
+            guard let url = normalizedURL() else { return }
+            vm.addTab(name: useName, cwd: defaultCwd(for: kind), kind: kind, url: url)
+            onClose()
+            return
+        }
+
+        let trimmedPath = cwdPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let useCwd  = trimmedPath.isEmpty
             ? defaultCwd(for: kind)
             : URL(fileURLWithPath: (trimmedPath as NSString).expandingTildeInPath)

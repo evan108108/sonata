@@ -210,7 +210,7 @@ private struct ActiveTabBody: View {
     var body: some View {
         switch tab.state {
         case .starting, .running:
-            InteractiveSessionTerminalView(terminalInstance: tab.terminalView)
+            InteractiveSessionContentView(contentInstance: tab.contentView)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .stopped(let exitCode):
             stoppedView(exitCode: exitCode)
@@ -276,27 +276,27 @@ private struct ActiveTabBody: View {
 
 // MARK: - SwiftTerm host
 
-/// Thin NSViewRepresentable that hosts a single LocalProcessTerminalView. Reuses
-/// the autoresizing-mask trick from SessionChatPanel so the SwiftTerm view fills
-/// the SwiftUI parent without being recreated.
-private struct InteractiveSessionTerminalView: NSViewRepresentable {
-    let terminalInstance: LocalProcessTerminalView
+/// Thin NSViewRepresentable that hosts a single session content view (a
+/// SwiftTerm terminal or a WKWebView). Reuses the autoresizing-mask trick so
+/// the hosted view fills the SwiftUI parent without being recreated.
+private struct InteractiveSessionContentView: NSViewRepresentable {
+    let contentInstance: NSView
 
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         container.wantsLayer = true
-        terminalInstance.frame = container.bounds
-        terminalInstance.autoresizingMask = [.width, .height]
-        container.addSubview(terminalInstance)
+        contentInstance.frame = container.bounds
+        contentInstance.autoresizingMask = [.width, .height]
+        container.addSubview(contentInstance)
         return container
     }
 
     func updateNSView(_ container: NSView, context: Context) {
-        if terminalInstance.superview !== container {
-            terminalInstance.removeFromSuperview()
-            terminalInstance.frame = container.bounds
-            terminalInstance.autoresizingMask = [.width, .height]
-            container.addSubview(terminalInstance)
+        if contentInstance.superview !== container {
+            contentInstance.removeFromSuperview()
+            contentInstance.frame = container.bounds
+            contentInstance.autoresizingMask = [.width, .height]
+            container.addSubview(contentInstance)
         }
     }
 }

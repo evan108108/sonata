@@ -3,6 +3,7 @@ import GRDB
 import SwiftTerm
 import AppKit
 import SwiftUI
+import WebKit
 
 enum InteractiveSessionState: Equatable {
     case starting
@@ -18,6 +19,7 @@ enum InteractiveSessionState: Equatable {
 enum SessionKind: String, Codable, CaseIterable, Identifiable {
     case sona
     case terminal
+    case webview
 
     var id: String { rawValue }
 
@@ -25,15 +27,32 @@ enum SessionKind: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .sona: return "Sona"
         case .terminal: return "Terminal"
+        case .webview: return "Web"
         }
     }
+
+    /// SF Symbol shown in the sessions sidebar so the kind is identifiable at
+    /// a glance (replaces the old plain status dot).
+    var iconName: String {
+        switch self {
+        case .sona: return "flame.fill"
+        case .terminal: return "terminal.fill"
+        case .webview: return "globe"
+        }
+    }
+
+    /// True for kinds backed by a subprocess + terminal view (Sona, Terminal).
+    /// Web sessions are backed by a WKWebView instead.
+    var isTerminalBacked: Bool { self != .webview }
 }
 
-/// One tab in the Interactive Sessions window — owns its own SwiftTerm terminal
-/// view and Claude Code subprocess. Acts as the LocalProcessTerminalView delegate
-/// so it can react to process termination on its own without a separate coordinator.
+/// One tab in the Interactive Sessions window. Content-type-aware: a
+/// terminal-backed session (Sona / Terminal) owns a SwiftTerm view + subprocess
+/// and acts as its `LocalProcessTerminalViewDelegate`; a Web session owns a
+/// WKWebView and acts as its `WKNavigationDelegate`. `contentView` exposes
+/// whichever to the SwiftUI container.
 @MainActor
-final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, LocalProcessTerminalViewDelegate {
+final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, LocalProcessTerminalViewDelegate, WKNavigationDelegate {
     let id: UUID
     @Published var name: String
     @Published var state: InteractiveSessionState = .starting
@@ -45,11 +64,35 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     @Published var beginRenameRequested: Bool = false
 
     let cwd: URL
-    let terminalView: LocalProcessTerminalView
     let sessionId: String
 
-    /// What this tab runs (Sona = Claude Code, terminal = plain shell).
+    /// What this tab runs (Sona = Claude Code, terminal = plain shell,
+    /// webview = a WKWebView pointed at `url`).
     let kind: SessionKind
+
+    /// Target URL for `.webview` sessions; nil for terminal-backed kinds.
+    let url: URL?
+
+    // Exactly one of these is non-nil, selected by `kind`. `contentView`
+    // exposes whichever to the SwiftUI container.
+    let terminal: LocalProcessTerminalView?
+    let webView: WKWebView?
+
+    /// The NSView to mount for this session — terminal or webview.
+    var contentView: NSView {
+        if let terminal { return terminal }
+        if let webView { return webView }
+        fatalError("InteractiveSessionTab has no content view")
+    }
+
+    /// Sidebar subtitle: the host for web sessions, the working directory's
+    /// last path component for terminal-backed kinds.
+    var subtitle: String {
+        switch kind {
+        case .webview: return url?.host ?? url?.absoluteString ?? "—"
+        default: return cwd.lastPathComponent
+        }
+    }
 
     /// Stable MCP-side identifier for this tab — what shows up as the
     /// sessionKey in MCPSessionRegistry, used by the dashboard's
@@ -75,34 +118,51 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// failure that wasn't theirs.
     private var lastSpawnAt: Date = .distantPast
 
-    init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona) {
-        self.id = id
-        self.name = name
-        self.cwd = cwd
-        self.kind = kind
-        self.sessionId = UUID().uuidString.lowercased()
-        self.resume = false
-        self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
-        terminalView.applyWarmChrome()
-        super.init()
-        terminalView.processDelegate = self
+    /// Fresh tab (mints a new sessionId, resume off).
+    convenience init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona, url: URL? = nil) {
+        self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
+                  sessionId: UUID().uuidString.lowercased(), resume: false)
     }
 
     /// Variant used when bootstrapping from the persistence table on app
     /// launch: caller supplies the prior `sessionId` so Claude Code can
     /// re-attach with `--resume`. Setting `resume: true` flips the spawn
     /// path to use `--resume <sessionId>` instead of `--session-id`.
-    init(id: UUID, name: String, cwd: URL, sessionId: String, resume: Bool, kind: SessionKind = .sona) {
+    convenience init(id: UUID, name: String, cwd: URL, sessionId: String, resume: Bool,
+                     kind: SessionKind = .sona, url: URL? = nil) {
+        self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
+                  sessionId: sessionId, resume: resume)
+    }
+
+    /// Designated init — builds the content backend (terminal or webview)
+    /// according to `kind` and wires up the matching delegate.
+    private init(id: UUID, name: String, cwd: URL, kind: SessionKind, url: URL?,
+                 sessionId: String, resume: Bool) {
         self.id = id
         self.name = name
         self.cwd = cwd
         self.kind = kind
+        self.url = url
         self.sessionId = sessionId
         self.resume = resume
-        self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
-        terminalView.applyWarmChrome()
+
+        switch kind {
+        case .sona, .terminal:
+            let tv = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+            tv.applyWarmChrome()
+            tv.applySolarizedText()
+            self.terminal = tv
+            self.webView = nil
+        case .webview:
+            let config = WKWebViewConfiguration()
+            config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+            self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
+            self.terminal = nil
+        }
+
         super.init()
-        terminalView.processDelegate = self
+        terminal?.processDelegate = self
+        webView?.navigationDelegate = self
     }
 
     /// Used by the rail's Restart button after a failed --resume (e.g. the
@@ -118,13 +178,29 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         switch kind {
         case .sona: spawnSona()
         case .terminal: spawnTerminal()
+        case .webview: loadWeb()
         }
+    }
+
+    /// Load (or reload) the target URL in the WKWebView. State is driven by
+    /// the navigation delegate: `.starting` here, `.running` on didFinish,
+    /// `.spawnFailed` on a load error.
+    private func loadWeb() {
+        guard let webView else { return }
+        guard let url else {
+            state = .spawnFailed(message: "No URL set for this web session")
+            return
+        }
+        state = .starting
+        lastSpawnAt = Date()
+        webView.load(URLRequest(url: url))
     }
 
     /// Launch a plain interactive login shell — no Claude, no MCP, no
     /// auto-confirm. Uses `$SHELL` (fallback `/bin/zsh`) and the same env/PATH
     /// the Sona path builds, so tools on PATH and the usual tokens are present.
     private func spawnTerminal() {
+        guard let termView = terminal else { return }
         try? FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
 
         // omitLegacyRole: true — SONATA_ROLE=session is meaningless for a bare
@@ -132,8 +208,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: true)
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
-        let terminal = terminalView.getTerminal()
-        terminal.resetToInitialState()
+        termView.getTerminal().resetToInitialState()
 
         guard FileManager.default.isExecutableFile(atPath: shell) else {
             state = .spawnFailed(message: "Shell not found at \(shell)")
@@ -141,7 +216,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         }
 
         lastSpawnAt = Date()
-        terminalView.startProcess(
+        termView.startProcess(
             executable: shell,
             args: ["-l"],
             environment: env,
@@ -151,6 +226,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     }
 
     private func spawnSona() {
+        guard let termView = terminal else { return }
         try? FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
 
         // Per plan §6: opt-in in-proc MCP. SessionKey is a stable prefix
@@ -181,8 +257,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             args.append(contentsOf: extras)
         }
 
-        let terminal = terminalView.getTerminal()
-        terminal.resetToInitialState()
+        termView.getTerminal().resetToInitialState()
 
         let binary = InteractiveSessionTab.claudeBinary
         guard FileManager.default.isExecutableFile(atPath: binary) || binary == "claude" else {
@@ -191,7 +266,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         }
 
         lastSpawnAt = Date()
-        terminalView.startProcess(
+        termView.startProcess(
             executable: binary,
             args: args,
             environment: env,
@@ -204,14 +279,31 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
                 if case .running = self.state {
-                    self.terminalView.send(txt: "\r")
+                    self.terminal?.send(txt: "\r")
                 }
             }
         }
     }
 
     func terminate() {
-        terminalView.terminate()
+        terminal?.terminate()
+        webView?.stopLoading()
+    }
+
+    /// Make this session's content the window's first responder so the user
+    /// can type immediately without clicking. Only meaningful for terminal-
+    /// backed sessions; web sessions handle their own focus on click.
+    func focusContent() {
+        guard kind.isTerminalBacked, let termView = terminal else { return }
+        DispatchQueue.main.async {
+            termView.window?.makeFirstResponder(termView)
+        }
+    }
+
+    /// Insert dropped file paths into a terminal-backed session (forwarded from
+    /// the app-level drop catcher). No-op for web sessions.
+    func insertDroppedPaths(_ paths: [String]) {
+        (terminal as? DropEnabledTerminalView)?.insertPaths(paths)
     }
 
     // MARK: - LocalProcessTerminalViewDelegate
@@ -219,6 +311,30 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
     nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
     nonisolated func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {}
+
+    // MARK: - WKNavigationDelegate (web sessions)
+
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in self?.state = .running }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+        Self.handleWebLoadFailure(error, on: self)
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+        Self.handleWebLoadFailure(error, on: self)
+    }
+
+    /// Mark the session failed on a real load error, but ignore `cancelled`
+    /// (-999) — WebKit reports that for benign superseded navigations (e.g. a
+    /// redirect or a quick reload), and flipping the session red on those would
+    /// be wrong.
+    private nonisolated static func handleWebLoadFailure(_ error: any Error, on tab: InteractiveSessionTab?) {
+        let ns = error as NSError
+        guard !(ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled) else { return }
+        Task { @MainActor [weak tab] in tab?.state = .spawnFailed(message: error.localizedDescription) }
+    }
 
     nonisolated func processTerminated(source: SwiftTerm.TerminalView, exitCode: Int32?) {
         let code = exitCode
@@ -379,9 +495,10 @@ final class InteractiveSessionsViewModel: ObservableObject {
                 cwd: URL(fileURLWithPath: row.cwd),
                 sessionId: row.sessionId,
                 // Only Sona sessions re-attach to a prior Claude conversation;
-                // a terminal has no session file to --resume.
+                // terminals and web sessions have nothing to --resume.
                 resume: kind == .sona,
-                kind: kind
+                kind: kind,
+                url: row.url.flatMap { URL(string: $0) }
             )
             tabs.append(tab)
             if row.wasActive == 1 { lastActiveId = uuid }
@@ -427,10 +544,10 @@ final class InteractiveSessionsViewModel: ObservableObject {
     /// cwd.path, same as the default-path variant. Trims the name and falls
     /// back to a "Session <N>" auto-name if it's empty.
     @discardableResult
-    func addTab(name: String, cwd: URL, kind: SessionKind = .sona) -> InteractiveSessionTab {
+    func addTab(name: String, cwd: URL, kind: SessionKind = .sona, url: URL? = nil) -> InteractiveSessionTab {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? "Session \(nextSessionIndex())" : trimmed
-        let tab = InteractiveSessionTab(name: finalName, cwd: cwd, kind: kind)
+        let tab = InteractiveSessionTab(name: finalName, cwd: cwd, kind: kind, url: url)
         tabs.append(tab)
         persistTab(tab, position: tabs.count - 1)
         selectTab(id: tab.id)
@@ -493,6 +610,23 @@ final class InteractiveSessionsViewModel: ObservableObject {
         if let pool = dbPool {
             InteractiveSessionsStore.setActive(dbPool: pool, id: id.uuidString.lowercased())
         }
+        // Drop focus into the selected session so typing lands immediately
+        // (terminal-backed kinds only; focusContent no-ops for web).
+        tabs.first(where: { $0.id == id })?.focusContent()
+    }
+
+    /// Focus the currently-active session's content. Called when the Sessions
+    /// section appears so the user can start typing without clicking.
+    func focusActiveContent() {
+        guard let id = activeTabId else { return }
+        tabs.first(where: { $0.id == id })?.focusContent()
+    }
+
+    /// Route dropped file paths (from the app-level drop catcher) to the
+    /// active session. No-op when nothing is active or it's a web session.
+    func handleDroppedPaths(_ paths: [String]) {
+        guard let id = activeTabId else { return }
+        tabs.first(where: { $0.id == id })?.insertDroppedPaths(paths)
     }
 
     func restartTab(id: UUID) {
@@ -522,7 +656,8 @@ final class InteractiveSessionsViewModel: ObservableObject {
             cwd: tab.cwd.path,
             position: position,
             wasActive: tab.id == activeTabId,
-            kind: tab.kind.rawValue
+            kind: tab.kind.rawValue,
+            url: tab.url?.absoluteString
         )
     }
 

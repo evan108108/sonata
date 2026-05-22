@@ -239,6 +239,28 @@ extension LocalProcessTerminalView {
     func applyWarmChrome() {
         nativeBackgroundColor = NSColor(Theme.Color.bgDeep)
     }
+
+    /// Recolor terminal *text* to the Solarized Dark palette — the default
+    /// foreground plus the 16 ANSI colors — while leaving the background as the
+    /// warm chrome from `applyWarmChrome()`. Used by terminal-backed sessions
+    /// so program output reads in Solarized tones over Sonata's ember surface.
+    func applySolarizedText() {
+        func c(_ hex: UInt32) -> SwiftTerm.Color {
+            let r = UInt16((hex >> 16) & 0xff)
+            let g = UInt16((hex >> 8) & 0xff)
+            let b = UInt16(hex & 0xff)
+            // Scale 0–255 → 0–65535 (×257 maps 0xff to 0xffff exactly).
+            return SwiftTerm.Color(red: r &* 257, green: g &* 257, blue: b &* 257)
+        }
+        // base0 — Solarized's default body-text tone.
+        nativeForegroundColor = NSColor(srgbRed: 0x83 / 255.0, green: 0x94 / 255.0, blue: 0x96 / 255.0, alpha: 1)
+        installColors([
+            c(0x073642), c(0xdc322f), c(0x859900), c(0xb58900),  // 0-3:  base02, red, green, yellow
+            c(0x268bd2), c(0xd33682), c(0x2aa198), c(0xeee8d5),  // 4-7:  blue, magenta, cyan, base2
+            c(0x002b36), c(0xcb4b16), c(0x586e75), c(0x657b83),  // 8-11: base03, orange, base01, base00
+            c(0x839496), c(0x6c71c4), c(0x93a1a1), c(0xfdf6e3),  // 12-15: base0, violet, base1, base3
+        ])
+    }
 }
 
 extension View {

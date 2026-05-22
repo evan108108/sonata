@@ -896,5 +896,12 @@ extension DatabaseMigrator {
             try db.execute(sql:
                 "ALTER TABLE interactiveSessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'sona'")
         }
+
+        // v16: web session URL. For kind='webview' the session renders this URL
+        // in a WKWebView instead of running a subprocess; NULL for sona/terminal.
+        registerMigration("v16_session_url") { db in
+            try db.execute(sql:
+                "ALTER TABLE interactiveSessions ADD COLUMN url TEXT")
+        }
     }
 }

@@ -21,6 +21,14 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSUIElement</key><false/>
+    <!-- Web sessions are a user-driven embedded browser (WKWebView): the user
+         types an arbitrary URL, so allow non-ATS loads (plain HTTP, sites with
+         older TLS) the same way a browser would. Without this, default ATS
+         blocks many URLs and the web session shows its failed/red state. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key><true/>
+    </dict>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleURLTypes</key>

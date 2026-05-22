@@ -58,16 +58,16 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let paths = resolvePaths(from: sender.draggingPasteboard)
+        let paths = Self.resolvePaths(from: sender.draggingPasteboard)
         guard !paths.isEmpty else { return false }
-        sendPaths(paths)
+        insertPaths(paths)
         return true
     }
 
     private func acceptedDragOperation(_ sender: NSDraggingInfo) -> NSDragOperation {
         // Match Terminal.app / iTerm: drop reads as a copy (the file isn't
         // moved, just its path-as-text is inserted into the shell).
-        return resolvePaths(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+        return Self.resolvePaths(from: sender.draggingPasteboard).isEmpty ? [] : .copy
     }
 
     // MARK: Paste
@@ -75,21 +75,33 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
     override func paste(_ sender: Any) {
         let pb = NSPasteboard.general
 
-        // 1) Existing plain-text path stays as-is (SwiftTerm's behavior).
+        // 1) A real file on the pasteboard → insert its FULL path. Finder's
+        // Cmd-C puts both the file URL *and* the bare filename (as a string)
+        // on the pasteboard, so we must check the file URL before the string
+        // branch below — otherwise pasting a copied file yields just the name.
+        let fileURLOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        if let fileURLs = pb.readObjects(forClasses: [NSURL.self], options: fileURLOptions) as? [URL],
+           case let paths = fileURLs.filter({ $0.isFileURL }).map({ $0.path }),
+           !paths.isEmpty {
+            insertPaths(paths)
+            return
+        }
+
+        // 2) Plain text (including URL-looking text) → SwiftTerm's normal text
+        // paste, which already honors bracketed-paste mode.
         if pb.string(forType: .string) != nil {
             super.paste(sender)
             return
         }
 
-        // 2) Try fileURL / URL / image — convert to a path and type it.
-        let paths = resolvePaths(from: pb)
+        // 3) Non-file URL or raw image data → resolved path.
+        let paths = Self.resolvePaths(from: pb)
         if !paths.isEmpty {
-            sendPaths(paths)
+            insertPaths(paths)
             return
         }
 
-        // 3) Nothing usable — fall through (will produce the SwiftTerm
-        // empty-paste no-op, which is fine).
+        // 4) Nothing usable — fall through (SwiftTerm empty-paste no-op).
         super.paste(sender)
     }
 
@@ -99,7 +111,7 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
     /// they appear in the drag/paste. Handles file URLs, http(s) URLs,
     /// and raw image data (saved to a scratch directory and the resulting
     /// path returned).
-    private func resolvePaths(from pasteboard: NSPasteboard) -> [String] {
+    static func resolvePaths(from pasteboard: NSPasteboard) -> [String] {
         var out: [String] = []
 
         // File URLs come through as NSURL instances — most reliable.
@@ -136,14 +148,29 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
 
     /// Type each path into the PTY, shell-quoted to survive spaces and
     /// special chars. Multi-path drops are space-separated, matching how
-    /// macOS Terminal.app handles a multi-file drop.
-    private func sendPaths(_ paths: [String]) {
+    /// macOS Terminal.app handles a multi-file drop. Public so an app-level
+    /// drop catcher can forward paths here (see SessionDropCatcher).
+    func insertPaths(_ paths: [String]) {
         let joined = paths.map(Self.shellQuote).joined(separator: " ")
         // Trailing space so the cursor lands ready for the next argument
         // (matches macOS Terminal.app behavior).
         let typed = joined + " "
         let bytes = Array(typed.utf8)
-        process.send(data: bytes[...])
+
+        // When the foreground program has bracketed-paste mode enabled (Claude
+        // Code's TUI, vim, etc.), wrap the path in the paste markers so it's
+        // inserted as literal text. Without this the raw bytes are read as
+        // keystrokes — and a path's leading "/" opens Claude Code's slash-
+        // command menu instead of dropping the path. Plain shells leave
+        // bracketed paste off, so they keep getting the raw bytes as before.
+        if getTerminal().bracketedPasteMode {
+            var out = EscapeSequences.bracketedPasteStart
+            out.append(contentsOf: bytes)
+            out.append(contentsOf: EscapeSequences.bracketedPasteEnd)
+            process.send(data: out[...])
+        } else {
+            process.send(data: bytes[...])
+        }
     }
 
     // POSIX-shell-safe quoting: wrap in single quotes, escape any embedded
@@ -160,7 +187,7 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
 
     // MARK: Image scratch directory
 
-    private func saveImageToScratch(data: Data, preferPng: Bool) -> URL? {
+    private static func saveImageToScratch(data: Data, preferPng: Bool) -> URL? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         let dir = home.appendingPathComponent(".sonata/scratch/dropped-images", isDirectory: true)

@@ -17,7 +17,8 @@ struct PersistedInteractiveSession: FetchableRecord, Codable {
     let cwd: String
     let position: Int
     let wasActive: Int
-    let kind: String        // SessionKind.rawValue ("sona" | "terminal")
+    let kind: String        // SessionKind.rawValue ("sona" | "terminal" | "webview")
+    let url: String?        // target URL for webview sessions; nil otherwise
     let createdAt: Int64
     let updatedAt: Int64
 }
@@ -28,7 +29,7 @@ enum InteractiveSessionsStore {
         do {
             return try dbPool.read { db in
                 try PersistedInteractiveSession.fetchAll(db, sql: """
-                    SELECT id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt
+                    SELECT id, sessionId, name, cwd, position, wasActive, kind, url, createdAt, updatedAt
                     FROM interactiveSessions
                     ORDER BY position ASC, createdAt ASC
                     """)
@@ -47,15 +48,16 @@ enum InteractiveSessionsStore {
         cwd: String,
         position: Int,
         wasActive: Bool,
-        kind: String
+        kind: String,
+        url: String?
     ) {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         do {
             try dbPool.write { db in
                 try db.execute(sql: """
                     INSERT INTO interactiveSessions
-                        (id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, sessionId, name, cwd, position, wasActive, kind, url, createdAt, updatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         sessionId = excluded.sessionId,
                         name      = excluded.name,
@@ -63,9 +65,10 @@ enum InteractiveSessionsStore {
                         position  = excluded.position,
                         wasActive = excluded.wasActive,
                         kind      = excluded.kind,
+                        url       = excluded.url,
                         updatedAt = excluded.updatedAt
                     """, arguments: [
-                        id, sessionId, name, cwd, position, wasActive ? 1 : 0, kind, now, now
+                        id, sessionId, name, cwd, position, wasActive ? 1 : 0, kind, url, now, now
                     ])
             }
         } catch {
