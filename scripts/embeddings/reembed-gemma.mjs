@@ -22,8 +22,10 @@
 // DB is never touched. A fresh backup should exist regardless.
 //
 // Embedding semantics MATCH the live EmbeddingServerManager exactly: prefix the doc
-// with "title: none | text: " and clip to 6000 chars (EmbeddingGemma's context is
-// 2048 tokens; 6000 chars stays under it with room for the prefix). Clipping (rather
+// with "title: none | text: " and clip to 4000 chars. EmbeddingGemma's context is
+// 2048 tokens; dense text runs ~2.5 chars/token, so 6000 chars (the original guess)
+// overran to ~2400 tokens and 500'd — 4000 chars stays under 2048 even when dense,
+// with room for the prefix. Clipping (rather
 // than chunk+pool) keeps stored corpus vectors identical to what the app produces for
 // the same text at store time. Only ~6 of 26.7k memories exceed this.
 //
@@ -38,7 +40,7 @@ const SERVER = process.env.EMBED_URL || "http://127.0.0.1:7712/v1/embeddings";
 const MODEL_ID = "embeddinggemma-300m"; // EmbeddingProvider.local.modelId
 const DIMS = 768;
 const DOC_PREFIX = "title: none | text: ";
-const MAXCHARS = 6000; // matches EmbeddingServerManager.maxInputChars
+const MAXCHARS = 4000; // matches EmbeddingServerManager.maxInputChars
 const BATCH = Number(process.env.BATCH || 8);
 const DRY = process.env.DRY === "1";
 const LIMIT = process.env.LIMIT ? parseInt(process.env.LIMIT, 10) : 0;

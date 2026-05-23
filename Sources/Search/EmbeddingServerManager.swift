@@ -38,13 +38,15 @@ actor EmbeddingServerManager {
         try await ensureRunning()
         let prefix = isQuery ? "task: search result | query: " : "title: none | text: "
         // EmbeddingGemma's context is 2048 tokens; clip very long inputs to a safe
-        // char budget (~1600 tokens) so they embed in one pass instead of erroring.
-        // Only a handful of memories exceed this; the head captures the gist.
+        // char budget so they embed in one pass instead of 500'ing. Dense text
+        // (code, punctuation) runs ~2.5 chars/token, so 4000 chars stays under 2048
+        // even at worst case. Only a handful of memories exceed this; the head
+        // captures the gist. (Must match reembed-gemma.mjs MAXCHARS.)
         let clipped = text.count > Self.maxInputChars ? String(text.prefix(Self.maxInputChars)) : text
         return try await requestEmbedding(prefix + clipped)
     }
 
-    private static let maxInputChars = 6000
+    private static let maxInputChars = 4000
 
     /// Provision (download on first run) + launch + health-check. Idempotent.
     func ensureRunning() async throws {
