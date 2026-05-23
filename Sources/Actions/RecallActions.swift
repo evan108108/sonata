@@ -564,10 +564,16 @@ let recallActions: [SonataAction] = [
                                 .map { row in (row["memoryId"] as String, row["embedding"] as Data) }
                         }
                         guard !rows.isEmpty else { return [:] }
+                        // Mean-center for anisotropic local embeddings (nomic) so
+                        // cosine actually discriminates; no-op for OpenRouter.
+                        let corpus = rows.map { ($0.0, unpackFloats($0.1)) }
+                        let doCenter = embeddingNeedsCentering
+                        let mu = doCenter ? corpusMean(corpus.map { $0.1 }) : []
+                        let q = doCenter ? centeredVector(queryEmbedding, by: mu) : queryEmbedding
                         var scores: [String: Double] = [:]
-                        for (memoryId, blob) in rows {
-                            let emb = unpackFloats(blob)
-                            let sim = Double(cosineSimilarity(queryEmbedding, emb))
+                        for (memoryId, emb) in corpus {
+                            let v = doCenter ? centeredVector(emb, by: mu) : emb
+                            let sim = Double(cosineSimilarity(q, v))
                             if sim > 0.3 {
                                 scores[memoryId] = sim
                             }

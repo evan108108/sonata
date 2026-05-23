@@ -148,3 +148,37 @@ func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
     guard denom > 0 else { return 0 }
     return dot / denom
 }
+
+// MARK: - Anisotropy correction (mean-centering)
+//
+// nomic-embed-text-v1.5 is highly anisotropic: random unrelated memories sit at
+// ~0.8 cosine, so raw cosine barely discriminates and recall collapses toward a
+// flat "everything is similar" band. Subtracting the corpus-mean vector before
+// cosine restores discrimination (random pairs drop to ~0.2; relevant hits
+// separate out). OpenRouter's text-embedding-3-small is already well-centered, so
+// centering is gated to the local provider (its mean would be ~0 anyway).
+
+/// Whether the active embedding provider needs mean-centering before cosine.
+var embeddingNeedsCentering: Bool { EmbeddingProvider.current == .local }
+
+/// Elementwise mean (centroid) of a set of equal-length vectors. Empty if none.
+func corpusMean(_ vecs: [[Float]]) -> [Float] {
+    guard let dim = vecs.first?.count, dim > 0 else { return [] }
+    var mu = [Float](repeating: 0, count: dim)
+    var n: Float = 0
+    for v in vecs where v.count == dim {
+        for i in 0..<dim { mu[i] += v[i] }
+        n += 1
+    }
+    if n > 0 { for i in 0..<dim { mu[i] /= n } }
+    return mu
+}
+
+/// Subtract the corpus mean from a vector (no-op if `mean` is empty or mismatched).
+@inline(__always)
+func centeredVector(_ v: [Float], by mean: [Float]) -> [Float] {
+    guard mean.count == v.count else { return v }
+    var o = v
+    for i in 0..<v.count { o[i] -= mean[i] }
+    return o
+}

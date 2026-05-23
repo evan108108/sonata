@@ -157,11 +157,15 @@ let embeddingActions: [SonataAction] = [
                         }
                 }
 
+                // Mean-center for anisotropic local embeddings (nomic); no-op for OpenRouter.
+                let corpus = rows.map { ($0.0, unpackFloats($0.1)) }
+                let doCenter = embeddingNeedsCentering
+                let mu = doCenter ? corpusMean(corpus.map { $0.1 }) : []
+                let q = doCenter ? centeredVector(queryEmbedding, by: mu) : queryEmbedding
                 var scored: [(String, Double)] = []
-                for (memoryId, blob) in rows {
-                    let emb = unpackFloats(blob)
-                    let sim = cosineSimilarity(queryEmbedding, emb)
-                    scored.append((memoryId, Double(sim)))
+                for (memoryId, emb) in corpus {
+                    let v = doCenter ? centeredVector(emb, by: mu) : emb
+                    scored.append((memoryId, Double(cosineSimilarity(q, v))))
                 }
 
                 scored.sort { $0.1 > $1.1 }
