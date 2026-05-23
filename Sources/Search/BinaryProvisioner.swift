@@ -305,8 +305,7 @@ extension ManagedBinary {
     /// internal subprocess (like MeiliSearch), NOT a user-installed daemon. The
     /// macOS release ships `llama-server` + its dylibs flat in one dir with
     /// @loader_path rpath, so it runs in place once extracted. ~10 MB.
-    /// arm64 asset verified (build b9286); x86_64 name follows the same release
-    /// pattern (verify before an Intel ship).
+    /// Both arm64 (kleidiai) and x86_64 assets verified present for build b9286.
     static let llamaServer = ManagedBinary(
         name: "llama-server",
         version: "b9286",
