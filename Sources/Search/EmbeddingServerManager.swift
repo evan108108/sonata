@@ -2,7 +2,7 @@ import Foundation
 import Logging
 
 /// Manages a local llama.cpp `llama-server --embedding` subprocess serving
-/// nomic-embed-text-v1.5 — the local embedding backend that replaces the remote
+/// EmbeddingGemma-300m — the local embedding backend that replaces the remote
 /// OpenRouter embedding API. Sonata-internal plumbing, same pattern as
 /// `MeiliSearchManager`; NOT a user-installed daemon.
 ///
@@ -30,14 +30,21 @@ actor EmbeddingServerManager {
 
     var isRunning: Bool { process?.isRunning == true }
 
-    /// Embed `text` via the local server, prepending nomic's required task prefix
-    /// (`search_query:` for queries, `search_document:` for corpus). Lazily ensures
-    /// the server is up. Returns a 768-dim L2-normalized vector.
+    /// Embed `text` via the local server, prepending EmbeddingGemma's required task
+    /// prompt (`task: search result | query: ` for queries, `title: none | text: `
+    /// for corpus). Lazily ensures the server is up. Returns a 768-dim L2-normalized
+    /// vector.
     func embed(_ text: String, isQuery: Bool) async throws -> [Float] {
         try await ensureRunning()
-        let prefix = isQuery ? "search_query: " : "search_document: "
-        return try await requestEmbedding(prefix + text)
+        let prefix = isQuery ? "task: search result | query: " : "title: none | text: "
+        // EmbeddingGemma's context is 2048 tokens; clip very long inputs to a safe
+        // char budget (~1600 tokens) so they embed in one pass instead of erroring.
+        // Only a handful of memories exceed this; the head captures the gist.
+        let clipped = text.count > Self.maxInputChars ? String(text.prefix(Self.maxInputChars)) : text
+        return try await requestEmbedding(prefix + clipped)
     }
+
+    private static let maxInputChars = 6000
 
     /// Provision (download on first run) + launch + health-check. Idempotent.
     func ensureRunning() async throws {
@@ -46,7 +53,7 @@ actor EmbeddingServerManager {
         guard let binary = await BinaryProvisioner.shared.provision(.llamaServer) else {
             throw EmbeddingError.binaryUnavailable
         }
-        guard let model = await BinaryProvisioner.shared.provision(.nomicEmbedModel) else {
+        guard let model = await BinaryProvisioner.shared.provision(.embeddingGemmaModel) else {
             throw EmbeddingError.modelUnavailable
         }
 
@@ -58,13 +65,14 @@ actor EmbeddingServerManager {
             "-m", model,
             "--embedding", "--pooling", "mean",
             "--host", "127.0.0.1", "--port", "\(port)",
-            "--ctx-size", "8192",
-            // Physical batch must hold a whole pooled sequence in one pass —
-            // the default (512) makes llama-server 500 on any input over ~512
-            // tokens ("input too large to process"), so longer memories would
-            // silently fail to embed and fall back to keyword. Match ctx so any
-            // single doc/query up to the context window embeds in one shot.
-            "--batch-size", "8192", "--ubatch-size", "8192",
+            "--ctx-size", "2048",
+            // EmbeddingGemma is trained at a 2048-token context. Physical batch must
+            // hold a whole pooled sequence in one pass — the default (512) makes
+            // llama-server 500 on any input over ~512 tokens ("input too large to
+            // process"), so longer memories would silently fail to embed and fall
+            // back to keyword. Match ctx so any single doc/query up to the context
+            // window embeds in one shot (inputs are clipped to fit in `embed`).
+            "--batch-size", "2048", "--ubatch-size", "2048",
         ]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
@@ -92,7 +100,7 @@ actor EmbeddingServerManager {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: ["input": input, "model": "nomic-embed-text-v1.5"])
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["input": input, "model": "embeddinggemma-300m"])
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw EmbeddingError.notHealthy }
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],

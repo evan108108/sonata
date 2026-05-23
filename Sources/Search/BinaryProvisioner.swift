@@ -324,14 +324,30 @@ extension ManagedBinary {
         ]
     )
 
-    /// nomic-embed-text-v1.5 (Q8_0 GGUF, 768-dim, retrieval-trained) — the local
-    /// embedding model. Arch-independent (same file both arches). ~146 MB.
+    /// nomic-embed-text-v1.5 (Q8_0 GGUF, 768-dim) — superseded by EmbeddingGemma.
+    /// Kept for reference/rollback. Arch-independent. ~146 MB.
     static let nomicEmbedModel = ManagedBinary(
         name: "nomic-embed-text-v1.5",
         version: "Q8_0",
         systemPaths: [],
         sources: {
             let url = URL(string: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf")!
+            let src = ManagedBinary.Source(url: url, sha256: nil, packaging: .rawBinary)
+            return [.arm64: src, .x86_64: src]
+        }()
+    )
+
+    /// EmbeddingGemma-300m (Q8_0 GGUF, 768-dim) — the local embedding model. Chosen
+    /// over nomic because nomic is highly anisotropic (random-pair cosine ~0.72,
+    /// flattening recall); EmbeddingGemma is natively well-centered (~0.48, beating
+    /// OpenRouter's 0.50), so cosine discriminates with no mean-centering correction.
+    /// Google's purpose-built on-device retrieval model. Arch-independent. ~333 MB.
+    static let embeddingGemmaModel = ManagedBinary(
+        name: "embeddinggemma-300m",
+        version: "Q8_0",
+        systemPaths: [],
+        sources: {
+            let url = URL(string: "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf")!
             let src = ManagedBinary.Source(url: url, sha256: nil, packaging: .rawBinary)
             return [.arm64: src, .x86_64: src]
         }()

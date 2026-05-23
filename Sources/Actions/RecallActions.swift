@@ -556,7 +556,7 @@ let recallActions: [SonataAction] = [
                 // Concurrent: Vector search
                 let vectorTask: Task<[String: Double], Never> = Task {
                     do {
-                        // local nomic or OpenRouter per EmbeddingProvider.current; any
+                        // local EmbeddingGemma or OpenRouter per EmbeddingProvider.current; any
                         // failure (e.g. no key) falls back to empty → keyword recall.
                         let queryEmbedding = try await embedText(topic, isQuery: true)
                         let rows: [(String, Data)] = try await dbPool.read { db in
@@ -564,8 +564,8 @@ let recallActions: [SonataAction] = [
                                 .map { row in (row["memoryId"] as String, row["embedding"] as Data) }
                         }
                         guard !rows.isEmpty else { return [:] }
-                        // Mean-center for anisotropic local embeddings (nomic) so
-                        // cosine actually discriminates; no-op for OpenRouter.
+                        // Optional mean-centering hook (off for EmbeddingGemma/OpenRouter,
+                        // both well-centered); see embeddingNeedsCentering.
                         let corpus = rows.map { ($0.0, unpackFloats($0.1)) }
                         let doCenter = embeddingNeedsCentering
                         let mu = doCenter ? corpusMean(corpus.map { $0.1 }) : []

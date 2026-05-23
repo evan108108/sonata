@@ -69,13 +69,13 @@ func generateEmbedding(text: String, apiKey: String) async throws -> [Float] {
     return first.embedding
 }
 
-/// Which embedding backend to use. Default = local nomic-embed-text-v1.5
-/// (served by llama-server / EmbeddingServerManager) as of the 2026-05-23
-/// cutover: the entire memoryEmbeddings corpus was re-embedded to nomic 768-dim,
-/// so OpenRouter's 1536-dim vectors can no longer be compared against stored
-/// vectors. Set UserDefaults "sonata.embeddingProvider" = "openRouter" (or env
-/// SONATA_EMBEDDING_PROVIDER=openRouter) to opt back out — but note doing so
-/// requires re-embedding the corpus back to 1536-dim to restore recall.
+/// Which embedding backend to use. Default = local EmbeddingGemma-300m
+/// (served by llama-server / EmbeddingServerManager): the entire memoryEmbeddings
+/// corpus is re-embedded to EmbeddingGemma 768-dim, so OpenRouter's 1536-dim vectors
+/// can no longer be compared against stored vectors. Set UserDefaults
+/// "sonata.embeddingProvider" = "openRouter" (or env SONATA_EMBEDDING_PROVIDER=
+/// openRouter) to opt back out — but note doing so requires re-embedding the corpus
+/// back to 1536-dim to restore recall.
 enum EmbeddingProvider: String {
     case openRouter
     case local
@@ -91,7 +91,7 @@ enum EmbeddingProvider: String {
     var modelId: String {
         switch self {
         case .openRouter: return "openai/text-embedding-3-small"
-        case .local:      return "nomic-embed-text-v1.5"
+        case .local:      return "embeddinggemma-300m"
         }
     }
 }
@@ -151,15 +151,18 @@ func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
 
 // MARK: - Anisotropy correction (mean-centering)
 //
-// nomic-embed-text-v1.5 is highly anisotropic: random unrelated memories sit at
-// ~0.8 cosine, so raw cosine barely discriminates and recall collapses toward a
-// flat "everything is similar" band. Subtracting the corpus-mean vector before
-// cosine restores discrimination (random pairs drop to ~0.2; relevant hits
-// separate out). OpenRouter's text-embedding-3-small is already well-centered, so
-// centering is gated to the local provider (its mean would be ~0 anyway).
+// Some embedding models are highly anisotropic — random unrelated memories sit at a
+// high baseline cosine, so raw cosine barely discriminates and recall collapses
+// toward a flat "everything is similar" band. nomic-embed-text-v1.5 was the worst
+// (~0.72 random-pair cosine); subtracting the corpus mean before cosine restored
+// discrimination. EmbeddingGemma-300m (the current local model) is natively
+// well-centered (~0.48, better than OpenRouter's 0.50), so no correction is needed.
+// Kept as a gated hook in case a future model regresses; currently off for all
+// providers.
 
 /// Whether the active embedding provider needs mean-centering before cosine.
-var embeddingNeedsCentering: Bool { EmbeddingProvider.current == .local }
+/// EmbeddingGemma and OpenRouter are both well-centered, so this is currently false.
+var embeddingNeedsCentering: Bool { false }
 
 /// Elementwise mean (centroid) of a set of equal-length vectors. Empty if none.
 func corpusMean(_ vecs: [[Float]]) -> [Float] {

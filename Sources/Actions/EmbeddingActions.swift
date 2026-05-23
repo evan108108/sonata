@@ -62,7 +62,7 @@ let embeddingActions: [SonataAction] = [
                 throw ActionError.invalidParam("type", "Invalid memory type '\(type)'")
             }
 
-            // Generate embedding (local nomic or OpenRouter per EmbeddingProvider.current)
+            // Generate embedding (local EmbeddingGemma or OpenRouter per EmbeddingProvider.current)
             let embedding: [Float]
             do {
                 embedding = try await embedText(content, isQuery: false)
@@ -140,7 +140,7 @@ let embeddingActions: [SonataAction] = [
             let q = try ctx.params.require("q")
             let limit = ctx.params.int("limit") ?? 10
 
-            // Generate query embedding (local nomic or OpenRouter per EmbeddingProvider.current)
+            // Generate query embedding (local EmbeddingGemma or OpenRouter per EmbeddingProvider.current)
             let queryEmbedding: [Float]
             do {
                 queryEmbedding = try await embedText(q, isQuery: true)
@@ -157,7 +157,7 @@ let embeddingActions: [SonataAction] = [
                         }
                 }
 
-                // Mean-center for anisotropic local embeddings (nomic); no-op for OpenRouter.
+                // Optional mean-centering hook (off for EmbeddingGemma/OpenRouter, both well-centered).
                 let corpus = rows.map { ($0.0, unpackFloats($0.1)) }
                 let doCenter = embeddingNeedsCentering
                 let mu = doCenter ? corpusMean(corpus.map { $0.1 }) : []
