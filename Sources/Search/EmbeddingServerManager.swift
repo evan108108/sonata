@@ -59,6 +59,12 @@ actor EmbeddingServerManager {
             "--embedding", "--pooling", "mean",
             "--host", "127.0.0.1", "--port", "\(port)",
             "--ctx-size", "8192",
+            // Physical batch must hold a whole pooled sequence in one pass —
+            // the default (512) makes llama-server 500 on any input over ~512
+            // tokens ("input too large to process"), so longer memories would
+            // silently fail to embed and fall back to keyword. Match ctx so any
+            // single doc/query up to the context window embeds in one shot.
+            "--batch-size", "8192", "--ubatch-size", "8192",
         ]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice

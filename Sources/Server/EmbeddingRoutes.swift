@@ -69,10 +69,13 @@ func generateEmbedding(text: String, apiKey: String) async throws -> [Float] {
     return first.embedding
 }
 
-/// Which embedding backend to use. Default = OpenRouter (unchanged behavior).
-/// Set UserDefaults "sonata.embeddingProvider" = "local" (or env
-/// SONATA_EMBEDDING_PROVIDER=local) to use the local nomic-embed-text-v1.5
-/// served by llama-server (EmbeddingServerManager).
+/// Which embedding backend to use. Default = local nomic-embed-text-v1.5
+/// (served by llama-server / EmbeddingServerManager) as of the 2026-05-23
+/// cutover: the entire memoryEmbeddings corpus was re-embedded to nomic 768-dim,
+/// so OpenRouter's 1536-dim vectors can no longer be compared against stored
+/// vectors. Set UserDefaults "sonata.embeddingProvider" = "openRouter" (or env
+/// SONATA_EMBEDDING_PROVIDER=openRouter) to opt back out — but note doing so
+/// requires re-embedding the corpus back to 1536-dim to restore recall.
 enum EmbeddingProvider: String {
     case openRouter
     case local
@@ -80,7 +83,7 @@ enum EmbeddingProvider: String {
     static var current: EmbeddingProvider {
         let raw = UserDefaults.standard.string(forKey: "sonata.embeddingProvider")
             ?? ProcessInfo.processInfo.environment["SONATA_EMBEDDING_PROVIDER"]
-        return raw == "local" ? .local : .openRouter
+        return raw == "openRouter" ? .openRouter : .local
     }
 
     /// Model identifier persisted alongside stored embeddings, so a later
