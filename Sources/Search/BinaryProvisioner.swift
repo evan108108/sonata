@@ -290,12 +290,12 @@ extension ManagedBinary {
         sources: [
             .arm64: .init(
                 url: URL(string: "https://github.com/meilisearch/meilisearch/releases/download/v1.42.1/meilisearch-macos-apple-silicon")!,
-                sha256: nil,
+                sha256: "dcfdb8c9040d82784e51e2bce0a5a3c7f696027bab5466d2e92dd6e9e23d5425",
                 packaging: .rawBinary
             ),
             .x86_64: .init(
                 url: URL(string: "https://github.com/meilisearch/meilisearch/releases/download/v1.42.1/meilisearch-macos-amd64")!,
-                sha256: nil,
+                sha256: "67f301ebee2083a7d689794f42acead8b79d6e1fd7e01d95d65ae10cdf036c09",
                 packaging: .rawBinary
             ),
         ]
