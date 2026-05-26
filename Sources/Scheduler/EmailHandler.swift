@@ -12,16 +12,13 @@ actor EmailHandler {
     /// Poll interval: 2 minutes.
     static let pollIntervalSeconds: TimeInterval = 120
 
-    /// AgentMail API base URL.
-    private static let apiBase = "https://api.agentmail.to/v0"
-
     // MARK: - State
 
     private let dbPool: DatabasePool
     private let logger: Logger
 
-    /// API key loaded from environment.
-    private let apiKey: String?
+    /// Pluggable email backend (AgentMail today). All sending/fetching goes through this.
+    private let provider: EmailProvider
 
     /// Lock: only one email session at a time.
     private var isProcessing = false
@@ -41,20 +38,20 @@ actor EmailHandler {
 
     // MARK: - Init
 
-    init(dbPool: DatabasePool, logger: Logger? = nil) {
+    init(dbPool: DatabasePool, logger: Logger? = nil, provider: EmailProvider = AgentMailProvider()) {
         self.dbPool = dbPool
         var log = logger ?? Logger(label: "sonata.email")
         log.logLevel = .info
         self.logger = log
-        self.apiKey = SecretStore.get("AGENTMAIL_API_KEY")
+        self.provider = provider
     }
 
     // MARK: - Lifecycle
 
     /// Start the email polling loop.
     func start() async {
-        guard apiKey != nil, !(apiKey?.isEmpty ?? true) else {
-            logger.warning("EmailHandler: disabled (no AGENTMAIL_API_KEY)")
+        guard provider.isConfigured else {
+            logger.warning("EmailHandler: disabled (email provider not configured)")
             return
         }
 
@@ -85,7 +82,7 @@ actor EmailHandler {
 
     /// One poll cycle: for every configured inbox, fetch threads and process new unread emails.
     private func poll() async {
-        guard let apiKey, !apiKey.isEmpty else { return }
+        guard provider.isConfigured else { return }
 
         // Reload from DB each cycle so config changes take effect within one poll.
         currentInboxes = await loadInboxes()
@@ -98,24 +95,22 @@ actor EmailHandler {
 
         for inbox in currentInboxes {
             do {
-                let threads = try await fetchThreads(inboxId: inbox.address, apiKey: apiKey)
+                let threads = try await provider.listThreads(inbox: inbox.address)
 
                 for thread in threads {
-                    // AgentMail API returns snake_case keys (thread_id, last_message_id)
-                    guard let threadId = (thread["thread_id"] ?? thread["threadId"]) as? String else { continue }
-                    guard let lastMessageId = (thread["last_message_id"] ?? thread["lastMessageId"]) as? String else { continue }
+                    let threadId = thread.threadId
+                    let lastMessageId = thread.lastMessageId
                     if knownEmailIds.contains(lastMessageId) { continue }
 
-                    let message = try await fetchMessage(
-                        inboxId: inbox.address,
-                        messageId: lastMessageId,
-                        apiKey: apiKey
+                    let message = try await provider.fetchMessage(
+                        inbox: inbox.address,
+                        messageId: lastMessageId
                     )
 
-                    let from = message["from"] as? String ?? ""
-                    let subject = (thread["subject"] as? String) ?? (message["subject"] as? String) ?? ""
-                    let body = message["text"] as? String ?? message["extracted_text"] as? String ?? message["extractedText"] as? String ?? ""
-                    let timestamp = message["timestamp"] as? String ?? ISO8601DateFormatter().string(from: Date())
+                    let from = message.from
+                    let subject = thread.subject ?? message.subject ?? ""
+                    let body = message.body
+                    let timestamp = message.timestamp ?? ISO8601DateFormatter().string(from: Date())
 
                     // Skip messages this inbox sent itself
                     if from.contains(inbox.address) {
@@ -207,7 +202,7 @@ actor EmailHandler {
         // itself as fallback). See plan § Step 7.
         for (inboxAddress, pending) in pendingApprovalByInbox where !pending.isEmpty {
             guard let inbox = currentInboxes.first(where: { $0.address == inboxAddress }) else { continue }
-            await sendApprovalRequest(emails: pending, inbox: inbox, apiKey: apiKey)
+            await sendApprovalRequest(emails: pending, inbox: inbox)
         }
     }
 
@@ -309,7 +304,7 @@ actor EmailHandler {
     /// Send one batched approval-request email per inbox covering every sender
     /// quarantined this cycle. Recipient: owner_email from coreBlocks, falling
     /// back to the inbox address itself.
-    private func sendApprovalRequest(emails: [EmailRecord], inbox: InboxConfig, apiKey: String) async {
+    private func sendApprovalRequest(emails: [EmailRecord], inbox: InboxConfig) async {
         let ownerEmail: String = (try? await dbPool.read { db in
             try String.fetchOne(db, sql:
                 "SELECT content FROM coreBlocks WHERE key = 'owner_email' AND active = 1")
@@ -349,12 +344,11 @@ actor EmailHandler {
         """
 
         do {
-            try await sendMessage(
-                inboxId: inbox.address,
+            try await provider.send(
+                inbox: inbox.address,
                 to: [ownerEmail],
                 subject: "[APPROVAL NEEDED] \(bySender.count) new sender(s) at \(inbox.address)",
-                text: body,
-                apiKey: apiKey
+                text: body
             )
             logger.info("EmailHandler: approval request sent to \(ownerEmail) for \(bySender.count) sender(s)")
         } catch {
@@ -528,7 +522,7 @@ actor EmailHandler {
     /// (e.g. arrived between restarts). Verifies via AgentMail that no reply was
     /// sent before dispatching, to avoid double-replies.
     private func dispatchPendingUnreadEmails() async {
-        guard let apiKey, !apiKey.isEmpty else { return }
+        guard provider.isConfigured else { return }
 
         // Find unread emails in DB, max 24h old
         let cutoffMs = Int64((Date().timeIntervalSince1970 - 86400) * 1000)
@@ -578,29 +572,14 @@ actor EmailHandler {
             }
 
             // Safety check 2: has a reply already been sent on this thread?
-            // Fetch thread from AgentMail — only need the latest message
+            // Only need the latest message's sender; can't-verify → skip to be safe.
             let alreadyReplied: Bool
             do {
-                let url = URL(string: "\(Self.apiBase)/inboxes/\(row.inboxAddress)/threads/\(row.threadId)?limit=1")!
-                var request = URLRequest(url: url, timeoutInterval: 10)
-                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    // Can't verify — skip to be safe
-                    logger.warning("EmailHandler: can't verify thread \(row.threadId) — skipping to be safe")
-                    continue
-                }
-                // Check if the latest message in the thread is from our inbox
-                let messages = json["messages"] as? [[String: Any]] ?? []
-                if let latest = messages.last {
-                    let latestFrom = latest["from"] as? String ?? ""
-                    alreadyReplied = latestFrom.contains(row.inboxAddress)
-                } else {
-                    alreadyReplied = false
-                }
+                let latestFrom = try await provider.latestMessageSender(
+                    inbox: row.inboxAddress, threadId: row.threadId)
+                alreadyReplied = latestFrom?.contains(row.inboxAddress) ?? false
             } catch {
-                logger.warning("EmailHandler: AgentMail check failed for \(row.threadId) — skipping: \(error)")
+                logger.warning("EmailHandler: thread-state check failed for \(row.threadId) — skipping: \(error)")
                 continue
             }
 
@@ -703,85 +682,20 @@ actor EmailHandler {
 
         } catch {
             logger.error("EmailHandler: dispatch threw: \(error)")
-            try? await sendFailureAlert(emails: emails, inbox: inbox, apiKey: apiKey!)
-        }
-    }
-
-    // MARK: - AgentMail API
-
-    /// Fetch threads from an AgentMail inbox.
-    private func fetchThreads(inboxId: String, apiKey: String) async throws -> [[String: Any]] {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/threads?limit=20")!
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw EmailError.apiFailed("threads", statusCode)
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let threads = json["threads"] as? [[String: Any]] else {
-            return []
-        }
-        return threads
-    }
-
-    /// Fetch a single message from AgentMail.
-    private func fetchMessage(inboxId: String, messageId: String, apiKey: String) async throws -> [String: Any] {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/messages/\(messageId)")!
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw EmailError.apiFailed("message", statusCode)
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return [:]
-        }
-        return json
-    }
-
-    /// Send a reply via AgentMail API.
-    private func sendMessage(
-        inboxId: String, to: [String], subject: String, text: String, apiKey: String
-    ) async throws {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/messages")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "to": to,
-            "subject": subject,
-            "text": text,
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw EmailError.apiFailed("send", statusCode)
+            try? await sendFailureAlert(emails: emails, inbox: inbox)
         }
     }
 
     /// Send a failure alert to the owner (resolved from core config or inbox address).
-    private func sendFailureAlert(emails: [EmailRecord], inbox: InboxConfig, apiKey: String) async throws {
+    private func sendFailureAlert(emails: [EmailRecord], inbox: InboxConfig) async throws {
         // Resolve recipient: owner_email from core config, or fall back to the inbox itself
         let ownerEmail: String = (try? await dbPool.read { db in
             try String.fetchOne(db, sql: "SELECT content FROM coreBlocks WHERE key = 'owner_email' AND active = 1")
         }) ?? inbox.address
 
         let subjects = emails.map { "\"\($0.subject)\" from \($0.from)" }.joined(separator: ", ")
-        try await sendMessage(
-            inboxId: inbox.address,
+        try await provider.send(
+            inbox: inbox.address,
             to: [ownerEmail],
             subject: "[Sonata] Failed to dispatch email at \(inbox.address)",
             text: """
@@ -790,8 +704,7 @@ actor EmailHandler {
             The emails are still in the inbox — you may want to check on this.
 
             — Sonata EmailHandler
-            """,
-            apiKey: apiKey
+            """
         )
     }
 
