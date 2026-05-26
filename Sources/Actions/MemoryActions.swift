@@ -277,11 +277,24 @@ let memoryActions: [SonataAction] = [
             ActionParam("limit", .integer, description: "Max results (default 20)"),
             ActionParam("type", .string, description: "Filter by memory type"),
             ActionParam("source", .string, description: "Filter by source"),
+            ActionParam("excludeSource", .stringArray, description: "Exclude these sources (comma-separated or array). Defaults to ['subagent-stop-hook'] unless source or includeAll is given."),
+            ActionParam("excludeTags", .stringArray, description: "Exclude memories carrying any of these tags."),
+            ActionParam("includeAll", .boolean, description: "Include normally-excluded noise sources (e.g. subagent-stop-hook)."),
         ],
         handler: { ctx in
             let limit = ctx.params.int("limit") ?? 20
             let type = ctx.params.string("type")
             let source = ctx.params.string("source")
+            let includeAll = ctx.params.bool("includeAll") ?? false
+            var excludeSources = ctx.params.stringArray("excludeSource") ?? []
+            let excludeTags = ctx.params.stringArray("excludeTags") ?? []
+
+            // Default: hide high-volume subagent-stop-hook noise that otherwise
+            // drowns genuine recent work in mem_recent. Opt back in via includeAll,
+            // an explicit source filter, or an explicit excludeSource list.
+            if excludeSources.isEmpty && source == nil && !includeAll {
+                excludeSources = ["subagent-stop-hook"]
+            }
 
             var sql = "SELECT * FROM memories m WHERE 1=1"
             var args: [any DatabaseValueConvertible] = []
@@ -293,6 +306,17 @@ let memoryActions: [SonataAction] = [
             if let s = source {
                 sql += " AND m.source = ?"
                 args.append(s)
+            }
+            if !excludeSources.isEmpty {
+                let placeholders = excludeSources.map { _ in "?" }.joined(separator: ", ")
+                // Keep NULL-source rows; NULL NOT IN (...) would otherwise drop them.
+                sql += " AND (m.source IS NULL OR m.source NOT IN (\(placeholders)))"
+                for s in excludeSources { args.append(s) }
+            }
+            if !excludeTags.isEmpty {
+                let placeholders = excludeTags.map { _ in "?" }.joined(separator: ", ")
+                sql += " AND NOT EXISTS (SELECT 1 FROM json_each(m.tags) je WHERE je.value IN (\(placeholders)))"
+                for t in excludeTags { args.append(t) }
             }
             sql += " ORDER BY m.createdAt DESC LIMIT ?"
             args.append(limit)
