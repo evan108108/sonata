@@ -32,7 +32,7 @@ struct EmailConfigView: View {
                     Text("No inboxes configured")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    Text("Add an AgentMail inbox to start receiving and replying to email.")
+                    Text("Add an inbox (AgentMail or your own IMAP/SMTP) to start receiving and replying to email.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
@@ -169,8 +169,39 @@ private struct EmailInboxEditSheet: View {
     @State private var systemPrompt = ""
     @State private var saving = false
 
+    // Provider / IMAP connection
+    @State private var provider = "agentmail"
+    @State private var preset = "gmail"
+    @State private var imapHost = ""
+    @State private var smtpHost = ""
+    @State private var imapPort = "993"
+    @State private var smtpPort = "465"
+    @State private var imapPassword = ""
+
     private var isEditing: Bool { inbox != nil }
-    private var isValid: Bool { !address.isEmpty && !role.isEmpty }
+    private var isValid: Bool {
+        guard !address.isEmpty, !role.isEmpty else { return false }
+        if provider == "imap" {
+            guard !imapHost.isEmpty, !smtpHost.isEmpty else { return false }
+            // A new IMAP inbox needs a password; editing may leave it blank to keep current.
+            if !isEditing && imapPassword.isEmpty { return false }
+        }
+        return true
+    }
+
+    /// Fill host/port fields from a known provider preset.
+    private func applyPreset(_ p: String) {
+        switch p {
+        case "gmail":
+            imapHost = "imap.gmail.com"; smtpHost = "smtp.gmail.com"; imapPort = "993"; smtpPort = "465"
+        case "fastmail":
+            imapHost = "imap.fastmail.com"; smtpHost = "smtp.fastmail.com"; imapPort = "993"; smtpPort = "465"
+        case "icloud":
+            imapHost = "imap.mail.me.com"; smtpHost = "smtp.mail.me.com"; imapPort = "993"; smtpPort = "587"
+        default:
+            break  // custom — leave fields as-is
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -187,7 +218,7 @@ private struct EmailInboxEditSheet: View {
 
             Form {
                 Section("Inbox") {
-                    TextField("Address (e.g. mybot@agentmail.to)", text: $address)
+                    TextField("Address (e.g. you@gmail.com or mybot@agentmail.to)", text: $address)
                         .disabled(isEditing)  // address is the natural key
                     TextField("Display Name", text: $displayName)
                     Picker("Role", selection: $role) {
@@ -195,6 +226,32 @@ private struct EmailInboxEditSheet: View {
                         Text("Scout Leader").tag("scoutleader")
                         Text("Relay").tag("relay")
                         Text("Custom").tag("custom")
+                    }
+                    Picker("Provider", selection: $provider) {
+                        Text("AgentMail").tag("agentmail")
+                        Text("IMAP / SMTP (your own email)").tag("imap")
+                    }
+                }
+
+                if provider == "imap" {
+                    Section("IMAP / SMTP Connection") {
+                        Picker("Preset", selection: $preset) {
+                            Text("Gmail").tag("gmail")
+                            Text("Fastmail").tag("fastmail")
+                            Text("iCloud").tag("icloud")
+                            Text("Custom").tag("custom")
+                        }
+                        .onChange(of: preset) { _, newValue in applyPreset(newValue) }
+
+                        TextField("IMAP host", text: $imapHost)
+                        TextField("IMAP port", text: $imapPort)
+                        TextField("SMTP host", text: $smtpHost)
+                        TextField("SMTP port", text: $smtpPort)
+                        SecureField(isEditing ? "App password (leave blank to keep current)"
+                                              : "App password", text: $imapPassword)
+                        Text("Use an app-specific password (requires 2-factor on the account), not your login password. Stored in the Secrets keychain, never in the database.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -233,7 +290,13 @@ private struct EmailInboxEditSheet: View {
                             enabled: enabled,
                             autoReply: autoReply,
                             dispatchTo: dispatchTo.isEmpty ? nil : dispatchTo,
-                            systemPrompt: systemPrompt.isEmpty ? nil : systemPrompt
+                            systemPrompt: systemPrompt.isEmpty ? nil : systemPrompt,
+                            provider: provider,
+                            imapHost: provider == "imap" ? imapHost : nil,
+                            smtpHost: provider == "imap" ? smtpHost : nil,
+                            imapPort: provider == "imap" ? Int(imapPort) : nil,
+                            smtpPort: provider == "imap" ? Int(smtpPort) : nil,
+                            imapPassword: imapPassword.isEmpty ? nil : imapPassword
                         )
                         saving = false
                         if ok { dismiss() }
@@ -255,6 +318,17 @@ private struct EmailInboxEditSheet: View {
                 autoReply = c.autoReply
                 dispatchTo = c.dispatchTo ?? "worker"
                 systemPrompt = c.systemPrompt ?? ""
+                provider = c.provider
+                // Repopulate IMAP host/ports from providerConfig (password is never
+                // echoed back — blank means "keep the stored secret").
+                if let cfgStr = c.providerConfig, let data = cfgStr.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    imapHost = json["imapHost"] as? String ?? ""
+                    smtpHost = json["smtpHost"] as? String ?? ""
+                    if let p = json["imapPort"] as? Int { imapPort = String(p) }
+                    if let p = json["smtpPort"] as? Int { smtpPort = String(p) }
+                    preset = "custom"  // show the inbox's actual stored values
+                }
             }
         }
     }

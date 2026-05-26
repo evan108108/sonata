@@ -16,6 +16,8 @@ struct EmailInboxResponse: Encodable {
     let autoReply: Bool
     let dispatchTo: String?
     let systemPrompt: String?
+    let provider: String
+    let providerConfig: String?
     let createdAt: Int64
     let updatedAt: Int64
 }
@@ -32,6 +34,8 @@ private func rowToInboxResponse(_ row: Row) -> EmailInboxResponse {
         autoReply: (row["autoReply"] as Int64? ?? 0) != 0,
         dispatchTo: row["dispatchTo"],
         systemPrompt: row["systemPrompt"],
+        provider: (row["provider"] as String?) ?? "agentmail",
+        providerConfig: row["providerConfig"],
         createdAt: row["createdAt"],
         updatedAt: row["updatedAt"]
     )
@@ -52,7 +56,8 @@ let emailInboxActions: [SonataAction] = [
                 let rows: [Row] = try ctx.dbPool.read { db -> [Row] in
                     try Row.fetchAll(db, sql: """
                         SELECT id, address, role, displayName, enabled, autoReply,
-                               dispatchTo, systemPrompt, createdAt, updatedAt
+                               dispatchTo, systemPrompt, provider, providerConfig,
+                               createdAt, updatedAt
                         FROM emailInboxes
                         ORDER BY createdAt ASC
                     """)
@@ -79,6 +84,12 @@ let emailInboxActions: [SonataAction] = [
             ActionParam("autoReply", .boolean, description: "Auto-reply to incoming email (default true)"),
             ActionParam("dispatchTo", .string, description: "Dispatch target: worker, supervisor, or manual"),
             ActionParam("systemPrompt", .string, description: "Custom reply personality prompt"),
+            ActionParam("provider", .string, description: "Backend: 'agentmail' (default) or 'imap'"),
+            ActionParam("imapHost", .string, description: "IMAP host (provider=imap)"),
+            ActionParam("smtpHost", .string, description: "SMTP host (provider=imap)"),
+            ActionParam("imapPort", .integer, description: "IMAP port (default 993)"),
+            ActionParam("smtpPort", .integer, description: "SMTP port (default 465)"),
+            ActionParam("imapPassword", .string, description: "App-password; stored in SecretStore, never the DB. Blank on edit = keep existing"),
         ],
         handler: { ctx in
             let address = try ctx.params.require("address")
@@ -88,6 +99,29 @@ let emailInboxActions: [SonataAction] = [
             let autoReply = ctx.params.bool("autoReply") ?? true
             let dispatchTo = ctx.params.string("dispatchTo")
             let systemPrompt = ctx.params.string("systemPrompt")
+            let provider = ctx.params.string("provider") ?? "agentmail"
+
+            // For IMAP inboxes, stash the app-password in SecretStore (keyed by
+            // address) and store only a passwordRef in providerConfig — the DB
+            // never holds the credential. Blank password on edit keeps the existing
+            // secret. AgentMail inboxes carry no providerConfig.
+            let providerConfig: String? = {
+                guard provider.lowercased() == "imap" else { return nil }
+                let passwordRef = "email.imap.\(address)"
+                if let pw = ctx.params.string("imapPassword"), !pw.isEmpty {
+                    SecretStore.set(name: passwordRef, value: pw,
+                                    description: "IMAP app-password for \(address)")
+                }
+                let cfg: [String: Any] = [
+                    "imapHost": ctx.params.string("imapHost") ?? "",
+                    "smtpHost": ctx.params.string("smtpHost") ?? "",
+                    "imapPort": ctx.params.int("imapPort") ?? 993,
+                    "smtpPort": ctx.params.int("smtpPort") ?? 465,
+                    "passwordRef": passwordRef,
+                ]
+                return (try? JSONSerialization.data(withJSONObject: cfg))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+            }()
 
             let now = nowMs()
             do {
@@ -103,12 +137,14 @@ let emailInboxActions: [SonataAction] = [
                             sql: """
                             UPDATE emailInboxes SET
                                 role = ?, displayName = ?, enabled = ?, autoReply = ?,
-                                dispatchTo = ?, systemPrompt = ?, updatedAt = ?
+                                dispatchTo = ?, systemPrompt = ?, provider = ?,
+                                providerConfig = ?, updatedAt = ?
                             WHERE id = ?
                             """,
                             arguments: [
                                 role, displayName, enabled ? 1 : 0, autoReply ? 1 : 0,
-                                dispatchTo, systemPrompt, now, existingId
+                                dispatchTo, systemPrompt, provider, providerConfig,
+                                now, existingId
                             ]
                         )
                         return existingId
@@ -118,13 +154,15 @@ let emailInboxActions: [SonataAction] = [
                             sql: """
                             INSERT INTO emailInboxes
                                 (id, address, role, displayName, enabled, autoReply,
-                                 dispatchTo, systemPrompt, createdAt, updatedAt)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 dispatchTo, systemPrompt, provider, providerConfig,
+                                 createdAt, updatedAt)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             arguments: [
                                 newId, address, role, displayName,
                                 enabled ? 1 : 0, autoReply ? 1 : 0,
-                                dispatchTo, systemPrompt, now, now
+                                dispatchTo, systemPrompt, provider, providerConfig,
+                                now, now
                             ]
                         )
                         return newId

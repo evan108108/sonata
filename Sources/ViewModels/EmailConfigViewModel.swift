@@ -10,6 +10,8 @@ struct EmailInboxItem: Identifiable, Hashable, Equatable {
     let autoReply: Bool
     let dispatchTo: String?
     let systemPrompt: String?
+    let provider: String
+    let providerConfig: String?
     let createdAt: Date
     let updatedAt: Date
 
@@ -49,6 +51,8 @@ class EmailConfigViewModel: ObservableObject {
                     autoReply: c.autoReply,
                     dispatchTo: c.dispatchTo,
                     systemPrompt: c.systemPrompt,
+                    provider: c.provider ?? "agentmail",
+                    providerConfig: c.providerConfig,
                     createdAt: Date(timeIntervalSince1970: Double(c.createdAt) / 1000),
                     updatedAt: Date(timeIntervalSince1970: Double(c.updatedAt) / 1000)
                 )
@@ -68,17 +72,31 @@ class EmailConfigViewModel: ObservableObject {
         enabled: Bool,
         autoReply: Bool,
         dispatchTo: String?,
-        systemPrompt: String?
+        systemPrompt: String?,
+        provider: String = "agentmail",
+        imapHost: String? = nil,
+        smtpHost: String? = nil,
+        imapPort: Int? = nil,
+        smtpPort: Int? = nil,
+        imapPassword: String? = nil
     ) async -> Bool {
         var body: [String: Any] = [
             "address": address,
             "role": role,
             "enabled": enabled,
             "autoReply": autoReply,
+            "provider": provider,
         ]
         if let d = displayName, !d.isEmpty { body["displayName"] = d }
         if let t = dispatchTo, !t.isEmpty { body["dispatchTo"] = t }
         if let s = systemPrompt, !s.isEmpty { body["systemPrompt"] = s }
+        if provider == "imap" {
+            if let h = imapHost { body["imapHost"] = h }
+            if let h = smtpHost { body["smtpHost"] = h }
+            if let p = imapPort { body["imapPort"] = p }
+            if let p = smtpPort { body["smtpPort"] = p }
+            if let pw = imapPassword, !pw.isEmpty { body["imapPassword"] = pw }
+        }
 
         return await post(path: "/api/email/inbox", body: body)
     }
@@ -149,6 +167,8 @@ private struct InboxJSON: Decodable {
     let autoReply: Bool
     let dispatchTo: String?
     let systemPrompt: String?
+    let provider: String?
+    let providerConfig: String?
     let createdAt: Int64
     let updatedAt: Int64
 }
