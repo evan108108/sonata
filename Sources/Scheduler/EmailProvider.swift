@@ -20,6 +20,10 @@ protocol EmailProvider: Sendable {
     /// A single message by id. Throws on transport/auth failure.
     func fetchMessage(inbox: String, messageId: String) async throws -> EmailMessage
 
+    /// All messages on `threadId`, oldest-first, with bodies resolved — the
+    /// conversation history a reply generator needs. Throws on transport/auth failure.
+    func fetchThreadMessages(inbox: String, threadId: String) async throws -> [EmailMessage]
+
     /// The `from` of the latest message on `threadId`, used to detect whether we
     /// already replied. `nil` = the thread has no messages. Throws when the state
     /// can't be verified (caller should skip rather than risk a double-reply).
@@ -128,6 +132,32 @@ struct AgentMailProvider: EmailProvider {
             body: body,
             timestamp: json["timestamp"] as? String
         )
+    }
+
+    func fetchThreadMessages(inbox: String, threadId: String) async throws -> [EmailMessage] {
+        let json = try await getJSON("/inboxes/\(inbox)/messages?limit=50", endpointLabel: "messages")
+        let raw = json["messages"] as? [[String: Any]] ?? []
+        let inThread = raw.filter { ($0["thread_id"] ?? $0["threadId"]) as? String == threadId }
+        let sorted = inThread.sorted {
+            ($0["timestamp"] as? String ?? "") < ($1["timestamp"] as? String ?? "")
+        }
+        var result: [EmailMessage] = []
+        for m in sorted {
+            var body = m["text"] as? String
+                ?? m["extracted_text"] as? String
+                ?? m["extractedText"] as? String
+            // List view may omit the body; fetch the full message to resolve it.
+            if body == nil, let mid = (m["message_id"] ?? m["messageId"]) as? String {
+                body = try? await fetchMessage(inbox: inbox, messageId: mid).body
+            }
+            result.append(EmailMessage(
+                from: m["from"] as? String ?? "",
+                subject: m["subject"] as? String,
+                body: body ?? "",
+                timestamp: m["timestamp"] as? String
+            ))
+        }
+        return result
     }
 
     func latestMessageSender(inbox: String, threadId: String) async throws -> String? {

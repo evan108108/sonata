@@ -35,6 +35,7 @@ actor HealthMonitor {
     // MARK: - State
 
     private let dbPool: DatabasePool
+    private let emailProvider: EmailProvider
     private let logger: Logger
     private var monitorTask: Task<Void, Never>?
     private var isRunning = false
@@ -121,9 +122,11 @@ actor HealthMonitor {
         port: Int = 3212,
         schedulerStatus: (@Sendable () async -> Bool)? = nil,
         workerPoolStatus: (@Sendable () async -> (target: Int, effective: Int))? = nil,
+        emailProvider: EmailProvider = AgentMailProvider(),
         logger: Logger? = nil
     ) {
         self.dbPool = dbPool
+        self.emailProvider = emailProvider
         self.serverURL = "http://127.0.0.1:\(port)/api/ping"
         self.schedulerStatus = schedulerStatus
         self.workerPoolStatus = workerPoolStatus
@@ -533,45 +536,27 @@ actor HealthMonitor {
             return
         }
 
-        // Send via AgentMail API
-        guard let url = URL(string: "https://api.agentmail.to/v0/inboxes/\(fromEmail)/messages") else {
-            logger.error("Failed to build AgentMail URL")
-            return
-        }
+        // Send via the shared email provider.
+        let text = """
+        Sonata Health Monitor Alert
 
-        let emailBody: [String: Any] = [
-            "to": alertToEmail ?? fromEmail,
-            "subject": "🚨 Sonata Health Alert: \(check)",
-            "body": """
-            Sonata Health Monitor Alert
+        Check: \(check)
+        Time: \(ISO8601DateFormatter().string(from: Date()))
 
-            Check: \(check)
-            Time: \(ISO8601DateFormatter().string(from: Date()))
+        \(message)
 
-            \(message)
-
-            ---
-            Sent by Sonata HealthMonitor
-            """
-        ]
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: emailBody) else {
-            logger.error("Failed to serialize alert email")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = jsonData
+        ---
+        Sent by Sonata HealthMonitor
+        """
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode < 300 {
-                logger.info("Alert email sent for check '\(check)'")
-            } else {
-                logger.warning("Alert email may have failed for check '\(check)'")
-            }
+            try await emailProvider.send(
+                inbox: fromEmail,
+                to: [alertToEmail ?? fromEmail],
+                subject: "🚨 Sonata Health Alert: \(check)",
+                text: text
+            )
+            logger.info("Alert email sent for check '\(check)'")
         } catch {
             logger.error("Failed to send alert email: \(error)")
         }

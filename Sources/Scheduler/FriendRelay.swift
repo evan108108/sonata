@@ -11,9 +11,6 @@ actor FriendRelay {
     /// Poll interval: 15 seconds.
     static let pollIntervalSeconds: TimeInterval = 15
 
-    /// AgentMail API base URL.
-    private static let apiBase = "https://api.agentmail.to/v0"
-
     /// Convex HTTP API for loading contacts.
     private static let convexAPI = "http://localhost:3211"
 
@@ -32,7 +29,10 @@ actor FriendRelay {
 
     private let dbPool: DatabasePool
     private let logger: Logger
-    private let agentMailKey: String?
+
+    /// Pluggable email backend (AgentMail today) — shared with EmailHandler so the
+    /// AgentMail wire format lives in exactly one place.
+    private let provider: EmailProvider
 
     /// Set of message IDs we've already handled.
     private var handledMessages: Set<String> = []
@@ -51,20 +51,20 @@ actor FriendRelay {
 
     // MARK: - Init
 
-    init(dbPool: DatabasePool, logger: Logger? = nil) {
+    init(dbPool: DatabasePool, logger: Logger? = nil, provider: EmailProvider = AgentMailProvider()) {
         self.dbPool = dbPool
         var log = logger ?? Logger(label: "sonata.friend-relay")
         log.logLevel = .info
         self.logger = log
-        self.agentMailKey = SecretStore.get("AGENTMAIL_API_KEY")
+        self.provider = provider
     }
 
     // MARK: - Lifecycle
 
     /// Start the friend relay polling loop.
     func start() async {
-        guard let key = agentMailKey, !key.isEmpty else {
-            logger.warning("FriendRelay: disabled (no AGENTMAIL_API_KEY)")
+        guard provider.isConfigured else {
+            logger.warning("FriendRelay: disabled (email provider not configured)")
             return
         }
 
@@ -98,14 +98,14 @@ actor FriendRelay {
         isPolling = true
         defer { isPolling = false }
 
-        guard let apiKey = agentMailKey, !apiKey.isEmpty else { return }
+        guard provider.isConfigured else { return }
 
         // Refresh friends list from contacts DB
         await refreshFriends()
 
         for friend in friends {
             do {
-                try await pollFriendInbox(friend: friend, apiKey: apiKey)
+                try await pollFriendInbox(friend: friend)
             } catch {
                 logger.error("FriendRelay: error polling \(friend.name): \(error)")
             }
@@ -118,13 +118,13 @@ actor FriendRelay {
     }
 
     /// Poll a single friend's inbox.
-    private func pollFriendInbox(friend: Friend, apiKey: String) async throws {
+    private func pollFriendInbox(friend: Friend) async throws {
         // Fetch recent threads
-        let threads = try await fetchThreads(inboxId: friend.email, apiKey: apiKey)
+        let threads = try await provider.listThreads(inbox: friend.email)
 
         for thread in threads {
-            guard let threadId = thread["threadId"] as? String,
-                  let lastMessageId = thread["lastMessageId"] as? String else { continue }
+            let threadId = thread.threadId
+            let lastMessageId = thread.lastMessageId
 
             // Skip already handled
             if handledMessages.contains(lastMessageId) { continue }
@@ -137,8 +137,8 @@ actor FriendRelay {
             }
 
             // Fetch the last message to check sender
-            let lastMsg = try await fetchMessage(inboxId: friend.email, messageId: lastMessageId, apiKey: apiKey)
-            let lastFrom = lastMsg["from"] as? String ?? ""
+            let lastMsg = try await provider.fetchMessage(inbox: friend.email, messageId: lastMessageId)
+            let lastFrom = lastMsg.from
 
             // Skip if the last message is FROM the friend (they already replied)
             if lastFrom.contains(friend.email) {
@@ -147,37 +147,21 @@ actor FriendRelay {
                 continue
             }
 
-            // Fetch all messages in this thread
-            let threadMessages = try await fetchInboxMessages(inboxId: friend.email, apiKey: apiKey)
-                .filter { ($0["threadId"] as? String) == threadId }
-                .sorted { (a, b) in
-                    let tsA = a["timestamp"] as? String ?? ""
-                    let tsB = b["timestamp"] as? String ?? ""
-                    return tsA < tsB
-                }
+            // Fetch the thread's conversation history (oldest-first, bodies resolved)
+            let threadMessages = try await provider.fetchThreadMessages(
+                inbox: friend.email, threadId: threadId)
 
             // Build conversation history for the provider API
             var conversationMessages: [[String: String]] = []
             for msg in threadMessages {
-                var text = msg["text"] as? String ?? msg["extractedText"] as? String
-                let from = msg["from"] as? String ?? ""
-
-                // If no text in list data, fetch full message
-                if text == nil {
-                    if let msgId = msg["messageId"] as? String {
-                        let fullMsg = try await fetchMessage(inboxId: friend.email, messageId: msgId, apiKey: apiKey)
-                        text = fullMsg["text"] as? String ?? fullMsg["extractedText"] as? String ?? "(no content)"
-                    }
-                }
-
-                let isFriend = from.contains(friend.email)
+                let isFriend = msg.from.contains(friend.email)
                 conversationMessages.append([
                     "role": isFriend ? "assistant" : "user",
-                    "content": text ?? "(no content)",
+                    "content": msg.body.isEmpty ? "(no content)" : msg.body,
                 ])
             }
 
-            let subject = thread["subject"] as? String ?? "(no subject)"
+            let subject = thread.subject ?? "(no subject)"
             logger.info("FriendRelay: \(friend.name) has new message in thread \"\(subject)\" — generating reply")
 
             // Call provider API
@@ -187,12 +171,11 @@ actor FriendRelay {
             )
 
             if let reply {
-                // Reply via AgentMail
-                try await replyToMessage(
-                    inboxId: friend.email,
+                // Reply via the email provider
+                try await provider.reply(
+                    inbox: friend.email,
                     messageId: lastMessageId,
-                    text: reply,
-                    apiKey: apiKey
+                    text: reply
                 )
                 logger.info("FriendRelay: \(friend.name) replied to \"\(subject)\"")
 
@@ -285,79 +268,6 @@ actor FriendRelay {
         }
 
         return content
-    }
-
-    // MARK: - AgentMail API
-
-    /// Fetch threads from an inbox.
-    private func fetchThreads(inboxId: String, apiKey: String) async throws -> [[String: Any]] {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/threads?limit=10")!
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            return []
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let threads = json["threads"] as? [[String: Any]] else {
-            return []
-        }
-        return threads
-    }
-
-    /// Fetch a single message.
-    private func fetchMessage(inboxId: String, messageId: String, apiKey: String) async throws -> [String: Any] {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/messages/\(messageId)")!
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            return [:]
-        }
-
-        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-    }
-
-    /// Fetch all messages from an inbox.
-    private func fetchInboxMessages(inboxId: String, apiKey: String) async throws -> [[String: Any]] {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/messages?limit=50")!
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            return []
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let messages = json["messages"] as? [[String: Any]] else {
-            return []
-        }
-        return messages
-    }
-
-    /// Reply to a message via AgentMail.
-    private func replyToMessage(inboxId: String, messageId: String, text: String, apiKey: String) async throws {
-        let url = URL(string: "\(Self.apiBase)/inboxes/\(inboxId)/messages/\(messageId)/reply")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = ["text": text]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw FriendRelayError.replyFailed(statusCode)
-        }
     }
 
     // MARK: - Friends Loading
