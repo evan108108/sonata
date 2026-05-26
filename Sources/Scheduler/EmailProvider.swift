@@ -36,6 +36,57 @@ protocol EmailProvider: Sendable {
     func reply(inbox: String, messageId: String, text: String) async throws
 }
 
+// MARK: - Per-inbox provider resolution
+
+/// Maps an inbox to the `EmailProvider` that backs it, so different inboxes can use
+/// different backends (AgentMail vs. a user's own IMAP/SMTP) within one EmailHandler.
+/// `defaultProvider` serves "agentmail" inboxes (injectable for tests).
+struct EmailProviderResolver: Sendable {
+    var defaultProvider: EmailProvider = AgentMailProvider()
+
+    func provider(for inbox: InboxConfig) -> EmailProvider {
+        switch inbox.provider.lowercased() {
+        case "imap", "imapsmtp", "smtp":
+            // A missing/invalid providerConfig yields an unconfigured ImapSmtpProvider
+            // (isConfigured == false), so the caller skips the inbox rather than
+            // silently routing an IMAP address through AgentMail.
+            let config = Self.imapSmtpConfig(from: inbox)
+                ?? ImapSmtpConfig(imapHost: "", smtpHost: "", username: inbox.address, password: "")
+            return ImapSmtpProvider(config: config)
+        default:
+            return defaultProvider
+        }
+    }
+
+    /// Parse an inbox's `providerConfig` JSON into an `ImapSmtpConfig`. The password
+    /// is read from SecretStore via `passwordRef` (preferred) or taken inline
+    /// (`password`, discouraged). Username defaults to the inbox address.
+    static func imapSmtpConfig(from inbox: InboxConfig) -> ImapSmtpConfig? {
+        guard let raw = inbox.providerConfig,
+              let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let imapHost = json["imapHost"] as? String, !imapHost.isEmpty,
+              let smtpHost = json["smtpHost"] as? String, !smtpHost.isEmpty
+        else { return nil }
+
+        let password: String
+        if let ref = json["passwordRef"] as? String, !ref.isEmpty {
+            password = SecretStore.get(ref) ?? ""
+        } else {
+            password = json["password"] as? String ?? ""
+        }
+
+        return ImapSmtpConfig(
+            imapHost: imapHost,
+            smtpHost: smtpHost,
+            username: (json["username"] as? String) ?? inbox.address,
+            password: password,
+            imapPort: (json["imapPort"] as? Int) ?? 993,
+            smtpPort: (json["smtpPort"] as? Int) ?? 465
+        )
+    }
+}
+
 // MARK: - Provider-agnostic models
 
 /// A thread summary reduced to what the poll loop needs.

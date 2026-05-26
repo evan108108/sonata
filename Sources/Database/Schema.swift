@@ -530,16 +530,18 @@ func createSchema(in db: Database) throws {
     // MARK: emailInboxes
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS emailInboxes (
-            id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-            address       TEXT NOT NULL UNIQUE,
-            role          TEXT NOT NULL,
-            displayName   TEXT,
-            enabled       INTEGER NOT NULL DEFAULT 1,
-            autoReply     INTEGER NOT NULL DEFAULT 1,
-            dispatchTo    TEXT,
-            systemPrompt  TEXT,
-            createdAt     INTEGER NOT NULL,
-            updatedAt     INTEGER NOT NULL
+            id             TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            address        TEXT NOT NULL UNIQUE,
+            role           TEXT NOT NULL,
+            displayName    TEXT,
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            autoReply      INTEGER NOT NULL DEFAULT 1,
+            dispatchTo     TEXT,
+            systemPrompt   TEXT,
+            provider       TEXT NOT NULL DEFAULT 'agentmail',
+            providerConfig TEXT,
+            createdAt      INTEGER NOT NULL,
+            updatedAt      INTEGER NOT NULL
         )
     """)
 
@@ -902,6 +904,17 @@ extension DatabaseMigrator {
         registerMigration("v16_session_url") { db in
             try db.execute(sql:
                 "ALTER TABLE interactiveSessions ADD COLUMN url TEXT")
+        }
+
+        // v17: per-inbox email provider. `provider` selects the EmailProvider
+        // backend ('agentmail' default, or 'imap' for SwiftMail IMAP/SMTP);
+        // `providerConfig` is JSON connection config for non-AgentMail providers
+        // (host/ports + a SecretStore key ref for the password).
+        registerMigration("v17_email_provider") { db in
+            try db.execute(sql:
+                "ALTER TABLE emailInboxes ADD COLUMN provider TEXT NOT NULL DEFAULT 'agentmail'")
+            try db.execute(sql:
+                "ALTER TABLE emailInboxes ADD COLUMN providerConfig TEXT")
         }
     }
 }

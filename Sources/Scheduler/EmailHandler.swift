@@ -17,8 +17,9 @@ actor EmailHandler {
     private let dbPool: DatabasePool
     private let logger: Logger
 
-    /// Pluggable email backend (AgentMail today). All sending/fetching goes through this.
-    private let provider: EmailProvider
+    /// Resolves the EmailProvider for each inbox (AgentMail, or the inbox's own
+    /// IMAP/SMTP). Lets different inboxes use different backends.
+    private let resolver: EmailProviderResolver
 
     /// Lock: only one email session at a time.
     private var isProcessing = false
@@ -38,23 +39,20 @@ actor EmailHandler {
 
     // MARK: - Init
 
-    init(dbPool: DatabasePool, logger: Logger? = nil, provider: EmailProvider = AgentMailProvider()) {
+    init(dbPool: DatabasePool, logger: Logger? = nil, resolver: EmailProviderResolver = EmailProviderResolver()) {
         self.dbPool = dbPool
         var log = logger ?? Logger(label: "sonata.email")
         log.logLevel = .info
         self.logger = log
-        self.provider = provider
+        self.resolver = resolver
     }
 
     // MARK: - Lifecycle
 
-    /// Start the email polling loop.
+    /// Start the email polling loop. Always runs; each inbox's provider is resolved
+    /// (and skipped if unconfigured) per poll, so e.g. an IMAP inbox works even with
+    /// no AgentMail key.
     func start() async {
-        guard provider.isConfigured else {
-            logger.warning("EmailHandler: disabled (email provider not configured)")
-            return
-        }
-
         await seedKnownIds()
 
         // Prime the inbox list so the startup log shows accurate state.
@@ -82,8 +80,6 @@ actor EmailHandler {
 
     /// One poll cycle: for every configured inbox, fetch threads and process new unread emails.
     private func poll() async {
-        guard provider.isConfigured else { return }
-
         // Reload from DB each cycle so config changes take effect within one poll.
         currentInboxes = await loadInboxes()
         if currentInboxes.isEmpty {
@@ -94,6 +90,11 @@ actor EmailHandler {
         var pendingApprovalByInbox: [String: [EmailRecord]] = [:]
 
         for inbox in currentInboxes {
+            let provider = resolver.provider(for: inbox)
+            guard provider.isConfigured else {
+                logger.info("EmailHandler: skipping \(inbox.address) — provider '\(inbox.provider)' not configured")
+                continue
+            }
             do {
                 let threads = try await provider.listThreads(inbox: inbox.address)
 
@@ -344,7 +345,7 @@ actor EmailHandler {
         """
 
         do {
-            try await provider.send(
+            try await resolver.provider(for: inbox).send(
                 inbox: inbox.address,
                 to: [ownerEmail],
                 subject: "[APPROVAL NEEDED] \(bySender.count) new sender(s) at \(inbox.address)",
@@ -522,8 +523,6 @@ actor EmailHandler {
     /// (e.g. arrived between restarts). Verifies via AgentMail that no reply was
     /// sent before dispatching, to avoid double-replies.
     private func dispatchPendingUnreadEmails() async {
-        guard provider.isConfigured else { return }
-
         // Find unread emails in DB, max 24h old
         let cutoffMs = Int64((Date().timeIntervalSince1970 - 86400) * 1000)
         let unreadRows: [(messageId: String, threadId: String, from: String, subject: String, body: String, inboxAddress: String)]
@@ -573,9 +572,15 @@ actor EmailHandler {
 
             // Safety check 2: has a reply already been sent on this thread?
             // Only need the latest message's sender; can't-verify → skip to be safe.
+            guard let inboxCfg = currentInboxes.first(where: { $0.address == row.inboxAddress }) else {
+                logger.info("EmailHandler: pending unread for \(row.inboxAddress) — inbox no longer configured; skipping")
+                continue
+            }
+            let rowProvider = resolver.provider(for: inboxCfg)
+            guard rowProvider.isConfigured else { continue }
             let alreadyReplied: Bool
             do {
-                let latestFrom = try await provider.latestMessageSender(
+                let latestFrom = try await rowProvider.latestMessageSender(
                     inbox: row.inboxAddress, threadId: row.threadId)
                 alreadyReplied = latestFrom?.contains(row.inboxAddress) ?? false
             } catch {
@@ -694,7 +699,7 @@ actor EmailHandler {
         }) ?? inbox.address
 
         let subjects = emails.map { "\"\($0.subject)\" from \($0.from)" }.joined(separator: ", ")
-        try await provider.send(
+        try await resolver.provider(for: inbox).send(
             inbox: inbox.address,
             to: [ownerEmail],
             subject: "[Sonata] Failed to dispatch email at \(inbox.address)",
@@ -716,7 +721,8 @@ actor EmailHandler {
         do {
             let rows: [Row] = try dbPool.read { db -> [Row] in
                 try Row.fetchAll(db, sql: """
-                    SELECT address, role, displayName, autoReply, dispatchTo, systemPrompt
+                    SELECT address, role, displayName, autoReply, dispatchTo, systemPrompt,
+                           provider, providerConfig
                     FROM emailInboxes
                     WHERE enabled = 1
                     ORDER BY createdAt ASC
@@ -731,7 +737,9 @@ actor EmailHandler {
                     displayName: row["displayName"],
                     autoReply: (row["autoReply"] as Int64? ?? 1) != 0,
                     dispatchTo: row["dispatchTo"],
-                    systemPrompt: row["systemPrompt"]
+                    systemPrompt: row["systemPrompt"],
+                    provider: (row["provider"] as String?) ?? "agentmail",
+                    providerConfig: row["providerConfig"]
                 )
             }
         } catch {
@@ -903,6 +911,10 @@ struct InboxConfig: Sendable {
     let autoReply: Bool
     let dispatchTo: String?
     let systemPrompt: String?
+    /// Which EmailProvider backs this inbox: "agentmail" (default) or "imap".
+    let provider: String
+    /// JSON connection config for non-AgentMail providers (host/ports + password ref).
+    let providerConfig: String?
 
     init(
         address: String,
@@ -910,7 +922,9 @@ struct InboxConfig: Sendable {
         displayName: String? = nil,
         autoReply: Bool = true,
         dispatchTo: String? = nil,
-        systemPrompt: String? = nil
+        systemPrompt: String? = nil,
+        provider: String = "agentmail",
+        providerConfig: String? = nil
     ) {
         self.address = address
         self.role = role
@@ -918,6 +932,8 @@ struct InboxConfig: Sendable {
         self.autoReply = autoReply
         self.dispatchTo = dispatchTo
         self.systemPrompt = systemPrompt
+        self.provider = provider
+        self.providerConfig = providerConfig
     }
 }
 
