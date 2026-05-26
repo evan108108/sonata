@@ -10,6 +10,7 @@ class Worker: ObservableObject, Identifiable {
     let id: String
     let label: String
     let sessionId: String  // Claude --session-id UUID for cycling/resume
+    let engine: WorkerEngine  // Claude (default) or Goose — see WorkerEngine.swift
 
     @Published var status: WorkerStatus = .starting
     @Published var currentTask: String = ""
@@ -31,20 +32,24 @@ class Worker: ObservableObject, Identifiable {
     let terminalView: LocalProcessTerminalView
     var coordinator: WorkerCoordinator?
 
-    init(label: String) {
+    init(label: String, engine: WorkerEngine = WorkerEngine.defaultEngine) {
         self.id = "worker-\(Date().timeIntervalSince1970.description.replacingOccurrences(of: ".", with: "").suffix(10))"
         self.label = label
         self.sessionId = UUID().uuidString.lowercased()
+        self.engine = engine
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
     }
 
-    /// Recovery init: reuse a candidate's prior workerId + sessionId so claude
-    /// resumes the existing JSONL on relaunch (sonata-restart-recovery-v0-plan §4).
-    init(label: String, workerId: String, sessionId: String) {
+    /// Recovery init: reuse a candidate's prior workerId + sessionId so the
+    /// engine resumes the existing session on relaunch (sonata-restart-recovery-v0-plan §4).
+    /// Engine defaults to `.claude` — recovered workers stay on Claude until the
+    /// `engine` column is persisted in the workers table (T4 follow-up).
+    init(label: String, workerId: String, sessionId: String, engine: WorkerEngine = .claude) {
         self.id = workerId
         self.label = label
         self.sessionId = sessionId
+        self.engine = engine
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
     }
@@ -158,6 +163,22 @@ class WorkerManager: ObservableObject {
             }
         }
         return "claude"
+    }
+
+    /// Goose binary path (no-fork engine, T3) — `SONA_GOOSE_BINARY` override or
+    /// the usual install locations. Delegates to the pure resolver in
+    /// `GooseEngineBinding` so it stays testable.
+    static var gooseBinary: String {
+        GooseEngineBinding.binary()
+    }
+
+    /// Resolve the executable for a worker's engine. Claude is the default;
+    /// Goose is opt-in. New engines slot in here.
+    static func binary(for engine: WorkerEngine) -> String {
+        switch engine {
+        case .claude: return claudeBinary
+        case .goose: return gooseBinary
+        }
     }
 
     static var workingDirectory: String {
@@ -390,7 +411,7 @@ class WorkerManager: ObservableObject {
         return plan.toSpawn
     }
 
-    func addWorker(label: String? = nil) {
+    func addWorker(label: String? = nil, engine: WorkerEngine = WorkerEngine.defaultEngine) {
         let usedIndices = workers.compactMap { w -> Int? in
             let prefix = "sona-worker-"
             guard w.label.hasPrefix(prefix) else { return nil }
@@ -398,7 +419,7 @@ class WorkerManager: ObservableObject {
         }
         let index = (usedIndices.max() ?? 0) + 1
         let workerLabel = label ?? "sona-worker-\(index)"
-        let worker = Worker(label: workerLabel)
+        let worker = Worker(label: workerLabel, engine: engine)
         workers.append(worker)
         selectedWorkerId = worker.id
         DispatchQueue.main.async {
@@ -476,8 +497,8 @@ class WorkerManager: ObservableObject {
 
         print("[cycle] spawn-started: \(slotLabel)")
 
-        // Spawn replacement with same label
-        let newWorker = Worker(label: slotLabel)
+        // Spawn replacement with same label + engine
+        let newWorker = Worker(label: slotLabel, engine: oldWorker.engine)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.workers.append(newWorker)
@@ -746,7 +767,8 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             sessionLabel: worker.label,
             restartNudge: restartNudge,
             taskId: taskId,
-            lastEventId: lastEventId
+            lastEventId: lastEventId,
+            engine: worker.engine
         )
 
         DispatchQueue.main.async { [weak self] in
@@ -757,33 +779,52 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             terminal.resetToInitialState()
 
             var args: [String] = []
-            // Recovery workers use --resume to load the existing JSONL session;
-            // claude rejects --session-id with "already in use" when the JSONL exists
-            // (sessionIdExists in claude's CLI just statSyncs <sessionId>.jsonl).
-            // Fresh workers use --session-id with a new UUID — no existing JSONL.
-            if restartNudge {
-                args.append(contentsOf: ["--resume", self.worker.sessionId])
-            } else {
-                args.append(contentsOf: ["--session-id", self.worker.sessionId])
+            switch self.worker.engine {
+            case .claude:
+                // Recovery workers use --resume to load the existing JSONL session;
+                // claude rejects --session-id with "already in use" when the JSONL exists
+                // (sessionIdExists in claude's CLI just statSyncs <sessionId>.jsonl).
+                // Fresh workers use --session-id with a new UUID — no existing JSONL.
+                if restartNudge {
+                    args.append(contentsOf: ["--resume", self.worker.sessionId])
+                } else {
+                    args.append(contentsOf: ["--session-id", self.worker.sessionId])
+                }
+                if WorkerManager.skipPermissions {
+                    args.append("--dangerously-skip-permissions")
+                }
+                if let channel = WorkerManager.channelServer {
+                    args.append(contentsOf: ["--dangerously-load-development-channels", "server:\(channel)"])
+                }
+                // Spread any --mcp-config args from the in-proc opt-in path.
+                args.append(contentsOf: launch.extraArgs)
+            case .goose:
+                // Goose has no JSONL/session-id-collision quirk: `session --name`
+                // both creates and resumes the same named session, so fresh and
+                // recovery spawns use identical argv. Report-back + skills come
+                // from the MCP extensions in launch.extraArgs; permission bypass
+                // is GOOSE_MODE=auto in the env (set by buildLaunchEnv), not a flag.
+                args = GooseEngineBinding.spawnArgs(
+                    sessionId: self.worker.sessionId,
+                    extensionArgs: launch.extraArgs
+                )
             }
-            if WorkerManager.skipPermissions {
-                args.append("--dangerously-skip-permissions")
-            }
-            if let channel = WorkerManager.channelServer {
-                args.append(contentsOf: ["--dangerously-load-development-channels", "server:\(channel)"])
-            }
-            // Spread any --mcp-config args from the in-proc opt-in path.
-            args.append(contentsOf: launch.extraArgs)
 
             view.startProcess(
-                executable: WorkerManager.claudeBinary,
+                executable: WorkerManager.binary(for: self.worker.engine),
                 args: args,
                 environment: launch.env,
                 currentDirectory: WorkerManager.workingDirectory
             )
 
-            self.scheduleAutoConfirm()
-            self.startContextWatch()
+            // Auto-confirm + context-limit watch are Claude-Code-TUI specific
+            // (carriage-return dismissals + "Context limit reached" → /compact).
+            // Goose's interactive prompts differ and GOOSE_MODE=auto avoids tool
+            // gating; its auto-confirm/context handling is a T4 follow-up.
+            if self.worker.engine == .claude {
+                self.scheduleAutoConfirm()
+                self.startContextWatch()
+            }
 
             // Register worker with Sonata HTTP API and set status to idle after startup
             let workerId = worker.id
@@ -904,7 +945,8 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         sessionLabel: String? = nil,
         restartNudge: Bool = false,
         taskId: String? = nil,
-        lastEventId: String? = nil
+        lastEventId: String? = nil,
+        engine: WorkerEngine = .claude
     ) -> LaunchEnv {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
@@ -927,56 +969,75 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=1")
 
-        // Per plan §6: opt-in in-proc MCP via SONATA_MCP_INPROC=1.
-        let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
-            sessionKey: workerId,
-            role: .worker,
-            slotLabel: sessionLabel
-        )
-        if inProcExtras != nil {
-            // SONA_SESSION_ID still emitted (mem-server.ts sibling-injection
-            // compatibility — Open Question 3 in plan §12). Other legacy
-            // identity vars (WORKER_ID, SESSION_LABEL, restart-nudge trio)
-            // are NOT emitted: identity is in the URL path now, and the
-            // restart nudge fires inline via MCPNotificationDispatcher
-            // after spawn (scheduled below).
-            if let sessionId {
-                env.append("SONA_SESSION_ID=\(sessionId)")
-            }
-            if restartNudge, let taskId, let lastEventId {
-                // Fire the SONATA_RESTART channel notification ~2s after
-                // spawn, once the in-proc SSE writer has had time to
-                // attach. Cheap detached Task; failure is logged but
-                // non-fatal.
-                let nudgeWorkerId = workerId
-                let nudgeTaskId = taskId
-                let nudgeLastEventId = lastEventId
-                Task.detached {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    await MCPNotificationDispatcher.shared.pushSonataRestart(
-                        sessionKey: nudgeWorkerId,
-                        taskId: nudgeTaskId,
-                        lastEventId: nudgeLastEventId
-                    )
+        // Engine-specific MCP wiring + identity. Claude (default) keeps its
+        // exact in-proc/legacy behavior; Goose attaches its MCP servers as
+        // CLI extensions and never touches the Claude in-proc credential path.
+        var resolvedExtraArgs: [String] = []
+        switch engine {
+        case .claude:
+            // Per plan §6: opt-in in-proc MCP via SONATA_MCP_INPROC=1.
+            let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
+                sessionKey: workerId,
+                role: .worker,
+                slotLabel: sessionLabel
+            )
+            if inProcExtras != nil {
+                // SONA_SESSION_ID still emitted (mem-server.ts sibling-injection
+                // compatibility — Open Question 3 in plan §12). Other legacy
+                // identity vars (WORKER_ID, SESSION_LABEL, restart-nudge trio)
+                // are NOT emitted: identity is in the URL path now, and the
+                // restart nudge fires inline via MCPNotificationDispatcher
+                // after spawn (scheduled below).
+                if let sessionId {
+                    env.append("SONA_SESSION_ID=\(sessionId)")
+                }
+                if restartNudge, let taskId, let lastEventId {
+                    // Fire the SONATA_RESTART channel notification ~2s after
+                    // spawn, once the in-proc SSE writer has had time to
+                    // attach. Cheap detached Task; failure is logged but
+                    // non-fatal.
+                    let nudgeWorkerId = workerId
+                    let nudgeTaskId = taskId
+                    let nudgeLastEventId = lastEventId
+                    Task.detached {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        await MCPNotificationDispatcher.shared.pushSonataRestart(
+                            sessionKey: nudgeWorkerId,
+                            taskId: nudgeTaskId,
+                            lastEventId: nudgeLastEventId
+                        )
+                    }
+                }
+            } else {
+                env.append("WORKER_ID=\(workerId)")
+                if let sessionLabel {
+                    env.append("SESSION_LABEL=\(sessionLabel)")
+                }
+                if let sessionId {
+                    env.append("SONA_SESSION_ID=\(sessionId)")
+                }
+                if restartNudge {
+                    env.append("SONATA_RESTART_NUDGE=1")
+                }
+                if let taskId {
+                    env.append("SONATA_RESTART_TASK_ID=\(taskId)")
+                }
+                if let lastEventId {
+                    env.append("SONATA_RESTART_LAST_EVENT_ID=\(lastEventId)")
                 }
             }
-        } else {
-            env.append("WORKER_ID=\(workerId)")
-            if let sessionLabel {
-                env.append("SESSION_LABEL=\(sessionLabel)")
-            }
+            resolvedExtraArgs = inProcExtras ?? []
+        case .goose:
+            // Goose reports back + loads skills via MCP extensions (channels/T2,
+            // skills-loader/T1) passed as `--with-extension` args; permission
+            // bypass is GOOSE_MODE=auto. No Claude in-proc credential is issued.
             if let sessionId {
                 env.append("SONA_SESSION_ID=\(sessionId)")
             }
-            if restartNudge {
-                env.append("SONATA_RESTART_NUDGE=1")
-            }
-            if let taskId {
-                env.append("SONATA_RESTART_TASK_ID=\(taskId)")
-            }
-            if let lastEventId {
-                env.append("SONATA_RESTART_LAST_EVENT_ID=\(lastEventId)")
-            }
+            env.append(contentsOf: GooseEngineBinding.envAdditions(
+                skipPermissions: WorkerManager.skipPermissions
+            ))
+            resolvedExtraArgs = GooseEngineBinding.extensionArgs()
         }
 
         // Pass through auth and API keys from parent environment or .env file
@@ -1002,7 +1063,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             }
         }
 
-        return LaunchEnv(env: env, extraArgs: inProcExtras ?? [])
+        return LaunchEnv(env: env, extraArgs: resolvedExtraArgs)
     }
 
     static func loadDotEnv(path: String) -> [String: String] {
