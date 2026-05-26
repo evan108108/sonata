@@ -12,6 +12,7 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.0.0"),
         .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1.git", from: "0.10.0"),
+        .package(url: "https://github.com/Cocoanetics/SwiftMail.git", from: "1.6.3"),
     ],
     targets: [
         .executableTarget(
@@ -22,6 +23,7 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "P256K", package: "swift-secp256k1"),
+                .product(name: "SwiftMail", package: "SwiftMail"),
             ],
             path: "Sources",
             resources: [
