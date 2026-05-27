@@ -50,6 +50,23 @@ actor MCPSessionRegistry {
         sessions[sessionKey]
     }
 
+    /// Resolve a DM/notification target to a session. Tries the sessionKey
+    /// directly, then falls back to a session whose `claudeSessionId` alias
+    /// (set via `sonata_identify`) matches `target` — so a DM addressed by a
+    /// session's Claude session id (which is often all the sender knows, e.g. a
+    /// worker reporting its own id) still routes instead of failing with
+    /// target_session_unknown. Prefers an SSE-attached match when an alias
+    /// resolves to more than one entry (a live session over a lingering ghost).
+    func resolveSession(_ target: String) async -> MCPSessionState? {
+        if let direct = sessions[target] { return direct }
+        var fallback: MCPSessionState?
+        for state in sessions.values where await state.claudeSessionId == target {
+            if await state.sseWriter != nil { return state }
+            fallback = fallback ?? state
+        }
+        return fallback
+    }
+
     func getOrCreate(_ sessionKey: String, inferRole: () async -> SessionRole) async -> MCPSessionState {
         if let existing = sessions[sessionKey] { return existing }
         let role = await inferRole()
@@ -159,7 +176,7 @@ actor MCPSessionRegistry {
         metaJson: String?,
         sentAtMs: Int64
     ) async -> Bool {
-        guard let state = sessions[target] else { return false }
+        guard let state = await resolveSession(target) else { return false }
         let hasSSE = await (state.sseWriter != nil)
         guard hasSSE else { return false }
         let content = "[DM from \(fromSessionId)]\n\(body)"
