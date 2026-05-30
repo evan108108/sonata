@@ -6,13 +6,13 @@ import Logging
 ///   1. Pumps SSE keepalive frames so long-lived MCP streams don't time out.
 ///   2. Refreshes the workers.lastHeartbeat (and supervisorState.lastHeartbeat)
 ///      DB columns for every session whose SSE is currently attached.
-///
-/// This sweeper does NOT evict registry entries. The single eviction
-/// rule lives in MCPHTTPRouter: when an SSE writer's onClose fires
-/// (HTTP connection closed by either side), the entry is removed from
-/// the registry. That's the entire eviction contract — the rule the
-/// user asked for: "if the HTTP connection is up and we have a session
-/// id, the session is connected; otherwise it's not."
+///   3. **Staleness backstop**: evicts registry entries with no SSE writer and
+///      a `lastContactedAt` older than `staleGrace`. The primary eviction rule
+///      lives in MCPHTTPRouter (SSE onClose), but entries can be created via a
+///      POST initialize/tool call *before* an SSE attach — anon-XXX handshakes
+///      that never identify, or sessions whose SSE close wasn't detected — so
+///      those would otherwise linger forever. The grace window covers normal
+///      handshake/attach latency.
 actor MCPSessionSweeper {
     private let registry: MCPSessionRegistry
     private let dbPool: DatabasePool
@@ -20,6 +20,8 @@ actor MCPSessionSweeper {
     private var task: Task<Void, Never>?
 
     private let tickInterval: TimeInterval = 15.0
+    /// Evict no-SSE entries whose lastContactedAt is older than this.
+    private let staleGrace: Int64 = 3 * 60 * 1000  // 3 minutes
 
     init(registry: MCPSessionRegistry, dbPool: DatabasePool, logger: Logger) {
         self.registry = registry
@@ -49,6 +51,15 @@ actor MCPSessionSweeper {
         let now = nowMs()
 
         for snap in snapshots {
+            // Staleness backstop (see actor doc): an entry with no SSE writer
+            // and no contact in `staleGrace` is an abandoned POST-only/anon
+            // handshake or a missed SSE-close — evict it so the registry stays
+            // accurate for DM routing, broadcast, and the dashboard.
+            if !snap.hasSSE && (now - snap.lastContactedAt) > staleGrace {
+                await registry.evict(snap.sessionKey)
+                logger.info("Sweeper pruned stale registry entry \(snap.sessionKey) (no SSE, lastContact \((now - snap.lastContactedAt) / 1000)s ago)")
+                continue
+            }
             // Only sessions with an attached SSE writer count as
             // "currently connected." For those, bump the DB heartbeat
             // column so other subsystems (worker pool monitor,

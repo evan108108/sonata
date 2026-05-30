@@ -19,18 +19,18 @@ struct ConnectedSessionsSection: View {
     @State private var showBroadcast: Bool = false
 
     var body: some View {
+        // Only sessions with a live SSE writer count as "connected" — abandoned
+        // POST-only / anon-XXX registry entries that lingered are hidden here
+        // (the sweeper's staleness prune evicts them at the source).
+        let live = vm.connected.filter(\.hasSSE)
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(systemName: "bubble.left.and.text.bubble.right")
                     .foregroundStyle(.teal)
                 Text("Connected")
                     .font(.headline)
-                Text("\(vm.connected.count)")
+                Text("\(live.count)")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                let live = vm.connected.filter(\.hasSSE).count
-                Text("· \(live) live")
-                    .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -52,7 +52,7 @@ struct ConnectedSessionsSection: View {
                 .help("Refresh")
             }
 
-            if vm.connected.isEmpty {
+            if live.isEmpty {
                 VStack(spacing: 4) {
                     Text(vm.hasLoadedOnce ? "No connected sessions" : "Loading…")
                         .font(.callout)
@@ -68,7 +68,7 @@ struct ConnectedSessionsSection: View {
             } else {
                 VStack(spacing: 2) {
                     sessionColumnHeader
-                    ForEach(vm.connected) { row in
+                    ForEach(live) { row in
                         ConnectedSessionRow(row: row) { dmTarget = row }
                     }
                 }
