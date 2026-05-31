@@ -291,8 +291,9 @@ private struct SessionsTerminalContainer: NSViewRepresentable {
 
         // Mount any session content views (terminal or webview) not yet
         // attached — below the drop catcher so it stays frontmost.
+        // Suspended webview tabs have no content view (nil) — skip them.
         for tab in vm.tabs {
-            let content = tab.contentView
+            guard let content = tab.contentView else { continue }
             if content.superview !== container {
                 content.frame = container.bounds
                 content.autoresizingMask = [.width, .height]
@@ -309,7 +310,7 @@ private struct SessionsTerminalContainer: NSViewRepresentable {
         }
         // Show only the active session's content.
         for tab in vm.tabs {
-            tab.contentView.isHidden = (tab.id != vm.activeTabId)
+            tab.contentView?.isHidden = (tab.id != vm.activeTabId)
         }
         // Keep the catcher frontmost (re-adding moves it to the top of the
         // z-order in case a freshly-mounted content view jumped ahead).
@@ -326,8 +327,8 @@ private struct SessionsTerminalContainer: NSViewRepresentable {
             context.coordinator.lastFocusedId = vm.activeTabId
             if let id = vm.activeTabId,
                let tab = vm.tabs.first(where: { $0.id == id }),
-               tab.kind.isTerminalBacked {
-                let content = tab.contentView
+               tab.kind.isTerminalBacked,
+               let content = tab.contentView {
                 DispatchQueue.main.async { content.window?.makeFirstResponder(content) }
             }
         }

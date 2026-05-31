@@ -210,8 +210,10 @@ private struct ActiveTabBody: View {
     var body: some View {
         switch tab.state {
         case .starting, .running:
-            InteractiveSessionContentView(contentInstance: tab.contentView)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let content = tab.contentView {
+                InteractiveSessionContentView(contentInstance: content)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         case .stopped(let exitCode):
             stoppedView(exitCode: exitCode)
         case .spawnFailed(let message):

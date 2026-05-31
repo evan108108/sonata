@@ -119,10 +119,13 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     private(set) var webView: WKWebView?
 
     /// The NSView to mount for this session — terminal or webview.
-    var contentView: NSView {
+    /// Returns nil for suspended webview sessions (both terminal and webView
+    /// are deallocated to free the WebContent process). Callers must skip nil
+    /// entries rather than force-unwrapping.
+    var contentView: NSView? {
         if let terminal { return terminal }
         if let webView { return webView }
-        fatalError("InteractiveSessionTab has no content view")
+        return nil
     }
 
     /// Sidebar subtitle: the host for web sessions, the working directory's
