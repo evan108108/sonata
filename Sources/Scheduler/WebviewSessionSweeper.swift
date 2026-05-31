@@ -7,6 +7,11 @@ import Logging
 ///   2. idle ≥ hardCloseSec    → close (remove session)
 ///   3. live count > maxLiveSessions → suspend oldest-idle until at ceiling
 /// Reads webviewSessionConfig every tick so Settings changes apply live.
+///
+/// Governance applies ONLY to agent-created sessions (`ownerAgentId != nil`).
+/// Sessions a user opened from the UI (`ownerAgentId == nil`, see
+/// InteractiveSessionTab.ownerAgentId) are exempt from idle-suspend, hard-close,
+/// and ceiling eviction — they keep running until the user removes them.
 actor WebviewSessionSweeper {
     private let dbPool: DatabasePool
     private let logger: Logger
@@ -47,7 +52,8 @@ actor WebviewSessionSweeper {
         await MainActor.run {
             let vm = InteractiveSessionsViewModel.shared
             let now = Int64(Date().timeIntervalSince1970 * 1000)
-            let webs = vm.tabs.filter { $0.kind == .webview }
+            // Only agent-created webviews are governed; UI-created ones (ownerAgentId == nil) are exempt.
+            let webs = vm.tabs.filter { $0.kind == .webview && $0.ownerAgentId != nil }
 
             // 1 & 2: idle-based suspend / hard-close.
             for tab in webs {
@@ -62,7 +68,8 @@ actor WebviewSessionSweeper {
             }
 
             // 3: ceiling — suspend oldest-idle live sessions beyond maxLiveSessions.
-            var live = vm.tabs.filter { $0.kind == .webview && $0.lifecycle == .live }
+            // Only the agent-managed pool counts toward (and is evicted by) the ceiling.
+            var live = vm.tabs.filter { $0.kind == .webview && $0.lifecycle == .live && $0.ownerAgentId != nil }
             if live.count > cfg.maxLiveSessions {
                 live.sort { $0.lastActivityAt < $1.lastActivityAt }   // oldest-idle first
                 let overflow = live.count - cfg.maxLiveSessions
