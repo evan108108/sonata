@@ -86,6 +86,12 @@ actor MCPSessionRegistry {
             await state.sseWriter?.close()
         }
         tokens.removeValue(forKey: sessionKey)
+        // Owning-agent death → auto-close its webview sessions (spec §4/§7).
+        // The owner key is the bridge sessionKey, which is exactly what we
+        // evict on, so the match is direct.
+        await MainActor.run {
+            InteractiveSessionsViewModel.shared.closeOwnedBy(agentId: sessionKey)
+        }
     }
 
     struct SessionSnapshot: Sendable {

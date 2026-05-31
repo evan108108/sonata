@@ -88,4 +88,55 @@ final class SessionKindPersistenceTests: XCTestCase {
         XCTAssertTrue(SessionKind.sona.isTerminalBacked)
         XCTAssertTrue(SessionKind.terminal.isTerminalBacked)
     }
+
+    func testWebviewGovernanceColumnsRoundTrip() throws {
+        let pool = try migratedPool()
+        InteractiveSessionsStore.upsert(
+            dbPool: pool, id: "id-bg", sessionId: "s1", name: "BG", cwd: "/tmp",
+            position: 0, wasActive: false, kind: "webview", url: "https://a.com",
+            ownerAgentId: "worker-7", partition: "research", status: "suspended",
+            lastActivityAt: 123_456, background: true)
+        let row = InteractiveSessionsStore.loadAll(dbPool: pool).first { $0.id == "id-bg" }
+        XCTAssertEqual(row?.ownerAgentId, "worker-7")
+        XCTAssertEqual(row?.partition, "research")
+        XCTAssertEqual(row?.status, "suspended")
+        XCTAssertEqual(row?.lastActivityAt, 123_456)
+        XCTAssertEqual(row?.background, 1)
+    }
+
+    func testV18DefaultsForLegacyRows() throws {
+        // A pre-v18 row (no governance cols) reads back status='live', background=0.
+        let pool = try migratedPool()
+        try pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO interactiveSessions (id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt)
+                VALUES ('legacy-web', 's', 'Old', '/tmp', 0, 0, 'webview', 0, 0)
+            """)
+        }
+        let row = InteractiveSessionsStore.loadAll(dbPool: pool).first { $0.id == "legacy-web" }
+        XCTAssertEqual(row?.status, "live")
+        XCTAssertEqual(row?.background, 0)
+        XCTAssertNil(row?.ownerAgentId)
+    }
+
+    func testUpdateStatusAndActivityHelpers() throws {
+        let pool = try migratedPool()
+        InteractiveSessionsStore.upsert(dbPool: pool, id: "x", sessionId: "s", name: "n", cwd: "/tmp",
+            position: 0, wasActive: false, kind: "webview", url: "https://a.com")
+        InteractiveSessionsStore.updateStatus(dbPool: pool, id: "x", status: "suspended")
+        InteractiveSessionsStore.updateLastURLAndActivity(dbPool: pool, id: "x", url: "https://b.com", at: 999)
+        let row = InteractiveSessionsStore.loadAll(dbPool: pool).first
+        XCTAssertEqual(row?.status, "suspended")
+        XCTAssertEqual(row?.url, "https://b.com")
+        XCTAssertEqual(row?.lastActivityAt, 999)
+    }
+
+    @MainActor
+    func testStableUUIDForPartitionIsDeterministic() {
+        let a = InteractiveSessionTab.stableUUID(forPartition: "research")
+        let b = InteractiveSessionTab.stableUUID(forPartition: "research")
+        let c = InteractiveSessionTab.stableUUID(forPartition: "other")
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, c)
+    }
 }

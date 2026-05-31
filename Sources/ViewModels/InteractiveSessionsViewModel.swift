@@ -4,12 +4,23 @@ import SwiftTerm
 import AppKit
 import SwiftUI
 import WebKit
+import CryptoKit
 
 enum InteractiveSessionState: Equatable {
     case starting
     case running
     case stopped(exitCode: Int32?)
     case spawnFailed(message: String)
+}
+
+/// Governance lifecycle of a webview session — orthogonal to the live render
+/// `InteractiveSessionState`. A `live` session has an instantiated WKWebView; a
+/// `suspended` one has had it deallocated (WebContent process freed) but keeps
+/// its WKWebsiteDataStore on disk + its registry row, so it resumes on next
+/// drive/focus.
+enum WebviewLifecycle: String, Codable {
+    case live
+    case suspended
 }
 
 /// What a session tab runs. `sona` is the full Claude Code subprocess (the
@@ -73,10 +84,39 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// Target URL for `.webview` sessions; nil for terminal-backed kinds.
     let url: URL?
 
+    /// Bridge sessionKey of the agent that created this webview session.
+    /// Drives Agent Webviews tree grouping + owning-agent-death auto-close.
+    /// nil for sona/terminal and for user-created webviews from the UI.
+    let ownerAgentId: String?
+
+    /// Cookie/data-store partition NAME. nil ⇒ shared WKWebsiteDataStore.default().
+    /// Bound to the WKWebViewConfiguration at build time; immutable per session.
+    let partition: String?
+
+    /// True for headless sessions: driveable + persisted + shown in the tree,
+    /// but not auto-selected and filtered out of the in-rail Sessions strip.
+    let background: Bool
+
+    /// Lifecycle status for webview sessions. Mirrors the persisted `status`.
+    /// `.starting`/`.running`/etc. on `state` is the live render state; this is
+    /// the governance state the sweeper and tree read.
+    @Published var lifecycle: WebviewLifecycle = .live
+
+    /// Epoch ms of the last drive/navigation. Sweeper reads this for idle math.
+    @Published var lastActivityAt: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+
+    /// The WKWebsiteDataStore this session's WKWebView binds to. Built once
+    /// from `partition` and reused across suspend/resume so cookies/logins
+    /// survive a WebContent-process teardown. `.default()` (shared) when
+    /// `partition == nil`; an isolated forIdentifier: store otherwise.
+    private let dataStore: WKWebsiteDataStore
+
     // Exactly one of these is non-nil, selected by `kind`. `contentView`
-    // exposes whichever to the SwiftUI container.
+    // exposes whichever to the SwiftUI container. `webView` is a `var` (not a
+    // `let`) so suspend() can deallocate it — freeing the WebContent process —
+    // and resume() can rebuild it against the same WKWebsiteDataStore.
     let terminal: LocalProcessTerminalView?
-    let webView: WKWebView?
+    private(set) var webView: WKWebView?
 
     /// The NSView to mount for this session — terminal or webview.
     var contentView: NSView {
@@ -130,10 +170,40 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             .appendingPathComponent(".sonata/scrollback/\(id.uuidString.lowercased()).log")
     }
 
+    /// Resolve a partition name to a data store. nil ⇒ the shared default jar
+    /// (log into Gmail once, every agent inherits it). A non-nil name ⇒ an
+    /// isolated persistent store keyed by a DETERMINISTIC UUID derived from the
+    /// name (UUIDv5-style, namespaced), so the same partition always reopens the
+    /// same cookies. macOS 14+ (Package.swift platforms .v14), so forIdentifier:
+    /// is available.
+    static func makeDataStore(partition: String?) -> WKWebsiteDataStore {
+        guard let partition, !partition.isEmpty else { return .default() }
+        return WKWebsiteDataStore(forIdentifier: stableUUID(forPartition: partition))
+    }
+
+    /// Deterministic UUIDv5 (SHA-256 truncated, RFC-4122 variant/version bits set)
+    /// over a fixed namespace + the partition name. Same name ⇒ same UUID.
+    static func stableUUID(forPartition name: String) -> UUID {
+        let namespace = "sonata.webview.partition"  // fixed salt
+        var hasher = SHA256()
+        hasher.update(data: Data(namespace.utf8))
+        hasher.update(data: Data(name.utf8))
+        var bytes = Array(hasher.finalize().prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50  // version 5
+        bytes[8] = (bytes[8] & 0x3F) | 0x80  // RFC-4122 variant
+        let uuid = (bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],
+                    bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15])
+        return UUID(uuid: uuid)
+    }
+
     /// Fresh tab (mints a new sessionId, resume off).
-    convenience init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona, url: URL? = nil) {
+    convenience init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona,
+                     url: URL? = nil, ownerAgentId: String? = nil, partition: String? = nil,
+                     background: Bool = false) {
         self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
-                  sessionId: UUID().uuidString.lowercased(), resume: false)
+                  sessionId: UUID().uuidString.lowercased(), resume: false,
+                  ownerAgentId: ownerAgentId, partition: partition, background: background,
+                  materializeWebView: !background)  // background sessions start suspended
     }
 
     /// Variant used when bootstrapping from the persistence table on app
@@ -141,15 +211,23 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// re-attach with `--resume`. Setting `resume: true` flips the spawn
     /// path to use `--resume <sessionId>` instead of `--session-id`.
     convenience init(id: UUID, name: String, cwd: URL, sessionId: String, resume: Bool,
-                     kind: SessionKind = .sona, url: URL? = nil) {
+                     kind: SessionKind = .sona, url: URL? = nil,
+                     ownerAgentId: String? = nil, partition: String? = nil,
+                     background: Bool = false, lifecycle: WebviewLifecycle = .live,
+                     materializeWebView: Bool) {
         self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
-                  sessionId: sessionId, resume: resume)
+                  sessionId: sessionId, resume: resume,
+                  ownerAgentId: ownerAgentId, partition: partition, background: background,
+                  materializeWebView: materializeWebView)
+        self.lifecycle = lifecycle
     }
 
     /// Designated init — builds the content backend (terminal or webview)
     /// according to `kind` and wires up the matching delegate.
     private init(id: UUID, name: String, cwd: URL, kind: SessionKind, url: URL?,
-                 sessionId: String, resume: Bool) {
+                 sessionId: String, resume: Bool,
+                 ownerAgentId: String? = nil, partition: String? = nil,
+                 background: Bool = false, materializeWebView: Bool = true) {
         self.id = id
         self.name = name
         self.cwd = cwd
@@ -157,6 +235,10 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         self.url = url
         self.sessionId = sessionId
         self.resume = resume
+        self.ownerAgentId = ownerAgentId
+        self.partition = partition
+        self.background = background
+        self.dataStore = InteractiveSessionTab.makeDataStore(partition: partition)
 
         switch kind {
         case .sona, .terminal:
@@ -173,15 +255,27 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             self.terminal = tv
             self.webView = nil
         case .webview:
-            let config = WKWebViewConfiguration()
-            config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-            self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
             self.terminal = nil
+            self.webView = materializeWebView
+                ? InteractiveSessionTab.makeWebView(dataStore: dataStore)
+                : nil
+            self.lifecycle = materializeWebView ? .live : .suspended
         }
 
         super.init()
         terminal?.processDelegate = self
         webView?.navigationDelegate = self
+    }
+
+    /// Build a WKWebView bound to the given data store. Factored out of init so
+    /// resume() can rebuild it identically. The data store is set on the config
+    /// BEFORE construction — it can't be swapped on a live WKWebView, which is
+    /// why partition is a create-time, immutable property.
+    static func makeWebView(dataStore: WKWebsiteDataStore) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = dataStore
+        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        return WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
     }
 
     /// Used by the rail's Restart button after a failed --resume (e.g. the
@@ -383,6 +477,43 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         webView?.stopLoading()
     }
 
+    // MARK: - Webview suspend / resume (governance)
+
+    /// Free the WebContent process: stop loading, drop the navigation delegate,
+    /// deallocate the WKWebView. The WKWebsiteDataStore (on disk) + the registry
+    /// row are retained, so resume() rebuilds an identical session. No-op for
+    /// terminal-backed kinds or an already-suspended webview.
+    func suspend() {
+        guard kind == .webview, lifecycle == .live else { return }
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil
+        webView = nil
+        lifecycle = .suspended
+        state = .stopped(exitCode: nil)
+    }
+
+    /// Rebuild the WKWebView against the SAME data store and reload the last
+    /// URL. No-op if already live. Called transparently by any drive verb and
+    /// by focus (spy/peek). Cookies/logins survive because they live in the
+    /// persistent data store, not the WKWebView.
+    ///
+    /// Named `resumeWebView` (not `resume`) to avoid colliding with the
+    /// existing `resume: Bool` --resume flag stored property.
+    func resumeWebView() {
+        guard kind == .webview, lifecycle == .suspended else { return }
+        let wv = InteractiveSessionTab.makeWebView(dataStore: dataStore)
+        wv.navigationDelegate = self
+        self.webView = wv
+        lifecycle = .live
+        if let url {
+            state = .starting
+            lastSpawnAt = Date()
+            wv.load(URLRequest(url: url))
+        } else {
+            state = .running
+        }
+    }
+
     /// Make this session's content the window's first responder so the user
     /// can type immediately without clicking. Only meaningful for terminal-
     /// backed sessions; web sessions handle their own focus on click.
@@ -408,7 +539,14 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     // MARK: - WKNavigationDelegate (web sessions)
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        Task { @MainActor [weak self] in self?.state = .running }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.state = .running
+            let committed = webView.url?.absoluteString
+            self.lastActivityAt = Int64(Date().timeIntervalSince1970 * 1000)
+            InteractiveSessionsViewModel.shared.recordWebviewActivity(
+                tabId: self.id, lastURL: committed, at: self.lastActivityAt)
+        }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
@@ -582,6 +720,7 @@ final class InteractiveSessionsViewModel: ObservableObject {
         for row in rows {
             guard let uuid = UUID(uuidString: row.id) else { continue }
             let kind = SessionKind(rawValue: row.kind) ?? .sona
+            let isWeb = (kind == .webview)
             let tab = InteractiveSessionTab(
                 id: uuid,
                 name: row.name,
@@ -591,7 +730,14 @@ final class InteractiveSessionsViewModel: ObservableObject {
                 // terminals and web sessions have nothing to --resume.
                 resume: kind == .sona,
                 kind: kind,
-                url: row.url.flatMap { URL(string: $0) }
+                url: row.url.flatMap { URL(string: $0) },
+                ownerAgentId: row.ownerAgentId,
+                partition: row.partition,
+                background: row.background == 1,
+                // Webviews come back SUSPENDED (spec §9): no WKWebView until
+                // first focus/drive. sona/terminal restore live as before.
+                lifecycle: isWeb ? .suspended : .live,
+                materializeWebView: false              // webviews never build the WKWebView here
             )
             // Restored Terminal sessions replay their saved scrollback once.
             tab.shouldReplayScrollback = (kind == .terminal)
@@ -609,9 +755,11 @@ final class InteractiveSessionsViewModel: ObservableObject {
         // Spawn each tab on the next runloop tick so the view model is
         // settled before the SwiftTerm pty starts and starts firing
         // process-state callbacks.
+        // Spawn only terminal-backed sessions; webviews stay suspended until
+        // first focus/drive resumes them.
         let restoredTabs = tabs
         DispatchQueue.main.async {
-            for tab in restoredTabs {
+            for tab in restoredTabs where tab.kind.isTerminalBacked {
                 tab.spawn()
             }
         }
@@ -650,6 +798,69 @@ final class InteractiveSessionsViewModel: ObservableObject {
             tab.spawn()
         }
         return tab
+    }
+
+    /// Create a webview session (the MCP `session_create` backend). When
+    /// `background` is true the session is created suspended, NOT selected, and
+    /// filtered out of the in-rail strip — it still persists + drives + shows in
+    /// the Agent Webviews tree. Visible (non-background) sessions materialize a
+    /// live WKWebView and load `url` immediately.
+    @discardableResult
+    func addWebviewSession(ownerAgentId: String?, url: URL?, partition: String?,
+                           background: Bool, name: String? = nil) -> InteractiveSessionTab {
+        let finalName = (name?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap {
+            $0.isEmpty ? nil : $0
+        } ?? (url?.host ?? "Web \(nextSessionIndex())")
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        let cwd = URL(fileURLWithPath: "\(home)/.sonata/session/web")
+        let tab = InteractiveSessionTab(
+            name: finalName, cwd: cwd, kind: .webview, url: url,
+            ownerAgentId: ownerAgentId, partition: partition, background: background)
+        tabs.append(tab)
+        persistTab(tab, position: tabs.count - 1)
+        if !background {
+            selectTab(id: tab.id)
+            DispatchQueue.main.async { tab.spawn() }   // loadWeb()
+        }
+        return tab
+    }
+
+    /// Look up a webview tab by its public session id (the persistence PK =
+    /// tab.id UUID string, lowercased). Used by the driver/MCP layer.
+    func webviewTab(id sid: String) -> InteractiveSessionTab? {
+        tabs.first { $0.kind == .webview && $0.id.uuidString.lowercased() == sid }
+    }
+
+    /// Count of LIVE webview WKWebViews — the sweeper's ceiling check.
+    var liveWebviewCount: Int {
+        tabs.filter { $0.kind == .webview && $0.lifecycle == .live }.count
+    }
+
+    func suspendTab(id: UUID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        tab.suspend()
+        dbPool.map { InteractiveSessionsStore.updateStatus(dbPool: $0, id: id.uuidString.lowercased(), status: "suspended") }
+    }
+
+    func resumeTab(id: UUID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        tab.resumeWebView()
+        dbPool.map { InteractiveSessionsStore.updateStatus(dbPool: $0, id: id.uuidString.lowercased(), status: "live") }
+    }
+
+    /// Called from the nav delegate; persists last URL + activity.
+    func recordWebviewActivity(tabId: UUID, lastURL: String?, at ms: Int64) {
+        dbPool.map {
+            InteractiveSessionsStore.updateLastURLAndActivity(
+                dbPool: $0, id: tabId.uuidString.lowercased(), url: lastURL, at: ms)
+        }
+    }
+
+    /// Close every webview session owned by `agentId`. Wired to MCP session
+    /// eviction (owning-agent death) — see §6.4.
+    func closeOwnedBy(agentId: String) {
+        let doomed = tabs.filter { $0.kind == .webview && $0.ownerAgentId == agentId }.map(\.id)
+        for id in doomed { closeTab(id: id) }
     }
 
     func closeTab(id: UUID) {
@@ -822,7 +1033,12 @@ final class InteractiveSessionsViewModel: ObservableObject {
             position: position,
             wasActive: tab.id == activeTabId,
             kind: tab.kind.rawValue,
-            url: tab.url?.absoluteString
+            url: tab.url?.absoluteString,
+            ownerAgentId: tab.ownerAgentId,
+            partition: tab.partition,
+            status: tab.lifecycle.rawValue,
+            lastActivityAt: tab.lastActivityAt,
+            background: tab.background
         )
     }
 

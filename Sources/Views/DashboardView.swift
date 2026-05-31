@@ -115,6 +115,9 @@ struct DashboardView: View {
                         UnconnectedSessionsSection(vm: allSessionsVM)
                             .padding(.horizontal)
 
+                        AgentWebviewsSection(vm: allSessionsVM)
+                            .padding(.horizontal)
+
                         // ── Token Usage ────────────────────────────────────────
                         // What is this costing right now — sparkline + today's spend.
                         TokenUsageCard(vm: tokenVM)

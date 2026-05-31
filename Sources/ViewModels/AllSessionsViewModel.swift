@@ -95,6 +95,23 @@ final class AllSessionsViewModel: ObservableObject {
     var connected: [AllSessionsRow] { rows.filter { $0.section == .connected } }
     var unconnected: [AllSessionsRow] { rows.filter { $0.section == .unconnected } }
 
+    struct WebviewGroup: Identifiable {
+        let id: String                 // ownerAgentId (or "—" for user-created)
+        let ownerLabel: String
+        let tabs: [InteractiveSessionTab]
+    }
+
+    /// Webview sessions grouped by owning agent, for the Agent Webviews tree.
+    /// Reads the live tabs directly (the registry is the source of truth);
+    /// SwiftUI re-renders because InteractiveSessionsViewModel is observed.
+    var webviewGroups: [WebviewGroup] {
+        let webs = InteractiveSessionsViewModel.shared.tabs.filter { $0.kind == .webview }
+        let byOwner = Dictionary(grouping: webs) { $0.ownerAgentId ?? "—" }
+        return byOwner
+            .map { WebviewGroup(id: $0.key, ownerLabel: $0.key == "—" ? "Unowned (user)" : $0.key, tabs: $0.value) }
+            .sorted { $0.ownerLabel < $1.ownerLabel }
+    }
+
     func fetch() async {
         var collected: [AllSessionsRow] = []
 

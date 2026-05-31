@@ -51,6 +51,57 @@ enum MCPToolHandlers {
             return await afkRegister(
                 args: args, sessionKey: sessionKey,
                 actionRegistry: actionRegistry, dbPool: dbPool)
+        case "session_create":
+            return await webviewCreate(args: args, sessionKey: sessionKey)
+        case "session_close":
+            return await webviewClose(args: args)
+        case "session_list":
+            return await webviewList()
+        case "session_focus":
+            return await webviewSimple(args: args) { try WebviewSessionService.shared.focus(sessionId: $0); return "focused \($0)" }
+        case "navigate":
+            return await webviewDrive(args: args) { sid in
+                guard let url = args["url"] as? String else { return (false, "navigate: url required") }
+                try await WebviewSessionService.shared.navigate(sessionId: sid, url: url); return (true, "navigated \(sid) → \(url)")
+            }
+        case "click":
+            return await webviewDrive(args: args) { sid in
+                let r = try await WebviewSessionService.shared.click(
+                    sessionId: sid, selector: args["selector"] as? String,
+                    x: args["x"] as? Double, y: args["y"] as? Double); return (true, r)
+            }
+        case "type":
+            return await webviewDrive(args: args) { sid in
+                guard let text = args["text"] as? String else { return (false, "type: text required") }
+                let r = try await WebviewSessionService.shared.type(
+                    sessionId: sid, text: text, selector: args["selector"] as? String); return (true, r)
+            }
+        case "scroll":
+            return await webviewDrive(args: args) { sid in
+                let r = try await WebviewSessionService.shared.scroll(
+                    sessionId: sid, x: args["x"] as? Double, y: args["y"] as? Double,
+                    selector: args["selector"] as? String); return (true, r)
+            }
+        case "screenshot":
+            return await webviewDrive(args: args) { sid in
+                let b64 = try await WebviewSessionService.shared.screenshot(sessionId: sid)
+                let json = (try? JSONSerialization.data(withJSONObject: ["screenshot": b64], options: []))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return (true, json)
+            }
+        case "evaluate":
+            return await webviewDrive(args: args) { sid in
+                guard let js = args["script"] as? String ?? args["js"] as? String else { return (false, "evaluate: script required") }
+                let r = try await WebviewSessionService.shared.evaluate(sessionId: sid, js: js); return (true, r)
+            }
+        case "look":
+            return await webviewDrive(args: args) { sid in
+                let r = try await WebviewSessionService.shared.look(sessionId: sid); return (true, r)
+            }
+        case "get_page_info":
+            return await webviewDrive(args: args) { sid in
+                let r = try await WebviewSessionService.shared.getPageInfo(sessionId: sid); return (true, r)
+            }
         default:
             return (false, "Unknown tool: \(toolName)")
         }
@@ -74,6 +125,54 @@ enum MCPToolHandlers {
         }
         return await actionRegistry.executeMCPTool(
             name: "afk_register", args: coerced, dbPool: dbPool)
+    }
+
+    // MARK: - Webview session tools (Phase 1)
+
+    private static func webviewCreate(
+        args: [String: Any], sessionKey: String
+    ) async -> (success: Bool, result: String) {
+        // ownerAgentId defaults to the calling bridge session (decision F2).
+        let owner = (args["ownerAgentId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sessionKey
+        let url = args["url"] as? String
+        let partition = (args["partition"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let background = (args["background"] as? Bool) ?? false
+        let sid = await WebviewSessionService.shared.create(
+            ownerAgentId: owner, url: url, partition: partition, background: background)
+        let payload: [String: Any] = ["sessionId": sid, "ownerAgentId": owner, "background": background]
+        let json = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{\"sessionId\":\"\(sid)\"}"
+        return (true, json)
+    }
+
+    private static func webviewClose(args: [String: Any]) async -> (success: Bool, result: String) {
+        guard let sid = args["sessionId"] as? String, !sid.isEmpty else { return (false, "sessionId required") }
+        do { try await WebviewSessionService.shared.close(sessionId: sid); return (true, "closed \(sid)") }
+        catch { return (false, "\(error)") }
+    }
+
+    private static func webviewList() async -> (success: Bool, result: String) {
+        let infos = await WebviewSessionService.shared.list()
+        let data = (try? JSONEncoder().encode(infos)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        return (true, data)
+    }
+
+    /// For verbs that take only a sessionId and return a string.
+    private static func webviewSimple(
+        args: [String: Any], _ op: @MainActor (String) async throws -> String
+    ) async -> (success: Bool, result: String) {
+        guard let sid = args["sessionId"] as? String, !sid.isEmpty else { return (false, "sessionId required") }
+        do { return (true, try await op(sid)) } catch { return (false, "\(error)") }
+    }
+
+    /// For drive verbs: extracts sessionId, runs the op, maps thrown DriveError
+    /// to a failed tool result. The op returns its own (success, result) so a
+    /// verb can report a semantic failure (e.g. missing required arg) too.
+    private static func webviewDrive(
+        args: [String: Any], _ op: @MainActor (String) async throws -> (Bool, String)
+    ) async -> (success: Bool, result: String) {
+        guard let sid = args["sessionId"] as? String, !sid.isEmpty else { return (false, "sessionId required") }
+        do { return try await op(sid) } catch { return (false, "\(error)") }
     }
 
     /// Fan a DM to every SSE-attached session matching the optional
@@ -604,6 +703,74 @@ enum MCPToolSchemas {
                 ],
                 "required": ["token"],
             ],
+        ],
+        [
+            "name": "session_create",
+            "description": "Create an in-app webview session (WKWebView). Returns { sessionId }. ownerAgentId defaults to the calling session. Omit `partition` for the shared cookie jar (logins inherited); pass a name for an isolated store. `background:true` creates it headless (driveable, not shown until focused).",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "ownerAgentId": ["type": "string", "description": "Owning agent (defaults to caller's session)"],
+                    "url": ["type": "string", "description": "Initial URL to load (optional)"],
+                    "partition": ["type": "string", "description": "Cookie/data-store partition name (omit = shared default)"],
+                    "background": ["type": "boolean", "description": "Headless: driveable but not mounted (default false)"],
+                ],
+            ],
+        ],
+        [
+            "name": "session_close",
+            "description": "Close a webview session and remove its registry row. Isolated-partition stores are reclaimed when their last session closes.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string", "description": "Session id from session_create"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "session_list",
+            "description": "List all webview sessions: [{ sessionId, ownerAgentId, status (live|suspended), background, url, title, partition, lastActivityAt }].",
+            "inputSchema": ["type": "object", "properties": [:]],
+        ],
+        [
+            "name": "session_focus",
+            "description": "Bring a webview session into the visible panel (spy/peek). Resumes it if suspended. Un-focusing happens in the UI and leaves it running.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string", "description": "Session id"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "navigate",
+            "description": "Load a URL in the webview session (WKWebView.load). Resumes a suspended session.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"], "url": ["type": "string"]], "required": ["sessionId", "url"]],
+        ],
+        [
+            "name": "click",
+            "description": "Click an element in the webview session — by CSS `selector`, or by viewport `x`+`y`.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"], "selector": ["type": "string"], "x": ["type": "number"], "y": ["type": "number"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "type",
+            "description": "Type `text` into the focused element, or into `selector` if given.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"], "text": ["type": "string"], "selector": ["type": "string"]], "required": ["sessionId", "text"]],
+        ],
+        [
+            "name": "scroll",
+            "description": "Scroll the page by `x`/`y` pixels, or scroll `selector` into view.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"], "x": ["type": "number"], "y": ["type": "number"], "selector": ["type": "string"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "screenshot",
+            "description": "PNG snapshot of the webview session as base64 (returns { screenshot }). Mirrors Eyebrowse.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "evaluate",
+            "description": "Run JavaScript in the page world (unsandboxed) and return the result. `script` is the JS source. Tool name matches Eyebrowse's `evaluate` exactly (zero relearning).",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"], "script": ["type": "string"]], "required": ["sessionId", "script"]],
+        ],
+        [
+            "name": "look",
+            "description": "Structured page snapshot: { url, title, text, links[], inputs[] } — what an agent needs to decide the next action.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "get_page_info",
+            "description": "Lightweight page state: { url, title, readyState, scroll, viewport }.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"]], "required": ["sessionId"]],
         ],
     ]
 }

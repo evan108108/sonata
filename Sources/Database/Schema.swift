@@ -597,6 +597,19 @@ func seedSupervisorConfigIfEmpty(in db: Database) throws {
     """, arguments: [now])
 }
 
+/// Seed the webviewSessionConfig singleton row with defaults if not present.
+/// Idempotent — safe to call from the migration or at startup.
+func seedWebviewSessionConfigIfEmpty(in db: Database) throws {
+    let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM webviewSessionConfig") ?? 0
+    guard count == 0 else { return }
+    let now = Int64(Date().timeIntervalSince1970 * 1000)
+    try db.execute(sql: """
+        INSERT INTO webviewSessionConfig
+            (id, idleSuspendSec, hardCloseSec, maxLiveSessions, updatedAt)
+        VALUES ('singleton', 300, 1800, 8, ?)
+    """, arguments: [now])
+}
+
 /// Seed the emailInboxes table with the two historically hardcoded inboxes
 /// if the table is empty. Idempotent — safe to call at startup or from a migration.
 func seedEmailInboxesIfEmpty(in db: Database) throws {
@@ -911,10 +924,53 @@ extension DatabaseMigrator {
         // `providerConfig` is JSON connection config for non-AgentMail providers
         // (host/ports + a SecretStore key ref for the password).
         registerMigration("v17_email_provider") { db in
+            // do/catch ADD COLUMN idiom (matches v13/v18): the full-schema
+            // baseline `CREATE TABLE emailInboxes` already includes these two
+            // columns, so on a FRESH DB they exist before this migration runs
+            // and a bare ALTER would fail with "duplicate column name". Older
+            // installs (table predates the columns) still get them added here.
+            do { try db.execute(sql: "ALTER TABLE emailInboxes ADD COLUMN provider TEXT NOT NULL DEFAULT 'agentmail'") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE emailInboxes ADD COLUMN providerConfig TEXT") } catch { /* column exists */ }
+        }
+
+        // v18: webview session governance + ownership fields. All additive,
+        // all nullable / defaulted so restored pre-v18 rows are valid:
+        //   ownerAgentId  — the bridge sessionKey of the agent that created
+        //                   the session (drives the Agent Webviews tree
+        //                   grouping + the owning-agent-death auto-close).
+        //   partition     — cookie/data-store partition NAME (NULL = shared
+        //                   WKWebsiteDataStore.default()). Immutable per session.
+        //   status        — 'live' | 'suspended' | 'closed' (rows are deleted
+        //                   on close, so persisted values are live|suspended).
+        //   lastActivityAt— epoch ms of the last drive/navigation; the sweeper
+        //                   reads this to decide idle-suspend / hard-close.
+        //   background    — 1 = headless (driveable, not auto-mounted/selected).
+        // The existing `url` column (v16) doubles as "last URL": the nav
+        // delegate writes the committed URL back so resume reloads it.
+        registerMigration("v18_webview_session_fields") { db in
+            do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN ownerAgentId TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN partition TEXT") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN status TEXT NOT NULL DEFAULT 'live'") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN lastActivityAt INTEGER") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN background INTEGER NOT NULL DEFAULT 0") } catch { /* column exists */ }
             try db.execute(sql:
-                "ALTER TABLE emailInboxes ADD COLUMN provider TEXT NOT NULL DEFAULT 'agentmail'")
-            try db.execute(sql:
-                "ALTER TABLE emailInboxes ADD COLUMN providerConfig TEXT")
+                "CREATE INDEX IF NOT EXISTS interactiveSessions_by_owner ON interactiveSessions(ownerAgentId)")
+        }
+
+        // v19: webview session governance config — a singleton row, exactly
+        // like supervisorConfig (v3). Defaults: idle-suspend 5 min, hard-close
+        // 30 min, max 8 concurrent live WKWebViews.
+        registerMigration("v19_webview_session_config") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS webviewSessionConfig (
+                    id              TEXT PRIMARY KEY DEFAULT 'singleton',
+                    idleSuspendSec  INTEGER NOT NULL DEFAULT 300,
+                    hardCloseSec    INTEGER NOT NULL DEFAULT 1800,
+                    maxLiveSessions INTEGER NOT NULL DEFAULT 8,
+                    updatedAt       INTEGER NOT NULL
+                )
+            """)
+            try seedWebviewSessionConfigIfEmpty(in: db)
         }
     }
 }

@@ -126,4 +126,42 @@ final class MCPSessionLifecycleTests: XCTestCase {
         XCTAssertTrue(snaps.contains { $0.sessionKey == "worker-sw1" && $0.hasSSE })
         await sweeper.stop()
     }
+
+    // MARK: - Webview session driver (Phase 1)
+
+    @MainActor
+    func testWebviewCreateListCloseLifecycle() async throws {
+        let svc = WebviewSessionService.shared
+        let before = svc.list().count
+        let sid = svc.create(ownerAgentId: "worker-a", url: nil, partition: "t-create", background: true)
+        XCTAssertTrue(svc.list().contains { $0.sessionId == sid && $0.background && $0.ownerAgentId == "worker-a" })
+        // Background ⇒ created suspended (no WKWebView built).
+        XCTAssertEqual(svc.list().first { $0.sessionId == sid }?.status, "suspended")
+        try svc.close(sessionId: sid)
+        XCTAssertEqual(svc.list().count, before)
+    }
+
+    @MainActor
+    func testFocusResumesSuspendedSession() async throws {
+        let svc = WebviewSessionService.shared
+        let sid = svc.create(ownerAgentId: "worker-b", url: "about:blank", partition: "t-focus", background: true)
+        defer { try? svc.close(sessionId: sid) }
+        XCTAssertEqual(svc.list().first { $0.sessionId == sid }?.status, "suspended")
+        try svc.focus(sessionId: sid)
+        XCTAssertEqual(svc.list().first { $0.sessionId == sid }?.status, "live")
+    }
+
+    @MainActor
+    func testCloseOwnedByAutoClosesAgentSessions() async throws {
+        let vm = InteractiveSessionsViewModel.shared
+        let svc = WebviewSessionService.shared
+        let s1 = svc.create(ownerAgentId: "worker-die", url: nil, partition: "t-d1", background: true)
+        let s2 = svc.create(ownerAgentId: "worker-die", url: nil, partition: "t-d2", background: true)
+        let other = svc.create(ownerAgentId: "worker-live", url: nil, partition: "t-d3", background: true)
+        defer { try? svc.close(sessionId: other) }
+        vm.closeOwnedBy(agentId: "worker-die")
+        let ids = svc.list().map(\.sessionId)
+        XCTAssertFalse(ids.contains(s1)); XCTAssertFalse(ids.contains(s2))
+        XCTAssertTrue(ids.contains(other), "other agent's session must survive")
+    }
 }

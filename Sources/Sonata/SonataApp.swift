@@ -486,6 +486,7 @@ struct SonataApp: App {
                 registry.register(schedulerActions)
                 registry.register(supervisorActions)
                 registry.register(supervisorConfigActions)
+                registry.register(webviewSessionConfigActions)
                 registry.register(wikiActions)
                 registry.register(coreBlockActions)
                 registry.register(checkpointActions)
@@ -549,6 +550,9 @@ struct SonataApp: App {
                     logger: logger
                 )
                 await mcpSweeper.start()
+                let webviewSweeper = WebviewSessionSweeper(
+                    dbPool: pool, logger: Logger(label: "sonata.webview.sweeper"))
+                await webviewSweeper.start()
                 let mcpEventPusher = MCPEventPusher(dbPool: pool, registry: mcpRegistry, logger: logger)
                 await mcpEventPusher.start()
                 logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")

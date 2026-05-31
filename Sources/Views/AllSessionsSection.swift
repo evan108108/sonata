@@ -355,6 +355,113 @@ private struct UnconnectedSessionRow: View {
     }
 }
 
+// MARK: - Agent Webviews
+
+/// Collapsible "Agent Webviews" tree: webview sessions grouped by owning agent.
+/// A view over the registry (InteractiveSessionsViewModel.shared.tabs) — headless
+/// sessions appear here without ever forcing a panel open. Per Evan's UI rule:
+/// NO focus rings — selection/state use background + color only.
+struct AgentWebviewsSection: View {
+    @ObservedObject var vm: AllSessionsViewModel
+    @ObservedObject private var sessions = InteractiveSessionsViewModel.shared
+    @State private var expandedOwners: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "globe").foregroundStyle(.blue)
+                Text("Agent Webviews").font(.headline)
+                let live = sessions.tabs.filter { $0.kind == .webview && $0.lifecycle == .live }.count
+                let total = sessions.tabs.filter { $0.kind == .webview }.count
+                Text("\(total)").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Text("· \(live) live").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            ForEach(vm.webviewGroups) { group in
+                DisclosureGroup(isExpanded: bindingFor(group.id)) {
+                    ForEach(group.tabs, id: \.id) { tab in
+                        WebviewSessionRow(tab: tab, sessions: sessions)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
+                        Text(group.ownerLabel).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        Text("\(group.tabs.count)").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func bindingFor(_ owner: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedOwners.contains(owner) },
+            set: { if $0 { expandedOwners.insert(owner) } else { expandedOwners.remove(owner) } })
+    }
+}
+
+/// One webview session row: status dot + name + url/title + last-activity, with
+/// focus (spy/peek), suspend, and close affordances. Matches the in-rail row
+/// idiom (SessionsView SessionSidebarRow) and the no-focus-ring rule.
+private struct WebviewSessionRow: View {
+    @ObservedObject var tab: InteractiveSessionTab
+    let sessions: InteractiveSessionsViewModel
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(tab.lifecycle == .live ? Color.green : Color.gray)
+                .frame(width: 8, height: 8)
+                .help(tab.lifecycle == .live ? "live" : "suspended")
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(tab.name).font(.caption).lineLimit(1)
+                    if tab.background {
+                        Text("bg").font(.caption2)
+                            .padding(.horizontal, 4).padding(.vertical, 0.5)
+                            .background(.purple.opacity(0.15), in: Capsule()).foregroundStyle(.purple)
+                    }
+                }
+                Text(tab.webView?.url?.absoluteString ?? tab.url?.absoluteString ?? "—")
+                    .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            Text(Self.relative(tab.lastActivityAt)).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+            // Affordances appear on hover (match ConnectedSessionRow's DM button).
+            Button { sessions.selectTab(id: tab.id); if tab.lifecycle == .suspended { sessions.resumeTab(id: tab.id) } } label: {
+                Image(systemName: "eye").foregroundStyle(.secondary)
+            }.buttonStyle(.borderless).help("Focus (spy/peek)").opacity(hovered ? 1 : 0.5)
+            if tab.lifecycle == .live {
+                Button { sessions.suspendTab(id: tab.id) } label: { Image(systemName: "pause.circle").foregroundStyle(.secondary) }
+                    .buttonStyle(.borderless).help("Suspend (free memory)").opacity(hovered ? 1 : 0.5)
+            }
+            Button { sessions.closeTab(id: tab.id) } label: { Image(systemName: "xmark.circle").foregroundStyle(.secondary) }
+                .buttonStyle(.borderless).help("Close").opacity(hovered ? 1 : 0.5)
+        }
+        .frame(height: 30)
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+        .contextMenu {
+            Button("Focus") { sessions.selectTab(id: tab.id); if tab.lifecycle == .suspended { sessions.resumeTab(id: tab.id) } }
+            if tab.lifecycle == .live { Button("Suspend") { sessions.suspendTab(id: tab.id) } }
+            else { Button("Resume") { sessions.resumeTab(id: tab.id) } }
+            Divider()
+            Button("Close", role: .destructive) { sessions.closeTab(id: tab.id) }
+        }
+    }
+
+    static func relative(_ ms: Int64) -> String {
+        let secs = max(0, Int(Date().timeIntervalSince1970) - Int(ms / 1000))
+        if secs < 60 { return "\(secs)s" }
+        if secs < 3600 { return "\(secs/60)m" }
+        return "\(secs/3600)h"
+    }
+}
+
 // MARK: - DM composer (shared between Connected section's per-row DM
 // and broadcast button)
 

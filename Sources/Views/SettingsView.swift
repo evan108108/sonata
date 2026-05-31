@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var workerExpanded = false
     @State private var supervisorExpanded = false
     @State private var studioExpanded = false
+    @State private var webExpanded = false
 
     // Whole-window translucency. Shares the UserDefaults key the WindowGroup
     // root reads, so dragging the slider updates the live window immediately.
@@ -260,6 +261,11 @@ struct SettingsView: View {
                     // MARK: - Supervisor Schedule Section
                     collapsibleSection("Supervisor", icon: "eye.fill", expanded: $supervisorExpanded) {
                         SupervisorConfigView()
+                    }
+
+                    // MARK: - Web Sessions Section
+                    collapsibleSection("Web Sessions", icon: "globe", expanded: $webExpanded) {
+                        WebviewSessionConfigView()
                     }
                 }
                 .padding()

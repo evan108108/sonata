@@ -37,7 +37,7 @@ struct SessionsView: View {
 
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(vm.tabs) { tab in
+                    ForEach(vm.tabs.filter { !($0.kind == .webview && $0.background) }) { tab in
                         SessionSidebarRow(tab: tab)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)

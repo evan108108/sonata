@@ -12,13 +12,18 @@ import GRDB
 
 struct PersistedInteractiveSession: FetchableRecord, Codable {
     let id: String          // matches InteractiveSessionTab.id (UUID string)
-    let sessionId: String   // Claude session id for --resume
+    let sessionId: String   // Claude session id for --resume (sona only)
     let name: String
     let cwd: String
     let position: Int
     let wasActive: Int
     let kind: String        // SessionKind.rawValue ("sona" | "terminal" | "webview")
-    let url: String?        // target URL for webview sessions; nil otherwise
+    let url: String?        // target / LAST url for webview sessions; nil otherwise
+    let ownerAgentId: String?  // bridge sessionKey of the creating agent (webview)
+    let partition: String?     // data-store partition name; nil = shared default
+    let status: String         // 'live' | 'suspended' (closed rows are deleted)
+    let lastActivityAt: Int64? // epoch ms of last drive/navigation
+    let background: Int        // 1 = headless
     let createdAt: Int64
     let updatedAt: Int64
 }
@@ -29,7 +34,9 @@ enum InteractiveSessionsStore {
         do {
             return try dbPool.read { db in
                 try PersistedInteractiveSession.fetchAll(db, sql: """
-                    SELECT id, sessionId, name, cwd, position, wasActive, kind, url, createdAt, updatedAt
+                    SELECT id, sessionId, name, cwd, position, wasActive, kind, url,
+                           ownerAgentId, partition, status, lastActivityAt, background,
+                           createdAt, updatedAt
                     FROM interactiveSessions
                     ORDER BY position ASC, createdAt ASC
                     """)
@@ -49,26 +56,40 @@ enum InteractiveSessionsStore {
         position: Int,
         wasActive: Bool,
         kind: String,
-        url: String?
+        url: String?,
+        ownerAgentId: String? = nil,
+        partition: String? = nil,
+        status: String = "live",
+        lastActivityAt: Int64? = nil,
+        background: Bool = false
     ) {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         do {
             try dbPool.write { db in
                 try db.execute(sql: """
                     INSERT INTO interactiveSessions
-                        (id, sessionId, name, cwd, position, wasActive, kind, url, createdAt, updatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, sessionId, name, cwd, position, wasActive, kind, url,
+                         ownerAgentId, partition, status, lastActivityAt, background,
+                         createdAt, updatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                        sessionId = excluded.sessionId,
-                        name      = excluded.name,
-                        cwd       = excluded.cwd,
-                        position  = excluded.position,
-                        wasActive = excluded.wasActive,
-                        kind      = excluded.kind,
-                        url       = excluded.url,
-                        updatedAt = excluded.updatedAt
+                        sessionId      = excluded.sessionId,
+                        name           = excluded.name,
+                        cwd            = excluded.cwd,
+                        position       = excluded.position,
+                        wasActive      = excluded.wasActive,
+                        kind           = excluded.kind,
+                        url            = excluded.url,
+                        ownerAgentId   = excluded.ownerAgentId,
+                        partition      = excluded.partition,
+                        status         = excluded.status,
+                        lastActivityAt = excluded.lastActivityAt,
+                        background     = excluded.background,
+                        updatedAt      = excluded.updatedAt
                     """, arguments: [
-                        id, sessionId, name, cwd, position, wasActive ? 1 : 0, kind, url, now, now
+                        id, sessionId, name, cwd, position, wasActive ? 1 : 0, kind, url,
+                        ownerAgentId, partition, status, lastActivityAt, background ? 1 : 0,
+                        now, now
                     ])
             }
         } catch {
@@ -88,6 +109,36 @@ enum InteractiveSessionsStore {
             }
         } catch {
             NSLog("[InteractiveSessionsStore] updateName(\(id)) failed: \(error)")
+        }
+    }
+
+    /// Persist a session's lifecycle status ('live' | 'suspended'). Called by
+    /// suspend()/resume() and the sweeper so a restart restores the right state.
+    static func updateStatus(dbPool: DatabasePool, id: String, status: String) {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        do {
+            try dbPool.write { db in
+                try db.execute(sql:
+                    "UPDATE interactiveSessions SET status = ?, updatedAt = ? WHERE id = ?",
+                    arguments: [status, now, id])
+            }
+        } catch {
+            NSLog("[InteractiveSessionsStore] updateStatus(\(id)) failed: \(error)")
+        }
+    }
+
+    /// Persist the last-committed URL + bump lastActivityAt. Called from the
+    /// nav delegate (didFinish) and every drive verb so resume reloads the
+    /// right page and the sweeper sees fresh activity.
+    static func updateLastURLAndActivity(dbPool: DatabasePool, id: String, url: String?, at ms: Int64) {
+        do {
+            try dbPool.write { db in
+                try db.execute(sql:
+                    "UPDATE interactiveSessions SET url = COALESCE(?, url), lastActivityAt = ?, updatedAt = ? WHERE id = ?",
+                    arguments: [url, ms, ms, id])
+            }
+        } catch {
+            NSLog("[InteractiveSessionsStore] updateLastURLAndActivity(\(id)) failed: \(error)")
         }
     }
 
