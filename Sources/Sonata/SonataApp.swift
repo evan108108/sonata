@@ -727,6 +727,21 @@ struct SonataApp: App {
                 }
                 logger.info("Supervisor window created (hidden)")
 
+                // 6c. Auto-start restored interactive sessions (sona/terminal
+                // tabs) from the launch Task so each reconnects its Claude
+                // process + MCP/SSE stream on launch — exactly like workers and
+                // the supervisor — instead of staying suspended until the user
+                // focuses the tab. Window-independent: runs even if the main
+                // WindowGroup window never comes to the foreground (e.g. a
+                // headless relaunch by the deploy agent), the case where
+                // ContentView.onAppear never fires and no session ever connects.
+                // bootstrap() is idempotent, so ContentView.onAppear's later
+                // call is a harmless no-op.
+                await MainActor.run {
+                    _ = InteractiveSessionsViewModel.shared.bootstrap(dbPool: pool)
+                }
+                logger.info("Auto-started restored interactive sessions")
+
                 // Register shutdown handler
                 let shutdownHandler = {
                     logger.info("Sonata shutting down — stopping all services")
