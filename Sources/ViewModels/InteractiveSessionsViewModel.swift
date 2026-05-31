@@ -772,9 +772,21 @@ final class InteractiveSessionsViewModel: ObservableObject {
         // Spawn only terminal-backed sessions; webviews stay suspended until
         // first focus/drive resumes them.
         let restoredTabs = tabs
-        DispatchQueue.main.async {
+        let focusedId = activeTabId
+        DispatchQueue.main.async { [weak self] in
             for tab in restoredTabs where tab.kind.isTerminalBacked {
                 tab.spawn()
+            }
+            // Eagerly resume ONLY the session that was focused at quit, so the
+            // user lands back live where they were. Every OTHER webview stays
+            // lazily suspended until first focused — resurrecting them all on
+            // launch would spike memory/CPU and re-introduce the suspended-
+            // webview crash (32574ea). Pushed to a second runloop hop so the
+            // resume never blocks the launch / loading screen; resumeTab is a
+            // no-op unless the tab is a suspended webview.
+            if let focusedId,
+               restoredTabs.first(where: { $0.id == focusedId })?.kind == .webview {
+                DispatchQueue.main.async { self?.resumeTab(id: focusedId) }
             }
         }
         return tabs.count
