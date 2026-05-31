@@ -95,6 +95,12 @@ final class PluginManager: @unchecked Sendable {
     /// Backoff intervals for crash recovery (seconds)
     private let backoffIntervals: [Double] = [2, 5, 15]
 
+    /// A recovered plugin must stay healthy this long before its crash counter is reset.
+    /// A boots-then-dies plugin passes the health probe (an old instance is still listening)
+    /// then exits seconds later; if the transient healthy snapshot reset crashCount to 0
+    /// immediately, the give-up threshold could never be reached and it would loop forever.
+    private let crashCountStableWindow: Double = 60
+
     /// Health check timeout per plugin (seconds)
     let healthTimeout: Double = 15.0
 
@@ -556,11 +562,33 @@ final class PluginManager: @unchecked Sendable {
             await discoverAndRegisterActions(runtime)
             subscribeToEventsChannel(runtime)
             runtime.status = "running"
-            runtime.crashCount = 0
+            // Do NOT reset crashCount immediately — a boots-then-dies plugin passes this
+            // health probe and then exits. Defer the reset until it proves stable, so a
+            // crash loop actually accumulates toward the give-up threshold (#27 fix).
+            scheduleCrashCountReset(runtime)
             await updateStatus(name: pluginName, status: "running", pid: runtime.process.map { Int($0.processIdentifier) })
-            sonataFileLog("Plugin \(pluginName): recovered successfully")
+            sonataFileLog("Plugin \(pluginName): recovered (pending \(Int(crashCountStableWindow))s stability check)")
         } else {
             await handleCrash(pluginName: pluginName, exitCode: -1)
+        }
+    }
+
+    /// Reset a plugin's crashCount only after it stays healthy for `crashCountStableWindow`
+    /// seconds with no further crash. Captures the current count; if another crash bumps it
+    /// (or the plugin leaves "running") meanwhile, the reset is skipped so the accumulated
+    /// count can still reach the give-up threshold. Without this, a plugin that passes the
+    /// health probe and dies seconds later resets its own counter every cycle and loops
+    /// forever instead of being skipped (#26/#27 root cause).
+    private func scheduleCrashCountReset(_ runtime: PluginRuntime) {
+        let observed = runtime.crashCount
+        let name = runtime.name
+        Task {
+            try? await Task.sleep(for: .seconds(crashCountStableWindow))
+            guard let rt = withLock({ plugins[name] }), rt === runtime else { return }
+            if rt.status == "running" && rt.crashCount == observed {
+                rt.crashCount = 0
+                sonataFileLog("Plugin \(name): stable for \(Int(crashCountStableWindow))s — crash counter reset")
+            }
         }
     }
 
@@ -820,7 +848,8 @@ final class PluginManager: @unchecked Sendable {
     /// Kill any process listening on the given port. Needed for compiled Bun
     /// binaries where `bin/<name> stop` is a no-op — without this, the old
     /// process keeps holding the port and the new spawn crashes immediately.
-    private func killProcessOnPort(_ port: Int) {
+    /// PIDs currently holding the given TCP port (via lsof).
+    private func pidsOnPort(_ port: Int) -> [Int32] {
         let lsof = Process()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         lsof.arguments = ["-ti", ":\(port)"]
@@ -830,12 +859,40 @@ final class PluginManager: @unchecked Sendable {
         try? lsof.run()
         lsof.waitUntilExit()
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        for pidStr in output.split(separator: "\n") {
-            if let pid = Int32(pidStr.trimmingCharacters(in: .whitespaces)) {
-                kill(pid, SIGTERM)
-            }
+        return output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    /// Reclaim a port held by a stale plugin process before spawning a fresh one.
+    /// SIGTERM first; if the holder ignores it (e.g. a hung graceful-shutdown that waits on
+    /// keep-alive connections), escalate to SIGKILL, and don't return until the port is
+    /// verifiably free (or a hard deadline). A boots-then-dies crash loop is almost always
+    /// EADDRINUSE: the new process can't bind because the old one never released the port,
+    /// so spawning before the port frees just reproduces the loop (#27 fix).
+    private func killProcessOnPort(_ port: Int) {
+        guard !pidsOnPort(port).isEmpty else { return }
+        for pid in pidsOnPort(port) { kill(pid, SIGTERM) }
+
+        // Poll for graceful exit; escalate to SIGKILL if still held after the grace period.
+        let graceDeadline = Date().addingTimeInterval(2.5)
+        while Date() < graceDeadline {
+            if pidsOnPort(port).isEmpty { return }
+            Thread.sleep(forTimeInterval: 0.1)
         }
-        Thread.sleep(forTimeInterval: 1.0)
+        let stubborn = pidsOnPort(port)
+        if !stubborn.isEmpty {
+            sonataFileLog("Port \(port): \(stubborn.count) process(es) ignored SIGTERM after 2.5s — sending SIGKILL")
+            for pid in stubborn { kill(pid, SIGKILL) }
+        }
+
+        // Wait for the port to actually free so the fresh spawn can bind.
+        let killDeadline = Date().addingTimeInterval(2.5)
+        while Date() < killDeadline {
+            if pidsOnPort(port).isEmpty { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if !pidsOnPort(port).isEmpty {
+            sonataFileLog("Port \(port): still held after SIGKILL + ~5s — spawn may fail with EADDRINUSE")
+        }
     }
 
     /// Run the plugin's stop command to cleanly shut down any daemon process.
