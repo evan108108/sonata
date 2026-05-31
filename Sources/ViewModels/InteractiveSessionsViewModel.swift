@@ -95,7 +95,9 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
 
     /// True for headless sessions: driveable + persisted + shown in the tree,
     /// but not auto-selected and filtered out of the in-rail Sessions strip.
-    let background: Bool
+    /// Cleared when the session is brought to the foreground via selectTab,
+    /// so session_list/UI reflect that it's no longer headless.
+    @Published var background: Bool
 
     /// Lifecycle status for webview sessions. Mirrors the persisted `status`.
     /// `.starting`/`.running`/etc. on `state` is the live render state; this is
@@ -278,8 +280,17 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         let config = WKWebViewConfiguration()
         config.websiteDataStore = dataStore
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        return WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
+        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
+        // Present a full desktop-Safari UA. The bare WKWebView default omits the
+        // "Version/.. Safari/.." suffix, and some sites sniff for it and serve
+        // degraded or blocked content — a complete Safari UA hardens scraping.
+        wv.customUserAgent = safariUserAgent
+        return wv
     }
+
+    /// Full desktop-Safari user agent applied to every session's WKWebView.
+    static let safariUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15"
 
     /// Used by the rail's Restart button after a failed --resume (e.g. the
     /// session file at ~/.claude/sessions/<sessionId>.json was pruned).
@@ -824,6 +835,13 @@ final class InteractiveSessionsViewModel: ObservableObject {
         if !background {
             selectTab(id: tab.id)
             DispatchQueue.main.async { tab.spawn() }   // loadWeb()
+        } else if url != nil {
+            // Background + initial URL: materialize headlessly and kick off the
+            // load now (mirrors the foreground path minus selectTab) so the
+            // first drive verb sees the page instead of about:blank. The sweeper
+            // idle-suspends it later; a background session WITHOUT a url stays
+            // lazily suspended until first driven.
+            DispatchQueue.main.async { self.resumeTab(id: tab.id) }
         }
         return tab
     }
@@ -988,6 +1006,16 @@ final class InteractiveSessionsViewModel: ObservableObject {
         lastActiveTabId = id
         if let pool = dbPool {
             InteractiveSessionsStore.setActive(dbPool: pool, id: id.uuidString.lowercased())
+        }
+        // Bringing a headless (background) session to the foreground un-hides it:
+        // clear the flag + persist so session_list and the rail stop reporting
+        // it as background once focus mounts it.
+        if let tab = tabs.first(where: { $0.id == id }), tab.background {
+            tab.background = false
+            dbPool.map {
+                InteractiveSessionsStore.updateBackground(
+                    dbPool: $0, id: id.uuidString.lowercased(), background: false)
+            }
         }
         // Drop focus into the selected session so typing lands immediately
         // (terminal-backed kinds only; focusContent no-ops for web).

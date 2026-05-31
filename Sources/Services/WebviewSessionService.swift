@@ -133,10 +133,23 @@ final class WebviewSessionService {
         let r = try await runJS(wv, WebviewJS.pageInfo); touch(tab); return r
     }
 
-    /// PNG snapshot → base64 string (matches Eyebrowse's `screenshot` field).
-    func screenshot(sessionId: String) async throws -> String {
+    /// Encoded snapshot of a webview session. `maxWidth` (points) downscales at
+    /// capture time so the result fits an agent's token budget; `format` is
+    /// "png" (default) or "jpeg"; `quality` is the JPEG compression factor.
+    struct Snapshot {
+        let data: Data
+        let format: String   // "png" | "jpeg"
+        let width: Int       // points
+        let height: Int
+    }
+
+    func screenshot(sessionId: String, maxWidth: Double? = nil,
+                    format: String = "png", quality: Double = 0.7) async throws -> Snapshot {
         let (tab, wv) = try liveWebView(sessionId)
         let cfg = WKSnapshotConfiguration()
+        // snapshotWidth (points) scales the capture down preserving aspect —
+        // cheaper and sharper than re-sampling the full retina image after.
+        if let maxWidth, maxWidth > 0 { cfg.snapshotWidth = NSNumber(value: maxWidth) }
         let image: NSImage = try await withCheckedThrowingContinuation { cont in
             wv.takeSnapshot(with: cfg) { img, err in
                 if let img { cont.resume(returning: img) }
@@ -145,11 +158,16 @@ final class WebviewSessionService {
         }
         touch(tab)
         guard let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]) else {
-            throw DriveError.js("png encode failed")
+              let rep = NSBitmapImageRep(data: tiff) else {
+            throw DriveError.js("image encode failed")
         }
-        return png.base64EncodedString()
+        let isJpeg = format.lowercased() == "jpeg" || format.lowercased() == "jpg"
+        let encoded: Data? = isJpeg
+            ? rep.representation(using: .jpeg, properties: [.compressionFactor: max(0, min(1, quality))])
+            : rep.representation(using: .png, properties: [:])
+        guard let out = encoded else { throw DriveError.js("\(isJpeg ? "jpeg" : "png") encode failed") }
+        return Snapshot(data: out, format: isJpeg ? "jpeg" : "png",
+                        width: Int(image.size.width), height: Int(image.size.height))
     }
 
     // MARK: - WKWebView async bridge

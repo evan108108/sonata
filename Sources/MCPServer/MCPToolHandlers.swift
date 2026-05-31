@@ -84,8 +84,26 @@ enum MCPToolHandlers {
             }
         case "screenshot":
             return await webviewDrive(args: args) { sid in
-                let b64 = try await WebviewSessionService.shared.screenshot(sessionId: sid)
-                let json = (try? JSONSerialization.data(withJSONObject: ["screenshot": b64], options: []))
+                let maxWidth = (args["maxWidth"] as? Double) ?? (args["maxWidth"] as? Int).map(Double.init)
+                let format = (args["format"] as? String) ?? "png"
+                let quality = (args["quality"] as? Double) ?? (args["quality"] as? Int).map(Double.init) ?? 0.7
+                let shot = try await WebviewSessionService.shared.screenshot(
+                    sessionId: sid, maxWidth: maxWidth, format: format, quality: quality)
+                // With `path`, write to disk and return { path } — keeps large
+                // images out of the agent's token budget. Otherwise base64.
+                if let path = (args["path"] as? String), !path.isEmpty {
+                    let dest = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                    try shot.data.write(to: dest)
+                    let payload: [String: Any] = ["path": dest.path, "bytes": shot.data.count,
+                                                  "format": shot.format, "width": shot.width, "height": shot.height]
+                    let json = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+                        .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                    return (true, json)
+                }
+                let payload: [String: Any] = ["screenshot": shot.data.base64EncodedString(),
+                                              "bytes": shot.data.count, "format": shot.format,
+                                              "width": shot.width, "height": shot.height]
+                let json = (try? JSONSerialization.data(withJSONObject: payload, options: []))
                     .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                 return (true, json)
             }
@@ -754,8 +772,14 @@ enum MCPToolSchemas {
         ],
         [
             "name": "screenshot",
-            "description": "PNG snapshot of the webview session as base64 (returns { screenshot }). Mirrors Eyebrowse.",
-            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"]], "required": ["sessionId"]],
+            "description": "Snapshot of the webview session. Returns { screenshot (base64), bytes, format, width, height }. Use `maxWidth` to shrink the image (a full retina PNG can blow the token budget), `format:\"jpeg\"` + `quality` for smaller payloads, or `path` to write the image to a file and get { path } back instead of base64.",
+            "inputSchema": ["type": "object", "properties": [
+                "sessionId": ["type": "string"],
+                "maxWidth": ["type": "number", "description": "Scale the capture to this width in points (preserves aspect; smaller = fewer tokens)"],
+                "format": ["type": "string", "description": "png (default) or jpeg"],
+                "quality": ["type": "number", "description": "JPEG quality 0–1 (default 0.7); ignored for png"],
+                "path": ["type": "string", "description": "If set, write the image here and return { path } instead of base64"]
+            ], "required": ["sessionId"]],
         ],
         [
             "name": "evaluate",

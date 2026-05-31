@@ -142,6 +142,22 @@ enum InteractiveSessionsStore {
         }
     }
 
+    /// Persist a session's `background` (headless) flag. Called when a
+    /// background session is brought to the foreground via selectTab so the
+    /// stored row matches the live state across a restart.
+    static func updateBackground(dbPool: DatabasePool, id: String, background: Bool) {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        do {
+            try dbPool.write { db in
+                try db.execute(sql:
+                    "UPDATE interactiveSessions SET background = ?, updatedAt = ? WHERE id = ?",
+                    arguments: [background ? 1 : 0, now, id])
+            }
+        } catch {
+            NSLog("[InteractiveSessionsStore] updateBackground(\(id)) failed: \(error)")
+        }
+    }
+
     /// Re-write every row's `position` in one transaction to match the
     /// order of `ids`. Called whenever the tab list is reordered or when
     /// a tab is closed (renumbers the survivors to a contiguous range).
