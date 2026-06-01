@@ -65,9 +65,14 @@ final class MCPHandshakeTests: XCTestCase {
             "worker tool surface is missing required tools: "
                 + "\(required.subtracting(names).sorted())")
 
-        // ...and Plan §4's removed DM registry must stay gone. If a future
-        // patch adds sonar_dm_register/sonar_dm_unregister back, this catches it.
-        let removed: Set<String> = ["sonar_dm_register", "sonar_dm_unregister"]
+        // ...and the dead DM registry surface must stay gone. dm_send always
+        // queues durably; targets receive via live SSE push or dm_inbox poll.
+        // No registration step exists; if a regression reintroduces any of
+        // these, workers will hallucinate a registration model again.
+        let removed: Set<String> = [
+            "sonar_dm_register", "sonar_dm_unregister",
+            "dm_register", "dm_unregister", "dm_poll",
+        ]
         XCTAssertTrue(removed.isDisjoint(with: names),
             "removed DM-registry tools reappeared: "
                 + "\(removed.intersection(names).sorted())")

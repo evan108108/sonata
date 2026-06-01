@@ -71,11 +71,8 @@ final class DMActionsTests: XCTestCase {
 
     // MARK: routeInbound
 
-    func testRouteInboundPersistsBeforeEnqueue() async throws {
+    func testRouteInboundPersistsRowForBackfill() async throws {
         let pool = try makeInMemoryDbPool()
-        let reg = DMRegistry()
-        reg.register(sessionId: "session-x", sessionLabel: nil, role: nil)
-
         let payload: [String: Any] = [
             "message_id": "abc123",
             "target_session_id": "session-x",
@@ -84,143 +81,31 @@ final class DMActionsTests: XCTestCase {
             "question": "hello",
             "context": "ctx",
         ]
-        await DMActions.routeInbound(payload: payload, dbPool: pool, registry: reg, nowFn: { 5_000 })
+        await DMActions.routeInbound(payload: payload, dbPool: pool, nowFn: { 5_000 })
 
-        // Persisted.
+        // Persisted regardless of whether anyone is SSE-attached.
         XCTAssertEqual(try dmMessagesCount(pool, target: "session-x"), 1)
-        // Enqueued.
-        let queue = reg._peekQueue(sessionId: "session-x")
-        XCTAssertEqual(queue.count, 1)
-        XCTAssertEqual(queue[0].messageId, "abc123")
-        XCTAssertEqual(queue[0].fromPubkey, "peer-pub-hex")
-        XCTAssertEqual(queue[0].fromSessionId, "sender-1")
-        XCTAssertEqual(queue[0].body, "hello")
-        XCTAssertEqual(queue[0].receivedAtMs, 5_000)
     }
 
     func testRouteInboundShortCircuitsWhenTargetMissing() async throws {
         let pool = try makeInMemoryDbPool()
-        let reg = DMRegistry()
-        reg.register(sessionId: "session-x", sessionLabel: nil, role: nil)
-        // No target_session_id → routeInbound bails (nothing happens).
-        await DMActions.routeInbound(payload: ["question": "hello"], dbPool: pool, registry: reg)
+        await DMActions.routeInbound(payload: ["question": "hello"], dbPool: pool)
         XCTAssertEqual(try dmMessagesCount(pool), 0)
-        XCTAssertEqual(reg._peekQueue(sessionId: "session-x").count, 0)
-    }
-
-    func testRouteInboundUnregisteredTargetPersistsButDoesntEnqueue() async throws {
-        let pool = try makeInMemoryDbPool()
-        let reg = DMRegistry()
-        // No registration for session-x.
-
-        let payload: [String: Any] = [
-            "message_id": "msg-99",
-            "target_session_id": "session-x",
-            "from_peer": "peer-pub",
-            "question": "hello",
-        ]
-        await DMActions.routeInbound(payload: payload, dbPool: pool, registry: reg, nowFn: { 7_000 })
-
-        // Row persisted for backfill.
-        XCTAssertEqual(try dmMessagesCount(pool, target: "session-x"), 1)
-        // Not enqueued.
-        XCTAssertFalse(reg.has("session-x"))
-        XCTAssertEqual(reg._peekQueue(sessionId: "session-x").count, 0)
     }
 
     func testRouteInboundIsIdempotentOnMessageId() async throws {
         let pool = try makeInMemoryDbPool()
-        let reg = DMRegistry()
-        reg.register(sessionId: "session-x", sessionLabel: nil, role: nil)
-
         let payload: [String: Any] = [
             "message_id": "same",
             "target_session_id": "session-x",
             "from_peer": "p",
             "question": "h",
         ]
-        await DMActions.routeInbound(payload: payload, dbPool: pool, registry: reg)
-        await DMActions.routeInbound(payload: payload, dbPool: pool, registry: reg)
+        await DMActions.routeInbound(payload: payload, dbPool: pool)
+        await DMActions.routeInbound(payload: payload, dbPool: pool)
 
         // dm_messages INSERT OR IGNORE keeps a single row.
         XCTAssertEqual(try dmMessagesCount(pool, target: "session-x"), 1)
-        // Registry LRU drops the second enqueue.
-        XCTAssertEqual(reg._peekQueue(sessionId: "session-x").count, 1)
-    }
-
-    // MARK: dm_register handler — security A.1
-
-    func testDmRegisterRejectsSessionIdWithoutHeartbeat() async throws {
-        let pool = try makeInMemoryDbPool()
-        let action = dmActions.first { $0.name == "dm_register" }!
-
-        // No worker row + no ExternalBridgeRegistry entry → reject.
-        let ctx = ActionContext(
-            params: ActionParams(["sessionId": "ghost-no-heartbeat"]),
-            dbPool: pool
-        )
-        do {
-            _ = try await action.handler(ctx)
-            XCTFail("expected ActionError.custom")
-        } catch let error as ActionError {
-            switch error {
-            case .custom(let msg, let status):
-                XCTAssertTrue(msg.contains("bad_session_id"))
-                XCTAssertEqual(status, .unprocessableContent)
-            default:
-                XCTFail("wrong error case: \(error)")
-            }
-        }
-    }
-
-    func testDmRegisterAcceptsSessionWithFreshWorkerHeartbeat() async throws {
-        let pool = try makeInMemoryDbPool()
-        // Seed a worker row with a fresh heartbeat.
-        try await pool.write { db in
-            try db.execute(
-                sql: "INSERT INTO workers (id, workerId, sessionLabel, sessionId, lastHeartbeat, registeredAt) VALUES (?, ?, ?, ?, ?, ?)",
-                arguments: ["wid-1", "wid-1", "scheduler-3", "fresh-session", nowMs(), nowMs()]
-            )
-        }
-        let action = dmActions.first { $0.name == "dm_register" }!
-        let ctx = ActionContext(
-            params: ActionParams([
-                "sessionId": "fresh-session",
-                "sessionLabel": "scheduler-3",
-                "role": "worker",
-            ]),
-            dbPool: pool
-        )
-        let response = try await action.handler(ctx)
-
-        // Encode → decode round trip.
-        let data = try JSONEncoder().encode(EncodableShim(value: response))
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(json?["sessionId"] as? String, "fresh-session")
-        XCTAssertEqual(json?["ok"] as? Bool, true)
-
-        // Cleanup: unregister so subsequent tests see a clean state.
-        DMRegistry.shared.unregister(sessionId: "fresh-session")
-    }
-
-    func testDmRegisterRejectsInvalidSessionIdRegex() async throws {
-        let pool = try makeInMemoryDbPool()
-        let action = dmActions.first { $0.name == "dm_register" }!
-        let ctx = ActionContext(
-            params: ActionParams(["sessionId": "has spaces!"]),
-            dbPool: pool
-        )
-        do {
-            _ = try await action.handler(ctx)
-            XCTFail("expected reject")
-        } catch let error as ActionError {
-            if case .custom(let msg, let status) = error {
-                XCTAssertTrue(msg.contains("bad_session_id"))
-                XCTAssertEqual(status, .unprocessableContent)
-            } else {
-                XCTFail("wrong case")
-            }
-        }
     }
 
     // MARK: dm_send handler — error matrix
@@ -366,18 +251,6 @@ final class DMActionsTests: XCTestCase {
         XCTAssertEqual(messages[2]["messageId"] as? String, "m2")
     }
 
-    // MARK: dm_unregister is idempotent
-
-    func testDmUnregisterIdempotent() async throws {
-        let pool = try makeInMemoryDbPool()
-        let action = dmActions.first { $0.name == "dm_unregister" }!
-        let ctx = ActionContext(
-            params: ActionParams(["sessionId": "never-registered"]),
-            dbPool: pool
-        )
-        // Should not throw.
-        _ = try await action.handler(ctx)
-    }
 }
 
 // Type-erased Encodable shim so XCTest can JSONEncode `any Encodable` results

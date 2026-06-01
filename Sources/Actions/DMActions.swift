@@ -320,13 +320,13 @@ private extension Database {
 
 enum DMActions {
     /// Inbound DM dispatcher. Called by PluginManager.handlePluginEvent for
-    /// "new_message" payloads whose `target_session_id` is non-empty. Persists
-    /// the dm_messages row FIRST (so backfill survives even if enqueue fails),
-    /// then attempts in-memory enqueue. Idempotent on messageId.
+    /// federated "new_message" payloads whose `target_session_id` is non-empty.
+    /// Persists the dm_messages row FIRST (so backfill via dm_inbox always
+    /// works), then attempts a live SSE push via MCPSessionRegistry. Idempotent
+    /// on messageId.
     static func routeInbound(
         payload: [String: Any],
         dbPool: DatabasePool,
-        registry: DMRegistry = .shared,
         nowFn: () -> Int64 = nowMs
     ) async {
         guard let target = (payload["target_session_id"] as? String), !target.isEmpty else { return }
@@ -336,7 +336,6 @@ enum DMActions {
         let body = (payload["question"] as? String) ?? ""
         let context = payload["context"] as? String
         let metaJson = payload["meta_json"] as? String
-        // Sender wall clock is best-effort; if missing, fall back to receivedAt.
         let now = nowFn()
         let sentAt = (payload["sent_at_ms"] as? Int64) ?? (payload["sent_at_ms"] as? Int).map(Int64.init) ?? now
         let env = DMEnvelope(
@@ -358,23 +357,21 @@ enum DMActions {
         } catch {
             sonataFileLog("DMActions.routeInbound: persist failed messageId=\(messageId) — \(error)")
         }
-        let routed = registry.enqueue(env)
-        if !routed {
-            sonataFileLog("DMActions.routeInbound: target=\(target) unregistered; persisted only")
+        if let mcpReg = MCPSessionRegistry.shared {
+            _ = await mcpReg.deliverDM(
+                target: target,
+                messageId: messageId,
+                body: body,
+                fromSessionId: fromSessionId ?? "",
+                context: context,
+                metaJson: metaJson,
+                sentAtMs: sentAt
+            )
         }
     }
 }
 
 // MARK: - HTTP responses
-
-private struct DMRegisterResponse: Encodable {
-    let ok: Bool
-    let sessionId: String
-}
-
-private struct DMPollResponse: Encodable {
-    let messages: [DMEnvelope]
-}
 
 private struct DMSendResponse: Encodable {
     let messageId: String
@@ -445,95 +442,6 @@ func dmMessagesCleanupOld(dbPool: DatabasePool, ttlMs: Int64 = 7 * 24 * 60 * 60 
 // MARK: - Endpoints
 
 let dmActions: [SonataAction] = [
-
-    // POST /api/dm/register — Pass A.1: reject sessionIds without a fresh
-    // heartbeat in workers OR ExternalBridgeRegistry.
-    SonataAction(
-        name: "dm_register",
-        description: "Register a session as a Sonar DM target. Bridge must already have a fresh heartbeat in workers or ExternalBridgeRegistry. Idempotent.",
-        group: "/api/dm",
-        path: "/register",
-        method: .post,
-        params: [
-            ActionParam("sessionId", .string, required: true, description: "Bridge session id (regex: [A-Za-z0-9_-]{1,128})"),
-            ActionParam("sessionLabel", .string, required: false, description: "Optional friendly label"),
-            ActionParam("role", .string, required: false, description: "Optional role hint: worker | interactive | supervisor"),
-        ],
-        handler: { ctx in
-            let sessionId = try ctx.params.require("sessionId")
-            guard isValidSessionId(sessionId) else {
-                throw ActionError.custom("bad_session_id: \(sessionId)", .unprocessableContent)
-            }
-            // Pass A.1: reject unless this bridge has registered itself in
-            // workers/external_bridges first. Cheap check that closes the
-            // "any process on localhost can register an arbitrary id" hole.
-            let checker = makeProductionHeartbeatChecker(dbPool: ctx.dbPool)
-            DMRegistry.shared.setHeartbeatChecker(checker)
-            let fresh = await checker.isFresh(sessionId)
-            guard fresh else {
-                throw ActionError.custom("bad_session_id: no fresh heartbeat for \(sessionId)", .unprocessableContent)
-            }
-            DMRegistry.shared.register(
-                sessionId: sessionId,
-                sessionLabel: ctx.params.string("sessionLabel"),
-                role: ctx.params.string("role")
-            )
-            return DMRegisterResponse(ok: true, sessionId: sessionId)
-        }
-    ),
-
-    // POST /api/dm/unregister — idempotent (200 even if absent).
-    SonataAction(
-        name: "dm_unregister",
-        description: "Remove a session from the DM registry. Pending queue is cleared. Idempotent.",
-        group: "/api/dm",
-        path: "/unregister",
-        method: .post,
-        params: [
-            ActionParam("sessionId", .string, required: true, description: "Bridge session id"),
-        ],
-        handler: { ctx in
-            let sessionId = try ctx.params.require("sessionId")
-            DMRegistry.shared.unregister(sessionId: sessionId)
-            return SuccessResponse()
-        }
-    ),
-
-    // GET /api/dm/poll?sessionId=<id> — drain pending deliveries.
-    SonataAction(
-        name: "dm_poll",
-        description: "Drain pending DMs for a session. Bridge calls this on each poll cycle.",
-        group: "/api/dm",
-        path: "/poll",
-        method: .get,
-        params: [
-            ActionParam("sessionId", .string, required: true, description: "Bridge session id", source: .query),
-        ],
-        handler: { ctx in
-            let sessionId = try ctx.params.require("sessionId")
-            guard isValidSessionId(sessionId) else {
-                throw ActionError.custom("bad_session_id: \(sessionId)", .unprocessableContent)
-            }
-            let messages = DMRegistry.shared.claimReplies(sessionId: sessionId)
-            // Mark delivered in dm_messages so the 7-day TTL clock starts ticking.
-            if !messages.isEmpty {
-                let now = nowMs()
-                let ids = messages.map(\.messageId)
-                do {
-                    try await ctx.dbPool.write { db in
-                        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
-                        try db.execute(
-                            sql: "UPDATE dm_messages SET deliveryStatus = 'delivered', deliveredAtMs = ? WHERE messageId IN (\(placeholders))",
-                            arguments: StatementArguments([now] + ids)
-                        )
-                    }
-                } catch {
-                    sonataFileLog("dm_poll: deliveredAt update failed — \(error)")
-                }
-            }
-            return DMPollResponse(messages: messages)
-        }
-    ),
 
     // POST /api/dm/send — local loopback or peer-forwarded send.
     SonataAction(
