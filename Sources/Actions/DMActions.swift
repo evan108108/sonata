@@ -734,19 +734,40 @@ let dmActions: [SonataAction] = [
         }
     ),
 
-    // GET /api/dm/registry — public snapshot (used by Sonar's sonar_session_list).
+    // GET /api/dm/registry — snapshot of DM-reachable sessions.
+    //
+    // Backing store is MCPSessionRegistry (the live SSE-attached sessions) —
+    // the only thing that determines DM reachability now. Response shape kept
+    // identical to the legacy DMRegistry-backed version so any existing caller
+    // (e.g. Sonar's sonar_session_list) keeps working. `sessionId` is the
+    // bridge sessionKey, `role` is the session's role, `registeredAt` is the
+    // session's lastContactedAt (kept named "registeredAt" for shape stability).
     SonataAction(
         name: "dm_registry",
-        description: "Snapshot of currently-registered DM sessions. Used by Sonar's sonar_session_list.",
+        description: "Snapshot of DM-reachable sessions (live SSE-attached). Response shape kept stable for back-compat callers.",
         group: "/api/dm",
         path: "/registry",
         method: .get,
         params: [],
         handler: { _ in
-            DMRegistryResponse(
-                entries: DMRegistry.shared.listRegistrations(),
-                generatedAt: nowMs()
-            )
+            let entries: [DMRegistration]
+            if let mcpReg = MCPSessionRegistry.shared {
+                let snapshot = await mcpReg.snapshot()
+                entries = snapshot
+                    .filter { $0.hasSSE }
+                    .sorted { $0.lastContactedAt < $1.lastContactedAt }
+                    .map { snap in
+                        DMRegistration(
+                            sessionId: snap.sessionKey,
+                            sessionLabel: snap.claudeKind,
+                            role: "\(snap.role)",
+                            registeredAt: snap.lastContactedAt
+                        )
+                    }
+            } else {
+                entries = []
+            }
+            return DMRegistryResponse(entries: entries, generatedAt: nowMs())
         }
     ),
 
