@@ -15,12 +15,43 @@ private let afkLogger = Logger(label: "sonata.afk")
 // State is in-memory only — AFK is transient per-session.
 
 struct AFKReply: Codable, Sendable {
+    let id: String          // stable id — the ack key for the outbox (FIX #2)
     let token: String
     let replyText: String
     let fromAddr: String
     let subject: String
     let messageId: String
     let receivedAt: Int64
+
+    init(
+        id: String = UUID().uuidString,
+        token: String,
+        replyText: String,
+        fromAddr: String,
+        subject: String,
+        messageId: String,
+        receivedAt: Int64
+    ) {
+        self.id = id
+        self.token = token
+        self.replyText = replyText
+        self.fromAddr = fromAddr
+        self.subject = subject
+        self.messageId = messageId
+        self.receivedAt = receivedAt
+    }
+
+    // Tolerant decode: a legacy reply persisted without an id still gets one.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        self.token = try c.decode(String.self, forKey: .token)
+        self.replyText = try c.decode(String.self, forKey: .replyText)
+        self.fromAddr = try c.decode(String.self, forKey: .fromAddr)
+        self.subject = try c.decode(String.self, forKey: .subject)
+        self.messageId = try c.decode(String.self, forKey: .messageId)
+        self.receivedAt = try c.decode(Int64.self, forKey: .receivedAt)
+    }
 }
 
 struct AFKRegistration: Sendable {
@@ -56,8 +87,10 @@ final class AFKRegistry: @unchecked Sendable {
         lock.lock()
         let hook = deliveryHook
         guard hook != nil else { lock.unlock(); return }
+        // Snapshot WITHOUT clearing — the hook acks each reply (ackReply) only
+        // on a confirmed push, so a failed delivery during the boot drain keeps
+        // the reply durable for the next reconnect/poll (FIX #2).
         let snapshot = pendingReplies
-        pendingReplies.removeAll()
         lock.unlock()
         for (sessionId, replies) in snapshot {
             for reply in replies { hook?(sessionId, reply) }
@@ -108,13 +141,30 @@ final class AFKRegistry: @unchecked Sendable {
             lock.unlock()
             return false
         }
+        // FIX #2 — outbox / at-least-once. ALWAYS persist first, THEN deliver.
+        // The hook is a best-effort push; ackReply removes the entry only on a
+        // confirmed delivery. A failed push (dead SSE writer) leaves the reply
+        // durable so the next reconnect/poll drains it — instead of the reply
+        // being lost AND reported delivered, which is what happened before.
+        pendingReplies[sessionId, default: []].append(reply)
         let hook = deliveryHook
-        if hook == nil {
-            pendingReplies[sessionId, default: []].append(reply)
-        }
         lock.unlock()
         hook?(sessionId, reply)
         return true
+    }
+
+    /// Remove a single delivered reply from the outbox after a confirmed push.
+    /// Called by the delivery hook when pushChannel returns true. No-op if the
+    /// reply was already drained (e.g. by /api/afk/poll).
+    func ackReply(sessionId: String, replyId: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard var replies = pendingReplies[sessionId] else { return }
+        replies.removeAll { $0.id == replyId }
+        if replies.isEmpty {
+            pendingReplies[sessionId] = nil
+        } else {
+            pendingReplies[sessionId] = replies
+        }
     }
 
     /// Drain pending replies for a session. Bridge calls this on each poll.

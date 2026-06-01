@@ -75,6 +75,94 @@ final class MCPAFKDeliveryTests: XCTestCase {
         XCTAssertEqual(meta["subject"] as? String, "[AFK:tok-afk-test] should I deploy?")
     }
 
+    // FIX #2 (outbox / at-least-once) — a confirmed push acks the reply out of
+    // the durable outbox, so a subsequent poll has nothing left to drain.
+    func testAFKReplyIsAckedOutOfOutboxAfterSuccessfulPush() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        await h.dispatcher.bind(registry: h.mcpRegistry)
+        addTeardownBlock {
+            AFKRegistry.shared.setDeliveryHook { _, _ in }
+            AFKRegistry.shared.unregister(token: "tok-afk-ack")
+        }
+
+        let sessionKey = "afk-ack-target"
+        let (_, state) = await h.registerSession(sessionKey: sessionKey, role: .worker)
+        let writer = MCPSSEWriter()
+        await state.attachSSE(writer)
+
+        AFKRegistry.shared.register(token: "tok-afk-ack", sessionId: sessionKey)
+
+        let reply = AFKReply(
+            token: "tok-afk-ack",
+            replyText: "go ahead",
+            fromAddr: "evan@example.com",
+            subject: "[AFK:tok-afk-ack] ok?",
+            messageId: "<msg-afk-ack@example>",
+            receivedAt: nowMs()
+        )
+        XCTAssertTrue(AFKRegistry.shared.enqueueReply(reply))
+
+        // Wait for the push to actually land on the SSE stream.
+        let frames = await MCPSSEFrameCollector.collect(
+            from: writer, timeout: 2.0,
+            until: { $0.contains("tok-afk-ack") }
+        )
+        XCTAssertTrue(frames.contains(where: { $0.contains("tok-afk-ack") }),
+            "expected the reply to be pushed over SSE")
+
+        // The hook acks asynchronously right after pushChannel returns true.
+        // Poll the outbox until it's empty (ack landed), bounded so a
+        // regression — reply left in the outbox — fails instead of hanging.
+        var drained: [AFKReply] = [reply]
+        for _ in 0..<40 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            drained = AFKRegistry.shared.claimReplies(sessionId: sessionKey)
+            if drained.isEmpty { break }
+        }
+        XCTAssertTrue(drained.isEmpty,
+            "a delivered reply must be acked out of the outbox, not left for re-delivery")
+    }
+
+    // FIX #2 — when the push fails (no live SSE writer), the reply must stay in
+    // the outbox so a later reconnect/poll can drain it, instead of being lost
+    // AND reported delivered (the original bug).
+    func testAFKReplySurvivesInOutboxWhenPushFails() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        await h.dispatcher.bind(registry: h.mcpRegistry)
+        addTeardownBlock {
+            AFKRegistry.shared.setDeliveryHook { _, _ in }
+            AFKRegistry.shared.unregister(token: "tok-afk-blind")
+        }
+
+        // Register the token to a session that has NO SSE writer attached, so
+        // pushNotification returns false (alive-but-blind).
+        let sessionKey = "afk-blind-target"
+        AFKRegistry.shared.register(token: "tok-afk-blind", sessionId: sessionKey)
+
+        let reply = AFKReply(
+            token: "tok-afk-blind",
+            replyText: "still want this delivered",
+            fromAddr: "evan@example.com",
+            subject: "[AFK:tok-afk-blind] reachable?",
+            messageId: "<msg-afk-blind@example>",
+            receivedAt: nowMs()
+        )
+        XCTAssertTrue(AFKRegistry.shared.enqueueReply(reply),
+            "enqueueReply still reports true — the token is registered")
+
+        // Give the async hook time to run and (correctly) NOT ack on failure.
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let drained = AFKRegistry.shared.claimReplies(sessionId: sessionKey)
+        XCTAssertEqual(drained.count, 1,
+            "a reply whose push failed must remain durable in the outbox")
+        XCTAssertEqual(drained.first?.messageId, "<msg-afk-blind@example>")
+    }
+
     func testAFKEnqueueReplyReportsFalseWhenTokenUnknown() async {
         // No bind here — just exercising the registry's contract that an
         // unknown token returns false rather than misrouting.

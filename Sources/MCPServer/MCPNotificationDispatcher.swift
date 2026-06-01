@@ -11,7 +11,13 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
         guard claimBound(registry) else { return }
         AFKRegistry.shared.setDeliveryHook { [weak self] sessionId, reply in
             Task { [weak self] in
-                await self?.pushAFKReply(sessionKey: sessionId, reply: reply)
+                let delivered = await self?.pushAFKReply(sessionKey: sessionId, reply: reply) ?? false
+                // FIX #2: only drop the reply from the durable outbox once the
+                // push actually landed. A failed push leaves it for the next
+                // reconnect/poll to drain.
+                if delivered {
+                    AFKRegistry.shared.ackReply(sessionId: sessionId, replyId: reply.id)
+                }
             }
         }
         AFKRegistry.shared.drainPendingForHook()
@@ -78,7 +84,8 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
         )
     }
 
-    private func pushAFKReply(sessionKey: String, reply: AFKReply) async {
+    @discardableResult
+    private func pushAFKReply(sessionKey: String, reply: AFKReply) async -> Bool {
         let content = """
             [AFK reply for token \(reply.token)]
             From: \(reply.fromAddr)
@@ -93,7 +100,7 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
             "from_addr": reply.fromAddr,
             "subject": reply.subject,
         ]
-        await pushChannel(sessionKey: sessionKey, content: content, meta: meta)
+        return await pushChannel(sessionKey: sessionKey, content: content, meta: meta)
     }
 
     @discardableResult
