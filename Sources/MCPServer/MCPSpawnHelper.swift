@@ -61,15 +61,38 @@ enum MCPSpawn {
                 return nil
             }
         }
-        guard let registry = MCPSessionRegistry.shared else {
-            FileHandle.standardError.write(Data("[mcp-spawn] SONATA_MCP_INPROC set but MCPSessionRegistry.shared not yet published — falling back to legacy bridge for sessionKey=\(sessionKey)\n".utf8))
-            return nil
+        // Cold-start race: MCPSessionRegistry.shared is set near the top of
+        // SonataApp's launch Task, but ContentView.onAppear can fire on the
+        // MainActor first and try to spawn sessions before that publication
+        // lands. Falling back to the legacy bridge here is a silent footgun:
+        // the spawned session looks alive but never attaches SSE, so DMs to
+        // it sit in dm_messages forever (no one polls it). Wait up to ~2s
+        // for the registry to be published, then bail loudly so the failure
+        // is visible in the log instead of a mysterious "DM not delivered".
+        let registry: MCPSessionRegistry
+        if let r = MCPSessionRegistry.shared {
+            registry = r
+        } else {
+            let deadline = Date().addingTimeInterval(2.0)
+            var found: MCPSessionRegistry?
+            while Date() < deadline {
+                if let r = MCPSessionRegistry.shared {
+                    found = r
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            guard let r = found else {
+                FileHandle.standardError.write(Data("[mcp-spawn] FATAL: MCPSessionRegistry.shared still nil after 2s wait for sessionKey=\(sessionKey) — session will spawn WITHOUT MCP attach (DMs unreachable). Investigate startup order.\n".utf8))
+                return nil
+            }
+            registry = r
         }
         do {
             let cred = try awaitSyncMCPCredential(sessionKey: sessionKey, role: role, registry: registry)
             return ["--mcp-config", cred.configPath.path]
         } catch {
-            FileHandle.standardError.write(Data("[mcp-spawn] credential write failed for sessionKey=\(sessionKey): \(error) — falling back to legacy bridge\n".utf8))
+            FileHandle.standardError.write(Data("[mcp-spawn] FATAL: credential write failed for sessionKey=\(sessionKey): \(error) — session will spawn WITHOUT MCP attach (DMs unreachable).\n".utf8))
             return nil
         }
     }

@@ -727,6 +727,15 @@ final class InteractiveSessionsViewModel: ObservableObject {
         bootstrapped = true
         self.dbPool = dbPool
 
+        // Belt-and-braces: any sona session spawned below will call
+        // MCPSpawn.extraArgsForInProcMCP which requires MCPSessionRegistry.shared.
+        // SonataApp publishes .shared near the top of its launch Task; if we get
+        // here first, the spawn helper's bounded wait will cover it, but emit a
+        // log so the race is visible if it shifts.
+        if MCPSessionRegistry.shared == nil {
+            sonataFileLog("InteractiveSessionsViewModel.bootstrap: MCPSessionRegistry.shared is nil — spawn helper will wait for publication")
+        }
+
         let rows = InteractiveSessionsStore.loadAll(dbPool: dbPool)
         guard !rows.isEmpty else { return 0 }
 

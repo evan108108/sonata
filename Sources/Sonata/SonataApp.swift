@@ -500,6 +500,19 @@ struct SonataApp: App {
                 registry.register(statsActions)
                 registry.register(compositeActions)
 
+                // Publish MCPSessionRegistry.shared as early as possible — before
+                // PluginManager, mountHTTP, or anything else that could yield to
+                // the MainActor. Coordinators that spawn claude sessions on
+                // launch (InteractiveSessionTab from ContentView.onAppear,
+                // SupervisorCoordinator, WorkerCoordinator) race with this Task;
+                // if .shared is still nil when they reach MCPSpawn, they would
+                // fall back to the legacy stdio bridge and never attach SSE.
+                // The router/dispatcher/sweeper bindings below stay where they
+                // are — they only need the registry object to exist, which it
+                // now does.
+                let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: registry)
+                MCPSessionRegistry.shared = mcpRegistry
+
                 // Create PluginManager (before mountHTTP so plugin management routes are included)
                 let pluginManager = PluginManager(dbPool: pool, registry: registry)
 
@@ -524,18 +537,10 @@ struct SonataApp: App {
                 logger.info("MCP WebSocket endpoint registered at ws://127.0.0.1:\(port)/mcp")
 
                 // In-app MCP HTTP+SSE server — replaces sonata-bridge.ts.
-                // Routes are always mounted (cheap, idempotent) but no
-                // existing session uses them unless SONATA_MCP_INPROC=1
-                // is set at app launch — which is what the coordinators
-                // in §6 of the plan check before writing `"type": "http"`
-                // into a session's --mcp-config. Off-by-default keeps
-                // every existing stdio-bridge session unaffected during
-                // Phase B/C.
-                let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: registry)
-                // Publish to coordinators that spawn claude sessions outside
-                // this task graph (SupervisorCoordinator, WorkerCoordinator,
-                // InteractiveSessionTab, InspectorWindowController).
-                MCPSessionRegistry.shared = mcpRegistry
+                // Registry was constructed and published to .shared above,
+                // before PluginManager / mountHTTP, to win the race with
+                // ContentView.onAppear-driven session spawns. Here we wire it
+                // into the HTTP router, notification dispatcher, and sweepers.
                 MCPHTTPRouter.register(
                     on: router,
                     registry: mcpRegistry,
