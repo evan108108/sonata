@@ -110,7 +110,7 @@ final class DMActionsTests: XCTestCase {
 
     // MARK: dm_send handler — error matrix
 
-    func testDmSendUnknownLocalTargetReturns404() async throws {
+    func testDmSendUnknownLocalTargetQueuesNotFails() async throws {
         let pool = try makeInMemoryDbPool()
         let action = dmActions.first { $0.name == "dm_send" }!
         let ctx = ActionContext(
@@ -121,17 +121,13 @@ final class DMActionsTests: XCTestCase {
             ]),
             dbPool: pool
         )
-        do {
-            _ = try await action.handler(ctx)
-            XCTFail("expected 404")
-        } catch let error as ActionError {
-            if case .custom(let msg, let status) = error {
-                XCTAssertTrue(msg.contains("target_session_unknown"))
-                XCTAssertEqual(status, .notFound)
-            } else {
-                XCTFail("wrong case: \(error)")
-            }
-        }
+        // No SSE attached and no prior inbox history → must still queue, not 404.
+        let response = try await action.handler(ctx)
+        let data = try JSONEncoder().encode(EncodableShim(value: response))
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(json?["deliveryStatus"] as? String, "queued")
+        // Persisted so the target can backfill via dm_inbox.
+        XCTAssertEqual(try dmMessagesCount(pool, target: "nobody"), 1)
     }
 
     func testDmSendEmptyBodyReturns422() async throws {
@@ -188,9 +184,9 @@ final class DMActionsTests: XCTestCase {
         }
     }
 
-    func testDmSendLazyOptimisticOnRecentInbox() async throws {
+    func testDmSendAppendsToExistingInbox() async throws {
         let pool = try makeInMemoryDbPool()
-        // Seed a recent dm_messages row for target-y (within 24h).
+        // Seed a prior dm_messages row for target-y.
         try await pool.write { db in
             try db.execute(
                 sql: """
@@ -217,7 +213,8 @@ final class DMActionsTests: XCTestCase {
         let response = try await action.handler(ctx)
         let data = try JSONEncoder().encode(EncodableShim(value: response))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(json?["deliveryStatus"] as? String, "queued_unregistered")
+        // No SSE attached in this test harness → always queued, never delivered.
+        XCTAssertEqual(json?["deliveryStatus"] as? String, "queued")
         // Persisted as second row.
         XCTAssertEqual(try dmMessagesCount(pool, target: "target-y"), 2)
     }

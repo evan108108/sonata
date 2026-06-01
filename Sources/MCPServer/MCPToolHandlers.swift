@@ -576,7 +576,7 @@ enum MCPToolSchemas {
         ],
         [
             "name": "sonar_dm_send",
-            "description": "Send a session-addressed DM. Local target: omit peer_id. Remote target: include peer_id (Sonar peers.id, NOT instance_id).",
+            "description": "Send a DM to a session. Always queued durably in dm_messages; pushed live immediately if the target has an SSE connection, otherwise delivered the next time the target calls sonar_dm_inbox. No registration step — every session is reachable by id. Local target: omit peer_id. Remote target: include peer_id (Sonar peers.id, NOT instance_id).",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -619,7 +619,7 @@ enum MCPToolSchemas {
         ],
         [
             "name": "sonar_dm_inbox",
-            "description": "Backfill: fetch persisted DMs addressed to this session since a timestamp. Use after restart/registration to catch up.",
+            "description": "Backfill: fetch persisted DMs addressed to this session since a timestamp. Use after restart, or to pull DMs that arrived while not SSE-attached.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

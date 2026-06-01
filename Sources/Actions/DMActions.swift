@@ -533,12 +533,11 @@ let dmActions: [SonataAction] = [
                 }
             }
 
-            // Local loopback. Presence = MCPSessionRegistry.hasSSE on the
-            // target sessionKey. Persist FIRST (so the recipient can backfill
-            // via dm_inbox even if the SSE attach drops mid-push), then push
-            // via the in-app MCPNotificationDispatcher / Registry.deliverDM
-            // path. The legacy DMRegistry enqueue-and-poll surface is dead
-            // (no bridge polls it).
+            // Local loopback. Always persists to dm_messages (durable inbox),
+            // then attempts a live SSE push via MCPSessionRegistry. No
+            // registration gate, no 404 — if the target isn't currently
+            // SSE-attached, the message sits in dm_messages and the recipient
+            // pulls it via dm_inbox whenever it next polls.
             let env = DMEnvelope(
                 messageId: messageId,
                 fromSessionId: fromSessionId,
@@ -552,8 +551,13 @@ let dmActions: [SonataAction] = [
                 metaJson: metaJson
             )
 
+            try? await ctx.dbPool.write { db in
+                _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
+            }
+
+            var delivered = false
             if let mcpReg = MCPSessionRegistry.shared {
-                let delivered = await mcpReg.deliverDM(
+                delivered = await mcpReg.deliverDM(
                     target: targetSessionId,
                     messageId: messageId,
                     body: body,
@@ -562,33 +566,18 @@ let dmActions: [SonataAction] = [
                     metaJson: metaJson,
                     sentAtMs: now
                 )
-                if delivered {
-                    try? await ctx.dbPool.write { db in
-                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
-                    }
-                    return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued")
-                }
             }
 
-            // §11.1 lazy-optimistic: 202 if a recent dm_messages row exists for
-            // this target (within 24h), otherwise strict 404.
-            let recentExists = (try? await ctx.dbPool.read { db -> Bool in
-                let cutoff = now - 24 * 60 * 60 * 1000
-                let count = try Int.fetchOne(
-                    db,
-                    sql: "SELECT COUNT(*) FROM dm_messages WHERE targetSessionId = ? AND receivedAtMs >= ?",
-                    arguments: [targetSessionId, cutoff]
-                ) ?? 0
-                return count > 0
-            }) ?? false
-
-            if recentExists {
+            let status = delivered ? "delivered" : "queued"
+            if delivered {
                 try? await ctx.dbPool.write { db in
-                    _ = try dmMessagesPersist(env, deliveryStatus: "queued_unregistered", db: db)
+                    try db.execute(
+                        sql: "UPDATE dm_messages SET deliveryStatus = 'delivered', deliveredAtMs = ? WHERE messageId = ?",
+                        arguments: [now, messageId]
+                    )
                 }
-                return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: "queued_unregistered")
             }
-            throw ActionError.custom("target_session_unknown: \(targetSessionId)", .notFound)
+            return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: status)
         }
     ),
 
