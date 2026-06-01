@@ -477,9 +477,6 @@ struct SonataApp: App {
                 registry.register(inspectorAction)
                 registry.register(afkActions)
                 registry.register(dmActions)
-                // sonar-dm v0: production heartbeat checker + 60s prune timer.
-                DMRegistry.shared.setHeartbeatChecker(makeProductionHeartbeatChecker(dbPool: pool))
-                DMRegistry.shared.startPruneTimer()
                 registry.register(calendarActions)
                 registry.register(emailActions)
                 registry.register(emailInboxActions)
