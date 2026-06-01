@@ -2,20 +2,19 @@ import Foundation
 import GRDB
 import SQLite3
 
-// Sonar DMs v0 — Sonata-side routing.
+// Sonar DMs — Sonata-side routing.
 //
-// Mirrors AFKActions.swift / AFKRegistry pattern for session-addressed direct
-// messages that arrive over the Sonar plugin's `messages:events / new_message`
-// channel. The bridge polls /api/dm/poll and pushes each envelope into the
-// session via `notifications/claude/channel` with `meta.event_type=sonar_dm`.
+// Unified model after the DMRegistry surface was removed:
+//   - dm_send always persists to `dm_messages` (durable inbox), then attempts
+//     a live SSE push via MCPSessionRegistry.deliverDM. Status is "delivered"
+//     or "queued"; never 404.
+//   - dm_inbox is the only backfill path — recipients pull anything that
+//     wasn't live-pushed.
+//   - routeInbound (federated DMs landing locally) does the same: persist
+//     first, then try a live SSE push.
 //
-// Persistence: every inbound DM lands in `dm_messages` BEFORE the in-memory
-// DMRegistry enqueue, so a bridge that registers after the fact can backfill
-// via /api/dm/inbox.
-//
-// Plan: /Users/evan/memory/claude/documents/plans/sonar-dm-v0-plan.md
-// Sections: §4 (Sonata-side endpoints), §6 (MCP types), §7 (error policy),
-// §11 (locked decisions), §12 (security findings A.1, A.7), §13 (limits).
+// No registration step exists. Every session is reachable by its session key
+// (or claudeSessionId alias, via MCPSessionRegistry.resolveSession).
 
 // MARK: - Types
 

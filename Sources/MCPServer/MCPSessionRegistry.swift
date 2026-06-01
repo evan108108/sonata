@@ -54,9 +54,11 @@ actor MCPSessionRegistry {
     /// directly, then falls back to a session whose `claudeSessionId` alias
     /// (set via `sonata_identify`) matches `target` — so a DM addressed by a
     /// session's Claude session id (which is often all the sender knows, e.g. a
-    /// worker reporting its own id) still routes instead of failing with
-    /// target_session_unknown. Prefers an SSE-attached match when an alias
-    /// resolves to more than one entry (a live session over a lingering ghost).
+    /// worker reporting its own id) still routes to the live SSE attach.
+    /// Prefers an SSE-attached match when an alias resolves to more than one
+    /// entry (a live session over a lingering ghost). If no match is found,
+    /// the DM is still durable in dm_messages — the recipient picks it up via
+    /// dm_inbox whenever it next attaches.
     func resolveSession(_ target: String) async -> MCPSessionState? {
         if let direct = sessions[target] { return direct }
         var fallback: MCPSessionState?

@@ -25,9 +25,9 @@
 //        ▼                                ▼
 //     Sonar-B (4100) ──── new_message broadcast (messages:events)
 //        │                                │
-//     Sonata-B (3311) ── DMActions.routeInbound → dm_messages persist + DMRegistry enqueue
+//     Sonata-B (3311) ── DMActions.routeInbound → dm_messages persist + SSE push
 //                          │
-//                          └──── /api/dm/poll?sessionId=X-stub  (test polls)
+//                          └──── /api/dm/inbox?sessionId=X-stub  (test polls)
 //
 // What the test does NOT do (intentional, per "DO NOT modify production code
 // paths" in the task brief):
@@ -50,13 +50,13 @@
 //   2. Ensure pairing between Sonar-A and Sonar-B (creates peer rows + flips
 //      connection_status="paired", trust_level="intimate" on both sides if
 //      not already paired).
-//   3. Stub-register session-X on Sonata-B via `/api/bridge/announce` (which
-//      seeds ExternalBridgeRegistry with a fresh heartbeat, satisfying the
-//      Pass A.1 gate in `/api/dm/register`) followed by `/api/dm/register`.
+//   3. Announce stub session-X on Sonata-B via `/api/bridge/announce` (cosmetic
+//      — dashboard shows it; not load-bearing for DM delivery).
 //   4. Sender-side: `POST Sonata-A /api/dm/send` with target_session_id="X-stub",
 //      peer_id=<id of Sonar-B's peer record on Sonar-A>, body="federated ping".
-//   5. Receiver-side: poll `Sonata-B /api/dm/poll?sessionId=X-stub` AND query
-//      `/api/dm/inbox?sessionId=X-stub` until the envelope appears (≤ 10s).
+//   5. Receiver-side: poll `Sonata-B /api/dm/inbox?sessionId=X-stub` until the
+//      envelope appears (≤ 10s). routeInbound persists before SSE push, so
+//      backfill always sees the message.
 //   6. Assert on the envelope: target_session_id matches, body matches,
 //      from_pubkey populated to Sonar-A's instance_id, message_id present.
 //   7. Write `fixtures/sonar-dm-roundtrip.json` with the captured envelope +

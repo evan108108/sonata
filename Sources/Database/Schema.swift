@@ -744,11 +744,12 @@ extension DatabaseMigrator {
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS tasks_by_acknowledgedAt ON tasks(acknowledgedAt)")
         }
 
-        // v9: dm_messages — durable log of session-addressed Sonar DMs (sonar-dm v0).
-        // Inbound DMs are persisted here BEFORE the in-memory DMRegistry enqueue so a
-        // bridge that registers later can backfill via /api/dm/inbox?since=<ms>.
-        // 7-day TTL on `deliveredAtMs IS NOT NULL` rows is enforced by the nightly
-        // maintenance task; undelivered rows are retained until first poll.
+        // v9: dm_messages — durable inbox for session-addressed Sonar DMs.
+        // dm_send always persists here, then attempts a live SSE push via
+        // MCPSessionRegistry. Recipients pull missed messages via
+        // /api/dm/inbox?since=<ms>. 7-day TTL on `deliveredAtMs IS NOT NULL`
+        // rows is enforced by the nightly maintenance task; undelivered rows
+        // are retained until the recipient picks them up.
         registerMigration("v9_dm_messages") { db in
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS dm_messages (

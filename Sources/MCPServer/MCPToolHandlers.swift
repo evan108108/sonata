@@ -443,10 +443,10 @@ enum MCPToolHandlers {
         }
     }
 
-    /// Local target: bypass DMRegistry, persist to dm_messages, push
-    /// inline via the registry's atomic deliverDM. Federation (peer_id
-    /// set): preserve the existing dm_send action which handles peer
-    /// routing.
+    /// Local target: persist to dm_messages, then push inline via
+    /// MCPSessionRegistry.deliverDM (live SSE if attached, otherwise the
+    /// recipient pulls via dm_inbox). Federation (peer_id set): delegate to
+    /// the dm_send action which handles peer routing via Sonar.
     private static func sonarDMSend(
         args: [String: Any],
         sessionKey: String,
