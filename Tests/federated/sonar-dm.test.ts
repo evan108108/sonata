@@ -332,12 +332,13 @@ async function ensurePairedPeer(
 
 // ── Sonata-B stub session bring-up ──────────────────────────────────────────
 
-/**
- * Seed a fresh ExternalBridgeRegistry entry for `sessionId` on Sonata-B.
- * `/api/dm/register` rejects sessionIds without a fresh heartbeat (Pass A.1),
- * and `bridge_announce` is the cheapest way to satisfy that gate without
- * touching the workers table.
- */
+// Note: legacy /api/dm/register and /api/dm/poll endpoints were removed when
+// the DMRegistry surface was deleted. Federated DMs land in dm_messages via
+// routeInbound and are read back via /api/dm/inbox (the only path now).
+//
+// announceStubBridge is kept for compatibility with the bridge-dashboard
+// announce path but is no longer load-bearing for DM delivery.
+
 async function announceStubBridge(sonataBase: string, sessionId: string, label: string): Promise<void> {
   const res = await postJson(`${sonataBase}/api/bridge/announce`, {
     sessionId,
@@ -352,23 +353,6 @@ async function announceStubBridge(sonataBase: string, sessionId: string, label: 
 
 async function unregisterStubBridge(sonataBase: string, sessionId: string): Promise<void> {
   await postJson(`${sonataBase}/api/bridge/unregister`, { sessionId }).catch(() => undefined);
-}
-
-async function dmRegister(sonataBase: string, sessionId: string, role: string): Promise<void> {
-  const res = await postJson(`${sonataBase}/api/dm/register`, {
-    sessionId,
-    sessionLabel: `fed-test ${sessionId}`,
-    role,
-  });
-  if (!res.ok) {
-    throw new Error(
-      `${sonataBase}/api/dm/register HTTP ${res.status}: ${res.raw.slice(0, 200)}`,
-    );
-  }
-}
-
-async function dmUnregister(sonataBase: string, sessionId: string): Promise<void> {
-  await postJson(`${sonataBase}/api/dm/unregister`, { sessionId }).catch(() => undefined);
 }
 
 interface DMSendResponse {
@@ -423,16 +407,6 @@ interface DMEnvelope {
   receivedAtMs: number;
 }
 
-async function dmPoll(sonataBase: string, sessionId: string): Promise<DMEnvelope[]> {
-  const res = await httpJson<{ messages: DMEnvelope[] }>(
-    `${sonataBase}/api/dm/poll?sessionId=${encodeURIComponent(sessionId)}`,
-  );
-  if (!res.ok || !res.body || !Array.isArray(res.body.messages)) {
-    throw new Error(`${sonataBase}/api/dm/poll HTTP ${res.status}: ${res.raw.slice(0, 200)}`);
-  }
-  return res.body.messages;
-}
-
 async function dmInbox(sonataBase: string, sessionId: string, since = 0): Promise<DMEnvelope[]> {
   const res = await httpJson<{ messages: DMEnvelope[] }>(
     `${sonataBase}/api/dm/inbox?sessionId=${encodeURIComponent(sessionId)}&since=${since}&limit=50`,
@@ -485,13 +459,9 @@ async function runOnce(attempt: number): Promise<RoundTripResult> {
     name: PEER_LABEL_A_ON_B,
   });
 
-  // Step 2: stub-register session-X on Sonata-B.
+  // Step 2: announce stub bridge on Sonata-B so the dashboard shows it.
+  // No dm_register call — DM delivery is by-id; targets pull via dm_inbox.
   await announceStubBridge(SONATA_B_HTTP, STUB_SESSION_ID, STUB_BRIDGE_LABEL);
-  await dmRegister(SONATA_B_HTTP, STUB_SESSION_ID, "interactive");
-
-  // Also announce the sender so /api/dm/send on Sonata-A passes the
-  // fromSessionId regex (it's only validated for shape, not heartbeat —
-  // but announcing keeps the bridge dashboard tidy and matches reality).
   await announceStubBridge(SONATA_A_HTTP, SENDER_SESSION_ID, `sender ${RUN_ID}`).catch(() => undefined);
 
   const body = `federated ping ${RUN_ID}`;
@@ -507,30 +477,20 @@ async function runOnce(attempt: number): Promise<RoundTripResult> {
     context,
   });
 
-  // Step 4: poll Sonata-B for the envelope. Poll /api/dm/poll first (drains
-  // the registry queue, hits the live in-memory path) — that's the path
-  // sonar_dm_register wires up. Fall back to /api/dm/inbox (the durable
-  // dm_messages table) so backfill is exercised too: per plan §4.4, the
-  // DM is persisted before enqueue, so it's visible in inbox even if the
-  // registry path lags.
+  // Step 4: poll Sonata-B for the envelope via /api/dm/inbox — the durable
+  // dm_messages table is the only path now that the legacy registry queue
+  // is gone. routeInbound persists before SSE push, so backfill always
+  // sees the message even if no live session is attached.
   const deadline = Date.now() + ROUND_TRIP_DEADLINE_MS;
   let envelope: DMEnvelope | null = null;
-  let source: "poll" | "inbox" = "poll";
+  const source: "poll" | "inbox" = "inbox";
   while (Date.now() < deadline) {
-    const polled = await dmPoll(SONATA_B_HTTP, STUB_SESSION_ID).catch(() => [] as DMEnvelope[]);
-    const matchPoll = polled.find((m) => m.body === body && m.targetSessionId === STUB_SESSION_ID);
-    if (matchPoll) {
-      envelope = matchPoll;
-      source = "poll";
-      break;
-    }
     const inboxed = await dmInbox(SONATA_B_HTTP, STUB_SESSION_ID, t_send - 5_000).catch(
       () => [] as DMEnvelope[],
     );
     const matchInbox = inboxed.find((m) => m.body === body && m.targetSessionId === STUB_SESSION_ID);
     if (matchInbox) {
       envelope = matchInbox;
-      source = "inbox";
       break;
     }
     await sleep(ROUND_TRIP_POLL_MS);
@@ -593,10 +553,8 @@ function portFromUrl(url: string): number {
 // ── Teardown ────────────────────────────────────────────────────────────────
 
 async function teardown(): Promise<void> {
-  // Remove the DM registration + bridge entry on Sonata-B. Idempotent — both
-  // endpoints 200 even if absent.
+  // Remove the announced bridge entries. Idempotent — endpoints 200 even if absent.
   await Promise.all([
-    dmUnregister(SONATA_B_HTTP, STUB_SESSION_ID),
     unregisterStubBridge(SONATA_B_HTTP, STUB_SESSION_ID),
     unregisterStubBridge(SONATA_A_HTTP, SENDER_SESSION_ID),
   ]);
