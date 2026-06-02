@@ -162,19 +162,30 @@ actor ChatServerManager {
         let port = spec.port
         killOrphans(port: port)
 
-        // --parallel slot count is env-controllable so the user can choose:
-        // - 1 (default): no multiplexing overhead — best throughput when a
-        //   single client (typically PithBackfill) has the server to itself.
-        //   The right call while a big backfill is running.
-        // - 2+: continuous-batching multiplexes decode steps across concurrent
-        //   requests so an interactive Claude Code session doesn't have to
-        //   queue behind PithBackfill. Pay ~50% throughput-when-alone for
-        //   zero contention when chatting with a local model.
-        // Each slot gets `ctx-size / parallel` tokens, and Claude Code needs
-        // the full 128K Llama 3.1 native window for its system prompt, so
-        // ctx-size scales with parallel.
+        // Two env knobs control the server's runtime budget so the user can
+        // tune for the active workload without a code change:
+        //
+        //   SONA_CHAT_PARALLEL (default 1) — concurrent request slots.
+        //     1 = no multiplexing overhead, best throughput for a single
+        //         client (PithBackfill running alone, the common case).
+        //     2+ = continuous-batching for interactive Claude Code sessions
+        //         that would otherwise queue behind pith. Costs ~50%
+        //         throughput-when-alone for zero contention.
+        //
+        //   SONA_CHAT_CTX_PER_SLOT (default 8192) — context window per slot.
+        //     8192 = pith-sized. Tiny KV cache, fastest per-request scheduling.
+        //         Default while the big NULL-l0/l1 backfill is the dominant
+        //         workload; Claude Code workers/sessions will reject inbound
+        //         requests at this size (their system prompt is >100K tokens).
+        //     131072 = Llama 3.1's native context. Required for Claude Code
+        //         worker/session redirect to actually work end-to-end. Bump
+        //         to this when the backfill is done and you want to chat
+        //         with a local model.
+        //
+        // Total --ctx-size = perSlot × parallel (llama-server divides ctx
+        // evenly across slots, and each slot must hold a full request).
         let parallel = max(1, Int(ProcessInfo.processInfo.environment["SONA_CHAT_PARALLEL"] ?? "1") ?? 1)
-        let perSlotCtx = 131072
+        let perSlotCtx = max(2048, Int(ProcessInfo.processInfo.environment["SONA_CHAT_CTX_PER_SLOT"] ?? "8192") ?? 8192)
         let totalCtx = perSlotCtx * parallel
 
         let proc = Process()
