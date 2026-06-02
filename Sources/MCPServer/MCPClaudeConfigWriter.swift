@@ -13,13 +13,19 @@ enum MCPClaudeConfigWriter {
         let token = MCPTokenGenerator.newToken()
         let configPath = try ensureConfigDir().appendingPathComponent("\(sessionKey).json")
 
+        // Single unified MCP server — see ~/.sonata/wiki/sonata/mcp-identity.md
+        // ("The single rule"). The `/mcp/:sessionKey` endpoint serves the
+        // entire tool surface (236 tools, incl. all 76 mem_* tools), so one
+        // server entry is all a session needs.
+        //
+        // A second "memory" entry pointing at `/mcp-memory/:sessionKey` used
+        // to be emitted here, but MCPHTTPRouter never registered that route —
+        // it 404'd from day one, surfacing as a low-visibility "Failed to
+        // reconnect to memory" in the /mcp panel while the mem_* tools kept
+        // working through sonata-bridge. Emitting only the route that exists
+        // removes the config↔route divergence permanently.
         let config: [String: Any] = [
             "mcpServers": [
-                "memory": [
-                    "type": "http",
-                    "url": "http://localhost:\(port)/mcp-memory/\(sessionKey)",
-                    "headers": ["Authorization": "Bearer \(token)"],
-                ],
                 "sonata-bridge": [
                     "type": "http",
                     "url": "http://localhost:\(port)/mcp/\(sessionKey)",
