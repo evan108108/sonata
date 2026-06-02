@@ -1090,10 +1090,14 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         // matching server warm. Different local models live on different
         // ports/processes; the registry guarantees the spawn-site and the
         // actor agree on the URL without an await.
+        // SONA_LOCAL_MODEL=1 is a marker the user's global CLAUDE.md keys off
+        // to skip auto-invoking workflow skills like /evenflow — a small
+        // local model wastes itself trying to drive multi-step dev workflows.
         if let model, model.hasPrefix(ChatServerManager.localModelPrefix) {
             let chatModelName = String(model.dropFirst(ChatServerManager.localModelPrefix.count))
             env.append("ANTHROPIC_BASE_URL=\(LocalChatModelRegistry.baseURL(for: chatModelName))")
             env.append("ANTHROPIC_API_KEY=local")
+            env.append("SONA_LOCAL_MODEL=1")
             Task.detached { try? await ChatServerManager.shared.ensureRunning(modelName: chatModelName) }
         }
 

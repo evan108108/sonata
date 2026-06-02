@@ -455,10 +455,14 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         // `local/`, resolve the stripped name through the registry to find
         // the matching server's loopback port, point Claude Code there with a
         // placeholder API key, and kick the matching server warm.
+        // SONA_LOCAL_MODEL=1 is read by the user's global CLAUDE.md to skip
+        // auto-invoking workflow skills like /evenflow for chat-with-local
+        // sessions where multi-step dev workflows aren't the intent.
         if let model, model.hasPrefix(ChatServerManager.localModelPrefix) {
             let chatModelName = String(model.dropFirst(ChatServerManager.localModelPrefix.count))
             env.append("ANTHROPIC_BASE_URL=\(LocalChatModelRegistry.baseURL(for: chatModelName))")
             env.append("ANTHROPIC_API_KEY=local")
+            env.append("SONA_LOCAL_MODEL=1")
             Task.detached { try? await ChatServerManager.shared.ensureRunning(modelName: chatModelName) }
         }
 
