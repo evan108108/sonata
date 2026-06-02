@@ -11,6 +11,11 @@ class Worker: ObservableObject, Identifiable {
     let label: String
     let sessionId: String  // Claude --session-id UUID for cycling/resume
     let engine: WorkerEngine  // Claude (default) or Goose — see WorkerEngine.swift
+    /// Optional model override. nil → engine's hardcoded default (Anthropic-hosted).
+    /// Prefix `local/` → resolve to the local chat server (Phase F.1 redirect).
+    /// Bare name (no prefix) → passed through as `--model <name>` to the runner;
+    /// useful for Anthropic model selection (claude-opus-4-7 etc., Phase F.4 UI).
+    let model: String?
 
     @Published var status: WorkerStatus = .starting
     @Published var currentTask: String = ""
@@ -32,11 +37,12 @@ class Worker: ObservableObject, Identifiable {
     let terminalView: LocalProcessTerminalView
     var coordinator: WorkerCoordinator?
 
-    init(label: String, engine: WorkerEngine = WorkerEngine.defaultEngine) {
+    init(label: String, engine: WorkerEngine = WorkerEngine.defaultEngine, model: String? = nil) {
         self.id = "worker-\(Date().timeIntervalSince1970.description.replacingOccurrences(of: ".", with: "").suffix(10))"
         self.label = label
         self.sessionId = UUID().uuidString.lowercased()
         self.engine = engine
+        self.model = model
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
     }
@@ -45,11 +51,12 @@ class Worker: ObservableObject, Identifiable {
     /// engine resumes the existing session on relaunch (sonata-restart-recovery-v0-plan §4).
     /// Engine defaults to `.claude` — recovered workers stay on Claude until the
     /// `engine` column is persisted in the workers table (T4 follow-up).
-    init(label: String, workerId: String, sessionId: String, engine: WorkerEngine = .claude) {
+    init(label: String, workerId: String, sessionId: String, engine: WorkerEngine = .claude, model: String? = nil) {
         self.id = workerId
         self.label = label
         self.sessionId = sessionId
         self.engine = engine
+        self.model = model
         self.terminalView = DropEnabledTerminalView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         terminalView.applyWarmChrome()
     }
@@ -411,7 +418,7 @@ class WorkerManager: ObservableObject {
         return plan.toSpawn
     }
 
-    func addWorker(label: String? = nil, engine: WorkerEngine = WorkerEngine.defaultEngine) {
+    func addWorker(label: String? = nil, engine: WorkerEngine = WorkerEngine.defaultEngine, model: String? = nil) {
         let usedIndices = workers.compactMap { w -> Int? in
             let prefix = "sona-worker-"
             guard w.label.hasPrefix(prefix) else { return nil }
@@ -419,7 +426,7 @@ class WorkerManager: ObservableObject {
         }
         let index = (usedIndices.max() ?? 0) + 1
         let workerLabel = label ?? "sona-worker-\(index)"
-        let worker = Worker(label: workerLabel, engine: engine)
+        let worker = Worker(label: workerLabel, engine: engine, model: model)
         workers.append(worker)
         selectedWorkerId = worker.id
         DispatchQueue.main.async {
@@ -497,8 +504,8 @@ class WorkerManager: ObservableObject {
 
         print("[cycle] spawn-started: \(slotLabel)")
 
-        // Spawn replacement with same label + engine
-        let newWorker = Worker(label: slotLabel, engine: oldWorker.engine)
+        // Spawn replacement with same label + engine + model
+        let newWorker = Worker(label: slotLabel, engine: oldWorker.engine, model: oldWorker.model)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.workers.append(newWorker)
@@ -768,7 +775,8 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             restartNudge: restartNudge,
             taskId: taskId,
             lastEventId: lastEventId,
-            engine: worker.engine
+            engine: worker.engine,
+            model: worker.model
         )
 
         DispatchQueue.main.async { [weak self] in
@@ -795,6 +803,17 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 }
                 if let channel = WorkerManager.channelServer {
                     args.append(contentsOf: ["--dangerously-load-development-channels", "server:\(channel)"])
+                }
+                // Phase F.1: pass `--model <name>` when the worker has an
+                // explicit model. `local/<name>` strips the prefix — the local
+                // llama-server ignores the model field of the request anyway
+                // (it serves whatever GGUF was loaded at startup), but Claude
+                // Code still needs *some* value to put in its outbound payload.
+                if let workerModel = self.worker.model {
+                    let stripped = workerModel.hasPrefix(ChatServerManager.localModelPrefix)
+                        ? String(workerModel.dropFirst(ChatServerManager.localModelPrefix.count))
+                        : workerModel
+                    args.append(contentsOf: ["--model", stripped])
                 }
                 // Spread any --mcp-config args from the in-proc opt-in path.
                 args.append(contentsOf: launch.extraArgs)
@@ -946,7 +965,8 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         restartNudge: Bool = false,
         taskId: String? = nil,
         lastEventId: String? = nil,
-        engine: WorkerEngine = .claude
+        engine: WorkerEngine = .claude,
+        model: String? = nil
     ) -> LaunchEnv {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
@@ -1061,6 +1081,17 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             for item in extra.components(separatedBy: ",") where !item.isEmpty {
                 env.append(item)
             }
+        }
+
+        // Phase F.1: local-model redirect. When the worker's model starts with
+        // `local/`, point Claude Code at the loopback chat server and give it a
+        // placeholder key (the server doesn't authenticate). Kick the server
+        // off the actor so it's warm by the time claude makes its first call;
+        // ensureRunning is idempotent and a no-op when the server is already up.
+        if let model, model.hasPrefix(ChatServerManager.localModelPrefix) {
+            env.append("ANTHROPIC_BASE_URL=\(ChatServerManager.defaultBaseURL)")
+            env.append("ANTHROPIC_API_KEY=local")
+            Task.detached { try? await ChatServerManager.shared.ensureRunning() }
         }
 
         return LaunchEnv(env: env, extraArgs: resolvedExtraArgs)
@@ -1248,14 +1279,24 @@ struct WorkersView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
             Spacer(minLength: 0)
-            Button {
-                manager.addWorker()
+            Menu {
+                Button("Default (Anthropic)") {
+                    manager.addWorker()
+                }
+                // Phase F.1: spawn a worker that points at the local llama-server
+                // via Claude Code's ANTHROPIC_BASE_URL redirect. Smoke-test path;
+                // Phase F.4 will replace this with a real model picker sourced
+                // from BinaryProvisioner's installed-chat-model registry.
+                Button("Local — Llama 3.1 8B (experimental)") {
+                    manager.addWorker(model: "\(ChatServerManager.localModelPrefix)llama-3.1-8b-instruct")
+                }
             } label: {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 16, weight: .regular))
                     .foregroundStyle(.white)
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .fixedSize()
             .help("Add Worker")
         }
