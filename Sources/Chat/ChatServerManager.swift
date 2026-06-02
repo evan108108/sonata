@@ -162,24 +162,28 @@ actor ChatServerManager {
         let port = spec.port
         killOrphans(port: port)
 
+        // --parallel slot count is env-controllable so the user can choose:
+        // - 1 (default): no multiplexing overhead — best throughput when a
+        //   single client (typically PithBackfill) has the server to itself.
+        //   The right call while a big backfill is running.
+        // - 2+: continuous-batching multiplexes decode steps across concurrent
+        //   requests so an interactive Claude Code session doesn't have to
+        //   queue behind PithBackfill. Pay ~50% throughput-when-alone for
+        //   zero contention when chatting with a local model.
+        // Each slot gets `ctx-size / parallel` tokens, and Claude Code needs
+        // the full 128K Llama 3.1 native window for its system prompt, so
+        // ctx-size scales with parallel.
+        let parallel = max(1, Int(ProcessInfo.processInfo.environment["SONA_CHAT_PARALLEL"] ?? "1") ?? 1)
+        let perSlotCtx = 131072
+        let totalCtx = perSlotCtx * parallel
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
         proc.arguments = [
             "-m", model,
             "--host", "127.0.0.1", "--port", "\(port)",
-            // Phase F.2-a contention fix: --parallel + continuous-batching
-            // lets the server interleave decode steps across multiple in-flight
-            // requests so PithBackfill (running ~45/min) doesn't starve the
-            // interactive worker/session sharing the same process. Each slot
-            // gets `ctx-size / parallel` tokens of context; we want each slot
-            // to keep the full 128K Llama 3.1 native window for Claude Code
-            // workers, so total ctx-size is 256K (2 × 128K). KV cache is now
-            // ~1GB on top of the 4.6GB model weights — still comfortable on
-            // 16GB+ unified memory. Phase F.2-b (model pool) layers on top of
-            // this; per-process parallelism is the right answer for SAME-model
-            // contention regardless of whether the pool grows.
-            "--ctx-size", "262144",
-            "--parallel", "2",
+            "--ctx-size", "\(totalCtx)",
+            "--parallel", "\(parallel)",
             "-cb",
             "--n-predict", "400",
             "--temp", "0.3",
