@@ -283,6 +283,14 @@ let contactActions: [SonataAction] = [
                 guard changed > 0 else {
                     throw ActionError.notFound("Contact not found for email \(email)")
                 }
+                // If this approved the sender (autoAllowEmail -> 1), re-dispatch any
+                // emails still stuck in pending_approval. The email APPROVE-directive
+                // path does this via EmailHandler; the UI/MCP flag path must too, or
+                // already-quarantined mail stays pending forever. Fire-and-forget: the
+                // handler logs its own errors and the pending rows are durable.
+                if autoAllow == 1, let emailHandler = ctx.emailHandler {
+                    Task { await emailHandler.redispatchPendingForApprovedSender(email: email) }
+                }
                 return SuccessResponse()
             } catch let e as ActionError {
                 throw e

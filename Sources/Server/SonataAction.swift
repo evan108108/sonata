@@ -137,17 +137,22 @@ struct ActionContext: @unchecked Sendable {
     let dbPool: DatabasePool
     let scheduler: SchedulerActor?
     let search: (any SearchService)?
+    /// The live email handler, so out-of-band approval actions (e.g.
+    /// contact_set_email_flags) can re-dispatch a sender's quarantined mail.
+    let emailHandler: EmailHandler?
 
     init(
         params: ActionParams,
         dbPool: DatabasePool,
         scheduler: SchedulerActor? = nil,
-        search: (any SearchService)? = nil
+        search: (any SearchService)? = nil,
+        emailHandler: EmailHandler? = nil
     ) {
         self.params = params
         self.dbPool = dbPool
         self.scheduler = scheduler
         self.search = search
+        self.emailHandler = emailHandler
     }
 }
 

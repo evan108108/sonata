@@ -12,6 +12,9 @@ final class ActionRegistry: @unchecked Sendable {
     private let lock = NSLock()
     var scheduler: SchedulerActor?
     var search: (any SearchService)?
+    /// Live email handler (set after boot, once EmailHandler is constructed) so
+    /// approval actions can re-dispatch a sender's pending_approval mail.
+    var emailHandler: EmailHandler?
 
     /// Register a batch of actions. Re-registering an action with the same
     /// name replaces the existing entry (used when plugins re-discover on
@@ -104,6 +107,7 @@ final class ActionRegistry: @unchecked Sendable {
     ) -> @Sendable (Request, Context) async throws -> Response {
         let scheduler = self.scheduler
         let search = self.search
+        let emailHandler = self.emailHandler
         let registry = self
         return { request, context in
             guard let pluginName = context.parameters.get("name", as: String.self) else {
@@ -154,7 +158,8 @@ final class ActionRegistry: @unchecked Sendable {
                     params: ActionParams(finalParams),
                     dbPool: dbPool,
                     scheduler: scheduler,
-                    search: search
+                    search: search,
+                    emailHandler: emailHandler
                 )
                 let result = try await action.handler(ctx)
                 return jsonResponse(AnyEncodable(result))
@@ -221,6 +226,7 @@ final class ActionRegistry: @unchecked Sendable {
     ) -> @Sendable (Request, Context) async throws -> Response {
         let scheduler = self.scheduler
         let search = self.search
+        let emailHandler = self.emailHandler
         return { request, context in
             do {
                 // Extract parameters based on HTTP method and param source
@@ -252,7 +258,8 @@ final class ActionRegistry: @unchecked Sendable {
                     params: ActionParams(finalParams),
                     dbPool: dbPool,
                     scheduler: scheduler,
-                    search: search
+                    search: search,
+                    emailHandler: emailHandler
                 )
                 let result = try await action.handler(ctx)
                 return jsonResponse(AnyEncodable(result))
@@ -410,7 +417,8 @@ final class ActionRegistry: @unchecked Sendable {
                 params: ActionParams(finalArgs),
                 dbPool: dbPool,
                 scheduler: scheduler,
-                search: search
+                search: search,
+                emailHandler: emailHandler
             )
 
             let result = try await action.handler(ctx)

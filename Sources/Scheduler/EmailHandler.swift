@@ -369,7 +369,7 @@ actor EmailHandler {
                 leftover.append(email)
                 continue
             }
-            await processApprovalDirectives(body: email.body, inbox: email.inboxAddress)
+            await processApprovalDirectives(body: email.body)
             try? await markEmailProcessed(messageId: email.messageId, success: true)
         }
         return leftover
@@ -377,7 +377,7 @@ actor EmailHandler {
 
     /// Parse APPROVE / REJECT / DELETE directives line-by-line. Defensive
     /// against quoted reply content and whitespace.
-    private func processApprovalDirectives(body: String, inbox: String) async {
+    private func processApprovalDirectives(body: String) async {
         for rawLine in body.split(separator: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             // Ignore quoted-reply prefixes and obvious header lines.
@@ -392,7 +392,7 @@ actor EmailHandler {
             switch directive {
             case "APPROVE":
                 await setContactEmailFlags(email: addr, autoAllow: 1, block: 0)
-                await redispatchPending(email: addr, inbox: inbox)
+                await redispatchPendingForApprovedSender(email: addr)
                 logger.info("EmailHandler: APPROVED \(addr) — re-dispatching pending")
             case "REJECT":
                 await setContactEmailFlags(email: addr, autoAllow: 0, block: 1)
@@ -443,17 +443,45 @@ actor EmailHandler {
         }
     }
 
+    /// Re-dispatch every pending_approval email from a sender who was just
+    /// approved out-of-band (People UI toggle or the contact_set_email_flags
+    /// MCP/HTTP action). The caller doesn't know which inbox the mail landed in,
+    /// so we scope per-row by toAddr and dispatch each inbox group under its own
+    /// InboxConfig. Public entry point reachable from ContactActions.
+    func redispatchPendingForApprovedSender(email: String) async {
+        let addr = email.lowercased()
+        let inboxes: [String]
+        do {
+            inboxes = try await dbPool.read { db in
+                try String.fetchAll(db, sql: """
+                    SELECT DISTINCT toAddr
+                    FROM emails
+                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ?
+                    """, arguments: ["%\(addr)%"])
+            }
+        } catch {
+            logger.error("EmailHandler: redispatchPendingForApprovedSender read failed for \(addr) — \(error)")
+            return
+        }
+        if inboxes.isEmpty { return }
+        logger.info("EmailHandler: \(addr) approved out-of-band — re-dispatching pending across \(inboxes.count) inbox(es)")
+        for inbox in inboxes {
+            await redispatchPending(email: addr, inbox: inbox)
+        }
+    }
+
     /// Re-dispatch any pending_approval emails from this sender, scoped to the
-    /// given inbox. Called after APPROVE.
+    /// given inbox (toAddr) so the dispatch matches that inbox's InboxConfig.
+    /// Called after APPROVE.
     private func redispatchPending(email: String, inbox: String) async {
         do {
             let rows: [Row] = try dbPool.read { db in
                 try Row.fetchAll(db, sql: """
                     SELECT messageId, threadId, fromAddr, toAddr, subject, body, receivedAt
                     FROM emails
-                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ?
+                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ? AND toAddr = ?
                     ORDER BY receivedAt ASC
-                    """, arguments: ["%\(email)%"])
+                    """, arguments: ["%\(email)%", inbox])
             }
             if rows.isEmpty { return }
 
@@ -462,8 +490,8 @@ actor EmailHandler {
             try await dbPool.write { db in
                 try db.execute(sql: """
                     UPDATE emails SET status = 'unread'
-                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ?
-                    """, arguments: ["%\(email)%"])
+                    WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ? AND toAddr = ?
+                    """, arguments: ["%\(email)%", inbox])
             }
 
             // Build EmailRecord values and dispatch via the existing path.
