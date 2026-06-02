@@ -144,11 +144,40 @@ actor PithBackfill {
     }
 
     private func processOne(id: String, content: String, dbPool: DatabasePool) async {
-        let pith = await Pith.generateOrNil(content: content, logger: logger)
+        // Distinguish server-side failures (server is down/starting/timing out)
+        // from row-level failures (this content can't be parsed). Server-side
+        // failures must NOT bump pithAttempts, or a thundering-herd during
+        // chat-server startup or a transient outage will permanently retire
+        // rows that never actually got a fair attempt — exactly the regression
+        // that burned 545 rows during the Phase F.2 deploy.
+        let pith: Pith.Result?
+        do {
+            pith = try await Pith.generate(content: content)
+        } catch ChatServerManager.ChatError.notHealthy,
+                ChatServerManager.ChatError.binaryUnavailable,
+                ChatServerManager.ChatError.modelUnavailable,
+                ChatServerManager.ChatError.unknownModel {
+            // Server-side: do not UPDATE at all, will be re-selected next sweep.
+            logger.warning("backfill: chat server unhealthy; skipping \(id) for this round (will retry)")
+            failed += 1
+            return
+        } catch {
+            // Likely URLSession transient (timeout, connection reset). Treat as
+            // server-side too — don't penalize the row for our infrastructure.
+            // If the same row times out persistently we'll see it dominate the
+            // log; revisit then with a per-row error budget.
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain {
+                logger.warning("backfill: URL error \(nsError.code) for \(id); skipping this round")
+                failed += 1
+                return
+            }
+            // Row-level: model returned something we couldn't parse / content
+            // genuinely can't be pithed. Fall through to bump attempts.
+            logger.warning("backfill: pith generation failed for \(id) (\(error)); will bump attempt counter")
+            pith = nil
+        }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        // Single UPDATE either way: always bump pithAttempts so a row that
-        // deterministically fails parsing retires after maxAttempts instead of
-        // being re-selected forever. On success we also write l0/l1/updatedAt.
         do {
             try await dbPool.write { db in
                 if let pith {
