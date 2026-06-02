@@ -148,7 +148,13 @@ actor ChatServerManager {
         proc.arguments = [
             "-m", model,
             "--host", "127.0.0.1", "--port", "\(port)",
-            "--ctx-size", "8192",
+            // 128K — Llama 3.1's native context. Pith only ever sends a few
+            // hundred tokens, but Phase F.1 workers running Claude Code send
+            // 100K+ on the first message (full system prompt + tool definitions
+            // + skills); 8K was rejecting them server-side with a 400. KV cache
+            // at this size is ~512MB on top of the 4.6GB model weights, which
+            // is comfortable on Apple Silicon with 16GB+ unified memory.
+            "--ctx-size", "131072",
             "--n-predict", "400",
             "--temp", "0.3",
             // Push all layers to GPU. Apple Silicon Metal handles 8B Q4 easily;
