@@ -1083,15 +1083,18 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             }
         }
 
-        // Phase F.1: local-model redirect. When the worker's model starts with
-        // `local/`, point Claude Code at the loopback chat server and give it a
-        // placeholder key (the server doesn't authenticate). Kick the server
-        // off the actor so it's warm by the time claude makes its first call;
-        // ensureRunning is idempotent and a no-op when the server is already up.
+        // Phase F.1 + F.2-b: local-model redirect. When the worker's model
+        // starts with `local/`, resolve the stripped name through the registry
+        // to get the right loopback port, point Claude Code there with a
+        // placeholder key (the server doesn't authenticate), and kick the
+        // matching server warm. Different local models live on different
+        // ports/processes; the registry guarantees the spawn-site and the
+        // actor agree on the URL without an await.
         if let model, model.hasPrefix(ChatServerManager.localModelPrefix) {
-            env.append("ANTHROPIC_BASE_URL=\(ChatServerManager.defaultBaseURL)")
+            let chatModelName = String(model.dropFirst(ChatServerManager.localModelPrefix.count))
+            env.append("ANTHROPIC_BASE_URL=\(LocalChatModelRegistry.baseURL(for: chatModelName))")
             env.append("ANTHROPIC_API_KEY=local")
-            Task.detached { try? await ChatServerManager.shared.ensureRunning() }
+            Task.detached { try? await ChatServerManager.shared.ensureRunning(modelName: chatModelName) }
         }
 
         return LaunchEnv(env: env, extraArgs: resolvedExtraArgs)

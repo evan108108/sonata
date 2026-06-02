@@ -1,38 +1,41 @@
 import Foundation
 import Logging
 
-/// Manages a local llama.cpp `llama-server` subprocess serving Llama 3.1 8B
-/// Instruct — the local chat backend that powers pith L0/L1 generation (and
-/// any future local-chat features). Sonata-internal plumbing, same shape as
-/// `EmbeddingServerManager`; NOT a user-installed daemon.
+/// Pooled manager for local `llama-server` subprocesses — one process per
+/// distinct model in `LocalChatModelRegistry`. Phase F.2-b: was previously a
+/// singleton that only knew about Llama 3.1 8B; now keyed by `modelName` so a
+/// session on Llama can coexist with (future) sessions on Qwen / Falcon /
+/// user-installed GGUFs without sharing process state.
 ///
-/// Lazily started on first `chatCompletion(...)` call, so when no caller needs
-/// chat this process never launches and the 4.6 GB model is never downloaded.
-/// The binary + GGUF come from `BinaryProvisioner` (download-on-first-run);
-/// the llama.cpp release binary runs in place beside its dylibs
-/// (rpath @loader_path), so no DYLD wiring is needed.
+/// Within a single process, `--parallel 2 -cb` (set in the spawn args below)
+/// gives us continuous-batching multiplexing — pith and an interactive
+/// session sharing the SAME model interleave decode steps instead of queueing.
+/// That fix is independent of pooling: per-model pooling is for *different*
+/// model contention; per-process parallel is for *same-model* contention.
+///
+/// All public methods take an optional `modelName` defaulting to
+/// `LocalChatModelRegistry.defaultModelName` so existing callers (Pith,
+/// PithBackfill, FriendRelay's local branch) keep working without touching
+/// their call sites — they implicitly use Llama 3.1 8B as before.
 actor ChatServerManager {
     static let shared = ChatServerManager()
 
-    /// Loopback port for the local chat server. Embedding server uses 7712;
-    /// app HTTP is 3211. Phase F.2 will turn this into a pool with one port
-    /// per loaded model; today the singleton owns this port.
-    static let defaultPort = 7713
-    /// Public base URL — exposed for callers that want to redirect external
-    /// tools (e.g. Claude Code via `ANTHROPIC_BASE_URL`) at the local server
-    /// without hardcoding the port string. The trailing `/v1` is NOT included
-    /// because consumers (OpenAI-compatible SDKs, Claude Code) append it.
-    static let defaultBaseURL = "http://127.0.0.1:\(defaultPort)"
     /// Spawn-site prefix that tags a model as locally hosted. A model name
     /// starting with this is resolved to the local chat server and stripped
     /// before being passed to the runner as `--model <name>`.
     static let localModelPrefix = "local/"
 
-    private let port = ChatServerManager.defaultPort
-    private let logger: Logger
-    private var process: Process?
+    /// Backward-compat alias for spawn-sites written before the registry
+    /// existed. Resolves to the URL of the default model's server. New code
+    /// should call `LocalChatModelRegistry.baseURL(for:)` with an explicit
+    /// modelName so a non-default model picker actually points the redirect
+    /// at the right port.
+    static var defaultBaseURL: String {
+        LocalChatModelRegistry.baseURL(for: LocalChatModelRegistry.defaultModelName)
+    }
 
-    private var baseURL: String { "http://127.0.0.1:\(port)" }
+    private let logger: Logger
+    private var processes: [String: Process] = [:]
 
     init() {
         var log = Logger(label: "sonata.chatserver")
@@ -41,6 +44,7 @@ actor ChatServerManager {
     }
 
     enum ChatError: Error {
+        case unknownModel(String)
         case binaryUnavailable
         case modelUnavailable
         case notHealthy
@@ -48,13 +52,16 @@ actor ChatServerManager {
         case missingContent
     }
 
-    var isRunning: Bool { process?.isRunning == true }
+    func isRunning(modelName: String = LocalChatModelRegistry.defaultModelName) -> Bool {
+        processes[modelName]?.isRunning == true
+    }
 
-    /// Make a chat completion request against the locally-hosted model. Lazily
-    /// ensures the server is up. Returns the assistant message content as a
-    /// String — callers are responsible for parsing (e.g. JSON for pith).
+    /// Single-turn convenience. Builds a [system, user] messages array and
+    /// forwards to `chatCompletionMessages`.
     ///
     /// - Parameters:
+    ///   - modelName: which local model to hit. Defaults to the registry's
+    ///     default (Llama 3.1 8B today) — keeps existing callsites unchanged.
     ///   - systemPrompt: the system message (frozen per use case)
     ///   - userContent: the user message
     ///   - maxTokens: max output tokens
@@ -64,6 +71,7 @@ actor ChatServerManager {
     ///     force server-side JSON-mode (Llama 3.1 still occasionally wraps in
     ///     markdown fences; callers should defensively strip).
     func chatCompletion(
+        modelName: String = LocalChatModelRegistry.defaultModelName,
         systemPrompt: String,
         userContent: String,
         maxTokens: Int = 400,
@@ -72,6 +80,7 @@ actor ChatServerManager {
         jsonObject: Bool = true
     ) async throws -> String {
         try await chatCompletionMessages(
+            modelName: modelName,
             messages: [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userContent],
@@ -89,13 +98,14 @@ actor ChatServerManager {
     ///
     /// Each message must be `["role": <system|user|assistant>, "content": ...]`.
     func chatCompletionMessages(
+        modelName: String = LocalChatModelRegistry.defaultModelName,
         messages: [[String: String]],
         maxTokens: Int = 400,
         temperature: Double = 0.3,
         seed: Int = 42,
         jsonObject: Bool = false
     ) async throws -> String {
-        try await ensureRunning()
+        try await ensureRunning(modelName: modelName)
 
         var body: [String: Any] = [
             "messages": messages,
@@ -107,6 +117,7 @@ actor ChatServerManager {
             body["response_format"] = ["type": "json_object"]
         }
 
+        let baseURL = LocalChatModelRegistry.baseURL(for: modelName)
         guard let url = URL(string: "\(baseURL)/v1/chat/completions") else {
             throw ChatError.badResponse
         }
@@ -130,31 +141,46 @@ actor ChatServerManager {
         return content
     }
 
-    /// Provision (download on first run) + launch + health-check. Idempotent.
-    func ensureRunning() async throws {
-        if isRunning { return }
+    /// Provision (download on first run) + launch + health-check the server
+    /// for `modelName`. Idempotent: returns immediately if the process for
+    /// this model is already up. Each modelName owns its own port from the
+    /// registry — two distinct models means two distinct processes on two
+    /// distinct ports, no contention.
+    func ensureRunning(modelName: String = LocalChatModelRegistry.defaultModelName) async throws {
+        if isRunning(modelName: modelName) { return }
 
+        guard let spec = LocalChatModelRegistry.spec(for: modelName) else {
+            throw ChatError.unknownModel(modelName)
+        }
         guard let binary = await BinaryProvisioner.shared.provision(.llamaServer) else {
             throw ChatError.binaryUnavailable
         }
-        guard let model = await BinaryProvisioner.shared.provision(.llama31InstructModel) else {
+        guard let model = await BinaryProvisioner.shared.provision(spec.binary) else {
             throw ChatError.modelUnavailable
         }
 
-        killOrphans()
+        let port = spec.port
+        killOrphans(port: port)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
         proc.arguments = [
             "-m", model,
             "--host", "127.0.0.1", "--port", "\(port)",
-            // 128K — Llama 3.1's native context. Pith only ever sends a few
-            // hundred tokens, but Phase F.1 workers running Claude Code send
-            // 100K+ on the first message (full system prompt + tool definitions
-            // + skills); 8K was rejecting them server-side with a 400. KV cache
-            // at this size is ~512MB on top of the 4.6GB model weights, which
-            // is comfortable on Apple Silicon with 16GB+ unified memory.
-            "--ctx-size", "131072",
+            // Phase F.2-a contention fix: --parallel + continuous-batching
+            // lets the server interleave decode steps across multiple in-flight
+            // requests so PithBackfill (running ~45/min) doesn't starve the
+            // interactive worker/session sharing the same process. Each slot
+            // gets `ctx-size / parallel` tokens of context; we want each slot
+            // to keep the full 128K Llama 3.1 native window for Claude Code
+            // workers, so total ctx-size is 256K (2 × 128K). KV cache is now
+            // ~1GB on top of the 4.6GB model weights — still comfortable on
+            // 16GB+ unified memory. Phase F.2-b (model pool) layers on top of
+            // this; per-process parallelism is the right answer for SAME-model
+            // contention regardless of whether the pool grows.
+            "--ctx-size", "262144",
+            "--parallel", "2",
+            "-cb",
             "--n-predict", "400",
             "--temp", "0.3",
             // Push all layers to GPU. Apple Silicon Metal handles 8B Q4 easily;
@@ -164,29 +190,34 @@ actor ChatServerManager {
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         try proc.run()
-        process = proc
+        processes[modelName] = proc
 
         // Loading a 4.6 GB GGUF + warming Metal takes longer than embeddings; give it 60s.
-        guard await waitForHealthy(timeoutSeconds: 60) else {
-            logger.error("llama-server (chat) failed health check on port \(port)")
-            process = nil
+        guard await waitForHealthy(port: port, timeoutSeconds: 60) else {
+            logger.error("llama-server (chat) failed health check for \(modelName) on port \(port)")
+            processes[modelName] = nil
             throw ChatError.notHealthy
         }
-        logger.info("chat server up (pid \(proc.processIdentifier), port \(port))")
+        logger.info("chat server up: \(modelName) (pid \(proc.processIdentifier), port \(port))")
     }
 
-    func shutdown() {
-        guard let proc = process, proc.isRunning else { return }
-        proc.terminate()
-        process = nil
+    /// Terminate every running chat-server process this manager owns.
+    /// Used on app shutdown; per-model shutdown isn't surfaced yet because
+    /// no caller needs it. Idle-shutdown is deferred until multiple models
+    /// are commonly in flight at once.
+    func shutdownAll() {
+        for (modelName, proc) in processes where proc.isRunning {
+            proc.terminate()
+            processes[modelName] = nil
+        }
     }
 
     // MARK: - Internals
 
-    private func waitForHealthy(timeoutSeconds: Int) async -> Bool {
+    private func waitForHealthy(port: Int, timeoutSeconds: Int) async -> Bool {
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
         while Date() < deadline {
-            if let url = URL(string: "\(baseURL)/health") {
+            if let url = URL(string: "http://127.0.0.1:\(port)/health") {
                 var req = URLRequest(url: url)
                 req.timeoutInterval = 2
                 if let (_, resp) = try? await URLSession.shared.data(for: req),
@@ -199,8 +230,9 @@ actor ChatServerManager {
         return false
     }
 
-    /// Kill any orphaned chat server on our port from a prior run.
-    private func killOrphans() {
+    /// Kill any orphaned chat server on the given port from a prior run.
+    /// Scoped per port so we don't terminate a sibling model's process.
+    private func killOrphans(port: Int) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         proc.arguments = ["-f", "llama-server.*--port \(port)"]

@@ -450,14 +450,16 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         )
         var env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: inProcExtras != nil)
 
-        // Phase F.4 (sessions): local-model redirect, mirrors WorkersView's
-        // buildLaunchEnv. When the session's model starts with `local/`, point
-        // Claude Code at the loopback chat server with a placeholder API key
-        // and kick the server warm. The `--model` arg below strips the prefix.
+        // Phase F.4 (sessions) + F.2-b: local-model redirect, mirrors
+        // WorkersView's buildLaunchEnv. When the session's model starts with
+        // `local/`, resolve the stripped name through the registry to find
+        // the matching server's loopback port, point Claude Code there with a
+        // placeholder API key, and kick the matching server warm.
         if let model, model.hasPrefix(ChatServerManager.localModelPrefix) {
-            env.append("ANTHROPIC_BASE_URL=\(ChatServerManager.defaultBaseURL)")
+            let chatModelName = String(model.dropFirst(ChatServerManager.localModelPrefix.count))
+            env.append("ANTHROPIC_BASE_URL=\(LocalChatModelRegistry.baseURL(for: chatModelName))")
             env.append("ANTHROPIC_API_KEY=local")
-            Task.detached { try? await ChatServerManager.shared.ensureRunning() }
+            Task.detached { try? await ChatServerManager.shared.ensureRunning(modelName: chatModelName) }
         }
 
         var args: [String] = []
