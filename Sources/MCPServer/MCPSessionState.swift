@@ -190,7 +190,7 @@ actor MCPSessionState {
         // it, and below annotate the error so the failure is self-explaining
         // in the tool result the model sees.
         let rawArguments = params["arguments"]
-        let args = rawArguments as? [String: Any] ?? [:]
+        var args = rawArguments as? [String: Any] ?? [:]
         let argsShape: String
         switch rawArguments {
         case nil:
@@ -206,6 +206,29 @@ actor MCPSessionState {
         }
         FileHandle.standardError.write(Data(
             "[mcp] tools/call \(toolName) role=\(roleString()) args=\(argsShape)\n".utf8))
+
+        // Recovery shim: some MCP clients (and some model-emitted tool calls)
+        // flatten arguments up one level — sending {name, content, type, ...}
+        // at the params layer instead of {name, arguments: {content, type, ...}}.
+        // The server then reads params.arguments as {} and the tool fails with
+        // "Missing required parameter", forcing the worker into a documented
+        // REST-shim fallback. When the standard path yields no args but params
+        // carries non-protocol keys, treat those keys as the args. JSON-RPC
+        // reserved keys (`name`, `arguments`, `_meta`) are excluded so this is
+        // a no-op for well-formed calls. Logged with a distinct prefix so the
+        // recovery is observable.
+        if args.isEmpty {
+            let reserved: Set<String> = ["name", "arguments", "_meta"]
+            var recovered: [String: Any] = [:]
+            for (k, v) in params where !reserved.contains(k) {
+                recovered[k] = v
+            }
+            if !recovered.isEmpty {
+                args = recovered
+                FileHandle.standardError.write(Data(
+                    "[mcp-compat] recovered \(recovered.count) arg(s) from params-level for \(toolName): keys=[\(recovered.keys.sorted().joined(separator: ","))]\n".utf8))
+            }
+        }
         guard let registry = self.registry else {
             return jsonRPCError(id: id, code: -32603,
                 message: "MCP registry deallocated mid-call")
