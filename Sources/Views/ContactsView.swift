@@ -340,7 +340,7 @@ struct ContactEditSheet: View {
     @State private var email = ""
     @State private var type = "human"
     @State private var role = ""
-    @State private var provider = ""
+    @State private var provider = "local"   // new contacts default to local; line 512 overrides on edit
     @State private var model = ""
     @State private var systemPrompt = ""
     @State private var notes = ""
@@ -393,8 +393,42 @@ struct ContactEditSheet: View {
                     }
                     if peerKind == "invoked" {
                         Section("AI Details") {
-                            TextField("Provider (openai, anthropic, google)", text: $provider)
-                            TextField("Model (gpt-4o, claude-opus-4, etc.)", text: $model)
+                            Picker("Provider", selection: $provider) {
+                                Text("Local (Llama 3.1 8B)").tag("local")
+                                Text("OpenRouter").tag("openrouter")
+                                Text("OpenAI").tag("openai")
+                            }
+                            .onChange(of: provider) { _, newValue in
+                                // Local has only one chat model right now — auto-fill
+                                // the field so it's discoverable. If the user picks a
+                                // hosted provider, clear it back so they can type.
+                                if newValue == "local" {
+                                    model = "llama-3.1-8b-instruct"
+                                } else if model == "llama-3.1-8b-instruct" {
+                                    model = ""
+                                }
+                            }
+
+                            if provider == "local" {
+                                TextField("Model", text: $model)
+                                    .disabled(true)
+                                Text("Local serving is single-model today. Multi-model local serving + arbitrary-GGUF download is on the roadmap.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                TextField(
+                                    provider == "openrouter"
+                                        ? "Model (e.g. anthropic/claude-3.5-sonnet, openai/gpt-4o)"
+                                        : "Model (e.g. gpt-4o, gpt-4o-mini)",
+                                    text: $model
+                                )
+                                Text(provider == "openrouter"
+                                    ? "Requires OPENROUTER_API_KEY in environment."
+                                    : "Requires OPENAI_API_KEY in environment.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("System Prompt")
                                     .font(.caption)
@@ -475,8 +509,17 @@ struct ContactEditSheet: View {
                 email = c.email
                 type = c.type
                 role = c.role ?? ""
-                provider = c.provider ?? ""
+                // Default empty provider to "local" so the Picker always shows
+                // a valid selection (an empty string matches no tag → blank UI).
+                // Existing non-empty values pass through unchanged.
+                let storedProvider = c.provider ?? ""
+                provider = storedProvider.isEmpty ? "local" : storedProvider
                 model = c.model ?? ""
+                // If we defaulted to local AND there's no stored model, auto-fill
+                // the local model name to match what the picker's onChange would do.
+                if provider == "local" && model.isEmpty {
+                    model = "llama-3.1-8b-instruct"
+                }
                 systemPrompt = c.systemPrompt ?? ""
                 notes = c.notes ?? ""
                 // Default to 'invoked' when the row predates v13 and has

@@ -103,6 +103,11 @@ actor FriendRelay {
         // Refresh friends list from contacts DB
         await refreshFriends()
 
+        // Idle no-op: if zero hosted AI friends exist, skip the per-friend poll
+        // entirely. Saves the network/disk burst every 15s on installs that
+        // have no invoked AI peers configured.
+        guard !friends.isEmpty else { return }
+
         for friend in friends {
             do {
                 try await pollFriendInbox(friend: friend)
@@ -202,49 +207,87 @@ actor FriendRelay {
 
     // MARK: - Provider API
 
-    /// Call the appropriate provider API (OpenAI/OpenRouter) for a friend.
+    /// Call the appropriate provider for a friend. Dispatches on
+    /// `friend.provider` (per-friend config), not on env vars. Returns the
+    /// assistant message content, or nil on any failure (logged).
     private func callProviderAPI(
         friend: Friend,
         messages: [[String: String]]
     ) async throws -> String? {
-        // Determine endpoint and key
-        let env = ProcessInfo.processInfo.environment
-        let openRouterKey = env["OPENROUTER_API_KEY"]
-        let openAIKey = env["OPENAI_API_KEY"]
+        var allMessages: [[String: String]] = [
+            ["role": "system", "content": friend.systemPrompt]
+        ]
+        allMessages.append(contentsOf: messages)
 
-        let apiKey: String
-        let baseURL: String
-        let model: String
+        switch friend.provider.lowercased() {
+        case "local":
+            // Route through the local Llama 3.1 8B server (same one pith uses).
+            // No API key required; no per-call cost.
+            do {
+                return try await ChatServerManager.shared.chatCompletionMessages(
+                    messages: allMessages,
+                    maxTokens: 1500,
+                    temperature: 0.8,
+                    jsonObject: false
+                )
+            } catch {
+                logger.error("FriendRelay: local chat call failed for \(friend.name): \(error)")
+                return nil
+            }
 
-        if let orKey = openRouterKey, !orKey.isEmpty {
-            apiKey = orKey
-            baseURL = "https://openrouter.ai/api/v1/chat/completions"
-            // OpenRouter requires provider prefix
-            model = friend.model.contains("/") ? friend.model : "openai/\(friend.model)"
-        } else if let oaKey = openAIKey, !oaKey.isEmpty {
-            apiKey = oaKey
-            baseURL = "https://api.openai.com/v1/chat/completions"
-            model = friend.model
-        } else {
-            logger.error("FriendRelay: no API key set (checked OPENROUTER_API_KEY, OPENAI_API_KEY)")
+        case "openrouter":
+            return try await callHostedChatAPI(
+                friend: friend,
+                allMessages: allMessages,
+                baseURL: "https://openrouter.ai/api/v1/chat/completions",
+                apiKeyEnv: "OPENROUTER_API_KEY",
+                // OpenRouter requires a provider/model prefix; if the friend's
+                // model already has one, pass through, else default to openai/.
+                modelOverride: friend.model.contains("/") ? friend.model : "openai/\(friend.model)"
+            )
+
+        case "openai":
+            return try await callHostedChatAPI(
+                friend: friend,
+                allMessages: allMessages,
+                baseURL: "https://api.openai.com/v1/chat/completions",
+                apiKeyEnv: "OPENAI_API_KEY",
+                modelOverride: friend.model
+            )
+
+        default:
+            logger.error("FriendRelay: unknown provider '\(friend.provider)' for \(friend.name); skipping")
+            return nil
+        }
+    }
+
+    /// Generic helper for OpenAI-compatible hosted endpoints (OpenAI direct,
+    /// OpenRouter, anything else that speaks /v1/chat/completions and Bearer
+    /// auth). Returns nil + logs on missing key or HTTP error.
+    private func callHostedChatAPI(
+        friend: Friend,
+        allMessages: [[String: String]],
+        baseURL: String,
+        apiKeyEnv: String,
+        modelOverride: String
+    ) async throws -> String? {
+        // Read via SecretStore (Sonata's canonical key path — matches
+        // EmbeddingRoutes / BackupManager / EmailProvider). Reading raw
+        // ProcessInfo env only works when Sonata is launched from a shell
+        // with the var exported; that's not how the app normally runs.
+        guard let apiKey = SecretStore.get(apiKeyEnv), !apiKey.isEmpty else {
+            logger.error("FriendRelay: \(apiKeyEnv) not in SecretStore; cannot reach \(friend.provider) for \(friend.name)")
             return nil
         }
 
-        // Build request
         let url = URL(string: baseURL)!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // Build messages array with system prompt
-        var allMessages: [[String: String]] = [
-            ["role": "system", "content": friend.systemPrompt]
-        ]
-        allMessages.append(contentsOf: messages)
-
         let body: [String: Any] = [
-            "model": model,
+            "model": modelOverride,
             "messages": allMessages,
             "max_tokens": 1500,
             "temperature": 0.8,
@@ -255,7 +298,7 @@ actor FriendRelay {
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             let body = String(data: data, encoding: .utf8) ?? ""
-            logger.error("FriendRelay: provider API error \(statusCode): \(body.prefix(200))")
+            logger.error("FriendRelay: \(friend.provider) API error \(statusCode): \(body.prefix(200))")
             return nil
         }
 
@@ -316,16 +359,20 @@ actor FriendRelay {
 
     // MARK: - State Persistence
 
-    /// Key prefix for appState table.
-    private static let stateKey = "friend.relay.handled"
+    /// `appState.app` namespace for FriendRelay's persisted state. The table
+    /// has UNIQUE(app, key) so every caller must provide its own app name.
+    private static let stateApp = "friend-relay"
+
+    /// `appState.key` under our app namespace.
+    private static let stateKey = "handled"
 
     /// Load handled message IDs from appState table.
     private func loadHandledState() async {
         do {
             let value: String? = try await dbPool.read { db in
                 try String.fetchOne(db, sql: """
-                    SELECT value FROM appState WHERE key = ?
-                """, arguments: [Self.stateKey])
+                    SELECT value FROM appState WHERE app = ? AND key = ?
+                """, arguments: [Self.stateApp, Self.stateKey])
             }
 
             if let value,
@@ -347,13 +394,15 @@ actor FriendRelay {
             let idsToSave = Array(handledMessages.suffix(500))
             let data = try JSONSerialization.data(withJSONObject: idsToSave)
             let value = String(data: data, encoding: .utf8) ?? "[]"
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
 
             try await dbPool.write { db in
                 try db.execute(sql: """
-                    INSERT INTO appState (key, value, updatedAt)
-                    VALUES (?, ?, datetime('now'))
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt
-                """, arguments: [Self.stateKey, value])
+                    INSERT INTO appState (app, key, value, updatedAt)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(app, key) DO UPDATE
+                    SET value = excluded.value, updatedAt = excluded.updatedAt
+                """, arguments: [Self.stateApp, Self.stateKey, value, now])
             }
         } catch {
             logger.warning("FriendRelay: failed to save handled state: \(error)")
