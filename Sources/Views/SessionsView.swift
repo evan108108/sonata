@@ -450,6 +450,11 @@ private struct NewSessionSheet: View {
     @State private var cwdPath: String = ""
     @State private var urlString: String = ""
     @State private var kind: SessionKind = .sona
+    /// Per-tab model override (Phase F.4). nil = Anthropic default;
+    /// `local/<name>` = local llama-server redirect via ChatServerManager.
+    /// Only shown / applied for `.sona` kind — terminal/webview don't run
+    /// Claude Code so the picker is irrelevant for them.
+    @State private var model: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -488,6 +493,13 @@ private struct NewSessionSheet: View {
                             Button("Browse…") { browse() }
                         }
                     }
+                    if kind == .sona {
+                        Picker("Model", selection: $model) {
+                            Text("Default (Anthropic)").tag(String?.none)
+                            Text("Local — Llama 3.1 8B (experimental)")
+                                .tag(String?.some("\(ChatServerManager.localModelPrefix)llama-3.1-8b-instruct"))
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -502,7 +514,7 @@ private struct NewSessionSheet: View {
             }
             .padding()
         }
-        .frame(width: 520, height: 290)
+        .frame(width: 520, height: 340)
         .onAppear {
             // Prefill defaults once so the form reflects what would happen
             // if the user just hits Start without touching anything.
@@ -579,7 +591,8 @@ private struct NewSessionSheet: View {
         let useCwd  = trimmedPath.isEmpty
             ? defaultCwd(for: kind)
             : URL(fileURLWithPath: (trimmedPath as NSString).expandingTildeInPath)
-        vm.addTab(name: useName, cwd: useCwd, kind: kind)
+        // Model only applies to Sona sessions — terminal/webview don't read it.
+        vm.addTab(name: useName, cwd: useCwd, kind: kind, model: kind == .sona ? model : nil)
         onClose()
     }
 }

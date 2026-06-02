@@ -24,6 +24,7 @@ struct PersistedInteractiveSession: FetchableRecord, Codable {
     let status: String         // 'live' | 'suspended' (closed rows are deleted)
     let lastActivityAt: Int64? // epoch ms of last drive/navigation
     let background: Int        // 1 = headless
+    let model: String?         // optional --model override; `local/...` = local-server redirect
     let createdAt: Int64
     let updatedAt: Int64
 }
@@ -36,7 +37,7 @@ enum InteractiveSessionsStore {
                 try PersistedInteractiveSession.fetchAll(db, sql: """
                     SELECT id, sessionId, name, cwd, position, wasActive, kind, url,
                            ownerAgentId, partition, status, lastActivityAt, background,
-                           createdAt, updatedAt
+                           model, createdAt, updatedAt
                     FROM interactiveSessions
                     ORDER BY position ASC, createdAt ASC
                     """)
@@ -61,7 +62,8 @@ enum InteractiveSessionsStore {
         partition: String? = nil,
         status: String = "live",
         lastActivityAt: Int64? = nil,
-        background: Bool = false
+        background: Bool = false,
+        model: String? = nil
     ) {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         do {
@@ -70,8 +72,8 @@ enum InteractiveSessionsStore {
                     INSERT INTO interactiveSessions
                         (id, sessionId, name, cwd, position, wasActive, kind, url,
                          ownerAgentId, partition, status, lastActivityAt, background,
-                         createdAt, updatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         model, createdAt, updatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         sessionId      = excluded.sessionId,
                         name           = excluded.name,
@@ -85,11 +87,12 @@ enum InteractiveSessionsStore {
                         status         = excluded.status,
                         lastActivityAt = excluded.lastActivityAt,
                         background     = excluded.background,
+                        model          = excluded.model,
                         updatedAt      = excluded.updatedAt
                     """, arguments: [
                         id, sessionId, name, cwd, position, wasActive ? 1 : 0, kind, url,
                         ownerAgentId, partition, status, lastActivityAt, background ? 1 : 0,
-                        now, now
+                        model, now, now
                     ])
             }
         } catch {

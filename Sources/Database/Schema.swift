@@ -985,5 +985,15 @@ extension DatabaseMigrator {
             try db.execute(sql:
                 "CREATE INDEX IF NOT EXISTS memories_pith_backfill ON memories(pithAttempts) WHERE l0 IS NULL OR l1 IS NULL")
         }
+
+        // v21: per-session model override for interactive sessions. Lets a tab
+        // remember "this Sona session runs against Llama 3.1 8B" across
+        // restarts — without it the model would silently revert to the
+        // hardcoded Anthropic default on every --resume. NULL = default model.
+        // Non-NULL values starting with `local/` are interpreted by spawnSona
+        // as a local-server redirect (Phase F.4).
+        registerMigration("v21_interactive_session_model") { db in
+            do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN model TEXT") } catch { /* column exists */ }
+        }
     }
 }

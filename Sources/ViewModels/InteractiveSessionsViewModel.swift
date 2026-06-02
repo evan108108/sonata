@@ -99,6 +99,15 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// so session_list/UI reflect that it's no longer headless.
     @Published var background: Bool
 
+    /// Optional model override for `.sona` kind sessions. nil → the hardcoded
+    /// Anthropic default (claude-opus-4-7). Prefix `local/` → resolve to the
+    /// local chat server via the ANTHROPIC_BASE_URL redirect (Phase F.1).
+    /// Bare name → passed through as `--model <name>` to Claude Code. Set at
+    /// creation, persisted on the v14 row, immutable for the tab's lifetime —
+    /// changing models mid-conversation would require a full --resume re-spawn
+    /// that we don't gain anything from supporting yet.
+    let model: String?
+
     /// Lifecycle status for webview sessions. Mirrors the persisted `status`.
     /// `.starting`/`.running`/etc. on `state` is the live render state; this is
     /// the governance state the sweeper and tree read.
@@ -204,11 +213,12 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// Fresh tab (mints a new sessionId, resume off).
     convenience init(id: UUID = UUID(), name: String, cwd: URL, kind: SessionKind = .sona,
                      url: URL? = nil, ownerAgentId: String? = nil, partition: String? = nil,
-                     background: Bool = false) {
+                     background: Bool = false, model: String? = nil) {
         self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
                   sessionId: UUID().uuidString.lowercased(), resume: false,
                   ownerAgentId: ownerAgentId, partition: partition, background: background,
-                  materializeWebView: !background)  // background sessions start suspended
+                  materializeWebView: !background,  // background sessions start suspended
+                  model: model)
     }
 
     /// Variant used when bootstrapping from the persistence table on app
@@ -219,11 +229,11 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
                      kind: SessionKind = .sona, url: URL? = nil,
                      ownerAgentId: String? = nil, partition: String? = nil,
                      background: Bool = false, lifecycle: WebviewLifecycle = .live,
-                     materializeWebView: Bool) {
+                     materializeWebView: Bool, model: String? = nil) {
         self.init(id: id, name: name, cwd: cwd, kind: kind, url: url,
                   sessionId: sessionId, resume: resume,
                   ownerAgentId: ownerAgentId, partition: partition, background: background,
-                  materializeWebView: materializeWebView)
+                  materializeWebView: materializeWebView, model: model)
         self.lifecycle = lifecycle
     }
 
@@ -232,7 +242,8 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     private init(id: UUID, name: String, cwd: URL, kind: SessionKind, url: URL?,
                  sessionId: String, resume: Bool,
                  ownerAgentId: String? = nil, partition: String? = nil,
-                 background: Bool = false, materializeWebView: Bool = true) {
+                 background: Bool = false, materializeWebView: Bool = true,
+                 model: String? = nil) {
         self.id = id
         self.name = name
         self.cwd = cwd
@@ -243,6 +254,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         self.ownerAgentId = ownerAgentId
         self.partition = partition
         self.background = background
+        self.model = model
         self.dataStore = InteractiveSessionTab.makeDataStore(partition: partition)
 
         switch kind {
@@ -436,7 +448,17 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             role: .interactive,
             slotLabel: "interactive"
         )
-        let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: inProcExtras != nil)
+        var env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: inProcExtras != nil)
+
+        // Phase F.4 (sessions): local-model redirect, mirrors WorkersView's
+        // buildLaunchEnv. When the session's model starts with `local/`, point
+        // Claude Code at the loopback chat server with a placeholder API key
+        // and kick the server warm. The `--model` arg below strips the prefix.
+        if let model, model.hasPrefix(ChatServerManager.localModelPrefix) {
+            env.append("ANTHROPIC_BASE_URL=\(ChatServerManager.defaultBaseURL)")
+            env.append("ANTHROPIC_API_KEY=local")
+            Task.detached { try? await ChatServerManager.shared.ensureRunning() }
+        }
 
         var args: [String] = []
         // `--resume <id>` and `--session-id <id>` are mutually exclusive in
@@ -451,7 +473,17 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         }
         args.append("--dangerously-skip-permissions")
         args.append(contentsOf: ["--dangerously-load-development-channels", "server:sonata-bridge"])
-        args.append(contentsOf: ["--model", "claude-opus-4-7"])
+        // Model resolution: caller-supplied override (potentially prefixed
+        // `local/`, stripped before the arg) or the hardcoded Anthropic default.
+        let modelArg: String
+        if let model {
+            modelArg = model.hasPrefix(ChatServerManager.localModelPrefix)
+                ? String(model.dropFirst(ChatServerManager.localModelPrefix.count))
+                : model
+        } else {
+            modelArg = "claude-opus-4-7"
+        }
+        args.append(contentsOf: ["--model", modelArg])
         if let extras = inProcExtras {
             args.append(contentsOf: extras)
         }
@@ -760,7 +792,8 @@ final class InteractiveSessionsViewModel: ObservableObject {
                 // Webviews come back SUSPENDED (spec §9): no WKWebView until
                 // first focus/drive. sona/terminal restore live as before.
                 lifecycle: isWeb ? .suspended : .live,
-                materializeWebView: false              // webviews never build the WKWebView here
+                materializeWebView: false,             // webviews never build the WKWebView here
+                model: row.model
             )
             // Restored Terminal sessions replay their saved scrollback once.
             tab.shouldReplayScrollback = (kind == .terminal)
@@ -808,12 +841,12 @@ final class InteractiveSessionsViewModel: ObservableObject {
     // MARK: - Public API
 
     @discardableResult
-    func addTab() -> InteractiveSessionTab {
+    func addTab(model: String? = nil) -> InteractiveSessionTab {
         let index = nextSessionIndex()
         let name = "Session \(index)"
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         let cwd = URL(fileURLWithPath: "\(home)/.sonata/session/session\(index)")
-        return addTab(name: name, cwd: cwd)
+        return addTab(name: name, cwd: cwd, model: model)
     }
 
     /// Variant used by the rail-side "New Session" sheet: caller supplies the
@@ -821,11 +854,15 @@ final class InteractiveSessionsViewModel: ObservableObject {
     /// from NSOpenPanel). The process is spawned with currentDirectory =
     /// cwd.path, same as the default-path variant. Trims the name and falls
     /// back to a "Session <N>" auto-name if it's empty.
+    ///
+    /// `model` is the per-tab model override (Phase F.4). `nil` ⇒ Anthropic
+    /// default; `local/<name>` ⇒ local-server redirect via ChatServerManager.
     @discardableResult
-    func addTab(name: String, cwd: URL, kind: SessionKind = .sona, url: URL? = nil) -> InteractiveSessionTab {
+    func addTab(name: String, cwd: URL, kind: SessionKind = .sona, url: URL? = nil,
+                model: String? = nil) -> InteractiveSessionTab {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? "Session \(nextSessionIndex())" : trimmed
-        let tab = InteractiveSessionTab(name: finalName, cwd: cwd, kind: kind, url: url)
+        let tab = InteractiveSessionTab(name: finalName, cwd: cwd, kind: kind, url: url, model: model)
         tabs.append(tab)
         persistTab(tab, position: tabs.count - 1)
         selectTab(id: tab.id)
@@ -1090,7 +1127,8 @@ final class InteractiveSessionsViewModel: ObservableObject {
             partition: tab.partition,
             status: tab.lifecycle.rawValue,
             lastActivityAt: tab.lastActivityAt,
-            background: tab.background
+            background: tab.background,
+            model: tab.model
         )
     }
 
