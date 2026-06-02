@@ -172,20 +172,22 @@ actor ChatServerManager {
         //         that would otherwise queue behind pith. Costs ~50%
         //         throughput-when-alone for zero contention.
         //
-        //   SONA_CHAT_CTX_PER_SLOT (default 8192) — context window per slot.
-        //     8192 = pith-sized. Tiny KV cache, fastest per-request scheduling.
-        //         Default while the big NULL-l0/l1 backfill is the dominant
-        //         workload; Claude Code workers/sessions will reject inbound
-        //         requests at this size (their system prompt is >100K tokens).
+        //   SONA_CHAT_CTX_PER_SLOT (default 131072) — context window per slot.
         //     131072 = Llama 3.1's native context. Required for Claude Code
-        //         worker/session redirect to actually work end-to-end. Bump
-        //         to this when the backfill is done and you want to chat
-        //         with a local model.
+        //         worker/session redirect (system prompt + tools + skills is
+        //         100K+ tokens). Empirically ALSO faster for pith on Apple
+        //         Silicon — Metal kernels are tuned for larger ctx and slow
+        //         down at small sizes; counterintuitively, 8192 measured
+        //         ~5× slower than 131072 for the same single-shot pith load.
+        //         So the only reason to lower this is RAM pressure, not speed.
+        //     8192 = minimal KV cache (~32MB extra). Use only on memory-
+        //         constrained machines where you don't need Claude Code
+        //         worker support. Pith still works but slower per request.
         //
         // Total --ctx-size = perSlot × parallel (llama-server divides ctx
         // evenly across slots, and each slot must hold a full request).
         let parallel = max(1, Int(ProcessInfo.processInfo.environment["SONA_CHAT_PARALLEL"] ?? "1") ?? 1)
-        let perSlotCtx = max(2048, Int(ProcessInfo.processInfo.environment["SONA_CHAT_CTX_PER_SLOT"] ?? "8192") ?? 8192)
+        let perSlotCtx = max(2048, Int(ProcessInfo.processInfo.environment["SONA_CHAT_CTX_PER_SLOT"] ?? "131072") ?? 131072)
         let totalCtx = perSlotCtx * parallel
 
         let proc = Process()
