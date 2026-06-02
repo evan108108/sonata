@@ -1,0 +1,12 @@
+{
+  "memory_id": "c29e6a90ef61c0b187e256a58e4e65c2",
+  "memory_type": "learning",
+  "model": "llama-3.1-8b-instruct-Q4_K_M",
+  "system_prompt": "You generate LOD summaries for memories. Return STRICT JSON with two fields: l0 and l1. l0 = one sentence, max ~15 words, the thesis or essence. l1 = 2-3 sentences, max ~60 words, the argument arc or key facts. Be abstractive — distill, don't quote. Match the voice of the source (first-person for reflections, third-person for technical notes). For very short input, l0/l1 may equal input. Output ONLY the JSON. No preamble, no markdown fences.",
+  "temperature": 0.3,
+  "seed": 42,
+  "l0": "LLM workers cannot be trusted to follow script-execution instructions.",
+  "l1": "When prompted to run wiki-memories.sh, workers often ignored or modified the instructions, leading to inconsistent results. Pre-enriching data is a solution to provide rich content without relying on worker compliance. The wiki-memories.sh pagination approach works when used correctly.",
+  "l0_length": 70,
+  "l1_length": 286
+}

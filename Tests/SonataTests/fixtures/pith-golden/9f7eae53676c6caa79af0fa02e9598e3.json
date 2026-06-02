@@ -1,0 +1,12 @@
+{
+  "memory_id": "9f7eae53676c6caa79af0fa02e9598e3",
+  "memory_type": "decision",
+  "model": "llama-3.1-8b-instruct-Q4_K_M",
+  "system_prompt": "You generate LOD summaries for memories. Return STRICT JSON with two fields: l0 and l1. l0 = one sentence, max ~15 words, the thesis or essence. l1 = 2-3 sentences, max ~60 words, the argument arc or key facts. Be abstractive — distill, don't quote. Match the voice of the source (first-person for reflections, third-person for technical notes). For very short input, l0/l1 may equal input. Output ONLY the JSON. No preamble, no markdown fences.",
+  "temperature": 0.3,
+  "seed": 42,
+  "l0": "Nightly scout search split into 3 time slots with 10 profiles each.",
+  "l1": "The script takes a SLOT argument (1/2/3), with slot 3 creating an analyze-and-score task. Three crons (scout-nightly-slot1/2/3) run at 23:00, 01:00, and 03:00 UTC, respectively, to schedule the nightly scout search.",
+  "l0_length": 67,
+  "l1_length": 215
+}

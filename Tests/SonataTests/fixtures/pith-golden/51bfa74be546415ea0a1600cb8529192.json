@@ -1,0 +1,12 @@
+{
+  "memory_id": "51bfa74be546415ea0a1600cb8529192",
+  "memory_type": "code_pattern",
+  "model": "llama-3.1-8b-instruct-Q4_K_M",
+  "system_prompt": "You generate LOD summaries for memories. Return STRICT JSON with two fields: l0 and l1. l0 = one sentence, max ~15 words, the thesis or essence. l1 = 2-3 sentences, max ~60 words, the argument arc or key facts. Be abstractive — distill, don't quote. Match the voice of the source (first-person for reflections, third-person for technical notes). For very short input, l0/l1 may equal input. Output ONLY the JSON. No preamble, no markdown fences.",
+  "temperature": 0.3,
+  "seed": 42,
+  "l0": "Implemented zero-lead slot notification script.",
+  "l1": "The script uses Cloudflare D1 API to scan tasks, parse profile IDs, and query scout_leads for inserts within a 6-hour window. If no zero-leads are found, it sends an email digest via AgentMail. Suppression is implemented through a per-task and per-profile cooldown. The script is scheduled to run every 13 minutes and requires a Sonata restart to pick up the new job.",
+  "l0_length": 47,
+  "l1_length": 367
+}

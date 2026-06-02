@@ -661,6 +661,11 @@ struct SonataApp: App {
                 // 2. Email Handler
                 let emailHandler = EmailHandler(dbPool: pool)
                 await emailHandler.start()
+                // Late-bind into the action registry so approval actions
+                // (contact_set_email_flags) can re-dispatch quarantined mail.
+                // Routes were registered before this point, so this is set here
+                // rather than alongside registry.scheduler at boot.
+                registry.emailHandler = emailHandler
 
                 // 3. Friend Relay
                 let friendRelay = FriendRelay(dbPool: pool)
@@ -703,6 +708,15 @@ struct SonataApp: App {
                     await meili.backfillArchive(dbPool: pool)
                     await meili.backfillDocs()
                     await meili.backfillPrivate()
+                }
+
+                // 8b. Pith L0/L1 backfill for memories created before pith-on-insert
+                // landed. Long-running (one chat-server roundtrip per memory) so it
+                // runs in a detached Task that doesn't block boot. First call lazily
+                // starts the chat server (downloading the 4.6 GB GGUF on absolute
+                // first run). Idempotent: resumes from where prior runs left off.
+                Task {
+                    await PithBackfill.shared.run(dbPool: pool)
                 }
 
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")

@@ -211,6 +211,8 @@ let memoryActions: [SonataAction] = [
             ActionParam("project", .string, description: "Project namespace"),
             ActionParam("topic", .string, description: "Topic namespace"),
             ActionParam("createdAt", .integer, description: "Override createdAt (epoch ms)"),
+            ActionParam("l0", .string, description: "Pre-computed L0 (skips pith generation)"),
+            ActionParam("l1", .string, description: "Pre-computed L1 (skips pith generation)"),
         ],
         handler: { ctx in
             let content = try ctx.params.require("content")
@@ -231,6 +233,20 @@ let memoryActions: [SonataAction] = [
             let project = ctx.params.string("project")
             let topic = ctx.params.string("topic")
 
+            // Generate L0/L1 via local llama-server unless caller pre-supplied them.
+            // Failure (chat server down, model missing, parse error) degrades to
+            // NULL l0/l1 — the backfill task picks those up later.
+            let suppliedL0 = ctx.params.string("l0")
+            let suppliedL1 = ctx.params.string("l1")
+            let (l0, l1): (String?, String?)
+            if suppliedL0 != nil || suppliedL1 != nil {
+                (l0, l1) = (suppliedL0, suppliedL1)
+            } else if let pith = await Pith.generateOrNil(content: content) {
+                (l0, l1) = (pith.l0, pith.l1)
+            } else {
+                (l0, l1) = (nil, nil)
+            }
+
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -238,14 +254,16 @@ let memoryActions: [SonataAction] = [
                         INSERT INTO memories
                             (id, content, type, tags, source, importance,
                              validFrom, validUntil, project, topic,
+                             l0, l1,
                              createdAt, updatedAt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         arguments: [
                             id, content, type, tagsJSON,
                             source, importance,
                             validFrom, validUntil,
                             project, topic,
+                            l0, l1,
                             createdAt, createdAt
                         ]
                     )
@@ -511,13 +529,29 @@ let memoryActions: [SonataAction] = [
             var setClauses: [String] = ["updatedAt = ?"]
             var args: [any DatabaseValueConvertible] = [now]
 
-            if let v = ctx.params.string("content")      { setClauses.append("content = ?");      args.append(v) }
+            let newContent = ctx.params.string("content")
+            let suppliedL0 = ctx.params.string("l0")
+            let suppliedL1 = ctx.params.string("l1")
+
+            if let v = newContent                        { setClauses.append("content = ?");      args.append(v) }
             if let v = ctx.params.string("type")         { setClauses.append("type = ?");         args.append(v) }
             if let v = ctx.params.stringArray("tags")    { setClauses.append("tags = ?");         args.append(encodeTags(v)) }
             if let v = ctx.params.string("source")       { setClauses.append("source = ?");       args.append(v) }
             if let v = ctx.params.double("importance")   { setClauses.append("importance = ?");   args.append(v) }
-            if let v = ctx.params.string("l0")           { setClauses.append("l0 = ?");           args.append(v) }
-            if let v = ctx.params.string("l1")           { setClauses.append("l1 = ?");           args.append(v) }
+            if let v = suppliedL0                        { setClauses.append("l0 = ?");           args.append(v) }
+            if let v = suppliedL1                        { setClauses.append("l1 = ?");           args.append(v) }
+
+            // Content changed and caller didn't override l0/l1 → regenerate them
+            // from the new content. Old tiers describe stale text otherwise.
+            // Fail-soft: leave l0/l1 untouched on pith error (the backfill task
+            // will catch the inconsistency and refresh).
+            if let updatedContent = newContent, suppliedL0 == nil, suppliedL1 == nil,
+               let pith = await Pith.generateOrNil(content: updatedContent) {
+                setClauses.append("l0 = ?")
+                args.append(pith.l0)
+                setClauses.append("l1 = ?")
+                args.append(pith.l1)
+            }
             if let v = ctx.params.string("status")       { setClauses.append("status = ?");       args.append(v) }
             if let v = ctx.params.string("supersededBy") { setClauses.append("supersededBy = ?"); args.append(v) }
             if let v = ctx.params.string("revisionOf")   { setClauses.append("revisionOf = ?");   args.append(v) }
@@ -529,10 +563,13 @@ let memoryActions: [SonataAction] = [
 
             args.append(id)
             let sql = "UPDATE memories SET \(setClauses.joined(separator: ", ")) WHERE id = ?"
+            // Snapshot to satisfy Sendable: `args` is a var; the dbPool.write closure
+            // is @Sendable and would capture the var by reference otherwise.
+            let finalArgs = args
 
             do {
-                try ctx.dbPool.write { db in
-                    try db.execute(sql: sql, arguments: StatementArguments(args))
+                try await ctx.dbPool.write { db in
+                    try db.execute(sql: sql, arguments: StatementArguments(finalArgs))
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -636,6 +673,13 @@ let memoryActions: [SonataAction] = [
             let project = ctx.params.string("project") ?? orig.project
             let topic = ctx.params.string("topic") ?? orig.topic
 
+            // The revised memory has new content, so regenerate L0/L1 from that
+            // content (don't carry over the original's tiers — they describe the
+            // old text). Fail-soft: NULL l0/l1 on pith error.
+            let pith = await Pith.generateOrNil(content: content)
+            let l0 = pith?.l0
+            let l1 = pith?.l1
+
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
@@ -643,14 +687,16 @@ let memoryActions: [SonataAction] = [
                         INSERT INTO memories
                             (id, content, type, tags, source, importance,
                              revisionOf, revisionNote, project, topic,
+                             l0, l1,
                              validFrom, createdAt, updatedAt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         arguments: [
                             newId, content, newType, tagsJSON,
                             source, importance,
                             originalId, revisionNote,
                             project, topic,
+                            l0, l1,
                             now, now, now
                         ]
                     )

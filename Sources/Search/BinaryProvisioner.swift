@@ -352,4 +352,26 @@ extension ManagedBinary {
             return [.arm64: src, .x86_64: src]
         }()
     )
+
+    /// Meta Llama 3.1 8B Instruct (Q4_K_M GGUF) — the local chat model that powers
+    /// pith L0/L1 generation. Chosen over Qwen 2.5 3B/7B and Falcon 3 7B in a 5-way
+    /// bake-off (2026-06-02) because it was the only local candidate with 5/5
+    /// format-compliant JSON, zero hallucinations, and naturally-correct voice
+    /// matching (first-person for reflections, third-person for technical notes).
+    /// See PithRegressionTests + plans/sonata-openrouter-decoupling.md §1.
+    /// Arch-independent. ~4.6 GB.
+    static let llama31InstructModel = ManagedBinary(
+        name: "llama-3.1-8b-instruct",
+        version: "Q4_K_M",
+        systemPaths: [],
+        sources: {
+            let url = URL(string: "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf")!
+            let src = ManagedBinary.Source(
+                url: url,
+                sha256: "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
+                packaging: .rawBinary
+            )
+            return [.arm64: src, .x86_64: src]
+        }()
+    )
 }
