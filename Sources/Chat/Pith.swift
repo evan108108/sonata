@@ -40,10 +40,24 @@ enum Pith {
 
     /// Generate L0/L1 for `content`. Spawns the chat server on first use; the
     /// 4.6 GB GGUF is fetched via `BinaryProvisioner` on absolute first use.
+    ///
+    /// `maxTokens` is overridden (vs `ChatServerManager`'s 400 default) because
+    /// 400 truncated ~14% of responses mid-JSON during the initial backfill —
+    /// Llama 3.1 8B happily produces 250-300 word L1 paragraphs for dense
+    /// technical memories, blowing past the budget and emitting un-parseable
+    /// half-strings. Running locally there's no per-token cost, so this is
+    /// generous on purpose — it's a runaway-protection ceiling, not a target.
+    /// The model stops at the closing `}` for well-formed JSON regardless.
+    /// Regression goldens are unaffected: temp+seed are locked, and at fixed
+    /// sampling the same input deterministically produces the same bytes as
+    /// long as the cap allows the response to complete.
+    static let generateMaxTokens = 1500
+
     static func generate(content: String) async throws -> Result {
         let raw = try await ChatServerManager.shared.chatCompletion(
             systemPrompt: systemPrompt,
-            userContent: content
+            userContent: content,
+            maxTokens: generateMaxTokens
         )
         return try parse(raw)
     }

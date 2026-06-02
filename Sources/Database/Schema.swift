@@ -973,5 +973,17 @@ extension DatabaseMigrator {
             """)
             try seedWebviewSessionConfigIfEmpty(in: db)
         }
+
+        // v20: per-row pith-generation attempt counter. PithBackfill used to
+        // re-select any row with NULL l0/l1 every batch, so a row whose
+        // generation deterministically failed (truncated JSON, dead-letter
+        // content) would loop forever — eventually crowding the SELECT and
+        // grinding throughput to ~zero. Track attempts and skip rows past a
+        // ceiling. NULL-by-default since legacy rows haven't been attempted.
+        registerMigration("v20_pith_attempts") { db in
+            do { try db.execute(sql: "ALTER TABLE memories ADD COLUMN pithAttempts INTEGER NOT NULL DEFAULT 0") } catch { /* column exists */ }
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS memories_pith_backfill ON memories(pithAttempts) WHERE l0 IS NULL OR l1 IS NULL")
+        }
     }
 }

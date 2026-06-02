@@ -36,6 +36,13 @@ actor PithBackfill {
     /// Log a progress line every N rows.
     private static let progressInterval = 25
 
+    /// Hard ceiling on per-row generation attempts. Past this, the row is
+    /// treated as permanently un-pithable (deterministic local model + locked
+    /// seed = same response every retry) and skipped on subsequent sweeps so
+    /// it stops crowding the SELECT. 3 attempts is enough to absorb transient
+    /// server flakiness without burning forever on dead-letter content.
+    private static let maxAttempts = 3
+
     struct Status: Sendable {
         let isRunning: Bool
         let totalNeeded: Int
@@ -78,7 +85,11 @@ actor PithBackfill {
             needed = try await dbPool.read { db in
                 try Int.fetchOne(
                     db,
-                    sql: "SELECT COUNT(*) FROM memories WHERE l0 IS NULL OR l1 IS NULL"
+                    sql: """
+                        SELECT COUNT(*) FROM memories
+                        WHERE (l0 IS NULL OR l1 IS NULL) AND pithAttempts < ?
+                        """,
+                    arguments: [Self.maxAttempts]
                 ) ?? 0
             }
         } catch {
@@ -105,11 +116,11 @@ actor PithBackfill {
                         db,
                         sql: """
                             SELECT id, content FROM memories
-                            WHERE l0 IS NULL OR l1 IS NULL
+                            WHERE (l0 IS NULL OR l1 IS NULL) AND pithAttempts < ?
                             ORDER BY createdAt DESC
                             LIMIT ?
                             """,
-                        arguments: [Self.batchSize]
+                        arguments: [Self.maxAttempts, Self.batchSize]
                     ).map { (id: $0["id"] as String, content: $0["content"] as String) }
                 }
             } catch {
@@ -133,19 +144,30 @@ actor PithBackfill {
     }
 
     private func processOne(id: String, content: String, dbPool: DatabasePool) async {
-        guard let pith = await Pith.generateOrNil(content: content, logger: logger) else {
-            failed += 1
-            return
-        }
+        let pith = await Pith.generateOrNil(content: content, logger: logger)
         let now = Int64(Date().timeIntervalSince1970 * 1000)
+        // Single UPDATE either way: always bump pithAttempts so a row that
+        // deterministically fails parsing retires after maxAttempts instead of
+        // being re-selected forever. On success we also write l0/l1/updatedAt.
         do {
             try await dbPool.write { db in
-                try db.execute(
-                    sql: "UPDATE memories SET l0 = ?, l1 = ?, updatedAt = ? WHERE id = ?",
-                    arguments: [pith.l0, pith.l1, now, id]
-                )
+                if let pith {
+                    try db.execute(
+                        sql: """
+                            UPDATE memories
+                            SET l0 = ?, l1 = ?, updatedAt = ?, pithAttempts = pithAttempts + 1
+                            WHERE id = ?
+                            """,
+                        arguments: [pith.l0, pith.l1, now, id]
+                    )
+                } else {
+                    try db.execute(
+                        sql: "UPDATE memories SET pithAttempts = pithAttempts + 1 WHERE id = ?",
+                        arguments: [id]
+                    )
+                }
             }
-            succeeded += 1
+            if pith != nil { succeeded += 1 } else { failed += 1 }
         } catch {
             logger.error("backfill: UPDATE failed for \(id): \(error)")
             failed += 1

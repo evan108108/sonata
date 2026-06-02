@@ -97,7 +97,7 @@ for id in "${MEMORY_IDS[@]}"; do
     --argjson temp "$TEMP" \
     --argjson seed "$SEED" \
     '{messages: [{role:"system", content:$system}, {role:"user", content:$user}],
-      max_tokens: 400, temperature: $temp, seed: $seed,
+      max_tokens: 1500, temperature: $temp, seed: $seed,
       response_format: {type: "json_object"}}')
 
   raw=$(curl -fs -X POST "$CHAT_URL" \
