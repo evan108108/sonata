@@ -152,6 +152,26 @@ actor ChatServerManager {
         guard let spec = LocalChatModelRegistry.spec(for: modelName) else {
             throw ChatError.unknownModel(modelName)
         }
+
+        // Orphan adoption: after a Sonata restart, the actor's `processes`
+        // dict is empty even though llama-server orphans from the prior run
+        // are still bound to their ports and serving requests. Before doing
+        // anything destructive, probe /health — if a healthy server is
+        // already listening on the model's port, treat the request as
+        // fulfilled. The previous behavior (killOrphans → spawn → wait 60s)
+        // was needlessly killing the working orphan on every deploy, which
+        // in turn made pith calls fail with notHealthy for the ~30-60s it
+        // took the fresh spawn to come up (or worse, when the fresh spawn
+        // hit memory pressure from a sibling model and couldn't bind at all).
+        //
+        // Per-call probe (no caching): if the orphan dies, the next call
+        // falls through to the spawn path. ~50-200ms probe latency is fine
+        // for pith call volume.
+        if await waitForHealthy(port: spec.port, timeoutSeconds: 1) {
+            logger.info("adopted existing llama-server on port \(spec.port) for \(modelName)")
+            return
+        }
+
         guard let binary = await BinaryProvisioner.shared.provision(.llamaServer) else {
             throw ChatError.binaryUnavailable
         }
