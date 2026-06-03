@@ -1109,8 +1109,24 @@ final class InteractiveSessionsViewModel: ObservableObject {
         // path once.
         tab.clearResumeFlag()
         tab.terminate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            tab.spawn()
+        // Webview restart needs a full WKWebView teardown + rebuild, not just
+        // `.spawn()` (which calls loadWeb() against the existing WKWebView).
+        // After a previous load failed (e.g. the session depends on a local
+        // server that wasn't running yet), WKWebView lands in a stuck state
+        // where subsequent .load() calls don't repaint — the view just stays
+        // empty. suspend() nils the WKWebView; resumeWebView() builds a fresh
+        // one against the same WKWebsiteDataStore (cookies/logins preserved)
+        // and reloads the URL. Same effect as "recreate session" without
+        // touching the persistence row.
+        if tab.kind == .webview {
+            tab.suspend()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                tab.resumeWebView()
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                tab.spawn()
+            }
         }
     }
 
