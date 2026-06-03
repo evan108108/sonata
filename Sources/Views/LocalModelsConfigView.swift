@@ -65,8 +65,8 @@ struct LocalModelsConfigView: View {
         }
         .padding()
         .sheet(isPresented: $showingAddSheet) {
-            AddLocalModelSheet { modelName, displayName, urlString, sha in
-                Task { await runInstall(modelName: modelName, displayName: displayName, urlString: urlString, sha: sha) }
+            AddLocalModelSheet { modelName, displayName, urlString, sha, extra in
+                Task { await runInstall(modelName: modelName, displayName: displayName, urlString: urlString, sha: sha, extra: extra) }
             }
         }
         .onAppear { refresh() }
@@ -121,6 +121,11 @@ struct LocalModelsConfigView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                if let extra = row.extraArgs, !extra.isEmpty {
+                    Text("extra: \(extra)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
             }
             Spacer()
             if confirmingDeleteId == row.id {
@@ -170,7 +175,7 @@ struct LocalModelsConfigView: View {
         }
     }
 
-    private func runInstall(modelName: String, displayName: String, urlString: String, sha: String?) async {
+    private func runInstall(modelName: String, displayName: String, urlString: String, sha: String?, extra: String?) async {
         guard let url = URL(string: urlString) else {
             await MainActor.run { lastError = "Invalid URL" }
             return
@@ -184,7 +189,8 @@ struct LocalModelsConfigView: View {
                 modelName: modelName,
                 displayName: displayName,
                 sourceURL: url,
-                sha256: sha?.isEmpty == false ? sha : nil
+                sha256: sha?.isEmpty == false ? sha : nil,
+                extraArgs: extra?.isEmpty == false ? extra : nil
             )
             await MainActor.run {
                 inflight = nil
@@ -229,8 +235,9 @@ private struct AddLocalModelSheet: View {
     @State private var displayName: String = ""
     @State private var urlString: String = ""
     @State private var sha256: String = ""
+    @State private var extraArgs: String = ""
 
-    let onSubmit: (_ modelName: String, _ displayName: String, _ url: String, _ sha: String?) -> Void
+    let onSubmit: (_ modelName: String, _ displayName: String, _ url: String, _ sha: String?, _ extra: String?) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -268,10 +275,19 @@ private struct AddLocalModelSheet: View {
                               prompt: Text("paste to enable integrity check"))
                         .font(.system(.caption, design: .monospaced))
                         .autocorrectionDisabled()
+                    TextField("Extra llama-server args (optional)", text: $extraArgs,
+                              prompt: Text("--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768"),
+                              axis: .vertical)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1...3)
+                        .autocorrectionDisabled()
                 } footer: {
-                    Text("Model name must be lowercase letters, digits, hyphens, dots. It's what you'll see in the worker/session model picker and what's passed to Claude Code as --model.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Model name must be lowercase letters, digits, hyphens, dots. It's what you'll see in the worker/session model picker and what's passed to Claude Code as --model.")
+                        Text("Extra args are appended to the llama-server command. Use for per-model quirks: Qwen 2.5 32B needs YaRN to reach its 128K context (the placeholder above is the right value); DeepSeek R1 needs `--jinja` for its chat template; etc.")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -284,7 +300,8 @@ private struct AddLocalModelSheet: View {
                     onSubmit(modelName.trimmingCharacters(in: .whitespacesAndNewlines),
                              displayName.trimmingCharacters(in: .whitespacesAndNewlines),
                              urlString.trimmingCharacters(in: .whitespacesAndNewlines),
-                             sha256.trimmingCharacters(in: .whitespacesAndNewlines))
+                             sha256.trimmingCharacters(in: .whitespacesAndNewlines),
+                             extraArgs.trimmingCharacters(in: .whitespacesAndNewlines))
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -293,6 +310,6 @@ private struct AddLocalModelSheet: View {
             }
             .padding()
         }
-        .frame(width: 560, height: 380)
+        .frame(width: 600, height: 460)
     }
 }

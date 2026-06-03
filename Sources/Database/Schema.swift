@@ -1018,5 +1018,17 @@ extension DatabaseMigrator {
                 )
             """)
         }
+
+        // v23: per-model extra llama-server spawn args. Some models need
+        // model-specific flags that llama-server can't infer from the GGUF
+        // metadata alone — most commonly RoPE/YaRN scaling for long context
+        // (Qwen 2.5 32B trains at 32K and extends to 128K only when spawned
+        // with `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768`).
+        // Without those, llama-server silently clamps n_ctx to the trained
+        // size regardless of our --ctx-size request. Stored as a single
+        // whitespace-separated string; split at spawn time.
+        registerMigration("v23_installed_chat_models_extra_args") { db in
+            do { try db.execute(sql: "ALTER TABLE installedChatModels ADD COLUMN extraArgs TEXT") } catch { /* column exists */ }
+        }
     }
 }

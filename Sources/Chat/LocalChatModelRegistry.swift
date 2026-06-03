@@ -33,12 +33,16 @@ enum LocalChatModelRegistry {
     /// Spec for a registry entry: the on-disk GGUF (via provisioner) plus the
     /// loopback port the server for this model is pinned to. `displayName` is
     /// the UI-friendly label; equals `modelName` for hardcoded entries that
-    /// didn't bother spelling out a longer string.
+    /// didn't bother spelling out a longer string. `extraSpawnArgs` are
+    /// appended to the llama-server argv at spawn time — used for per-model
+    /// quirks llama-server can't infer from the GGUF metadata (RoPE scaling,
+    /// non-default chat templates, etc.).
     struct Spec: Sendable {
         let modelName: String
         let displayName: String
         let binary: ManagedBinary
         let port: Int
+        let extraSpawnArgs: [String]
     }
 
     /// Hardcoded registry. Order matters only for port assignment readability —
@@ -49,7 +53,8 @@ enum LocalChatModelRegistry {
             modelName: "llama-3.1-8b-instruct",
             displayName: "Llama 3.1 8B Instruct (built-in)",
             binary: .llama31InstructModel,
-            port: basePort  // 7713
+            port: basePort,  // 7713
+            extraSpawnArgs: []
         ),
     ]
 

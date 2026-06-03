@@ -18,6 +18,7 @@ struct InstalledChatModel: FetchableRecord, Codable, Sendable {
     let port: Int           // monotonic loopback port assigned at install
     let ggufPath: String?   // nil while downloading; on-disk path once provisioned
     let installedAt: Int64  // epoch ms
+    let extraArgs: String?  // whitespace-separated extra llama-server args (v23)
 }
 
 enum InstalledChatModelsStore {
@@ -27,7 +28,7 @@ enum InstalledChatModelsStore {
             return try dbPool.read { db in
                 try InstalledChatModel.fetchAll(db, sql: """
                     SELECT id, modelName, displayName, sourceURL, sha256, port,
-                           ggufPath, installedAt
+                           ggufPath, installedAt, extraArgs
                     FROM installedChatModels
                     ORDER BY installedAt ASC
                     """)
@@ -48,18 +49,19 @@ enum InstalledChatModelsStore {
         sourceURL: String,
         sha256: String?,
         port: Int,
-        ggufPath: String?
+        ggufPath: String?,
+        extraArgs: String?
     ) throws {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         try dbPool.write { db in
             try db.execute(sql: """
                 INSERT INTO installedChatModels
                     (id, modelName, displayName, sourceURL, sha256, port,
-                     ggufPath, installedAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     ggufPath, installedAt, extraArgs)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     id, modelName, displayName, sourceURL, sha256, port,
-                    ggufPath, now,
+                    ggufPath, now, extraArgs,
                 ])
         }
     }

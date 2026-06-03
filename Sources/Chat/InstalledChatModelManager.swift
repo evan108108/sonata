@@ -71,12 +71,20 @@ actor InstalledChatModelManager {
     /// inserts a placeholder DB row (so the UI can list it as "Downloading"),
     /// runs the provisioner, persists the on-disk path, and refreshes the
     /// registry. On failure the placeholder row is removed so retry works.
+    ///
+    /// `extraArgs` is a whitespace-separated string of additional llama-server
+    /// flags that get appended to the spawn argv. Used for model-specific
+    /// quirks llama-server can't infer from GGUF metadata — most commonly
+    /// YaRN/RoPE scaling (`--rope-scaling yarn --rope-scale 4
+    /// --yarn-orig-ctx 32768` for Qwen 2.5 32B's 128K context). Nil/empty
+    /// means no extras.
     @discardableResult
     func install(
         modelName: String,
         displayName: String,
         sourceURL: URL,
         sha256: String? = nil,
+        extraArgs: String? = nil,
         onStatus: (@Sendable (InstallStatus) -> Void)? = nil
     ) async throws -> String {
         guard let dbPool else { throw InstallError.noDBPool }
@@ -94,11 +102,14 @@ actor InstalledChatModelManager {
         let floor = LocalChatModelRegistry.basePort + LocalChatModelRegistry.hardcoded.count
         let port = InstalledChatModelsStore.nextAvailablePort(dbPool: dbPool, floor: floor)
 
+        let normalizedExtra = extraArgs?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extraToStore = (normalizedExtra?.isEmpty == false) ? normalizedExtra : nil
+
         do {
             try InstalledChatModelsStore.insert(
                 dbPool: dbPool, id: id, modelName: modelName, displayName: displayName,
                 sourceURL: sourceURL.absoluteString, sha256: sha256, port: port,
-                ggufPath: nil
+                ggufPath: nil, extraArgs: extraToStore
             )
         } catch {
             logger.error("install: insert placeholder row failed: \(error)")
@@ -166,11 +177,18 @@ actor InstalledChatModelManager {
                   // hits its cache by name-version naming
         let binary = ephemeralBinary(id: row.id, modelName: row.modelName,
                                      sourceURL: url, sha256: row.sha256)
+        // Split the persisted whitespace-separated extraArgs into the argv
+        // array llama-server expects. Empty-arg filter handles double-spaces
+        // and leading/trailing whitespace that survived trim.
+        let extras: [String] = (row.extraArgs ?? "")
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
         return LocalChatModelRegistry.Spec(
             modelName: row.modelName,
             displayName: row.displayName,
             binary: binary,
-            port: row.port
+            port: row.port,
+            extraSpawnArgs: extras
         )
     }
 

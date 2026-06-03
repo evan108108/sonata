@@ -192,7 +192,7 @@ actor ChatServerManager {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
-        proc.arguments = [
+        var args: [String] = [
             "-m", model,
             "--host", "127.0.0.1", "--port", "\(port)",
             "--ctx-size", "\(totalCtx)",
@@ -226,8 +226,29 @@ actor ChatServerManager {
             // CPU-only would be 10x slower.
             "-ngl", "99",
         ]
+        // Per-model extras (F.3+): YaRN/RoPE scaling for Qwen, special chat
+        // templates, etc. Empty for built-in entries; populated from the
+        // user-installed row's `extraArgs` column for installed models.
+        args.append(contentsOf: spec.extraSpawnArgs)
+        proc.arguments = args
+
+        // Capture llama-server stderr to a per-model log so silent failures
+        // (e.g. n_ctx clamped to the trained context when YaRN isn't on,
+        // unknown-flag aborts, OOM warnings) are debuggable. stdout stays
+        // discarded — the useful boot + warning output goes to stderr.
+        let stderrPath = Self.logURL(for: modelName).path
+        try? FileManager.default.createDirectory(
+            atPath: (stderrPath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: stderrPath, contents: nil)
+        if let stderrHandle = FileHandle(forWritingAtPath: stderrPath) {
+            stderrHandle.seekToEndOfFile()
+            proc.standardError = stderrHandle
+        } else {
+            proc.standardError = FileHandle.nullDevice
+        }
         proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
         try proc.run()
         processes[modelName] = proc
 
@@ -278,6 +299,18 @@ actor ChatServerManager {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         return false
+    }
+
+    /// Per-model stderr log location. Files live under `~/.sonata/logs/` so
+    /// the Sonata app log directory stays clean and users can grep / tail one
+    /// model without noise from siblings. Filenames sanitize the modelName
+    /// to a filesystem-safe form (the registry already enforces a strict
+    /// charset, so this is paranoia, not real escaping).
+    static func logURL(for modelName: String) -> URL {
+        let dir = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".sonata/logs", isDirectory: true)
+        let safe = modelName.replacingOccurrences(of: "/", with: "_")
+        return dir.appendingPathComponent("llama-\(safe).log")
     }
 
     /// Kill any orphaned chat server on the given port from a prior run.
