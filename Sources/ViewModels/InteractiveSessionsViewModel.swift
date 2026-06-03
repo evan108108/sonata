@@ -463,6 +463,12 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             env.append("ANTHROPIC_BASE_URL=\(LocalChatModelRegistry.baseURL(for: chatModelName))")
             env.append("ANTHROPIC_API_KEY=local")
             env.append("SONA_LOCAL_MODEL=1")
+            // Same reasoning as WorkersView.buildLaunchEnv: local prompt-eval
+            // on the cold path can take 5-50 minutes for CC's 100K-token
+            // system prompt. Default SDK timeout triggers a retry that cancels
+            // the in-flight eval before it completes. 30 min is enough budget
+            // for the slowest viable local model (24B at 42 tok/sec).
+            env.append("ANTHROPIC_TIMEOUT_MS=1800000")
             Task.detached { try? await ChatServerManager.shared.ensureRunning(modelName: chatModelName) }
         }
 

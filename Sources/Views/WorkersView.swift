@@ -1098,6 +1098,14 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             env.append("ANTHROPIC_BASE_URL=\(LocalChatModelRegistry.baseURL(for: chatModelName))")
             env.append("ANTHROPIC_API_KEY=local")
             env.append("SONA_LOCAL_MODEL=1")
+            // Local prompt-eval on Apple Silicon Metal is ~40-300 tok/sec
+            // depending on model size; Claude Code ships a 100K-token system
+            // prompt + tool defs on every first message, so cold-path can take
+            // 5-50 minutes. Default Anthropic SDK timeout is way shorter and
+            // CC will give up + retry the request, which cancels the in-flight
+            // prompt-eval and we never make progress. 30 min lets even a
+            // 40 tok/sec model finish a single cold pass.
+            env.append("ANTHROPIC_TIMEOUT_MS=1800000")
             Task.detached { try? await ChatServerManager.shared.ensureRunning(modelName: chatModelName) }
         }
 
