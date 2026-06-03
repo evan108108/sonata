@@ -33,3 +33,6 @@ logs/
 
 # Deploy-time binary backups
 .binary-backups/
+
+# Claude Code session-local runtime state (CronCreate lockfile, etc.)
+.claude/
