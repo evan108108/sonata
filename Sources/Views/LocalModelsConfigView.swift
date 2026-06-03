@@ -249,15 +249,25 @@ private struct AddLocalModelSheet: View {
                 Section {
                     TextField("Model name", text: $modelName, prompt: Text("qwen-2.5-7b-instruct"))
                         .font(.system(.body, design: .monospaced))
+                        .autocorrectionDisabled()
                     TextField("Display name", text: $displayName, prompt: Text("Qwen 2.5 7B Instruct"))
+                        .autocorrectionDisabled()
+                    // Multi-line so long URLs wrap rather than truncate. The
+                    // earlier single-line + .truncationMode(.middle) combo had
+                    // a SwiftUI rendering bug on macOS where defocusing the
+                    // field made the truncated value invisible and the
+                    // placeholder reappeared — looking exactly like the URL
+                    // had been "reset" to a sibling field's prompt.
                     TextField("GGUF URL", text: $urlString,
-                              prompt: Text("https://huggingface.co/…/resolve/main/…Q4_K_M.gguf"))
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                              prompt: Text("https://huggingface.co/…/resolve/main/…Q4_K_M.gguf"),
+                              axis: .vertical)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(2...4)
+                        .autocorrectionDisabled()
                     TextField("sha256 (optional)", text: $sha256,
                               prompt: Text("paste to enable integrity check"))
                         .font(.system(.caption, design: .monospaced))
+                        .autocorrectionDisabled()
                 } footer: {
                     Text("Model name must be lowercase letters, digits, hyphens, dots. It's what you'll see in the worker/session model picker and what's passed to Claude Code as --model.")
                         .font(.caption2)
