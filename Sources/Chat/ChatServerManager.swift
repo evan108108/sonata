@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import os
 
 /// Pooled manager for local `llama-server` subprocesses — one process per
 /// distinct model in `LocalChatModelRegistry`. Phase F.2-b: was previously a
@@ -34,11 +35,19 @@ actor ChatServerManager {
         LocalChatModelRegistry.baseURL(for: LocalChatModelRegistry.defaultModelName)
     }
 
-    private let logger: Logger
+    private let logger: Logging.Logger
     private var processes: [String: Process] = [:]
 
+    /// Ports of user-installed models we have spawned in this app run.
+    /// Maintained alongside `processes` so the synchronous `terminateOnQuit`
+    /// (called from `NSApplication.willTerminateNotification` which has no
+    /// async budget) can pkill exactly the user-installed servers Sonata
+    /// started — adopted orphans stay running. Hardcoded internal models are
+    /// killed unconditionally by terminateOnQuit and don't appear here.
+    private static let spawnedUserModelPorts = OSAllocatedUnfairLock<Set<Int>>(initialState: [])
+
     init() {
-        var log = Logger(label: "sonata.chatserver")
+        var log = Logging.Logger(label: "sonata.chatserver")
         log.logLevel = .info
         self.logger = log
     }
@@ -271,6 +280,10 @@ actor ChatServerManager {
         proc.standardOutput = FileHandle.nullDevice
         try proc.run()
         processes[modelName] = proc
+        let isHardcoded = LocalChatModelRegistry.hardcoded.contains { $0.modelName == modelName }
+        if !isHardcoded {
+            Self.spawnedUserModelPorts.withLock { _ = $0.insert(port) }
+        }
 
         // Loading a 4.6 GB GGUF + warming Metal takes longer than embeddings; give it 60s.
         guard await waitForHealthy(port: port, timeoutSeconds: 60) else {
@@ -288,19 +301,60 @@ actor ChatServerManager {
             proc.terminate()
             processes[modelName] = nil
         }
+        Self.spawnedUserModelPorts.withLock { $0.removeAll() }
     }
 
     /// Terminate the server for a single model. Called by
     /// `InstalledChatModelManager.uninstall` so a deleted GGUF isn't being
     /// held by a stale process. No-op when the server isn't running.
     func shutdown(modelName: String) {
+        let port = LocalChatModelRegistry.spec(for: modelName)?.port
         guard let proc = processes[modelName], proc.isRunning else {
             processes[modelName] = nil
+            if let port = port {
+                Self.spawnedUserModelPorts.withLock { _ = $0.remove(port) }
+            }
             return
         }
         proc.terminate()
         processes[modelName] = nil
+        if let port = port {
+            Self.spawnedUserModelPorts.withLock { $0.remove(port) }
+        }
         logger.info("chat server terminated: \(modelName)")
+    }
+
+    /// Synchronous shutdown for the app-quit (`willTerminate`) path. macOS
+    /// gives willTerminate a ~5s budget before SIGKILL, and the handler runs
+    /// on the main thread — so we can't `await` the actor. Instead:
+    ///   - Hardcoded internal models (Llama 3.1 8B pith, etc.): pkill the
+    ///     port unconditionally. These are "ours" regardless of whether we
+    ///     spawned the live process or adopted an orphan from a prior run.
+    ///   - User-installed models: pkill ONLY the ports we ourselves spawned
+    ///     this run (tracked in `spawnedUserModelPorts`). Adopted orphans
+    ///     stay running — if the user installed a model and an orphan from
+    ///     a prior run is still serving it, we don't claim ownership.
+    nonisolated static func terminateOnQuit() {
+        for spec in LocalChatModelRegistry.hardcoded {
+            pkillPort(spec.port)
+        }
+        let ports = spawnedUserModelPorts.withLock { state -> Set<Int> in
+            let snapshot = state
+            state.removeAll()
+            return snapshot
+        }
+        for port in ports {
+            pkillPort(port)
+        }
+    }
+
+    private nonisolated static func pkillPort(_ port: Int) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        proc.arguments = ["-f", "llama-server.*--port \(port)"]
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
     }
 
     // MARK: - Internals

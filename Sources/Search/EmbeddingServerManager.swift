@@ -95,6 +95,18 @@ actor EmbeddingServerManager {
         process = nil
     }
 
+    /// Synchronous shutdown for `willTerminate`. Internal model — always
+    /// pkilled on app quit whether we spawned it or adopted an orphan from
+    /// a prior run. Port is hardcoded (7712).
+    nonisolated static func terminateOnQuit() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        proc.arguments = ["-f", "llama-server.*--port 7712"]
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+    }
+
     // MARK: - HTTP
 
     private func requestEmbedding(_ input: String) async throws -> [Float] {

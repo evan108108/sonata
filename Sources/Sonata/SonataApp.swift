@@ -417,12 +417,19 @@ struct SonataApp: App {
             fatalError("Sonata: Failed to initialize database — \(error)")
         }
 
-        // Register for app termination to cleanly release the HTTP port
+        // Register for app termination to cleanly release the HTTP port.
+        // Also tear down internal model servers (pith chat on 7713,
+        // embedding on 7712) so they don't survive as orphans across an app
+        // quit. Hardcoded internal models are always killed; user-installed
+        // models are killed only if we spawned them this run — adopted
+        // orphans from a prior run stay running by design.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil, queue: nil
         ) { _ in
-            sonataFileLog("App terminating — releasing port")
+            sonataFileLog("App terminating — shutting down internal model servers + releasing port")
+            ChatServerManager.terminateOnQuit()
+            EmbeddingServerManager.terminateOnQuit()
             _exit(0)
         }
 
