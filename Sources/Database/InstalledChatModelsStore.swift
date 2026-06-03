@@ -9,7 +9,7 @@ import GRDB
 // Synchronous reads/writes — used from the @MainActor view model and a
 // lightweight install actor. GRDB's DatabasePool already serialises writes.
 
-struct InstalledChatModel: FetchableRecord, Codable, Sendable {
+struct InstalledChatModel: FetchableRecord, Codable, Sendable, Identifiable {
     let id: String          // UUID string, stable per install
     let modelName: String   // short name used in `local/<modelName>` and --model arg
     let displayName: String // human-readable for the UI picker
@@ -78,6 +78,30 @@ enum InstalledChatModelsStore {
             }
         } catch {
             NSLog("[InstalledChatModelsStore] setGGUFPath(\(id)) failed: \(error)")
+        }
+    }
+
+    /// Update the two user-mutable fields on an existing install: the UI
+    /// display label and the per-model llama-server extra args. The other
+    /// columns (modelName / sourceURL / sha256 / port / ggufPath) are
+    /// load-bearing identifiers tied to references elsewhere (session rows,
+    /// running server PIDs, the on-disk GGUF) and are immutable post-install.
+    static func updateMetadata(
+        dbPool: DatabasePool,
+        id: String,
+        displayName: String,
+        extraArgs: String?
+    ) {
+        do {
+            try dbPool.write { db in
+                try db.execute(sql: """
+                    UPDATE installedChatModels
+                    SET displayName = ?, extraArgs = ?
+                    WHERE id = ?
+                    """, arguments: [displayName, extraArgs, id])
+            }
+        } catch {
+            NSLog("[InstalledChatModelsStore] updateMetadata(\(id)) failed: \(error)")
         }
     }
 

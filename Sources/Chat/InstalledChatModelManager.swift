@@ -131,6 +131,30 @@ actor InstalledChatModelManager {
         return id
     }
 
+    /// Update the user-mutable fields on an existing install: displayName
+    /// and extraArgs. Shuts down the running server for the model (if any)
+    /// so the next request spawns with the new args. Other fields
+    /// (modelName, sourceURL, port, ggufPath) are immutable post-install.
+    func updateMetadata(id: String, displayName: String, extraArgs: String?) async throws {
+        guard let dbPool else { throw InstallError.noDBPool }
+        let rows = InstalledChatModelsStore.loadAll(dbPool: dbPool)
+        guard let row = rows.first(where: { $0.id == id }) else {
+            throw InstallError.rowNotFound(id)
+        }
+        let normalizedExtra = extraArgs?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extraToStore = (normalizedExtra?.isEmpty == false) ? normalizedExtra : nil
+        InstalledChatModelsStore.updateMetadata(
+            dbPool: dbPool, id: id,
+            displayName: displayName, extraArgs: extraToStore
+        )
+        // Bounce the server so the new spawn args take effect on the next
+        // request. ensureRunning(modelName:) will respawn lazily — no need
+        // to do it here.
+        await ChatServerManager.shared.shutdown(modelName: row.modelName)
+        refreshRegistry()
+        logger.info("updated \(row.modelName): displayName + extraArgs")
+    }
+
     /// Remove an installed model: shut down its server, delete the GGUF,
     /// drop the DB row, and refresh the registry. Idempotent — silently
     /// no-ops if the id is unknown.

@@ -11,6 +11,7 @@ struct LocalModelsConfigView: View {
     @State private var lastError: String? = nil
     @State private var deletingId: String? = nil
     @State private var confirmingDeleteId: String? = nil
+    @State private var editingRow: InstalledChatModel? = nil
 
     /// Transient state shown while a download is in flight. The actor doesn't
     /// surface byte-level progress yet (BinaryProvisioner downloads the whole
@@ -67,6 +68,11 @@ struct LocalModelsConfigView: View {
         .sheet(isPresented: $showingAddSheet) {
             AddLocalModelSheet { modelName, displayName, urlString, sha, extra in
                 Task { await runInstall(modelName: modelName, displayName: displayName, urlString: urlString, sha: sha, extra: extra) }
+            }
+        }
+        .sheet(item: $editingRow) { row in
+            EditLocalModelSheet(row: row) { displayName, extra in
+                Task { await runEdit(id: row.id, displayName: displayName, extra: extra) }
             }
         }
         .onAppear { refresh() }
@@ -139,6 +145,14 @@ struct LocalModelsConfigView: View {
                     .controlSize(.small)
             } else {
                 Button {
+                    editingRow = row
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .disabled(deletingId != nil || row.ggufPath == nil)
+                .help("Edit display name and extra llama-server args")
+                Button {
                     confirmingDeleteId = row.id
                 } label: {
                     Image(systemName: "trash")
@@ -204,6 +218,23 @@ struct LocalModelsConfigView: View {
         }
     }
 
+    private func runEdit(id: String, displayName: String, extra: String?) async {
+        do {
+            try await InstalledChatModelManager.shared.updateMetadata(
+                id: id,
+                displayName: displayName,
+                extraArgs: extra?.isEmpty == false ? extra : nil
+            )
+            await MainActor.run {
+                lastError = nil
+                editingRow = nil
+                refresh()
+            }
+        } catch {
+            await MainActor.run { lastError = "\(error)" }
+        }
+    }
+
     private func runUninstall(id: String) async {
         await MainActor.run {
             deletingId = id
@@ -222,6 +253,97 @@ struct LocalModelsConfigView: View {
                 lastError = "\(error)"
             }
         }
+    }
+}
+
+/// Sheet for editing the two user-mutable fields on an installed model:
+/// displayName and extraArgs. Other fields (modelName, URL, sha256, port,
+/// ggufPath) are immutable post-install — renaming them would orphan
+/// references in session rows / running server PIDs / on-disk files.
+private struct EditLocalModelSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let row: InstalledChatModel
+    let onSubmit: (_ displayName: String, _ extra: String?) -> Void
+
+    @State private var displayName: String
+    @State private var extraArgs: String
+
+    init(row: InstalledChatModel, onSubmit: @escaping (_ displayName: String, _ extra: String?) -> Void) {
+        self.row = row
+        self.onSubmit = onSubmit
+        _displayName = State(initialValue: row.displayName)
+        _extraArgs = State(initialValue: row.extraArgs ?? "")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Edit \(row.modelName)")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            Form {
+                Section {
+                    LabeledContent("Model name", value: row.modelName)
+                        .font(.system(.caption, design: .monospaced))
+                    LabeledContent("Port", value: "\(row.port)")
+                        .font(.system(.caption, design: .monospaced))
+                    if let path = row.ggufPath {
+                        LabeledContent("GGUF") {
+                            Text(path)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                } header: {
+                    Text("Read-only")
+                }
+                Section {
+                    TextField("Display name", text: $displayName)
+                        .autocorrectionDisabled()
+                    TextField("Extra llama-server args", text: $extraArgs,
+                              prompt: Text("--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768"),
+                              axis: .vertical)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1...3)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Editable")
+                } footer: {
+                    Text("Saving restarts the llama-server process for this model so the new spawn args take effect. Any in-flight session's next message will pause briefly while it respawns.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Save") {
+                    let trimmedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedExtra = extraArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+                    onSubmit(trimmedName.isEmpty ? row.displayName : trimmedName,
+                             trimmedExtra.isEmpty ? nil : trimmedExtra)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 600, height: 480)
     }
 }
 
