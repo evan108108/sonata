@@ -496,8 +496,13 @@ private struct NewSessionSheet: View {
                     if kind == .sona {
                         Picker("Model", selection: $model) {
                             Text("Default (Anthropic)").tag(String?.none)
-                            Text("Local — Llama 3.1 8B (experimental)")
-                                .tag(String?.some("\(ChatServerManager.localModelPrefix)llama-3.1-8b-instruct"))
+                            // Phase F.3: iterate the registry so user-installed
+                            // models added via Settings → Local Models appear
+                            // here automatically alongside the built-in entry.
+                            ForEach(LocalChatModelRegistry.entries, id: \.modelName) { spec in
+                                Text("Local — \(spec.displayName)")
+                                    .tag(String?.some("\(ChatServerManager.localModelPrefix)\(spec.modelName)"))
+                            }
                         }
                     }
                 }

@@ -241,14 +241,25 @@ actor ChatServerManager {
     }
 
     /// Terminate every running chat-server process this manager owns.
-    /// Used on app shutdown; per-model shutdown isn't surfaced yet because
-    /// no caller needs it. Idle-shutdown is deferred until multiple models
-    /// are commonly in flight at once.
+    /// Used on app shutdown.
     func shutdownAll() {
         for (modelName, proc) in processes where proc.isRunning {
             proc.terminate()
             processes[modelName] = nil
         }
+    }
+
+    /// Terminate the server for a single model. Called by
+    /// `InstalledChatModelManager.uninstall` so a deleted GGUF isn't being
+    /// held by a stale process. No-op when the server isn't running.
+    func shutdown(modelName: String) {
+        guard let proc = processes[modelName], proc.isRunning else {
+            processes[modelName] = nil
+            return
+        }
+        proc.terminate()
+        processes[modelName] = nil
+        logger.info("chat server terminated: \(modelName)")
     }
 
     // MARK: - Internals

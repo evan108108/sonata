@@ -719,6 +719,12 @@ struct SonataApp: App {
                     await PithBackfill.shared.run(dbPool: pool)
                 }
 
+                // 8c. Hydrate the user-installed local chat model registry from
+                // the v22 `installedChatModels` table so worker/session pickers
+                // see them (Phase F.3). Sync — small, must complete before the
+                // worker/session UI hits the picker on first paint.
+                await InstalledChatModelManager.shared.bootstrap(dbPool: pool)
+
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")
 
                 // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up

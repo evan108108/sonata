@@ -11,11 +11,18 @@ import Foundation
 ///   - a *deterministic* loopback port so spawn-sites can compute the redirect
 ///     URL synchronously without awaiting the actor
 ///
-/// Today this is a hand-curated dictionary with one entry; Phase F.3 will add
-/// a user-installed lane (HF URLs → ephemeral specs registered here at
-/// runtime). The defaultModelName is what callers get when they don't pass an
-/// explicit modelName — used by Pith, PithBackfill, and FriendRelay's local
-/// branch so those paths keep working unchanged through the F.2-b refactor.
+/// Two lanes:
+///   - `hardcoded`: ships with Sonata, one entry today (Llama 3.1 8B). Pinned
+///     at compile time.
+///   - `userInstalled`: hydrated at boot from the v22 `installedChatModels`
+///     table (Phase F.3). User adds entries via Settings → Local Models;
+///     `InstalledChatModelManager` writes to the table and calls `replaceUserInstalled`
+///     to refresh the in-memory list. New entries auto-appear in the worker
+///     and session model pickers.
+///
+/// The defaultModelName is what callers get when they don't pass an explicit
+/// modelName — used by Pith, PithBackfill, and FriendRelay's local branch so
+/// those paths keep working unchanged through the F.2-b refactor.
 enum LocalChatModelRegistry {
     /// Lowest port handed out to a local chat model. Sits just above the
     /// embedding server (7712); leaves room for ~20 chat ports below the
@@ -24,9 +31,12 @@ enum LocalChatModelRegistry {
     static let basePort = 7713
 
     /// Spec for a registry entry: the on-disk GGUF (via provisioner) plus the
-    /// loopback port the server for this model is pinned to.
+    /// loopback port the server for this model is pinned to. `displayName` is
+    /// the UI-friendly label; equals `modelName` for hardcoded entries that
+    /// didn't bother spelling out a longer string.
     struct Spec: Sendable {
         let modelName: String
+        let displayName: String
         let binary: ManagedBinary
         let port: Int
     }
@@ -34,16 +44,34 @@ enum LocalChatModelRegistry {
     /// Hardcoded registry. Order matters only for port assignment readability —
     /// the actual port is in each Spec, so reordering is safe as long as ports
     /// stay distinct.
-    static let entries: [Spec] = [
+    static let hardcoded: [Spec] = [
         Spec(
             modelName: "llama-3.1-8b-instruct",
+            displayName: "Llama 3.1 8B Instruct (built-in)",
             binary: .llama31InstructModel,
             port: basePort  // 7713
         ),
     ]
 
-    /// What callers get when they don't name a model. Today: the only entry.
-    static let defaultModelName: String = entries[0].modelName
+    /// User-installed entries, hydrated at boot from `installedChatModels`
+    /// rows by `replaceUserInstalled`. Empty until then.
+    ///
+    /// nonisolated(unsafe) is fine here: replaceUserInstalled is called once
+    /// at app boot from SonataApp's launch Task (single writer), and readers
+    /// (spawn-sites, ChatServerManager) only read. No tearing in practice; if
+    /// dynamic add/remove ever needs to be concurrent with reads, wrap this
+    /// in an actor.
+    nonisolated(unsafe) static var userInstalled: [Spec] = []
+
+    /// All entries — hardcoded first, then user-installed in install order.
+    /// UI pickers iterate this so new installs auto-appear.
+    static var entries: [Spec] { hardcoded + userInstalled }
+
+    /// What callers get when they don't name a model. Today: the first
+    /// hardcoded entry (Llama 3.1 8B). Stays stable even as users install
+    /// additional models — Pith/PithBackfill/FriendRelay keep using the same
+    /// default without surprise.
+    static let defaultModelName: String = hardcoded[0].modelName
 
     /// Quick lookup. Returns nil for an unknown name; callers should treat
     /// that as a hard error since spawn-sites only see names that came out of
@@ -60,5 +88,11 @@ enum LocalChatModelRegistry {
     static func baseURL(for modelName: String) -> String {
         let port = spec(for: modelName)?.port ?? basePort
         return "http://127.0.0.1:\(port)"
+    }
+
+    /// Replace the user-installed list. Called by InstalledChatModelManager
+    /// at boot (after reading the DB) and after each install/delete.
+    static func replaceUserInstalled(_ specs: [Spec]) {
+        userInstalled = specs
     }
 }

@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var supervisorExpanded = false
     @State private var studioExpanded = false
     @State private var webExpanded = false
+    @State private var localModelsExpanded = false
 
     // Whole-window translucency. Shares the UserDefaults key the WindowGroup
     // root reads, so dragging the slider updates the live window immediately.
@@ -266,6 +267,11 @@ struct SettingsView: View {
                     // MARK: - Web Sessions Section
                     collapsibleSection("Web Sessions", icon: "globe", expanded: $webExpanded) {
                         WebviewSessionConfigView()
+                    }
+
+                    // MARK: - Local Models Section (Phase F.3)
+                    collapsibleSection("Local Models", icon: "cube.box", expanded: $localModelsExpanded) {
+                        LocalModelsConfigView()
                     }
                 }
                 .padding()

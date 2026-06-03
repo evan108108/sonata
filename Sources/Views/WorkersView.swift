@@ -1290,12 +1290,13 @@ struct WorkersView: View {
                 Button("Default (Anthropic)") {
                     manager.addWorker()
                 }
-                // Phase F.1: spawn a worker that points at the local llama-server
-                // via Claude Code's ANTHROPIC_BASE_URL redirect. Smoke-test path;
-                // Phase F.4 will replace this with a real model picker sourced
-                // from BinaryProvisioner's installed-chat-model registry.
-                Button("Local — Llama 3.1 8B (experimental)") {
-                    manager.addWorker(model: "\(ChatServerManager.localModelPrefix)llama-3.1-8b-instruct")
+                // Phase F.3: iterate the registry so user-installed models added
+                // via Settings → Local Models auto-appear without code changes.
+                // Hardcoded built-in (Llama 3.1 8B) plus any installed entries.
+                ForEach(LocalChatModelRegistry.entries, id: \.modelName) { spec in
+                    Button("Local — \(spec.displayName)") {
+                        manager.addWorker(model: "\(ChatServerManager.localModelPrefix)\(spec.modelName)")
+                    }
                 }
             } label: {
                 Image(systemName: "plus.circle.fill")

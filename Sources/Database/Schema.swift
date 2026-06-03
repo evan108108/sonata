@@ -995,5 +995,28 @@ extension DatabaseMigrator {
         registerMigration("v21_interactive_session_model") { db in
             do { try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN model TEXT") } catch { /* column exists */ }
         }
+
+        // v22: user-installed local chat models (Phase F.3). Sonata ships with
+        // a hardcoded LocalChatModelRegistry entry for Llama 3.1 8B; this
+        // table lets users add arbitrary GGUF URLs (typically HuggingFace
+        // resolve links) and have them appear as additional options in the
+        // worker/session model pickers. Port assignment is monotonic — never
+        // re-cycled on delete — so a removed-then-re-added model doesn't
+        // inherit an unrelated server's port. ggufPath is on-disk location
+        // populated by BinaryProvisioner; nil during in-flight downloads.
+        registerMigration("v22_installed_chat_models") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS installedChatModels (
+                    id           TEXT PRIMARY KEY,
+                    modelName    TEXT NOT NULL UNIQUE,
+                    displayName  TEXT NOT NULL,
+                    sourceURL    TEXT NOT NULL,
+                    sha256       TEXT,
+                    port         INTEGER NOT NULL UNIQUE,
+                    ggufPath     TEXT,
+                    installedAt  INTEGER NOT NULL
+                )
+            """)
+        }
     }
 }
