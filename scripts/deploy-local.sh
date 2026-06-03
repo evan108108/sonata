@@ -95,7 +95,7 @@ render_build() {
     for ((i=0;i<bw;i++)); do [ $i -lt $fill ] && bar+="█" || bar+="░"; done
     printf '\r\033[K  %s building %s[%s]%s %s%3d%%%s %02d:%02d %s%s%s' \
       "$sp" "$C_C" "$bar" "$C_R" "$C_G" "$pct" "$C_R" $((e/60)) $((e%60)) "$C_D" "${label:-$tag}" "$C_R"
-    sleep 1
+    sleep 2
   done
   printf '\r\033[K'
 }
