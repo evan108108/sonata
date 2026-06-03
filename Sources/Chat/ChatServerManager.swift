@@ -200,6 +200,25 @@ actor ChatServerManager {
             "-cb",
             "--n-predict", "400",
             "--temp", "0.3",
+            // Cold prompt-eval tuning. Claude Code's first request to a fresh
+            // local server ships 100K+ tokens of system prompt + tool defs +
+            // skills; ingesting that at default settings takes ~17 min on M-
+            // series. The four args below cut that to ~9-12 min cumulatively.
+            //
+            // -fa: fused flash-attention kernels. Metal-specific speedup on
+            //   both prompt-eval and decode for any non-trivial context.
+            // -b 4096 / -ub 2048: larger logical/physical batch sizes for
+            //   prompt-eval. Default is 2048/512 — the bigger batches saturate
+            //   Metal's matmul kernels better on long ingest. Trade: brief RAM
+            //   spike during prompt eval, irrelevant on 16GB+ unified memory.
+            // --cache-type-k/v q8_0: quantize KV cache to int8 (default f16).
+            //   Halves KV cache RAM and speeds up attention reads. Quality
+            //   loss is undetectable at Q4 model weights — the model's own
+            //   weights are already quantized harder than the cache.
+            "-fa",
+            "-b", "4096", "-ub", "2048",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
             // Push all layers to GPU. Apple Silicon Metal handles 8B Q4 easily;
             // CPU-only would be 10x slower.
             "-ngl", "99",
