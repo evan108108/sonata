@@ -258,18 +258,47 @@ actor MCPSessionState {
             )
         }
 
-        // When a call fails on a missing required parameter but the arguments
-        // object arrived empty/malformed, the value wasn't lost on the caller's
-        // side — the transport dropped it. Say so, so the model stops blaming
-        // its own input and retries instead of giving up.
+        // When a call fails on a missing required parameter, differentiate the
+        // failure mode by what we actually observed on the wire (argsShape) so
+        // the model gets actionable guidance instead of blaming the wrong
+        // layer. Three cases:
+        //
+        //   - empty-object: params.arguments = {} arrived. This is the MODEL
+        //     emitting a tool call with an empty arguments object — common
+        //     after long reasoning chains where it loses track of the schema.
+        //     NOT a transport bug. The previous server note here mistakenly
+        //     said "this is a client/transport issue", which sent workers
+        //     into the REST-shim fallback path even though the MCP path was
+        //     fine. Flipped to tell the model: this is your output, fix it.
+        //
+        //   - absent / null: params.arguments was missing entirely. Could be
+        //     a client serializer dropping it. Suggest retry; if it persists,
+        //     it's a real transport issue.
+        //
+        //   - wrong-type / keys=[...]: the args object was non-empty but the
+        //     handler still said "missing required parameter" — the named
+        //     param genuinely isn't in the object. The tool's own error
+        //     already says which one; no extra note needed.
         var finalOutput = output
-        if !success, args.isEmpty, output.contains("Missing required parameter") {
-            finalOutput += "\n\n[server note] The 'arguments' object for tool "
-                + "'\(toolName)' arrived \(argsShape) — the parameters were not "
-                + "transmitted to the server, so this is a client/transport "
-                + "issue rather than a value missing from your call. Retry the "
-                + "tool; if it persists across retries the MCP client is "
-                + "dropping arguments."
+        if !success, output.contains("Missing required parameter") {
+            switch argsShape {
+            case "empty-object":
+                finalOutput += "\n\n[server note] You sent `params.arguments = {}` "
+                    + "for tool '\(toolName)' — an empty object. The arguments "
+                    + "were NOT dropped in transit; they were never in your "
+                    + "request. This is a model-output issue. Re-emit the tool "
+                    + "call with a populated arguments object. Do NOT fall back "
+                    + "to a REST shim — the MCP transport is fine."
+            case "absent", "null":
+                finalOutput += "\n\n[server note] `params.arguments` was \(argsShape) "
+                    + "in your tools/call for '\(toolName)'. The field is "
+                    + "required by the JSON-RPC envelope; either your client "
+                    + "stripped it or you emitted a malformed envelope. Retry "
+                    + "the call; if it persists, the MCP client is dropping "
+                    + "arguments."
+            default:
+                break
+            }
         }
         let content: [[String: Any]] = [["type": "text", "text": finalOutput]]
         var result: [String: Any] = ["content": content]
