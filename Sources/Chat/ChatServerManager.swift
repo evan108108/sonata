@@ -205,8 +205,11 @@ actor ChatServerManager {
             // skills; ingesting that at default settings takes ~17 min on M-
             // series. The four args below cut that to ~9-12 min cumulatively.
             //
-            // -fa: fused flash-attention kernels. Metal-specific speedup on
-            //   both prompt-eval and decode for any non-trivial context.
+            // -fa on: fused flash-attention kernels. Metal-specific speedup on
+            //   both prompt-eval and decode for any non-trivial context. Newer
+            //   llama.cpp builds (>= b9270) require the explicit on|off|auto
+            //   value — bare `-fa` silently consumes the next arg and aborts
+            //   server boot with "unknown value for --flash-attn: '-b'".
             // -b 4096 / -ub 2048: larger logical/physical batch sizes for
             //   prompt-eval. Default is 2048/512 — the bigger batches saturate
             //   Metal's matmul kernels better on long ingest. Trade: brief RAM
@@ -215,7 +218,7 @@ actor ChatServerManager {
             //   Halves KV cache RAM and speeds up attention reads. Quality
             //   loss is undetectable at Q4 model weights — the model's own
             //   weights are already quantized harder than the cache.
-            "-fa",
+            "-fa", "on",
             "-b", "4096", "-ub", "2048",
             "--cache-type-k", "q8_0",
             "--cache-type-v", "q8_0",
