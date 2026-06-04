@@ -297,7 +297,16 @@ actor MCPSessionState {
                     + "the call; if it persists, the MCP client is dropping "
                     + "arguments."
             default:
-                break
+                // Args were present but the named param was missing. Common
+                // cause: snake_case vs camelCase mismatch between the
+                // published MCP schema and the REST shim's naming (e.g.
+                // tool wants event_id, model sent eventId). Scan the keys
+                // the model DID send and suggest the converse if it looks
+                // like a case-style swap. Costs nothing when there's no
+                // match; saves a retry loop when there is.
+                if let hint = snakeCamelHint(output: output, argsShape: argsShape) {
+                    finalOutput += "\n\n[server note] \(hint)"
+                }
             }
         }
         let content: [[String: Any]] = [["type": "text", "text": finalOutput]]
@@ -338,6 +347,68 @@ actor MCPSessionState {
 
     func markInFlight(eventId: String) { inFlightEventId = eventId }
     func clearInFlight() { inFlightEventId = nil }
+
+    /// If the failed call's missing parameter matches a key the model DID
+    /// send under the opposite case style (snake↔camel), return a hint
+    /// suggesting the canonical name. Returns nil when there's no plausible
+    /// case-style match (the param really is missing in any form).
+    ///
+    /// `output` is the tool's error string, expected to contain
+    /// "Missing required parameter: <name>".
+    /// `argsShape` is the diagnostic key list, of form "keys=[a,b,c]".
+    private func snakeCamelHint(output: String, argsShape: String) -> String? {
+        // Pull the missing param name out of the error.
+        guard let range = output.range(of: "Missing required parameter: ") else {
+            return nil
+        }
+        let tail = output[range.upperBound...]
+        let missing = String(tail.prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+        guard !missing.isEmpty else { return nil }
+
+        // Pull the keys the model actually sent.
+        guard argsShape.hasPrefix("keys=[") else { return nil }
+        let inner = argsShape.dropFirst("keys=[".count).dropLast()
+        let sentKeys = inner.split(separator: ",").map { String($0) }
+
+        let alt = caseStyleAlt(of: missing)
+        if !alt.isEmpty, sentKeys.contains(alt) {
+            let missingStyle = missing.contains("_") ? "snake_case" : "camelCase"
+            let altStyle = alt.contains("_") ? "snake_case" : "camelCase"
+            return "Tool '\(missing)' uses \(missingStyle); you sent '\(alt)' (\(altStyle)). "
+                + "Rename the argument key and retry — same value, just the other case style."
+        }
+        return nil
+    }
+
+    /// snake_to_camel and camel_to_snake — flip whichever applies.
+    /// Returns "" if the input has no case-style markers either way.
+    private func caseStyleAlt(of name: String) -> String {
+        if name.contains("_") {
+            // snake → camel
+            var out = ""
+            var upperNext = false
+            for ch in name {
+                if ch == "_" { upperNext = true; continue }
+                out.append(upperNext ? Character(ch.uppercased()) : ch)
+                upperNext = false
+            }
+            return out
+        }
+        if name.contains(where: { $0.isUppercase }) {
+            // camel → snake
+            var out = ""
+            for ch in name {
+                if ch.isUppercase {
+                    if !out.isEmpty { out.append("_") }
+                    out.append(Character(ch.lowercased()))
+                } else {
+                    out.append(ch)
+                }
+            }
+            return out
+        }
+        return ""
+    }
 
     private func jsonRPCResult(id: Any, result: Any) -> String {
         let envelope: [String: Any] = [

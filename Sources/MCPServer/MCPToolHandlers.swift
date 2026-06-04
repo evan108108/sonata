@@ -371,7 +371,13 @@ enum MCPToolHandlers {
         actionRegistry: ActionRegistry,
         dbPool: DatabasePool
     ) async -> (success: Bool, result: String) {
-        let eventId = args["event_id"] as? String ?? ""
+        // Accept BOTH snake_case (event_id, the published MCP schema) and
+        // camelCase (eventId, the REST shim's worker_event_complete naming).
+        // Diagnosed 2026-06-04: workers were burning retry loops because they
+        // routinely conflate the two surfaces. Aliasing here removes the
+        // entire class of "Missing required parameter" failures for this
+        // tool. The schema still publishes event_id as canonical.
+        let eventId = (args["event_id"] as? String) ?? (args["eventId"] as? String) ?? ""
         let result = args["result"] as? String
 
         switch role {
@@ -410,7 +416,8 @@ enum MCPToolHandlers {
         actionRegistry: ActionRegistry,
         dbPool: DatabasePool
     ) async -> (success: Bool, result: String) {
-        let eventId = args["event_id"] as? String ?? ""
+        // Snake/camel alias on event_id — see completeEvent for the rationale.
+        let eventId = (args["event_id"] as? String) ?? (args["eventId"] as? String) ?? ""
         let errMsg = args["error"] as? String ?? "Unknown error"
 
         switch role {
