@@ -1,40 +1,9 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Models
-
-private struct WikiPage: Identifiable, Decodable, Hashable {
-    let _id: String
-    let slug: String
-    let title: String
-    let namespace: String?
-    let pageType: String?
-    let parentSlug: String?
-    let topic: String?
-    let lastCompiled: Int64
-    let memoryCount: Int
-    let dirty: Bool
-    let documentId: String?
-    let filePath: String
-    let abstract: String?
-    let createdAt: Int64
-    let updatedAt: Int64
-
-    var id: String { _id }
-
-    var lastCompiledDate: Date {
-        Date(timeIntervalSince1970: Double(lastCompiled) / 1000)
-    }
-    var category: String {
-        // Derive category from slug: "memory-system" -> top level, "scout/pipeline" -> "scout"
-        if let slash = slug.firstIndex(of: "/") {
-            return String(slug[slug.startIndex..<slash])
-        }
-        return ""
-    }
-    var displayTitle: String {
-        title.isEmpty ? slug : title
-    }
-}
+//
+// `WikiPage` lives in WikiStateStore.swift so the singleton store can hold it.
 
 private struct WikiCategory: Identifiable {
     let name: String
@@ -62,15 +31,19 @@ private struct WikiTreeNode: Identifiable, Hashable {
 // MARK: - View
 
 struct WikiView: View {
-    @State private var pages: [WikiPage] = []
-    @State private var selectedPage: WikiPage?
-    @State private var selectedNodeId: String?
-    @State private var markdownContent: String?
+    // Persistent across tab switches via the singleton store. Search text is
+    // intentionally view-local — it's expected to reset on tab switch.
+    @ObservedObject private var store = WikiStateStore.shared
     @State private var searchText = ""
-    @State private var isLoading = false
-    @State private var isLoadingContent = false
-    @State private var error: String?
     @State private var recompileSlug: String?
+
+    private var pages: [WikiPage] { store.pages }
+    private var selectedPage: WikiPage? { store.selectedPage }
+    private var selectedNodeId: String? { store.selectedNodeId }
+    private var markdownContent: String? { store.markdownContent }
+    private var isLoading: Bool { store.isLoading }
+    private var isLoadingContent: Bool { store.isLoadingContent }
+    private var error: String? { store.error }
 
     private var treeNodes: [WikiTreeNode] {
         let filtered: [WikiPage]
@@ -218,38 +191,16 @@ struct WikiView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    // No `selection:` binding — macOS would paint it system blue;
-                    // we drive selection via tap + the warm sidebarRowSelection
-                    // pill instead. `children:` still gives the disclosure tree.
-                    List(treeNodes, children: \.children) { node in
-                        HStack(spacing: 6) {
-                            Image(systemName: node.icon)
-                                .foregroundStyle(node.children != nil ? Theme.Color.accentRust : .secondary)
-                                .frame(width: 16)
-                            Text(node.label)
-                                .lineLimit(1)
-                            if let kids = node.children {
-                                Text("(\(kids.count))")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            Spacer(minLength: 0)
+                    // Manual DisclosureGroup tree (not `List(children:)`) so
+                    // folder expansion can be bound to the store and survive
+                    // tab-switch view recreation. Each folder's isExpanded
+                    // binding round-trips through `store.expandedFolderIds`.
+                    List {
+                        ForEach(treeNodes) { node in
+                            wikiNodeView(node)
                         }
-                        .sidebarRowSelection(selectedNodeId == node.id)
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedNodeId = node.id }
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
                     }
                     .listStyle(.sidebar)
-                    .onChange(of: selectedNodeId) { _, newId in
-                        guard let newId, newId.hasPrefix("page-") else { return }
-                        let slug = String(newId.dropFirst(5))
-                        if let page = pages.first(where: { $0.slug == slug }) {
-                            selectedPage = page
-                            Task { await loadMarkdown(for: page) }
-                        }
-                    }
                 }
 
                 // Page count
@@ -280,9 +231,7 @@ struct WikiView: View {
                     },
                     onLinkClick: { slug in
                         if let target = pages.first(where: { $0.slug == slug }) {
-                            selectedPage = target
-                            selectedNodeId = "page-\(slug)"
-                            Task { await loadMarkdown(for: target) }
+                            Task { await store.select(page: target) }
                         }
                     }
                 )
@@ -297,7 +246,7 @@ struct WikiView: View {
             }
         }
         .task {
-            await fetchPages()
+            await store.fetchPages(port: sonataPort)
         }
         .onReceive(NotificationCenter.default.publisher(for: .sonataOpenWikiSlug)) { note in
             guard let slug = note.userInfo?["slug"] as? String else { return }
@@ -307,50 +256,10 @@ struct WikiView: View {
 
     private func openSlug(_ slug: String) async {
         if pages.isEmpty {
-            await fetchPages()
+            await store.fetchPages(port: sonataPort)
         }
         if let page = pages.first(where: { $0.slug == slug }) {
-            selectedPage = page
-            selectedNodeId = "page-\(slug)"
-            await loadMarkdown(for: page)
-        }
-    }
-
-    // MARK: - Networking
-
-    private func fetchPages() async {
-        isLoading = true
-        error = nil
-        defer { isLoading = false }
-
-        guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/wiki/pages") else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            self.pages = try JSONDecoder().decode([WikiPage].self, from: data)
-        } catch {
-            self.error = error.localizedDescription
-        }
-    }
-
-    private func loadMarkdown(for page: WikiPage) async {
-        isLoadingContent = true
-        markdownContent = nil
-        defer { isLoadingContent = false }
-
-        // Read the file directly from disk
-        let path = page.filePath
-        let expandedPath = (path as NSString).expandingTildeInPath
-        do {
-            markdownContent = try String(contentsOfFile: expandedPath, encoding: .utf8)
-        } catch {
-            // Try the wiki directory as fallback
-            let wikiDir = NSHomeDirectory() + "/.sonata/wiki/"
-            let fallbackPath = wikiDir + page.slug + ".md"
-            do {
-                markdownContent = try String(contentsOfFile: fallbackPath, encoding: .utf8)
-            } catch {
-                markdownContent = "*Could not load content from:*\n\n`\(expandedPath)`\n\n_Error: \(error.localizedDescription)_"
-            }
+            await store.select(page: page)
         }
     }
 
@@ -400,7 +309,53 @@ struct WikiView: View {
             _ = try? await URLSession.shared.data(for: dirtyReq)
         }
 
-        await fetchPages()
+        await store.fetchPages(port: sonataPort)
+    }
+
+    /// Recursive sidebar row. Folders render as a DisclosureGroup bound to
+    /// the store's expanded set; leaf pages render as a tappable row.
+    /// Returns AnyView because Swift's opaque-type inference can't resolve
+    /// `some View` for a recursively self-referencing @ViewBuilder.
+    private func wikiNodeView(_ node: WikiTreeNode) -> AnyView {
+        if let kids = node.children {
+            return AnyView(DisclosureGroup(isExpanded: store.expandedBinding(for: node.id)) {
+                ForEach(kids) { child in
+                    wikiNodeView(child)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: node.icon)
+                        .foregroundStyle(Theme.Color.accentRust)
+                        .frame(width: 16)
+                    Text(node.label)
+                        .lineLimit(1)
+                    Text("(\(kids.count))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear))
+        } else if let page = node.page {
+            return AnyView(HStack(spacing: 6) {
+                Image(systemName: node.icon)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                Text(node.label)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .sidebarRowSelection(selectedNodeId == node.id)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                Task { await store.select(page: page) }
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear))
+        } else {
+            return AnyView(EmptyView())
+        }
     }
 }
 
@@ -463,6 +418,8 @@ private struct WikiDetailView: View {
     let onRecompile: () -> Void
     var onLinkClick: ((String) -> Void)?
 
+    @State private var copiedPrompt = false
+
     var body: some View {
         VStack(spacing: 0) {
             // Header bar
@@ -501,6 +458,18 @@ private struct WikiDetailView: View {
                         .padding(.vertical, 3)
                         .background(.orange.opacity(0.12), in: Capsule())
                 }
+
+                Button {
+                    copyChatPrompt()
+                } label: {
+                    Label(
+                        copiedPrompt ? "Copied" : "Copy chat prompt",
+                        systemImage: copiedPrompt ? "checkmark" : "doc.on.clipboard"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .help("Copy as a prompt to paste into a Session and discuss this page")
+                .disabled(markdownContent == nil)
 
                 Button {
                     onRecompile()
@@ -553,6 +522,50 @@ private struct WikiDetailView: View {
         } catch {
             return AttributedString(text)
         }
+    }
+
+    /// Builds a session-ready prompt for the current page (breadcrumb +
+    /// disk path + frontmatter + body + a two-option close that lets the
+    /// session lead OR wait for direction) and puts it on the pasteboard.
+    /// Briefly flips the button label to "Copied" as confirmation.
+    private func copyChatPrompt() {
+        guard let content = markdownContent else { return }
+        let breadcrumb = breadcrumbPath(for: page)
+        let prompt = """
+        I'm reading my Sona wiki page and want to discuss it with you.
+
+        **Page:** \(breadcrumb)
+        **Path:** `\(page.filePath)`
+
+        Full content (frontmatter + body):
+
+        ---
+        \(content)
+        ---
+
+        Either ask me what angle I want to explore, or jump in with what stands out to you — your call.
+        """
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(prompt, forType: .string)
+
+        copiedPrompt = true
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run { copiedPrompt = false }
+        }
+    }
+
+    /// "Tool Trials > Agent Chat Bridge" — derived from slug structure +
+    /// display title. Gives the session positional context about what kind
+    /// of page it's looking at (a tool trial vs. a learning vs. a memory doc).
+    private func breadcrumbPath(for page: WikiPage) -> String {
+        let parts = page.slug.split(separator: "/").map(String.init)
+        if parts.count > 1 {
+            let categoryDisplay = parts[0].replacingOccurrences(of: "-", with: " ").capitalized
+            return "\(categoryDisplay) > \(page.displayTitle)"
+        }
+        return page.displayTitle
     }
 }
 

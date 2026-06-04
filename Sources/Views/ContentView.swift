@@ -157,7 +157,7 @@ struct ContentView: View {
             // setup. Without this, launching directly into Sessions / Workers
             // / Studio loses toolbar items the same way swap-without-transit
             // does. The .onChange handler below covers subsequent swaps.
-            let splitViewTabs: Set<SonataTab> = [.workers, .studio, .sessions, .memory, .tasks]
+            let splitViewTabs: Set<SonataTab> = [.workers, .studio, .sessions, .memory, .tasks, .wiki]
             if splitViewTabs.contains(selectedTab) {
                 inTransit = true
                 DispatchQueue.main.async {
@@ -178,7 +178,7 @@ struct ContentView: View {
         // an empty view for one runloop tick whenever the user switches
         // BETWEEN two NavigationSplitView tabs.
         .onChange(of: selectedTab) { oldValue, newValue in
-            let splitViewTabs: Set<SonataTab> = [.workers, .studio, .sessions, .memory, .tasks]
+            let splitViewTabs: Set<SonataTab> = [.workers, .studio, .sessions, .memory, .tasks, .wiki]
             guard splitViewTabs.contains(oldValue),
                   splitViewTabs.contains(newValue),
                   oldValue != newValue else { return }
