@@ -374,7 +374,7 @@ actor MCPSessionState {
         if !alt.isEmpty, sentKeys.contains(alt) {
             let missingStyle = missing.contains("_") ? "snake_case" : "camelCase"
             let altStyle = alt.contains("_") ? "snake_case" : "camelCase"
-            return "Tool '\(missing)' uses \(missingStyle); you sent '\(alt)' (\(altStyle)). "
+            return "Parameter '\(missing)' uses \(missingStyle); you sent '\(alt)' (\(altStyle)). "
                 + "Rename the argument key and retry — same value, just the other case style."
         }
         return nil
