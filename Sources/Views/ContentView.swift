@@ -107,6 +107,9 @@ struct ContentView: View {
         .background(Theme.Color.bgDeep.ignoresSafeArea())
         .toolbar {
             ToolbarItem(placement: .automatic) {
+                GlobalAFKToggle()
+            }
+            ToolbarItem(placement: .automatic) {
                 SearchBar(vm: searchVM, focusBinding: $searchFocused)
                     .frame(minWidth: 280, maxWidth: .infinity)
             }

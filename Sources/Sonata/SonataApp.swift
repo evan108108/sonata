@@ -483,6 +483,7 @@ struct SonataApp: App {
                 registry.register(workerToolDenialActions)
                 registry.register(inspectorAction)
                 registry.register(afkActions)
+                registry.register(globalAFKActions)
                 registry.register(dmActions)
                 registry.register(calendarActions)
                 registry.register(emailActions)
@@ -772,7 +773,9 @@ struct SonataApp: App {
                 // call is a harmless no-op.
                 await MainActor.run {
                     _ = InteractiveSessionsViewModel.shared.bootstrap(dbPool: pool)
+                    GlobalAFKController.shared.bootstrap(dbPool: pool)
                 }
+                await GlobalAFKOrchestrator.shared.start()
                 logger.info("Auto-started restored interactive sessions")
 
                 // Register shutdown handler

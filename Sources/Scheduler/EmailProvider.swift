@@ -32,8 +32,23 @@ protocol EmailProvider: Sendable {
     /// Send a new message from `inbox`. Throws on non-2xx.
     func send(inbox: String, to: [String], subject: String, text: String) async throws
 
+    /// Send a new message with both a plain-text body and an HTML body.
+    /// Default implementation falls back to text-only `send` so callers that
+    /// want HTML get it from providers that support it (AgentMail) and a safe
+    /// plain-text degrade from providers that don't (ImapSmtp today). The
+    /// `text` body is the canonical plain-text fallback for clients that
+    /// can't render HTML; the `html` body is the rich version.
+    func sendHTML(inbox: String, to: [String], subject: String, text: String, html: String) async throws
+
     /// Reply to an existing message, preserving its thread. Throws on non-2xx.
     func reply(inbox: String, messageId: String, text: String) async throws
+}
+
+extension EmailProvider {
+    func sendHTML(inbox: String, to: [String], subject: String, text: String, html: String) async throws {
+        // Default: providers without HTML support degrade to plain text.
+        try await send(inbox: inbox, to: to, subject: subject, text: text)
+    }
 }
 
 // MARK: - Per-inbox provider resolution
@@ -218,9 +233,23 @@ struct AgentMailProvider: EmailProvider {
     }
 
     func send(inbox: String, to: [String], subject: String, text: String) async throws {
+        // POST /inboxes/<id>/messages (the "obvious" path) is the LIST endpoint,
+        // not send — AgentMail returns 404 for POST against it. The actual send
+        // endpoint is /messages/send. Diagnosed 2026-06-04 when the new
+        // GlobalAFKOrchestrator kickoff email failed in production; the
+        // existing path had never been hit by anything else (all other Sonata
+        // email sends go through Claude Code workers using AgentMail MCP).
         try await post(
-            "/inboxes/\(inbox)/messages",
+            "/inboxes/\(inbox)/messages/send",
             body: ["to": to, "subject": subject, "text": text],
+            endpointLabel: "send"
+        )
+    }
+
+    func sendHTML(inbox: String, to: [String], subject: String, text: String, html: String) async throws {
+        try await post(
+            "/inboxes/\(inbox)/messages/send",
+            body: ["to": to, "subject": subject, "text": text, "html": html],
             endpointLabel: "send"
         )
     }

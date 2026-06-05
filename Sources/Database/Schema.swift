@@ -1030,5 +1030,23 @@ extension DatabaseMigrator {
         registerMigration("v23_installed_chat_models_extra_args") { db in
             do { try db.execute(sql: "ALTER TABLE installedChatModels ADD COLUMN extraArgs TEXT") } catch { /* column exists */ }
         }
+
+        // v24: single-row table that holds the Global AFK toggle state. The
+        // CHECK (id=1) constraint makes it impossible to have more than one
+        // row — there's only ever one global flag. enabled stored as INTEGER
+        // 0/1 (SQLite-native bool). enabledAt is the unix-ms timestamp of
+        // the most recent flip. flippedBy records the surface that did it
+        // (ui|mcp|api) for telemetry and the persistent banner copy.
+        registerMigration("v24_global_afk") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS globalAFK (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    enabledAt INTEGER,
+                    flippedBy TEXT
+                )
+                """)
+            try db.execute(sql: "INSERT OR IGNORE INTO globalAFK (id, enabled) VALUES (1, 0)")
+        }
     }
 }

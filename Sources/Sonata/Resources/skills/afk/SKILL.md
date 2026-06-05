@@ -1,6 +1,6 @@
 ---
 name: afk
-description: Enter AFK mode — shift communication to email while continuing work. Use when the user says they're going AFK, stepping away, leaving, "be right back", "brb", or types /afk.
+description: Enter AFK mode — shift communication to email while continuing work. Use when the user says they're going AFK, stepping away, leaving, "be right back", "brb", types /afk, OR when you receive a sonata-bridge channel event with `event_type=global_afk_directive` and `action=enter` (Sonata's global AFK toggle was flipped on).
 metadata:
   origin: manual
 ---
@@ -8,6 +8,16 @@ metadata:
 # AFK Mode
 
 When invoked, shift all user-facing questions from the terminal to email. The user is stepping away from the keyboard but wants you to keep working. While in AFK mode, replies arrive as **channel notifications** — same primitive Sonata workers use to receive events. You do NOT poll the inbox.
+
+## Triggers
+
+There are TWO ways this skill activates:
+
+1. **Direct (user-initiated):** The user types `/afk` or says "going afk / brb / stepping away." Follow the protocol below from "Entering AFK Mode".
+
+2. **Global AFK directive (Sonata-initiated):** Sonata's global AFK toggle was flipped on, and you received a channel event with `meta.event_type = "global_afk_directive"` and `meta.action = "enter"`. Treat this identically to a user-initiated /afk — generate a token, write it to disk, call afk_register, and continue working. Do NOT send an email at this moment unless you have an actual question to ask; the Sonata app already sent the user a kickoff email summarizing all affected sessions. Sessions email organically when they have something to report.
+
+   Conversely, when you receive `action = "exit"`, exit AFK mode (delete `/tmp/sona-afk-token`, optionally call `afk_unregister`, and resume normal use of AskUserQuestion).
 
 ## Entering AFK Mode
 

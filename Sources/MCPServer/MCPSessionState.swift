@@ -64,6 +64,19 @@ actor MCPSessionState {
     func attachSSE(_ writer: MCPSSEWriter) {
         sseWriter?.close()
         sseWriter = writer
+        // Notify any post-attach subscribers (e.g. GlobalAFKOrchestrator
+        // needs to push the AFK directive at this session if global AFK is
+        // already on). Carries the sessionKey + role so the listener has
+        // enough context to act without re-querying the registry.
+        let info: [String: Any] = [
+            "sessionKey": sessionKey,
+            "role": roleString(),
+        ]
+        NotificationCenter.default.post(
+            name: Notification.Name("sonataMCPSessionAttached"),
+            object: nil,
+            userInfo: info
+        )
     }
 
     func detachSSE(_ writer: MCPSSEWriter) {
