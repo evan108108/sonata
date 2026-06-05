@@ -439,10 +439,24 @@ extension GlobalAFKOrchestrator {
 
     /// Walk running processes once, build sessionKey → ClaudeProcInfo.
     /// Used as a fallback in `enrich` when MCPSessionState has no
-    /// claudeSessionId/cwd because the session never called sonata_identify
-    /// (the typical case for ttys-bound sessions spawned by Sonata's bash
-    /// integration). The map key is the sessionKey extracted from the
-    /// `--mcp-config /Users/evan/.sonata/mcp-cfg/session-<hex>.json` path.
+    /// claudeSessionId/cwd because the session never called sonata_identify.
+    ///
+    /// Two key shapes are emitted per matching process so this catches both
+    /// transports the registry uses:
+    ///
+    /// * **`session-<hex>`** — Sonata-spawned sessions whose argv carries
+    ///   `--mcp-config /Users/evan/.sonata/mcp-cfg/session-<hex>.json`. The
+    ///   hex segment is the bearer-token-derived sessionKey used over HTTP
+    ///   MCP. Sonata's own InteractiveSessionTabs sit on this.
+    /// * **`claude-<pid>`** — externally-launched sessions that load the
+    ///   sonata-bridge channel via `--dangerously-load-development-channels
+    ///   server:sonata-bridge` with no MCP config. The bridge subprocess
+    ///   computes `claude-${process.ppid}` as its BRIDGE_SESSION_ID and the
+    ///   registry stores the session under that exact key.
+    ///
+    /// A process can produce both keys (entry under each); either will hit
+    /// the same ClaudeProcInfo, so the matcher in enrich() just looks up by
+    /// snap.sessionKey directly.
     static func scanClaudeProcesses() -> [String: ClaudeProcInfo] {
         guard let psOutput = runShell(["/bin/ps", "-axww", "-o", "pid=,args="]) else {
             return [:]
@@ -450,18 +464,29 @@ extension GlobalAFKOrchestrator {
         var map: [String: ClaudeProcInfo] = [:]
         for rawLine in psOutput.split(separator: "\n", omittingEmptySubsequences: true) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            // Cheap pre-filter; argv has to mention claude AND the mcp-cfg
-            // path, otherwise we can't extract a sessionKey anyway.
+            // Cheap pre-filter; the cases we care about all involve a
+            // claude binary AND the sonata-bridge channel flag, which is
+            // how externally-launched sessions opt into Sonata routing.
             guard line.contains("/claude") || line.contains(" claude ") else { continue }
-            guard line.contains("session-") else { continue }
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
             guard let pidStr = parts.first, let pid = Int(pidStr) else { continue }
             let argv = String(line.dropFirst(pidStr.count).drop(while: { $0 == " " }))
-            let sessionKey = extractSessionKeyFromArgv(argv)
+            let mcpKey = extractSessionKeyFromArgv(argv)
             let claudeSessionId = extractResumeUUIDFromArgv(argv)
-            guard let sk = sessionKey else { continue }
+            let usesSonataBridge = argv.contains("server:sonata-bridge")
+            // Skip processes that aren't talking to Sonata at all (e.g.
+            // unrelated claude installs running other workloads). Either
+            // they declare the bridge channel or they reference a Sonata
+            // MCP config — otherwise there's nothing for us to map.
+            guard mcpKey != nil || usesSonataBridge else { continue }
             let cwd = cwdForPid(pid)
-            map[sk] = ClaudeProcInfo(pid: pid, claudeSessionId: claudeSessionId, cwd: cwd)
+            let info = ClaudeProcInfo(pid: pid, claudeSessionId: claudeSessionId, cwd: cwd)
+            if let sk = mcpKey {
+                map[sk] = info
+            }
+            if usesSonataBridge {
+                map["claude-\(pid)"] = info
+            }
         }
         return map
     }
