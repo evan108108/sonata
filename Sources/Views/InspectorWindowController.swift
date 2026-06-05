@@ -111,6 +111,7 @@ final class InspectorWindowController: NSObject, LocalProcessTerminalViewDelegat
         // Auto-confirm development channels prompt
         for delay in [2.0, 4.0, 7.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak view] in
+                FileHandle.standardError.write(Data("[DEBUG] PTY-send src=Inspector.auto-confirm delay=\(delay) text=\"\\r\" stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
                 view?.send(txt: "\r")
             }
         }

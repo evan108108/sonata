@@ -524,6 +524,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self else { return }
                 if case .running = self.state {
+                    FileHandle.standardError.write(Data("[DEBUG] PTY-send src=ISVM.spawn-auto-confirm tabId=\(self.id.uuidString.prefix(8)) name=\(self.name.debugDescription) delay=\(delay) text=\"\\r\" stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
                     self.terminal?.send(txt: "\r")
                 }
             }

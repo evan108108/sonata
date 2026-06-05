@@ -90,6 +90,7 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         // Auto-confirm the development channels warning prompt
         for delay in [2.0, 4.0, 7.0, 10.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                FileHandle.standardError.write(Data("[DEBUG] PTY-send src=SupervisorTerm.auto-confirm delay=\(delay) text=\"\\r\" stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
                 self?.terminalView?.send(txt: "\r")
             }
         }

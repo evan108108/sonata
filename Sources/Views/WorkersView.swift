@@ -897,6 +897,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     private func scheduleAutoConfirm() {
         for delay in [2.0, 4.0, 7.0, 10.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                FileHandle.standardError.write(Data("[DEBUG] PTY-send src=WorkersView.auto-confirm worker=\(self?.worker.label ?? "?") delay=\(delay) text=\"\\r\" stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
                 self?.terminalView?.send(txt: "\r")
             }
         }
@@ -921,6 +922,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         }
         if screenText.contains("Context limit reached") || screenText.contains("/compact or /clear") {
             print("[\(worker.label)] Context limit detected — auto-sending /compact")
+            FileHandle.standardError.write(Data("[DEBUG] PTY-send src=WorkersView.context-limit worker=\(worker.label) screenTextMatched=\(screenText.contains("Context limit reached") ? "ctxLimit" : "compactOrClear") text=\"/compact\\r\" stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
             view.send(txt: "/compact\r")
         }
     }
