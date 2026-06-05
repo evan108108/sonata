@@ -207,13 +207,19 @@ actor GlobalAFKOrchestrator {
         // while still parallelizing non-Echo work (tab lookup, cwd). Worst
         // case email send time = ceil(N/2) × echoTimeout.
         let echoConcurrencyCap = 2
+        // Scan running Claude Code processes ONCE — recovers claudeSessionId
+        // and cwd for sessions whose MCPSessionState never had identify()
+        // called (the common case for ttys-bound sessions Sonata spawned via
+        // bash). Without this, every such row in the email collapses to a
+        // bare "interactive" label with no path.
+        let procMap = Self.scanClaudeProcesses()
         let enriched: [EnrichedTarget] = await withTaskGroup(of: EnrichedTarget.self) { group in
             var inFlight = 0
             var pending = targets.makeIterator()
             // Prime the first cap-many tasks.
             for _ in 0..<echoConcurrencyCap {
                 guard let snap = pending.next() else { break }
-                group.addTask { await Self.enrich(snap: snap) }
+                group.addTask { await Self.enrich(snap: snap, procMap: procMap) }
                 inFlight += 1
             }
             var out: [EnrichedTarget] = []
@@ -221,7 +227,7 @@ actor GlobalAFKOrchestrator {
                 out.append(item)
                 inFlight -= 1
                 if let next = pending.next() {
-                    group.addTask { await Self.enrich(snap: next) }
+                    group.addTask { await Self.enrich(snap: next, procMap: procMap) }
                     inFlight += 1
                 }
             }
@@ -371,7 +377,10 @@ extension GlobalAFKOrchestrator {
     ///   ≤4-word handle ("Auth Bug Debugging") that becomes the displayName
     ///   — that's the actual disambiguator when multiple "interactive"
     ///   sessions are in the list.
-    static func enrich(snap: MCPSessionRegistry.SessionSnapshot) async -> EnrichedTarget {
+    static func enrich(
+        snap: MCPSessionRegistry.SessionSnapshot,
+        procMap: [String: ClaudeProcInfo] = [:]
+    ) async -> EnrichedTarget {
         let lookup = await tabLookup(for: snap)
         if let tabName = lookup.tabName {
             // Sonata-owned: name + cwd are enough. No Echo call.
@@ -391,7 +400,12 @@ extension GlobalAFKOrchestrator {
         //   3. supervisor special-case: the supervisor's sessionKey is the
         //      literal string "supervisor" — fall back to finding the
         //      most-recently-modified jsonl in its known project dir
-        let cwd = snap.cwd ?? defaultCwdForRole(snap.role)
+        //   4. process-scan fallback: walk running `claude` processes whose
+        //      argv carries `--mcp-config session-<sessionKey>.json` and
+        //      pull `--resume <uuid>` + cwd from there. Covers ttys-bound
+        //      sessions Sonata spawned via bash that never called identify().
+        let procInfo = procMap[snap.sessionKey]
+        let cwd = snap.cwd ?? procInfo?.cwd ?? defaultCwdForRole(snap.role)
         let claudeSessionId: String?
         if let id = snap.claudeSessionId {
             claudeSessionId = id
@@ -399,6 +413,8 @@ extension GlobalAFKOrchestrator {
             claudeSessionId = snap.sessionKey
         } else if snap.role == .supervisor {
             claudeSessionId = mostRecentTranscriptId(forProjectDir: "-Users-evan--sonata-supervisor")
+        } else if let pid = procInfo?.claudeSessionId {
+            claudeSessionId = pid
         } else {
             claudeSessionId = nil
         }
@@ -410,6 +426,100 @@ extension GlobalAFKOrchestrator {
             summary: nil,
             isOwnedTab: false
         )
+    }
+
+    /// One running `claude` process's contribution to the proc-scan map.
+    /// claudeSessionId is the `--resume <uuid>` argv value when present;
+    /// cwd comes from `lsof -p $PID -a -d cwd`. Either field may be nil.
+    struct ClaudeProcInfo: Sendable {
+        let pid: Int
+        let claudeSessionId: String?
+        let cwd: String?
+    }
+
+    /// Walk running processes once, build sessionKey → ClaudeProcInfo.
+    /// Used as a fallback in `enrich` when MCPSessionState has no
+    /// claudeSessionId/cwd because the session never called sonata_identify
+    /// (the typical case for ttys-bound sessions spawned by Sonata's bash
+    /// integration). The map key is the sessionKey extracted from the
+    /// `--mcp-config /Users/evan/.sonata/mcp-cfg/session-<hex>.json` path.
+    static func scanClaudeProcesses() -> [String: ClaudeProcInfo] {
+        guard let psOutput = runShell(["/bin/ps", "-axww", "-o", "pid=,args="]) else {
+            return [:]
+        }
+        var map: [String: ClaudeProcInfo] = [:]
+        for rawLine in psOutput.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            // Cheap pre-filter; argv has to mention claude AND the mcp-cfg
+            // path, otherwise we can't extract a sessionKey anyway.
+            guard line.contains("/claude") || line.contains(" claude ") else { continue }
+            guard line.contains("session-") else { continue }
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard let pidStr = parts.first, let pid = Int(pidStr) else { continue }
+            let argv = String(line.dropFirst(pidStr.count).drop(while: { $0 == " " }))
+            let sessionKey = extractSessionKeyFromArgv(argv)
+            let claudeSessionId = extractResumeUUIDFromArgv(argv)
+            guard let sk = sessionKey else { continue }
+            let cwd = cwdForPid(pid)
+            map[sk] = ClaudeProcInfo(pid: pid, claudeSessionId: claudeSessionId, cwd: cwd)
+        }
+        return map
+    }
+
+    /// Find `--mcp-config <path>` and pull the `session-<hex>` token from the
+    /// basename. nil when the argv doesn't carry a recognizable Sonata mcp
+    /// config (e.g. paired Claude Code on another box that loads a non-Sonata
+    /// MCP, or a session spawned with no MCP config at all).
+    private static func extractSessionKeyFromArgv(_ argv: String) -> String? {
+        guard let r = argv.range(of: "--mcp-config ") else { return nil }
+        let after = argv[r.upperBound...]
+        let pathToken = String(after.split(separator: " ", maxSplits: 1).first ?? "")
+        guard let startRange = pathToken.range(of: "session-"),
+              let endRange = pathToken.range(of: ".json", range: startRange.upperBound..<pathToken.endIndex)
+        else { return nil }
+        let key = String(pathToken[startRange.upperBound..<endRange.lowerBound])
+        return key.isEmpty ? nil : key
+    }
+
+    /// Find `--resume <uuid>` in argv. nil when the flag is absent (fresh
+    /// session) or the value isn't UUID-shaped (we'd rather fall through
+    /// than hand Echo a transcript path that won't exist).
+    private static func extractResumeUUIDFromArgv(_ argv: String) -> String? {
+        guard let r = argv.range(of: "--resume ") else { return nil }
+        let after = argv[r.upperBound...]
+        let token = String(after.split(separator: " ", maxSplits: 1).first ?? "")
+        return isUUID(token) ? token : nil
+    }
+
+    /// lsof in -Fn mode emits one record per opened path prefixed with `n`;
+    /// for `-d cwd` there's exactly one such line per process. Returns nil
+    /// when lsof fails (process gone, permission, etc.) — caller falls back
+    /// to role-default cwd.
+    private static func cwdForPid(_ pid: Int) -> String? {
+        guard let out = runShell(["/usr/sbin/lsof", "-p", "\(pid)", "-a", "-d", "cwd", "-Fn"]) else {
+            return nil
+        }
+        for line in out.split(separator: "\n") {
+            if line.hasPrefix("n/") { return String(line.dropFirst()) }
+        }
+        return nil
+    }
+
+    /// Spawn-and-collect a short-lived command. Returns stdout as UTF-8 on
+    /// success, nil on launch failure or non-UTF-8 output. Stderr is silently
+    /// discarded — these are diagnostic helpers, not user-facing commands.
+    private static func runShell(_ argv: [String]) -> String? {
+        guard let first = argv.first else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: first)
+        proc.arguments = Array(argv.dropFirst())
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = Pipe()
+        do { try proc.run() } catch { return nil }
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return String(data: data, encoding: .utf8)
     }
 
     /// Look up the matching InteractiveSessionTab. Returns the tab name only
