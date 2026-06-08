@@ -16,7 +16,6 @@ struct DashboardView: View {
     @StateObject private var pluginVM = PluginStatusViewModel()
     @StateObject private var thoughtsVM = RecentThoughtsViewModel()
     @StateObject private var deadlinesVM = DeadlinesViewModel()
-    @StateObject private var afkVM = AFKQuestionsViewModel()
     @StateObject private var attentionVM = AttentionTasksViewModel()
     @StateObject private var allSessionsVM = AllSessionsViewModel()
 
@@ -137,19 +136,6 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
 
-                        if !afkVM.entries.isEmpty {
-                            AFKQuestionsCard(
-                                entries: afkVM.entries,
-                                workersBySessionId: Dictionary(
-                                    uniqueKeysWithValues: workerManager.workers.map { ($0.sessionId, $0) }
-                                )
-                            ) { worker in
-                                WorkerManager.shared.selectedWorkerId = worker.id
-                                selectedTab = .workers
-                            }
-                            .padding(.horizontal)
-                        }
-
                         // (SessionsSection lives in a pinned footer below the ScrollView
                         //  so the Supervisor / Interactive Sessions launchers are always
                         //  reachable without scrolling.)
@@ -249,13 +235,6 @@ struct DashboardView: View {
             }
         }
         .task {
-            while !afkVM.hasLoadedOnce && !Task.isCancelled {
-                await afkVM.fetch()
-                if afkVM.hasLoadedOnce { break }
-                try? await Task.sleep(for: .seconds(bootRetryInterval))
-            }
-        }
-        .task {
             while !attentionVM.hasLoadedOnce && !Task.isCancelled {
                 await attentionVM.fetch()
                 if attentionVM.hasLoadedOnce { break }
@@ -276,7 +255,6 @@ struct DashboardView: View {
             Task { await pluginVM.fetch() }
             Task { await thoughtsVM.fetch() }
             Task { await deadlinesVM.fetch() }
-            Task { await afkVM.fetch() }
             Task { await attentionVM.fetch() }
             Task { await allSessionsVM.fetch() }
         }

@@ -9,18 +9,10 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
 
     func bind(registry: MCPSessionRegistry) async {
         guard claimBound(registry) else { return }
-        AFKRegistry.shared.setDeliveryHook { [weak self] sessionId, reply in
-            Task { [weak self] in
-                let delivered = await self?.pushAFKReply(sessionKey: sessionId, reply: reply) ?? false
-                // FIX #2: only drop the reply from the durable outbox once the
-                // push actually landed. A failed push leaves it for the next
-                // reconnect/poll to drain.
-                if delivered {
-                    AFKRegistry.shared.ackReply(sessionId: sessionId, replyId: reply.id)
-                }
-            }
-        }
-        AFKRegistry.shared.drainPendingForHook()
+        // AFK replies route directly through EmailHandler now — no registry,
+        // no outbox, no delivery hook. EmailHandler parses the sessionId from
+        // the `[AFK-#<sessionId>]` subject and calls pushAFKReply on the
+        // resolved live session. See Sources/Scheduler/EmailHandler.swift.
     }
 
     private func claimBound(_ registry: MCPSessionRegistry) -> Bool {
@@ -84,21 +76,31 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
         )
     }
 
+    /// Push an AFK email reply to a live session as a channel notification.
+    /// Called by EmailHandler after it has parsed the sessionId from a
+    /// `[AFK-#<sessionId>]` subject and resolved it to a live sessionKey
+    /// via MCPSessionRegistry. The receiving session's AFK skill matches
+    /// on `meta.event_type == "afk_reply"`.
     @discardableResult
-    private func pushAFKReply(sessionKey: String, reply: AFKReply) async -> Bool {
+    func pushAFKReply(
+        sessionKey: String,
+        fromAddr: String,
+        subject: String,
+        messageId: String,
+        replyText: String
+    ) async -> Bool {
         let content = """
-            [AFK reply for token \(reply.token)]
-            From: \(reply.fromAddr)
-            Subject: \(reply.subject)
+            [AFK reply]
+            From: \(fromAddr)
+            Subject: \(subject)
 
-            \(reply.replyText)
+            \(replyText)
             """
         let meta: [String: String] = [
             "event_type": "afk_reply",
-            "afk_token": reply.token,
-            "message_id": reply.messageId,
-            "from_addr": reply.fromAddr,
-            "subject": reply.subject,
+            "message_id": messageId,
+            "from_addr": fromAddr,
+            "subject": subject,
         ]
         return await pushChannel(sessionKey: sessionKey, content: content, meta: meta)
     }

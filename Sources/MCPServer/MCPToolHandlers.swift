@@ -44,13 +44,11 @@ enum MCPToolHandlers {
                 actionRegistry: actionRegistry, dbPool: dbPool)
         case "sonata_identify":
             return await sonataIdentify(args: args, state: state)
+        case "sonata_whoami":
+            return await sonataWhoami(state: state)
         case "sonar_dm_broadcast":
             return await sonarDMBroadcast(
                 args: args, sessionKey: sessionKey, registry: registry, dbPool: dbPool)
-        case "afk_register":
-            return await afkRegister(
-                args: args, sessionKey: sessionKey,
-                actionRegistry: actionRegistry, dbPool: dbPool)
         case "session_create":
             return await webviewCreate(args: args, sessionKey: sessionKey)
         case "session_close":
@@ -123,26 +121,6 @@ enum MCPToolHandlers {
         default:
             return (false, "Unknown tool: \(toolName)")
         }
-    }
-
-    /// `afk_register` narrow shim — replaces the stdio mem-server.ts
-    /// auto-inject of `sessionId` from WORKER_ID / SONA_SESSION_ID env vars.
-    /// When the caller omits sessionId we default to the bearer-derived
-    /// sessionKey, matching the prior behavior so existing skills (afk/SKILL)
-    /// keep working. See plan § Step 4 (Option Q1c).
-    private static func afkRegister(
-        args: [String: Any],
-        sessionKey: String,
-        actionRegistry: ActionRegistry,
-        dbPool: DatabasePool
-    ) async -> (success: Bool, result: String) {
-        var coerced = args
-        let supplied = (coerced["sessionId"] as? String) ?? ""
-        if supplied.isEmpty {
-            coerced["sessionId"] = sessionKey
-        }
-        return await actionRegistry.executeMCPTool(
-            name: "afk_register", args: coerced, dbPool: dbPool)
     }
 
     // MARK: - Webview session tools (Phase 1)
@@ -308,6 +286,32 @@ enum MCPToolHandlers {
             pid: pid
         )
         return (true, "Identified as \(claudeSessionId)")
+    }
+
+    /// Return the calling session's identity. Used by the /afk skill to learn
+    /// the routing id it should embed in `[AFK-#<id>]` subjects so EmailHandler
+    /// can push replies back via channel notification.
+    ///
+    /// `routingId` is the preferred handle: claudeSessionId if known (stable
+    /// across `--resume`), otherwise the bearer-derived sessionKey. Both forms
+    /// resolve via MCPSessionRegistry.resolveSession.
+    private static func sonataWhoami(
+        state: MCPSessionState
+    ) async -> (success: Bool, result: String) {
+        let sessionKey = state.sessionKey
+        let claudeSessionId = await state.claudeSessionId
+        let cwd = await state.cwd
+        let role = await state.role
+        let routingId = claudeSessionId ?? sessionKey
+        var dict: [String: Any] = [
+            "sessionKey": sessionKey,
+            "routingId": routingId,
+            "role": String(describing: role),
+        ]
+        if let cid = claudeSessionId { dict["claudeSessionId"] = cid }
+        if let c = cwd { dict["cwd"] = c }
+        let data = (try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])) ?? Data()
+        return (true, String(data: data, encoding: .utf8) ?? "{}")
     }
 
     /// Defaults target_session_id to the caller's sessionKey when omitted —
@@ -625,6 +629,14 @@ enum MCPToolSchemas {
             ],
         ],
         [
+            "name": "sonata_whoami",
+            "description": "Return this session's identity: { sessionKey, routingId, role, claudeSessionId?, cwd? }. Used by /afk to learn which id to put in `[AFK-#<id>]` subjects so replies route back via channel notification. routingId is the preferred handle (claudeSessionId when known, else sessionKey).",
+            "inputSchema": [
+                "type": "object",
+                "properties": [:],
+            ],
+        ],
+        [
             "name": "sonar_dm_inbox",
             "description": "Backfill: fetch persisted DMs addressed to this session since a timestamp. Use after restart, or to pull DMs that arrived while not SSE-attached.",
             "inputSchema": [
@@ -715,18 +727,6 @@ enum MCPToolSchemas {
                     "target_session_id": ["type": "string", "description": "Watcher session id (defaults to caller)"],
                 ],
                 "required": ["taskId"],
-            ],
-        ],
-        [
-            "name": "afk_register",
-            "description": "Register this session as the AFK target for a token. EmailHandler will route [AFK:<token>] replies here. sessionId defaults to the caller's bridge session id when omitted (narrow-shim auto-inject, replaces the prior stdio-proxy behavior).",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "token": ["type": "string", "description": "The AFK token (also embedded in the email subject)"],
-                    "sessionId": ["type": "string", "description": "Bridge session id (defaults to caller)"],
-                ],
-                "required": ["token"],
             ],
         ],
         [

@@ -187,8 +187,8 @@ actor EmailHandler {
             for email in newEmails {
                 try? await storeEmail(email, status: "unread")
             }
-            // Pull out any [AFK:<token>] replies and route them via the channel
-            // before falling through to the normal dispatch flow.
+            // Pull out any [AFK-#<sessionId>] replies and route them via the
+            // channel before falling through to the normal dispatch flow.
             let afterAFK = await routeAFKReplies(newEmails)
             // Then pull out [APPROVAL NEEDED] reply directives (APPROVE / REJECT
             // / DELETE) which update contacts.autoAllowEmail/blockEmail and
@@ -209,32 +209,42 @@ actor EmailHandler {
 
     // MARK: - AFK Routing
 
-    /// Split out emails whose subject matches `[AFK:<token>]` and route them to
-    /// the AFKRegistry instead of dispatching a worker. Returns the leftover
-    /// emails (no AFK match, or no session registered for the token).
+    /// Split out emails whose subject matches `[AFK-#<sessionId>]` and push them
+    /// to the live MCP session directly. No registry, no token lookup — the
+    /// sessionId IS the routing key. Returns the leftover emails (no AFK match
+    /// or no live session for the sessionId).
+    ///
+    /// SessionId is matched against `MCPSessionRegistry.resolveDMTarget`, which
+    /// accepts either an exact `sessionKey` (the MCP bearer-derived hex) or a
+    /// `claudeSessionId` alias (the UUID set after `sonata_identify`). So the
+    /// subject can carry whichever the session emitted at send time and it
+    /// still routes.
     private func routeAFKReplies(_ emails: [EmailRecord]) async -> [EmailRecord] {
         var leftover: [EmailRecord] = []
+        guard let reg = MCPSessionRegistry.shared else { return emails }
         for email in emails {
-            guard let token = Self.extractAFKToken(from: email.subject) else {
+            guard let target = Self.extractAFKSessionId(from: email.subject) else {
                 leftover.append(email)
                 continue
             }
-            let reply = AFKReply(
-                token: token,
-                replyText: email.body,
+            guard let state = await reg.resolveSession(target) else {
+                logger.info("EmailHandler: AFK target \(target) is not a live session; falling through")
+                leftover.append(email)
+                continue
+            }
+            let resolved = state.sessionKey
+            let pushed = await MCPNotificationDispatcher.shared.pushAFKReply(
+                sessionKey: resolved,
                 fromAddr: email.from,
                 subject: email.subject,
                 messageId: email.messageId,
-                receivedAt: nowMs()
+                replyText: email.body
             )
-            let routed = AFKRegistry.shared.enqueueReply(reply)
-            if routed {
-                logger.info("EmailHandler: routed AFK reply for token \(token) (msg \(email.messageId))")
+            if pushed {
+                logger.info("EmailHandler: routed AFK reply to session \(resolved) (subject sessionId=\(target), msg \(email.messageId))")
                 try? await markEmailProcessed(messageId: email.messageId, success: true)
             } else {
-                // No session registered for this token — fall through to normal
-                // handling so the user still sees the email surface somewhere.
-                logger.info("EmailHandler: AFK token \(token) has no registered session; falling through")
+                logger.info("EmailHandler: AFK target \(target) resolved to \(resolved) but channel push failed; falling through")
                 leftover.append(email)
             }
         }
@@ -532,17 +542,19 @@ actor EmailHandler {
 
     // MARK: - AFK Routing (cont'd)
 
-    /// Match `[AFK:<token>]` anywhere in the subject. Token is alnum + dashes.
-    static func extractAFKToken(from subject: String) -> String? {
-        guard let range = subject.range(of: #"\[AFK:([A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
-            return nil
-        }
-        let match = subject[range]
-        guard let colonIdx = match.firstIndex(of: ":") else { return nil }
-        let after = match.index(after: colonIdx)
-        let before = match.index(before: match.endIndex)
-        guard after < before else { return nil }
-        return String(match[after..<before])
+    /// Match `[AFK-#<sessionId>]` (current) or legacy `[AFK:<token>]` anywhere
+    /// in the subject. The separator after `AFK` can be any of `-`, `#`, `:`
+    /// (or a run of them, e.g. the canonical `-#`). Returns the captured id.
+    /// Legacy `[AFK:<token>]` subjects from in-flight email threads parse
+    /// here too — they'll fail to resolve against MCPSessionRegistry (because
+    /// the token is not a sessionId) and fall through gracefully.
+    static func extractAFKSessionId(from subject: String) -> String? {
+        let pattern = #"\[AFK[-:#]+([A-Za-z0-9_-]+)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(subject.startIndex..., in: subject)
+        guard let match = regex.firstMatch(in: subject, range: nsRange),
+              let groupRange = Range(match.range(at: 1), in: subject) else { return nil }
+        return String(subject[groupRange])
     }
 
     // MARK: - Pending Unread Recovery

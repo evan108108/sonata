@@ -70,11 +70,8 @@ actor GlobalAFKOrchestrator {
         let isOn = await MainActor.run { GlobalAFKController.shared.isEnabled }
         guard isOn else { return }
         guard let reg = MCPSessionRegistry.shared else { return }
-        // Register this late-joiner under its global token too, mirroring
-        // the broadcast path — otherwise replies addressed to it via the
-        // kickoff email's mailto links fall through to a generic worker.
-        let token = "global-\(sessionKey.prefix(8))"
-        AFKRegistry.shared.register(token: String(token), sessionId: sessionKey)
+        // No registration needed — EmailHandler routes [AFK-#<sessionId>]
+        // replies directly via MCPSessionRegistry. Just push the directive.
         let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
         let pushed = await reg.deliverDM(
             target: sessionKey,
@@ -99,20 +96,7 @@ actor GlobalAFKOrchestrator {
         let snaps = await collectTargetSessions()
         logger.info("global AFK flip: action=\(action) targets=\(snaps.count)")
 
-        // Register/unregister each session under its global token in
-        // AFKRegistry so EmailHandler can route [AFK:global-XXXX] replies
-        // straight to the right session. Without this, inbound replies fall
-        // through to the regular email-handling path and a random worker
-        // processes them instead of the addressed session.
-        for snap in snaps {
-            let token = "global-\(snap.sessionKey.prefix(8))"
-            if enabled {
-                AFKRegistry.shared.register(token: String(token), sessionId: snap.sessionKey)
-            } else {
-                AFKRegistry.shared.unregister(token: String(token))
-            }
-        }
-
+        // No registration step — EmailHandler routes by sessionId now.
         // Broadcast directive to each session.
         var deliveredCount = 0
         let directiveMetaJson = directiveMeta(action: action)
@@ -310,12 +294,15 @@ actor GlobalAFKOrchestrator {
 struct EnrichedTarget {
     let snap: MCPSessionRegistry.SessionSnapshot
     /// User-facing identifier. For Sonata tabs: the tab name. For external
-    /// sessions: an Echo-generated ≤4-word handle ("Auth Bug Debugging"),
-    /// or the role label as ultimate fallback. Never empty.
+    /// sessions: Echo handle → cwd basename → short claudeSessionId → role
+    /// label, in that order. Never empty.
     let displayName: String
     /// Working dir of the session. May be nil for external sessions that
     /// haven't called sonata_identify.
     let cwd: String?
+    /// Claude session id when known — used as the subject's routing key.
+    /// Stable across `--resume`, recognizable in the inbox.
+    let claudeSessionId: String?
     /// Unused in the current line shape — displayName now carries the
     /// disambiguating signal. Kept for future use (e.g. hover tooltip).
     let summary: String?
@@ -323,10 +310,16 @@ struct EnrichedTarget {
     /// to group sessions in the kickoff email's two-section layout.
     let isOwnedTab: Bool
 
-    var token: String { "global-\(snap.sessionKey.prefix(8))" }
+    /// Routing key for the subject. Prefers the stable Claude session UUID;
+    /// falls back to the bearer-derived sessionKey when no UUID is known.
+    /// EmailHandler.extractAFKSessionId pulls this out and
+    /// MCPSessionRegistry.resolveSession accepts either form.
+    var subjectSessionId: String {
+        claudeSessionId ?? snap.sessionKey
+    }
 
     func subject() -> String {
-        "[AFK:\(token)] \(displayName)"
+        "[AFK-#\(subjectSessionId)] \(displayName)"
     }
 
     func mailto(sonaInbox: String) -> String {
@@ -383,11 +376,16 @@ extension GlobalAFKOrchestrator {
     ) async -> EnrichedTarget {
         let lookup = await tabLookup(for: snap)
         if let tabName = lookup.tabName {
-            // Sonata-owned: name + cwd are enough. No Echo call.
+            // Sonata-owned: name + cwd are enough. No Echo call. claudeSessionId
+            // comes straight from the snapshot or proc scan if the tab has been
+            // identified — otherwise we route by the sessionKey (still stable
+            // for owned tabs within a single Sonata launch).
+            let procInfo = procMap[snap.sessionKey]
             return EnrichedTarget(
                 snap: snap,
                 displayName: tabName,
                 cwd: lookup.cwd,
+                claudeSessionId: snap.claudeSessionId ?? procInfo?.claudeSessionId,
                 summary: nil,
                 isOwnedTab: true
             )
@@ -419,13 +417,40 @@ extension GlobalAFKOrchestrator {
             claudeSessionId = nil
         }
         let echoName = await echoSessionName(for: snap, claudeSessionId: claudeSessionId, cwd: cwd)
+        // Fallback chain — Echo first (best), then cwd basename (still useful
+        // for disambiguating multiple "interactive" rows), then short Claude
+        // session id, finally the role label. Echo is the only chain element
+        // that can flake; the rest are pure derivations.
+        let displayName: String
+        if let echoName, !echoName.isEmpty {
+            displayName = echoName
+        } else if let base = cwdBasename(cwd) {
+            displayName = base
+        } else if let cid = claudeSessionId, !cid.isEmpty {
+            displayName = String(cid.prefix(8))
+        } else {
+            displayName = snap.role.label
+        }
         return EnrichedTarget(
             snap: snap,
-            displayName: echoName ?? snap.role.label,
+            displayName: displayName,
             cwd: cwd,
+            claudeSessionId: claudeSessionId,
             summary: nil,
             isOwnedTab: false
         )
+    }
+
+    /// Last path component of a cwd, skipping trivial ones (empty, "/", "~").
+    /// Used as a displayName fallback so rows are at least labeled with their
+    /// working dir (e.g. "Sonata", "session4") when Echo fails or has nothing
+    /// to summarize.
+    private static func cwdBasename(_ cwd: String?) -> String? {
+        guard let cwd, !cwd.isEmpty else { return nil }
+        let trimmed = cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
+        guard let last = trimmed.split(separator: "/").last else { return nil }
+        let name = String(last)
+        return (name == "/" || name == "~" || name.isEmpty) ? nil : name
     }
 
     /// One running `claude` process's contribution to the proc-scan map.

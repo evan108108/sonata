@@ -543,42 +543,16 @@ struct UpcomingEventsSection: View {
     }
 }
 
-// MARK: - AFK Questions (Attention zone)
+// MARK: - AFK Questions card removed
+//
+// The AFK token + registry surface was retired when EmailHandler started
+// routing [AFK-#<sessionId>] replies directly to the live MCP session. Without
+// a registry there is no server-side concept of "which AFK questions are
+// outstanding" — the email thread itself IS the outstanding-question signal.
+// If we want a dashboard view of pending AFK conversations later, the source
+// of truth is the Sonata AgentMail inbox, not an in-memory registry.
 
-struct AFKActiveEntryModel: Identifiable, Decodable, Equatable {
-    let token: String
-    let workerId: String
-    let registeredAt: Int64
-    let workerLabel: String?
-    let lastQuestion: String?
-
-    var id: String { token }
-}
-
-private struct AFKActiveResponse: Decodable {
-    let entries: [AFKActiveEntryModel]
-    let generatedAt: Int64
-}
-
-@MainActor
-final class AFKQuestionsViewModel: ObservableObject {
-    @Published var entries: [AFKActiveEntryModel] = []
-    @Published var hasLoadedOnce = false
-
-    func fetch() async {
-        do {
-            let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/afk/active")!
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
-            let decoded = try JSONDecoder().decode(AFKActiveResponse.self, from: data)
-            self.entries = decoded.entries
-            self.hasLoadedOnce = true
-        } catch {
-            // Quiet on transient failures.
-        }
-    }
-}
-
+#if false
 struct AFKQuestionsCard: View {
     let entries: [AFKActiveEntryModel]
     /// Worker `sessionId → Worker` lookup so taps can navigate to the live row.
@@ -708,6 +682,7 @@ struct AFKQuestionsCard: View {
         return String(s.prefix(n)) + "…"
     }
 }
+#endif
 
 // MARK: - Background thoughts
 
