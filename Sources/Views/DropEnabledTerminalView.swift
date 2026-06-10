@@ -184,8 +184,6 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
 
     override func paste(_ sender: Any) {
         let pb = NSPasteboard.general
-        let pbStringPreview = (pb.string(forType: .string) ?? "").prefix(120)
-        FileHandle.standardError.write(Data("[DEBUG] PTY-paste-entry pbChangeCount=\(pb.changeCount) pbString=\(String(pbStringPreview).debugDescription) stack=\(Thread.callStackSymbols.dropFirst().prefix(8).joined(separator: " | "))\n".utf8))
 
         // 1) A real file on the pasteboard → insert its FULL path. Finder's
         // Cmd-C puts both the file URL *and* the bare filename (as a string)
@@ -279,10 +277,8 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
             var out = EscapeSequences.bracketedPasteStart
             out.append(contentsOf: bytes)
             out.append(contentsOf: EscapeSequences.bracketedPasteEnd)
-            FileHandle.standardError.write(Data("[DEBUG] PTY-send src=DropEnabledTerm.insertPaths.bracketed paths=\(paths) text=\(typed.debugDescription) stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
             process.send(data: out[...])
         } else {
-            FileHandle.standardError.write(Data("[DEBUG] PTY-send src=DropEnabledTerm.insertPaths.raw paths=\(paths) text=\(typed.debugDescription) stack=\(Thread.callStackSymbols.dropFirst().prefix(5).joined(separator: " | "))\n".utf8))
             process.send(data: bytes[...])
         }
     }
