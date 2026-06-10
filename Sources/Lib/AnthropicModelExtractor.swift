@@ -21,7 +21,9 @@ enum AnthropicModelExtractor {
         let date: String?      // "20251114" or nil
     }
 
-    static let tiers = ["opus", "sonnet", "haiku", "fable"]
+    /// Canonical tier order used for picker grouping and sort. Fable leads
+    /// because it's the newest line; the rest descend by tenure.
+    static let tiers = ["fable", "opus", "sonnet", "haiku"]
     private static let pattern: NSRegularExpression = {
         // claude-<tier>-<digits>(-<digits>)*(-<8 digit date>)?
         // The version+date split happens in parse() — easier than encoding it
