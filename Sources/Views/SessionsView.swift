@@ -455,6 +455,7 @@ private struct NewSessionSheet: View {
     /// Only shown / applied for `.sona` kind — terminal/webview don't run
     /// Claude Code so the picker is irrelevant for them.
     @State private var model: String? = nil
+    @ObservedObject private var anthropicStore = AnthropicModelStore.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -496,12 +497,25 @@ private struct NewSessionSheet: View {
                     if kind == .sona {
                         Picker("Model", selection: $model) {
                             Text("Default (Anthropic)").tag(String?.none)
+                            // v25: live catalog extracted from the user's claude
+                            // binary, filtered to user-enabled rows. Empty until
+                            // AnthropicModelStore.bootstrap completes (first paint
+                            // gracefully degrades to just Default + locals).
+                            if !anthropicStore.enabledEntries.isEmpty {
+                                Divider()
+                                ForEach(anthropicStore.enabledEntries) { row in
+                                    Text(row.id).tag(String?.some(row.id))
+                                }
+                            }
                             // Phase F.3: iterate the registry so user-installed
                             // models added via Settings → Local Models appear
                             // here automatically alongside the built-in entry.
-                            ForEach(LocalChatModelRegistry.entries, id: \.modelName) { spec in
-                                Text("Local — \(spec.displayName)")
-                                    .tag(String?.some("\(ChatServerManager.localModelPrefix)\(spec.modelName)"))
+                            if !LocalChatModelRegistry.entries.isEmpty {
+                                Divider()
+                                ForEach(LocalChatModelRegistry.entries, id: \.modelName) { spec in
+                                    Text("Local — \(spec.displayName)")
+                                        .tag(String?.some("\(ChatServerManager.localModelPrefix)\(spec.modelName)"))
+                                }
                             }
                         }
                     }

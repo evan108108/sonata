@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var studioExpanded = false
     @State private var webExpanded = false
     @State private var localModelsExpanded = false
+    @State private var anthropicModelsExpanded = false
 
     // Whole-window translucency. Shares the UserDefaults key the WindowGroup
     // root reads, so dragging the slider updates the live window immediately.
@@ -267,6 +268,11 @@ struct SettingsView: View {
                     // MARK: - Web Sessions Section
                     collapsibleSection("Web Sessions", icon: "globe", expanded: $webExpanded) {
                         WebviewSessionConfigView()
+                    }
+
+                    // MARK: - Anthropic Models Section (v25)
+                    collapsibleSection("Anthropic Models", icon: "sparkles", expanded: $anthropicModelsExpanded) {
+                        AnthropicModelsConfigView()
                     }
 
                     // MARK: - Local Models Section (Phase F.3)

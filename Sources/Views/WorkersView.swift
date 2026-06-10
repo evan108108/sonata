@@ -1178,6 +1178,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
 struct WorkersView: View {
     @ObservedObject private var manager = WorkerManager.shared
+    @ObservedObject private var anthropicStore = AnthropicModelStore.shared
     @State private var showPromptCachePopover: Bool = false
 
     var body: some View {
@@ -1300,12 +1301,26 @@ struct WorkersView: View {
                 Button("Default (Anthropic)") {
                     manager.addWorker()
                 }
+                // v25: live catalog from AnthropicModelStore (extracted from
+                // the user's claude CLI, filtered to enabled rows). Empty list
+                // means the store hasn't bootstrapped yet — only Default shows.
+                if !anthropicStore.enabledEntries.isEmpty {
+                    Divider()
+                    ForEach(anthropicStore.enabledEntries) { row in
+                        Button(row.id) {
+                            manager.addWorker(model: row.id)
+                        }
+                    }
+                }
                 // Phase F.3: iterate the registry so user-installed models added
                 // via Settings → Local Models auto-appear without code changes.
                 // Hardcoded built-in (Llama 3.1 8B) plus any installed entries.
-                ForEach(LocalChatModelRegistry.entries, id: \.modelName) { spec in
-                    Button("Local — \(spec.displayName)") {
-                        manager.addWorker(model: "\(ChatServerManager.localModelPrefix)\(spec.modelName)")
+                if !LocalChatModelRegistry.entries.isEmpty {
+                    Divider()
+                    ForEach(LocalChatModelRegistry.entries, id: \.modelName) { spec in
+                        Button("Local — \(spec.displayName)") {
+                            manager.addWorker(model: "\(ChatServerManager.localModelPrefix)\(spec.modelName)")
+                        }
                     }
                 }
             } label: {

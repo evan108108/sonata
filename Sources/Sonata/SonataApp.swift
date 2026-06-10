@@ -732,6 +732,15 @@ struct SonataApp: App {
                 // worker/session UI hits the picker on first paint.
                 await InstalledChatModelManager.shared.bootstrap(dbPool: pool)
 
+                // 8d. Boot the Anthropic model catalog (v25). Extracts model IDs
+                // from the user's installed `claude` binary so the picker menu
+                // matches whatever Claude Code will actually accept via --model.
+                // Mtime-cached, so repeat launches without a CLI update are free.
+                await AnthropicModelStore.shared.bootstrap(
+                    dbPool: pool,
+                    binaryPath: InteractiveSessionTab.claudeBinary
+                )
+
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")
 
                 // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up

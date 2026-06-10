@@ -1048,5 +1048,30 @@ extension DatabaseMigrator {
                 """)
             try db.execute(sql: "INSERT OR IGNORE INTO globalAFK (id, enabled) VALUES (1, 0)")
         }
+
+        // v25: cached catalog of Anthropic models extracted from the user's
+        // `claude` CLI binary. Rows upserted at boot + on Settings refresh;
+        // `enabled` drives whether the entry appears in the Sessions/Workers
+        // pickers. New extractions default enabled=1 (per Evan: any model we
+        // discover is on by default, user can untick it). Rows never deleted —
+        // if a future Claude Code drops a model we tombstone via lastSeenAt
+        // rather than yanking it out from under sessions that reference it.
+        registerMigration("v25_anthropic_models") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS anthropicModels (
+                    id           TEXT PRIMARY KEY,
+                    tier         TEXT NOT NULL,
+                    version      TEXT NOT NULL,
+                    isDated      INTEGER NOT NULL DEFAULT 0,
+                    releaseDate  TEXT,
+                    displayName  TEXT,
+                    enabled      INTEGER NOT NULL DEFAULT 1,
+                    firstSeenAt  INTEGER NOT NULL,
+                    lastSeenAt   INTEGER NOT NULL
+                )
+                """)
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS anthropicModels_by_tier ON anthropicModels(tier, enabled)")
+        }
     }
 }
