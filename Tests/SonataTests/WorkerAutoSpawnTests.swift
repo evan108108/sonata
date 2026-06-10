@@ -19,9 +19,27 @@ final class WorkerAutoSpawnTests: XCTestCase {
 
     // MARK: - Fix 1: computePoolMaintainPlan is status-aware
 
-    func test_maintainPlan_emptyPool_spawnsAllSlots() {
+    /// 2026-06-10 semantics: an empty slot is treated as user-removed, not
+    /// as a hole to refill. Boot-time population is `spawnDefaultWorkers`'s
+    /// job; `maintainPoolSize` only heals stale `.offline` workers.
+    func test_maintainPlan_emptyPool_noOp() {
         let plan = WorkerManager.computePoolMaintainPlan(target: 2, workers: [])
-        XCTAssertEqual(plan.toSpawn, ["sona-worker-1", "sona-worker-2"])
+        XCTAssertTrue(plan.toSpawn.isEmpty,
+            "empty pool must not auto-spawn — refilling stomps explicit user removals")
+        XCTAssertTrue(plan.toDisplace.isEmpty)
+    }
+
+    /// User-removal regression: removing a slot via the Workers UI deletes
+    /// the Worker from the array entirely. The next pollHealth tick must
+    /// leave the gap alone instead of respawning it.
+    func test_maintainPlan_userRemovedSlot_staysGone() {
+        let workers = [
+            WorkerManager.WorkerSlotInfo(id: "w3", label: "sona-worker-3", status: .idle),
+            // slots 1 and 2 absent — user clicked Remove on both
+        ]
+        let plan = WorkerManager.computePoolMaintainPlan(target: 3, workers: workers)
+        XCTAssertTrue(plan.toSpawn.isEmpty,
+            "removed slots must NOT come back from maintainPoolSize")
         XCTAssertTrue(plan.toDisplace.isEmpty)
     }
 

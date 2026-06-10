@@ -346,14 +346,21 @@ class WorkerManager: ObservableObject {
         let status: Worker.WorkerStatus
     }
 
-    /// Pure planning function for pool maintenance. Status-aware: an
-    /// `.offline` worker is treated as not occupying its slot, so the
-    /// pool refills around it; the stale `.offline` Worker is reported
-    /// in `toDisplace` so the caller can remove it before spawning.
-    /// In-flight states (`.starting`, `.restarting`) still occupy the
-    /// slot so we don't double-spawn during a normal startup.
-    /// 2026-05-18 incident: prior version treated `.offline` as occupied
-    /// and the pool stalled at 1/2 while a dead Worker held the slot.
+    /// Pure planning function for pool maintenance. Heals stale slots only —
+    /// an `.offline` worker is treated as not occupying its slot and is
+    /// reported in `toDisplace` so the caller can remove it before spawning
+    /// a replacement. A slot with NO occupants (the user removed the worker
+    /// via the menu) is NOT refilled — pool maintenance must respect explicit
+    /// removals or removed workers respawn on the next health tick.
+    /// In-flight states (`.starting`, `.restarting`, `.draining`) still
+    /// occupy the slot so we don't double-spawn during a normal cycle.
+    ///
+    /// History:
+    ///   2026-05-18: status-aware refill landed for the pool-stuck-at-1/2
+    ///     incident — `.offline` was being treated as occupied.
+    ///   2026-06-10: refill restricted to stale slots only — empty slots
+    ///     are user-removed and must stay gone. The boot-time pool is
+    ///     spawned by `spawnDefaultWorkers`, not by this function.
     static func computePoolMaintainPlan(target: Int, workers: [WorkerSlotInfo]) -> PoolMaintainPlan {
         guard target > 0 else { return PoolMaintainPlan(toSpawn: [], toDisplace: []) }
         let prefix = "sona-worker-"
@@ -367,6 +374,8 @@ class WorkerManager: ObservableObject {
         var toDisplace: [String] = []
         for idx in 1...target {
             let occupants = bySlot[idx] ?? []
+            // No occupants at all → user removed this slot; leave it gone.
+            guard !occupants.isEmpty else { continue }
             let liveOccupants = occupants.filter { $0.status != .offline }
             if liveOccupants.isEmpty {
                 for stale in occupants where stale.status == .offline {

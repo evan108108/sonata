@@ -47,7 +47,6 @@ struct MCPTestHarness {
         actions.register(workerActions)
         actions.register(workerEventActions)
         actions.register(supervisorActions)
-        actions.register(afkActions)
         actions.register(dmActions)
         actions.register(taskActions)
         actions.register(taskWatcherActions)
