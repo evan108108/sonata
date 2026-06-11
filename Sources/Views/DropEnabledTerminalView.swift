@@ -41,12 +41,25 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
         super.init(frame: frameRect)
         registerForDraggedTypes(Self.acceptedDropTypes)
         observeTerminalColorChanges()
+        configureMouseBehavior()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerForDraggedTypes(Self.acceptedDropTypes)
         observeTerminalColorChanges()
+        configureMouseBehavior()
+    }
+
+    private func configureMouseBehavior() {
+        // SwiftTerm's feedPrepare() clears the selection on EVERY output chunk
+        // while this is true — with Claude Code's spinner redrawing several
+        // times a second, a selection dies the instant it's made. False
+        // switches SwiftTerm onto its preserve-selection-while-streaming path
+        // (Terminal.app-like). Cost: mouse events are no longer forwarded to
+        // TUI apps that request mouse mode; the wheel scrolls our scrollback
+        // instead. Live-toggleable if a TUI ever needs the mouse back.
+        allowMouseReporting = false
     }
 
     deinit {
