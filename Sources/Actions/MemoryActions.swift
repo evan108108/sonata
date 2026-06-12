@@ -280,6 +280,15 @@ let memoryActions: [SonataAction] = [
                 throw ActionError.database(error.localizedDescription)
             }
 
+            // Embed on insert — local model, zero marginal cost. Detached so
+            // the store call doesn't wait on the embedding server; if this
+            // fails (server cold/down) the EmbeddingSweeper picks the row up
+            // within a minute.
+            let dbPool = ctx.dbPool
+            Task.detached {
+                try? await embedMemoryIfMissing(dbPool: dbPool, memoryId: id, content: content)
+            }
+
             return StoreResponse(id: id)
         }
     ),

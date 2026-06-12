@@ -562,6 +562,11 @@ struct SonataApp: App {
                 let webviewSweeper = WebviewSessionSweeper(
                     dbPool: pool, logger: Logger(label: "sonata.webview.sweeper"))
                 await webviewSweeper.start()
+                // Embeds any memory row missing its vector (backlog drain on
+                // boot, then a 60s safety net behind mem_store's embed-on-insert).
+                let embeddingSweeper = EmbeddingSweeper(
+                    dbPool: pool, logger: Logger(label: "sonata.embedding.sweeper"))
+                await embeddingSweeper.start()
                 let mcpEventPusher = MCPEventPusher(dbPool: pool, registry: mcpRegistry, logger: logger)
                 await mcpEventPusher.start()
                 logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
