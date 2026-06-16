@@ -159,17 +159,44 @@ private struct DocSearchResultResponse: Encodable {
     let index: String
 }
 
+/// One session-transcript hit from the Meili `sessions` index.
+private struct ConversationHitAction: Encodable {
+    let sessionId: String
+    let project: String
+    let chunk: String
+    let snippet: String
+}
+
+/// One email hit from the Meili `emails` index.
+private struct EmailHitAction: Encodable {
+    let _id: String
+    let subject: String
+    let fromAddr: String
+    let receivedAt: String
+    let snippet: String
+}
+
 private struct RecallResponseAction: Encodable {
     let memories: [RecallMemoryAction]
     let entities: [EntityResponse]
     let relations: [RelationResponse]
     let documents: [DocumentSummaryAction]
     let wikiPages: [WikiPageResultAction]
+    let conversations: [ConversationHitAction]
+    let emails: [EmailHitAction]
     let wander: [WanderMemoryAction]
     let wanderCount: Int
     let query: String
     let vectorResultCount: Int
     let partial: Bool
+    /// Per-layer self-report — every recall response carries the health of
+    /// its own retrieval legs so a dead layer can never masquerade as
+    /// "no memories exist" (the 2026-06-12 embedding outage went unnoticed
+    /// for weeks because recall had no way to say "my vector leg is dark").
+    let legs: [String: [String: String]]
+    /// Human-readable alerts for any stale/dead leg. Non-empty means the
+    /// answer may be incomplete — treat accordingly.
+    let warnings: [String]
     let tokenUsage: TokenUsageAction
     let _timings: [String: Int]
 }
@@ -190,6 +217,7 @@ private struct ScoredMemoryAction {
 
 private struct Phase1ResultAction {
     let memories: [MemoryRow]
+    let ftsUsedOrFallback: Bool
     let entitySearch: [EntityRow]
     let exactEntity: EntityRow?
     let exactEntities: [EntityRow]
@@ -198,11 +226,36 @@ private struct Phase1ResultAction {
 
 // MARK: - FTS helpers (duplicated from RecallRoutes.swift)
 
+/// AND-first with OR fallback. A multi-word topic must not return zero just
+/// because one query word never co-occurs with the others ("SMS idea
+/// approval" found nothing while dozens of SMS memories existed — 2026-06-12).
+/// AND results keep precedence; OR results backfill the remaining limit,
+/// ranked by FTS5 bm25 so memories matching more words still rise.
 private func recallFtsSearchMemories(
     db: Database, query: String, limit: Int,
     project: String?, filterTopic: String?
+) throws -> (rows: [MemoryRow], usedOrFallback: Bool) {
+    let andHits = try recallFtsRun(
+        db: db, ftsQuery: ftsEscape(query), limit: limit,
+        project: project, filterTopic: filterTopic)
+    // Plenty of AND matches ⇒ the strict interpretation is working; done.
+    if andHits.count >= limit / 2 { return (andHits, false) }
+
+    let orHits = try recallFtsRun(
+        db: db, ftsQuery: ftsEscapeOR(query), limit: limit,
+        project: project, filterTopic: filterTopic)
+    var seen = Set(andHits.map(\.id))
+    var merged = andHits
+    for row in orHits where seen.insert(row.id).inserted && merged.count < limit {
+        merged.append(row)
+    }
+    return (merged, !orHits.isEmpty)
+}
+
+private func recallFtsRun(
+    db: Database, ftsQuery: String, limit: Int,
+    project: String?, filterTopic: String?
 ) throws -> [MemoryRow] {
-    let ftsQuery = ftsEscape(query)
     guard !ftsQuery.isEmpty else { return [] }
 
     var sql = """
@@ -584,9 +637,19 @@ let recallActions: [SonataAction] = [
                     }
                 }
 
+                // Concurrent: conversation logs (Meili sessions + emails) —
+                // the "did we talk about it?" leg.
+                let convSearch = ctx.search
+                let convTask: Task<(sessions: [SearchResult], emails: [SearchResult]), Never> = Task {
+                    guard let s = convSearch else { return ([], []) }
+                    async let sessionHits = s.searchSessions(query: topic, limit: 5)
+                    async let emailHits = s.searchEmails(query: topic, limit: 5)
+                    return await (sessionHits, emailHits)
+                }
+
                 // Phase 1: text-based strategies
                 let phase1Result = try await dbPool.read { db -> Phase1ResultAction in
-                    let memories = try recallFtsSearchMemories(
+                    let (memories, ftsUsedOrFallback) = try recallFtsSearchMemories(
                         db: db, query: topic, limit: limit,
                         project: project, filterTopic: filterTopic
                     )
@@ -619,6 +682,7 @@ let recallActions: [SonataAction] = [
 
                     return Phase1ResultAction(
                         memories: memories,
+                        ftsUsedOrFallback: ftsUsedOrFallback,
                         entitySearch: entitySearch,
                         exactEntity: exactEntity,
                         exactEntities: exactEntities,
@@ -978,6 +1042,104 @@ let recallActions: [SonataAction] = [
                     }
                 }
 
+                // Conversations leg (sessions + emails). Bounded snippets so
+                // the section costs ~a few hundred tokens at most.
+                let convResults = await convTask.value
+                let conversations = convResults.sessions.map { hit in
+                    ConversationHitAction(
+                        sessionId: hit.fields["sessionId"] ?? hit.id,
+                        project: hit.fields["project"] ?? "",
+                        chunk: hit.fields["chunk"] ?? "0",
+                        snippet: String(hit.snippet.prefix(300))
+                    )
+                }
+                let emailResults = convResults.emails.map { hit in
+                    EmailHitAction(
+                        _id: hit.id,
+                        subject: hit.fields["subject"] ?? "",
+                        fromAddr: hit.fields["fromAddr"] ?? "",
+                        receivedAt: hit.fields["receivedAt"] ?? "",
+                        snippet: String(hit.snippet.prefix(300))
+                    )
+                }
+                timings["conversationHits"] = conversations.count
+                timings["emailHits"] = emailResults.count
+                let convJSON = (try? JSONEncoder().encode(conversations)) ?? Data()
+                let emailJSON = (try? JSONEncoder().encode(emailResults)) ?? Data()
+                used += recallEstimateTokens(String(data: convJSON, encoding: .utf8) ?? "")
+                used += recallEstimateTokens(String(data: emailJSON, encoding: .utf8) ?? "")
+
+                // Per-leg health. Cheap scalar queries + Meili stats; the point
+                // is that a dead layer is visible in the very response it
+                // degrades, not discovered by archaeology weeks later.
+                var legs: [String: [String: String]] = [:]
+                var warnings: [String] = []
+
+                legs["fts"] = [
+                    "hits": "\(phase1Result.memories.count)",
+                    "mode": phase1Result.ftsUsedOrFallback ? "or-fallback" : "and",
+                ]
+                legs["entities"] = ["hits": "\(entities.count)"]
+                legs["graph"] = ["relations": "\(allRelations.count)"]
+                legs["wiki"] = ["hits": "\(wikiResults.count)", "ok": ctx.search != nil ? "true" : "false"]
+                legs["docs"] = ["hits": "\(phase1Result.documents.count)"]
+                legs["wander"] = ["hits": "\(finalWanderCount)"]
+
+                let health = try await dbPool.read { db -> (missingActive: Int, newestMemMs: Int64, newestEmbMs: Int64, emailTable: Int, sweepMs: Int64) in
+                    let missing = try Int.fetchOne(db, sql: """
+                        SELECT COUNT(*) FROM memories m
+                        WHERE (m.status IS NULL OR m.status = 'active')
+                          AND NOT EXISTS (SELECT 1 FROM memoryEmbeddings e WHERE e.memoryId = m.id)
+                        """) ?? 0
+                    let newestMem = try Int64.fetchOne(db, sql: "SELECT COALESCE(MAX(createdAt), 0) FROM memories") ?? 0
+                    let newestEmb = try Int64.fetchOne(db, sql: """
+                        SELECT COALESCE(MAX(m.createdAt), 0) FROM memories m
+                        JOIN memoryEmbeddings e ON e.memoryId = m.id
+                        """) ?? 0
+                    let emailCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emails") ?? 0
+                    let sweep = try Int64.fetchOne(db, sql: "SELECT COALESCE(MAX(indexedAt), 0) FROM transcriptIndexState") ?? 0
+                    return (missing, newestMem, newestEmb, emailCount, sweep)
+                }
+
+                let vectorStale = health.missingActive > 25
+                legs["vector"] = [
+                    "ok": vectorStale ? "false" : "true",
+                    "missingActive": "\(health.missingActive)",
+                    "newestMemoryMs": "\(health.newestMemMs)",
+                    "newestEmbeddedMs": "\(health.newestEmbMs)",
+                ]
+                if vectorStale {
+                    warnings.append("vector leg STALE: \(health.missingActive) active memories have no embedding — semantic recall is blind to them")
+                }
+
+                if let search = ctx.search {
+                    let emailIndexed = await search.documentCount(index: "emails")
+                    let sessionDocs = await search.documentCount(index: "sessions")
+                    let emailStale = emailIndexed >= 0 && emailIndexed < health.emailTable - 5
+                    legs["emailsIndex"] = [
+                        "ok": emailStale ? "false" : "true",
+                        "indexed": "\(emailIndexed)",
+                        "tableCount": "\(health.emailTable)",
+                    ]
+                    if emailStale {
+                        warnings.append("emails index STALE: \(emailIndexed) indexed of \(health.emailTable) stored — conversation search incomplete")
+                    }
+                    let sweepAgeMin = health.sweepMs > 0 ? (nowMs() - health.sweepMs) / 60_000 : -1
+                    let sessionsStale = sessionDocs <= 0 || sweepAgeMin < 0 || sweepAgeMin > 30
+                    legs["sessionsIndex"] = [
+                        "ok": sessionsStale ? "false" : "true",
+                        "docs": "\(sessionDocs)",
+                        "lastSweepMinAgo": "\(sweepAgeMin)",
+                    ]
+                    if sessionsStale {
+                        warnings.append("sessions index STALE or empty (docs=\(sessionDocs), lastSweep=\(sweepAgeMin)m ago) — transcript search incomplete")
+                    }
+                } else {
+                    legs["emailsIndex"] = ["ok": "false"]
+                    legs["sessionsIndex"] = ["ok": "false"]
+                    warnings.append("search service unavailable — wiki/docs/conversation legs are all dark")
+                }
+
                 timings["total"] = recallMsElapsed(since: t0)
 
                 let budgetCapHit = included.count < sorted.count
@@ -990,11 +1152,15 @@ let recallActions: [SonataAction] = [
                     relations: finalRelations,
                     documents: finalDocs,
                     wikiPages: finalWiki,
+                    conversations: conversations,
+                    emails: emailResults,
                     wander: finalWander,
                     wanderCount: finalWanderCount,
                     query: topic,
                     vectorResultCount: vectorScores.count,
                     partial: partial,
+                    legs: legs,
+                    warnings: warnings,
                     tokenUsage: TokenUsageAction(
                         budget: budget,
                         used: used,
@@ -1058,13 +1224,13 @@ let recallActions: [SonataAction] = [
     // GET /api/recall/doc-search — full-text search across wiki pages and archived memories via MeiliSearch
     SonataAction(
         name: "mem_doc_search",
-        description: "Full-text search across wiki pages and archived memories.",
+        description: "Full-text search across wiki pages, archived memories, docs, emails, and session transcripts.",
         group: "/api/recall",
         path: "/doc-search",
         method: .get,
         params: [
             ActionParam("q", .string, required: true, description: "Search query"),
-            ActionParam("index", .string, description: "Index: wiki, archive, docs, private, or all (default: all)"),
+            ActionParam("index", .string, description: "Index: wiki, archive, docs, private, emails, sessions, or all (default: all)"),
             ActionParam("limit", .integer, description: "Max results (default 5)"),
         ],
         handler: { ctx in
@@ -1085,8 +1251,15 @@ let recallActions: [SonataAction] = [
                 results = await search.searchDocs(query: q, limit: limit)
             case "private":
                 results = await search.searchPrivate(query: q, limit: limit)
+            case "emails":
+                results = await search.searchEmails(query: q, limit: limit)
+            case "sessions":
+                results = await search.searchSessions(query: q, limit: limit)
             default:
-                results = await search.search(query: q, limit: limit)
+                async let base = search.search(query: q, limit: limit)
+                async let emails = search.searchEmails(query: q, limit: limit)
+                async let sessions = search.searchSessions(query: q, limit: limit)
+                results = await base + emails + sessions
             }
 
             return results.map { r in

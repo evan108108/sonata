@@ -225,6 +225,11 @@ final class AllSessionsViewModel: ObservableObject {
         let sonataInternalPrefix = "\(NSHomeDirectory())/.sonata/"
         for (sid, proc) in byClaudeSessionId {
             if attachedIds.contains(sid) { continue }
+            // Sonata-owned tabs register under the derived "session-<hex16>"
+            // key and rarely call sonata_identify, so the registry never
+            // learns their full claude UUID — without this check every
+            // connected tab shows up a second time as Unconnected.
+            if attachedIds.contains(InteractiveSessionTab.mcpSessionKey(forClaudeSessionId: sid)) { continue }
             if let cwd = proc.cwd, cwd.hasPrefix(sonataInternalPrefix) { continue }
             let kind: AllSessionsRow.Kind
             switch proc.kindRaw.lowercased() {

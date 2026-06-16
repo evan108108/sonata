@@ -153,6 +153,13 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
     /// Connected/Unconnected sections to find the human-readable name
     /// ("Session 1" / "My Session") attached to the tab.
     var mcpSessionKey: String {
+        Self.mcpSessionKey(forClaudeSessionId: sessionId)
+    }
+
+    /// Single source of truth for the sessionKey derivation. The dashboard's
+    /// Unconnected dedup recomputes this from a bare claude session UUID, so
+    /// the formula must not fork from what tabs register with.
+    static func mcpSessionKey(forClaudeSessionId sessionId: String) -> String {
         "session-" + sessionId.replacingOccurrences(of: "-", with: "").prefix(16)
     }
 
@@ -881,6 +888,28 @@ final class InteractiveSessionsViewModel: ObservableObject {
         DispatchQueue.main.async {
             tab.spawn()
         }
+        return tab
+    }
+
+    /// Resume an existing historical session by its claude sessionId. Unlike
+    /// addTab (which mints a fresh sessionId), this re-attaches to a prior
+    /// conversation via `claude --resume <sessionId>`. The cwd MUST be the one
+    /// the session originally ran in, or claude can't locate the transcript at
+    /// ~/.claude/projects/<mangled-cwd>/<sessionId>.jsonl — callers pass the
+    /// cwd recovered from the transcript (see session_history action). On a
+    /// resume that exits immediately (transcript gone), the existing Restart
+    /// fallback flips to --session-id.
+    @discardableResult
+    func addResumedTab(sessionId: String, cwd: URL, name: String, model: String? = nil) -> InteractiveSessionTab {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = trimmed.isEmpty ? "Session \(nextSessionIndex())" : trimmed
+        let tab = InteractiveSessionTab(
+            id: UUID(), name: finalName, cwd: cwd, sessionId: sessionId, resume: true,
+            kind: .sona, materializeWebView: false, model: model)
+        tabs.append(tab)
+        persistTab(tab, position: tabs.count - 1)
+        selectTab(id: tab.id)
+        DispatchQueue.main.async { tab.spawn() }
         return tab
     }
 

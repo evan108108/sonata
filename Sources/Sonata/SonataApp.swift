@@ -463,6 +463,16 @@ struct SonataApp: App {
                 await meili.start(dbPool: pool)
                 await meili.ensureIndexes()
 
+                // Conversation-log search (Meili `emails` + `sessions`) — the
+                // subsystem's original purpose, restored 2026-06-12. First
+                // transcript pass over ~/.claude/projects runs in the
+                // background and resumes across launches via
+                // transcriptIndexState.
+                let conversationIndexer = ConversationIndexer(
+                    dbPool: pool, search: meili,
+                    logger: Logger(label: "sonata.conversation.indexer"))
+                await conversationIndexer.start()
+
                 let scheduler = SchedulerActor(dbPool: pool)
 
                 let router = Router(context: BasicWebSocketRequestContext.self)
@@ -474,6 +484,7 @@ struct SonataApp: App {
                 registry.search = meili
                 registry.register(memoryActions)
                 registry.register(recallActions)
+                registry.register(sessionHistoryActions)
                 registry.register(entityActions)
                 registry.register(relationActions)
                 registry.register(taskActions)

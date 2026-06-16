@@ -126,6 +126,21 @@ func createSchema(in db: Database) throws {
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS emails_by_status           ON emails(status)")
     try db.execute(sql: "CREATE INDEX IF NOT EXISTS emails_by_receivedAt       ON emails(receivedAt)")
 
+    // MARK: transcriptIndexState — ConversationIndexer's per-file bookkeeping
+    // for the Meili `sessions` index. JSONL transcripts are append-only, so
+    // lastOffset lets each sweep read only the new bytes of active sessions.
+    try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS transcriptIndexState (
+            path        TEXT PRIMARY KEY,
+            sessionId   TEXT NOT NULL,
+            lastSize    INTEGER NOT NULL,
+            lastMtimeMs INTEGER NOT NULL,
+            lastOffset  INTEGER NOT NULL,
+            chunkCount  INTEGER NOT NULL,
+            indexedAt   INTEGER NOT NULL
+        )
+    """)
+
     // MARK: calendarEvents
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS calendarEvents (
@@ -1072,6 +1087,26 @@ extension DatabaseMigrator {
                 """)
             try db.execute(sql:
                 "CREATE INDEX IF NOT EXISTS anthropicModels_by_tier ON anthropicModels(tier, enabled)")
+        }
+
+        // v26: ConversationIndexer's transcript bookkeeping. The table is also
+        // in createSchema (for fresh installs), but existing DBs never re-run
+        // v1, so the table must ALSO land via its own migration — otherwise
+        // ConversationIndexer's per-file state read throws "no such table",
+        // every transcript is skipped, and the Meili `sessions` index stays
+        // empty (resume search returns nothing). Mirrors the v2/v3/v5 pattern.
+        registerMigration("v26_transcript_index_state") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS transcriptIndexState (
+                    path        TEXT PRIMARY KEY,
+                    sessionId   TEXT NOT NULL,
+                    lastSize    INTEGER NOT NULL,
+                    lastMtimeMs INTEGER NOT NULL,
+                    lastOffset  INTEGER NOT NULL,
+                    chunkCount  INTEGER NOT NULL,
+                    indexedAt   INTEGER NOT NULL
+                )
+            """)
         }
     }
 }

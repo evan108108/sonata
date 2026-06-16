@@ -457,6 +457,17 @@ private struct NewSessionSheet: View {
     @State private var model: String? = nil
     @ObservedObject private var anthropicStore = AnthropicModelStore.shared
 
+    /// Fresh (mint a new sessionId) vs Resume (re-attach to a historical
+    /// session via `claude --resume`). Only meaningful for `.sona`.
+    @State private var startMode: StartMode = .fresh
+    @StateObject private var resumeBrowser = ResumeSessionBrowser()
+
+    private enum StartMode: String, CaseIterable, Identifiable {
+        case fresh, resume
+        var id: String { rawValue }
+        var label: String { self == .fresh ? "Fresh" : "Resume previous" }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -478,22 +489,39 @@ private struct NewSessionSheet: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    TextField("Name", text: $name, prompt: Text(defaultName(for: kind)))
-                    if kind == .webview {
-                        TextField("URL", text: $urlString, prompt: Text("https://example.com"))
-                            .font(.system(.body, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textContentType(.URL)
+
+                    // Resume is a Sona-only concept (terminal/web have no
+                    // claude conversation to re-attach to).
+                    if kind == .sona {
+                        Picker("Start", selection: $startMode) {
+                            ForEach(StartMode.allCases) { m in
+                                Text(m.label).tag(m)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    if kind == .sona && startMode == .resume {
+                        ResumeSessionPicker(browser: resumeBrowser)
                     } else {
-                        HStack {
-                            TextField("Working directory", text: $cwdPath, prompt: Text(defaultCwd(for: kind).path))
+                        TextField("Name", text: $name, prompt: Text(defaultName(for: kind)))
+                        if kind == .webview {
+                            TextField("URL", text: $urlString, prompt: Text("https://example.com"))
                                 .font(.system(.body, design: .monospaced))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                            Button("Browse…") { browse() }
+                                .textContentType(.URL)
+                        } else {
+                            HStack {
+                                TextField("Working directory", text: $cwdPath, prompt: Text(defaultCwd(for: kind).path))
+                                    .font(.system(.body, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Button("Browse…") { browse() }
+                            }
                         }
                     }
+                    // Model picker applies to any Sona session, fresh or resumed.
                     if kind == .sona {
                         Picker("Model", selection: $model) {
                             Text("Default (Anthropic)").tag(String?.none)
@@ -527,13 +555,14 @@ private struct NewSessionSheet: View {
 
             HStack {
                 Spacer()
-                Button("Start") { start() }
+                Button(startMode == .resume && kind == .sona ? "Resume" : "Start") { start() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
+                    .disabled(kind == .sona && startMode == .resume && resumeBrowser.selected == nil)
             }
             .padding()
         }
-        .frame(width: 520, height: 340)
+        .frame(width: 520, height: kind == .sona && startMode == .resume ? 460 : 340)
         .onAppear {
             // Prefill defaults once so the form reflects what would happen
             // if the user just hits Start without touching anything.
@@ -595,6 +624,22 @@ private struct NewSessionSheet: View {
     }
 
     private func start() {
+        // Resume mode: re-attach to the picked historical session in its
+        // original cwd. Live sessions aren't selectable (would fork), so a
+        // non-nil selection is safe to resume.
+        if kind == .sona && startMode == .resume {
+            guard let pick = resumeBrowser.selected else { return }
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let useName = trimmedName.isEmpty ? "↻ \(pick.project)" : trimmedName
+            vm.addResumedTab(
+                sessionId: pick.sessionId,
+                cwd: URL(fileURLWithPath: pick.cwd),
+                name: useName,
+                model: model)
+            onClose()
+            return
+        }
+
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let useName = trimmedName.isEmpty ? defaultName(for: kind) : trimmedName
 
@@ -613,5 +658,148 @@ private struct NewSessionSheet: View {
         // Model only applies to Sona sessions — terminal/webview don't read it.
         vm.addTab(name: useName, cwd: useCwd, kind: kind, model: kind == .sona ? model : nil)
         onClose()
+    }
+}
+
+// MARK: - Resume picker
+
+/// One resumable historical session, decoded from /api/sessions/history.
+struct HistoricalSession: Decodable, Identifiable {
+    let sessionId: String
+    let cwd: String
+    let project: String
+    let lastPrompt: String
+    let firstPrompt: String
+    let lastSeenMs: Int64
+    let isLive: Bool
+
+    var id: String { sessionId }
+
+    var relativeSeen: String {
+        let deltaSec = max(0, Int64(Date().timeIntervalSince1970 * 1000) - lastSeenMs) / 1000
+        if deltaSec < 60 { return "just now" }
+        let m = deltaSec / 60
+        if m < 60 { return "\(m)m ago" }
+        let h = m / 60
+        if h < 24 { return "\(h)h ago" }
+        return "\(h / 24)d ago"
+    }
+}
+
+/// Loads + searches historical sessions for the resume picker. Debounces the
+/// query and hits the local `session_history` action (transcript-content
+/// search when a query is set, recency otherwise).
+@MainActor
+final class ResumeSessionBrowser: ObservableObject {
+    @Published var query: String = ""
+    @Published private(set) var results: [HistoricalSession] = []
+    @Published private(set) var loading = false
+    @Published var selectedId: String?
+
+    private var debounce: Task<Void, Never>?
+
+    var selected: HistoricalSession? {
+        guard let id = selectedId else { return nil }
+        return results.first { $0.sessionId == id }
+    }
+
+    /// Debounced reload — call on query change and on first appear.
+    func reload() {
+        debounce?.cancel()
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        debounce = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
+            await self?.fetch(query: q)
+        }
+    }
+
+    private func fetch(query: String) async {
+        loading = true
+        defer { loading = false }
+        var comps = URLComponents(string: "http://127.0.0.1:\(sonataPort)/api/sessions/history")!
+        var items = [URLQueryItem(name: "limit", value: "25")]
+        if !query.isEmpty { items.append(URLQueryItem(name: "query", value: query)) }
+        comps.queryItems = items
+        guard let url = comps.url else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode([HistoricalSession].self, from: data)
+            self.results = decoded
+            // Drop a selection that fell out of the new result set.
+            if let sel = selectedId, !decoded.contains(where: { $0.sessionId == sel }) {
+                selectedId = nil
+            }
+        } catch {
+            self.results = []
+        }
+    }
+}
+
+private struct ResumeSessionPicker: View {
+    @ObservedObject var browser: ResumeSessionBrowser
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search past conversations…", text: $browser.query)
+                    .textFieldStyle(.plain)
+                    .onChange(of: browser.query) { _, _ in browser.reload() }
+                if browser.loading { ProgressView().controlSize(.small) }
+            }
+
+            if browser.results.isEmpty {
+                Text(browser.loading ? "Searching…" : "No matching sessions.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(browser.results) { s in
+                            row(s)
+                        }
+                    }
+                }
+                .frame(height: 180)
+            }
+        }
+        .onAppear { browser.reload() }
+    }
+
+    @ViewBuilder
+    private func row(_ s: HistoricalSession) -> some View {
+        let selected = browser.selectedId == s.sessionId
+        Button {
+            if !s.isLive { browser.selectedId = s.sessionId }
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(s.lastPrompt.isEmpty ? s.firstPrompt : s.lastPrompt)
+                        .lineLimit(1)
+                        .font(.system(size: 12))
+                    Spacer()
+                    if s.isLive {
+                        Text("live")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Text(s.project).font(.system(size: 10, design: .monospaced))
+                    Text("·").font(.system(size: 10))
+                    Text(s.relativeSeen).font(.system(size: 10))
+                }
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Color.accentColor.opacity(0.18) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .opacity(s.isLive ? 0.5 : 1)
+        }
+        .buttonStyle(.plain)
+        .help(s.isLive ? "This session is currently running — resuming would fork the conversation." : s.cwd)
     }
 }

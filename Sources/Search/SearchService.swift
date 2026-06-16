@@ -30,6 +30,18 @@ protocol SearchService: Sendable {
     func removePrivateFile(filename: String) async
     func searchPrivate(query: String, limit: Int) async -> [SearchResult]
 
+    // MARK: - Conversations (emails table + ~/.claude session transcripts)
+    // The search subsystem's original purpose: "did we talk about it?"
+    // Spotlight couldn't index the dotfile dirs these live in; Meili can.
+    // Docs are pre-shaped [[String: String]] so the ConversationIndexer owns
+    // extraction/chunking and the engine stays a dumb index.
+    func indexEmailDocs(_ docs: [[String: String]]) async
+    func searchEmails(query: String, limit: Int) async -> [SearchResult]
+    func indexSessionChunks(_ docs: [[String: String]]) async
+    func removeSessionChunks(ids: [String]) async
+    func searchSessions(query: String, limit: Int) async -> [SearchResult]
+    func documentCount(index: String) async -> Int
+
     // MARK: - Unified
     func search(query: String, limit: Int) async -> [SearchResult]
 

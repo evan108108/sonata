@@ -175,6 +175,8 @@ actor MeiliSearchManager: SearchService {
         await createIndex(uid: "archive", primaryKey: "id")
         await createIndex(uid: "docs", primaryKey: "id")
         await createIndex(uid: "private", primaryKey: "id")
+        await createIndex(uid: "emails", primaryKey: "id")
+        await createIndex(uid: "sessions", primaryKey: "id")
 
         // Configure searchable attributes
         await updateSettings(index: "wiki", settings: [
@@ -192,6 +194,14 @@ actor MeiliSearchManager: SearchService {
         await updateSettings(index: "private", settings: [
             "searchableAttributes": ["content", "title", "filename"],
             "displayedAttributes": ["id", "filename", "title", "filePath", "content"]
+        ])
+        await updateSettings(index: "emails", settings: [
+            "searchableAttributes": ["subject", "body", "fromAddr", "toAddr"],
+            "displayedAttributes": ["id", "subject", "body", "fromAddr", "toAddr", "threadId", "receivedAt"]
+        ])
+        await updateSettings(index: "sessions", settings: [
+            "searchableAttributes": ["text", "project", "sessionId"],
+            "displayedAttributes": ["id", "sessionId", "project", "chunk", "text", "mtimeMs"]
         ])
     }
 
@@ -285,6 +295,40 @@ actor MeiliSearchManager: SearchService {
         let _ = await post(path: "/indexes/archive/documents", body: [doc])
     }
 
+    // MARK: - Conversations
+
+    func indexEmailDocs(_ docs: [[String: String]]) async {
+        guard !docs.isEmpty else { return }
+        let _ = await post(path: "/indexes/emails/documents", body: docs)
+    }
+
+    func searchEmails(query: String, limit: Int = 5) async -> [SearchResult] {
+        return await searchIndex("emails", query: query, limit: limit)
+    }
+
+    func indexSessionChunks(_ docs: [[String: String]]) async {
+        guard !docs.isEmpty else { return }
+        let _ = await post(path: "/indexes/sessions/documents", body: docs)
+    }
+
+    func removeSessionChunks(ids: [String]) async {
+        guard !ids.isEmpty else { return }
+        let _ = await post(path: "/indexes/sessions/documents/delete-batch", body: ids)
+    }
+
+    func searchSessions(query: String, limit: Int = 5) async -> [SearchResult] {
+        return await searchIndex("sessions", query: query, limit: limit)
+    }
+
+    /// numberOfDocuments from /indexes/{uid}/stats — used by the recall
+    /// health block to detect index drift (e.g. emails table vs index).
+    func documentCount(index: String) async -> Int {
+        guard let data = await get(path: "/indexes/\(index)/stats"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let n = json["numberOfDocuments"] as? Int else { return -1 }
+        return n
+    }
+
     // MARK: - Search
 
     func searchWiki(query: String, limit: Int = 5) async -> [SearchResult] {
@@ -325,8 +369,11 @@ actor MeiliSearchManager: SearchService {
                 else { fields[key] = "\(value)" }
             }
             let id = fields["originalSlug"] ?? fields["slug"] ?? fields["filename"] ?? fields["id"] ?? ""
-            let title = fields["title"] ?? id
-            let snippet = String((fields["content"] ?? "").prefix(300))
+            // Title/snippet sources vary by index: wiki/docs carry title+content,
+            // emails carry subject+body, session chunks carry sessionId+text.
+            let title = fields["title"] ?? fields["subject"] ?? fields["sessionId"] ?? id
+            let snippetSource = fields["content"] ?? fields["body"] ?? fields["text"] ?? ""
+            let snippet = String(snippetSource.prefix(300))
             return SearchResult(id: id, title: title, snippet: snippet, index: index, fields: fields)
         }
     }
@@ -533,6 +580,20 @@ actor MeiliSearchManager: SearchService {
         guard let url = URL(string: "\(baseURL)\(path)") else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
+        request.setValue("Bearer \(masterKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+
+        do {
+            let (data, _) = try await session.data(for: request)
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    private func get(path: String) async -> Data? {
+        guard let url = URL(string: "\(baseURL)\(path)") else { return nil }
+        var request = URLRequest(url: url)
         request.setValue("Bearer \(masterKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 10
 
