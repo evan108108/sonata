@@ -48,6 +48,7 @@ protocol SearchService: Sendable {
     // MARK: - Backfill
     func backfillWiki(dbPool: DatabasePool) async
     func backfillArchive(dbPool: DatabasePool) async
+    func pruneArchiveOrphans(dbPool: DatabasePool) async -> Int
     func backfillDocs() async
     func backfillPrivate() async
 }

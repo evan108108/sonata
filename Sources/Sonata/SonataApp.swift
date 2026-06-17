@@ -713,7 +713,11 @@ struct SonataApp: App {
                             let effective = WorkerManager.shared.workers.filter { $0.status != .offline }.count
                             return (target: target, effective: effective)
                         }
-                    }
+                    },
+                    // Enables the periodic search-index + embedding-coverage
+                    // reconcile (self-heals docs drift, alarms on any index or
+                    // vector gap) — the standing guard against silent drift.
+                    search: meili
                 )
                 await healthMonitor.start()
 

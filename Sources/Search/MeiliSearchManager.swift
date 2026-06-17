@@ -222,12 +222,22 @@ actor MeiliSearchManager: SearchService {
     }
 
     /// Encode a relative filename for use as a MeiliSearch document ID.
-    /// MeiliSearch IDs allow only [A-Za-z0-9_-]; encode `/` and `.` separately so
-    /// they round-trip distinctly.
+    /// MeiliSearch IDs allow ONLY [A-Za-z0-9_-] (≤511 bytes); a doc with an
+    /// invalid id makes Meili reject the WHOLE batch it's in, so a single
+    /// space-bearing filename silently drops 50 docs (the 2026-06-17 docs
+    /// gap: one "Issue 11 - ….md" poisoned its batch). `/`→`--` and `.`→`__`
+    /// keep normal paths stable and reversible; the final pass maps any
+    /// remaining disallowed char to `-` so EVERY filename yields a valid id.
+    /// Normal filenames have no such chars, so their ids are unchanged (no
+    /// re-index churn); only previously-broken names change — and those were
+    /// never indexed anyway.
     private func encodeFilename(_ name: String) -> String {
-        name
+        let base = name
             .replacingOccurrences(of: "/", with: "--")
             .replacingOccurrences(of: ".", with: "__")
+        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        let sanitized = String(base.map { allowed.contains($0) ? $0 : "-" })
+        return String(sanitized.prefix(511))
     }
 
     func indexWikiPage(slug: String, title: String, content: String, namespace: String?, filePath: String) async {
@@ -456,6 +466,39 @@ actor MeiliSearchManager: SearchService {
         } catch {
             logger.error("Archive backfill failed: \(error)")
         }
+    }
+
+    /// Remove archive-index docs whose memory is no longer archived/superseded
+    /// (hard-deleted, un-archived, or revived). backfillArchive is add-only, so
+    /// without this orphans accumulate forever as archived memories get deleted
+    /// — the 2026-06-17 archive-over-count. Makes archive reconciliation
+    /// converge to exactly the source set. Returns the number pruned.
+    @discardableResult
+    func pruneArchiveOrphans(dbPool: DatabasePool) async -> Int {
+        // All ids currently in the archive index (paginate generously).
+        guard let data = await get(path: "/indexes/archive/documents?limit=100000&fields=id"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else { return 0 }
+        let indexIds = results.compactMap { $0["id"] as? String }
+        guard !indexIds.isEmpty else { return 0 }
+        // Of those, which still qualify as archived/superseded?
+        let validIds: Set<String> = (try? await dbPool.read { db -> Set<String> in
+            var keep = Set<String>()
+            for chunk in stride(from: 0, to: indexIds.count, by: 500) {
+                let slice = Array(indexIds[chunk..<min(chunk + 500, indexIds.count)])
+                let ph = slice.map { _ in "?" }.joined(separator: ",")
+                let rows = try String.fetchAll(db,
+                    sql: "SELECT id FROM memories WHERE status IN ('archived','superseded') AND id IN (\(ph))",
+                    arguments: StatementArguments(slice))
+                keep.formUnion(rows)
+            }
+            return keep
+        }) ?? Set(indexIds)  // on read failure, keep everything (never over-delete)
+        let orphans = indexIds.filter { !validIds.contains($0) }
+        guard !orphans.isEmpty else { return 0 }
+        let _ = await post(path: "/indexes/archive/documents/delete-batch", body: orphans)
+        logger.info("Pruned \(orphans.count) orphaned archive docs")
+        return orphans.count
     }
 
     func backfillDocs() async {

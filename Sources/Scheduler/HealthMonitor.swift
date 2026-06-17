@@ -40,6 +40,15 @@ actor HealthMonitor {
     private var monitorTask: Task<Void, Never>?
     private var isRunning = false
 
+    /// Search backend, for the index-drift reconcile check (nil = skip it).
+    private let search: (any SearchService)?
+    /// Wall-clock gate for the heavier search-index reconcile (scans dirs + may
+    /// re-backfill), so it runs at most once per interval no matter how often
+    /// runAllChecks is invoked — an /api/status call must not perturb the
+    /// cadence or trigger a backfill inside a status response.
+    private var lastSearchCheckAt: Date = .distantPast
+    private let searchCheckInterval: TimeInterval = 600  // 10 min
+
     /// Consecutive failure counts by check name.
     private var consecutiveFailures: [String: Int] = [:]
 
@@ -123,6 +132,7 @@ actor HealthMonitor {
         schedulerStatus: (@Sendable () async -> Bool)? = nil,
         workerPoolStatus: (@Sendable () async -> (target: Int, effective: Int))? = nil,
         emailProvider: EmailProvider = AgentMailProvider(),
+        search: (any SearchService)? = nil,
         logger: Logger? = nil
     ) {
         self.dbPool = dbPool
@@ -130,6 +140,7 @@ actor HealthMonitor {
         self.serverURL = "http://127.0.0.1:\(port)/api/ping"
         self.schedulerStatus = schedulerStatus
         self.workerPoolStatus = workerPoolStatus
+        self.search = search
         var log = logger ?? Logger(label: "sonata.health")
         log.logLevel = .info
         self.logger = log
@@ -354,7 +365,123 @@ actor HealthMonitor {
             results.append(poolResult)
         }
 
+        // 6. Search-index + embedding coverage reconcile. Heavier (scans dirs,
+        // may re-backfill), so only every Nth tick. This is the standing guard
+        // against the silent-drift class — embeddings not generating, a Meili
+        // index falling behind its source — that previously went unnoticed for
+        // weeks (vector dark 5/18→6/12; docs index drifting with no watcher).
+        if search != nil, now.timeIntervalSince(lastSearchCheckAt) >= searchCheckInterval {
+            lastSearchCheckAt = now
+            results.append(contentsOf: await checkSearchAndEmbeddings(at: now))
+        }
+
         return results
+    }
+
+    // MARK: - Search index + embedding coverage
+
+    /// Source-of-truth counts for each retrieval surface, compared against what
+    /// the index actually holds. Self-heals the one surface with no live writer
+    /// (docs: re-backfilled when short — there is no FSEvents watcher on the
+    /// documents dir, unlike wiki/private). Everything reports drift into the
+    /// existing consecutive-failure alert → supervisor path, so a wedged
+    /// sweeper or watcher pages within minutes instead of going unnoticed.
+    private func checkSearchAndEmbeddings(at time: Date) async -> [CheckResult] {
+        guard let search else { return [] }
+        var out: [CheckResult] = []
+
+        // --- Embedding coverage (active memories must have a vector) ---
+        let missingEmbeddings = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM memories m
+                WHERE COALESCE(m.status,'active')='active'
+                  AND NOT EXISTS (SELECT 1 FROM memoryEmbeddings e WHERE e.memoryId = m.id)
+                """) ?? 0
+        }) ?? 0
+        // EmbeddingSweeper drains the backlog continuously; a small transient
+        // count is normal. A large standing gap means it's wedged.
+        out.append(CheckResult(
+            name: "embedding_coverage",
+            healthy: missingEmbeddings <= 50,
+            message: missingEmbeddings <= 50
+                ? "OK (\(missingEmbeddings) active unembedded)"
+                : "\(missingEmbeddings) active memories have no embedding — vector recall is blind to them (EmbeddingSweeper wedged?)",
+            timestamp: time))
+
+        // --- Meili index drift vs source of truth ---
+        // (index, sourceCount, healWhenShort)
+        struct IndexCheck { let name: String; let source: Int; let heal: (@Sendable () async -> Void)? }
+        let home = NSHomeDirectory()
+        let archiveCount = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM memories WHERE status IN ('archived','superseded')") ?? 0
+        }) ?? 0
+        // Wiki is indexed from the wikiPages TABLE (non-archived), not raw
+        // disk — so compare against the table, else unregistered .md files on
+        // disk read as false "missing".
+        let wikiPageCount = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM wikiPages WHERE pageType IS NULL OR pageType != 'archived'") ?? 0
+        }) ?? 0
+        let emailCount = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emails") ?? 0
+        }) ?? 0
+        // sessions index doc ≈ one per recorded transcript chunk.
+        let sessionChunkCount = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COALESCE(SUM(chunkCount),0) FROM transcriptIndexState") ?? 0
+        }) ?? 0
+        let dbPoolRef = dbPool
+        // wiki/private heal via FSEvents (WikiFileWatcher); emails/sessions via
+        // ConversationIndexer's own sweep — so those are alarm-only here and a
+        // breach means that writer is wedged. docs/archive have no live writer,
+        // so they self-heal from their authoritative backfill.
+        let checks: [IndexCheck] = [
+            IndexCheck(name: "wiki", source: wikiPageCount, heal: nil),
+            IndexCheck(name: "docs", source: Self.countFiles(home + "/.sonata/documents", exts: ["md","txt"]),
+                       heal: { await search.backfillDocs() }),
+            IndexCheck(name: "private", source: Self.countFiles(home + "/.sonata/private", exts: ["md","txt"]), heal: nil),
+            IndexCheck(name: "emails", source: emailCount, heal: nil),
+            IndexCheck(name: "sessions", source: sessionChunkCount, heal: nil),
+            // archive heals BOTH directions: backfill adds missing, prune
+            // removes orphans (deleted memories backfill never cleans up).
+            IndexCheck(name: "archive", source: archiveCount, heal: {
+                await search.backfillArchive(dbPool: dbPoolRef)
+                _ = await search.pruneArchiveOrphans(dbPool: dbPoolRef)
+            }),
+        ]
+
+        for c in checks {
+            let indexed = await search.documentCount(index: c.name)
+            // documentCount returns -1 when Meili is unreachable; that's the
+            // http/meili layer's problem, not a drift signal — skip.
+            guard indexed >= 0 else { continue }
+            // Drift in EITHER direction: under-count = missing docs, over-count
+            // = orphans (deleted sources never pruned). Alarm beyond tolerance.
+            let drift = abs(c.source - indexed)
+            let tolerance = max(5, c.source / 20)  // 5%, min 5
+            if drift > tolerance, let heal = c.heal {
+                logger.warning("search index '\(c.name)' drift \(indexed) vs source \(c.source) — reconciling")
+                await heal()
+            }
+            out.append(CheckResult(
+                name: "index_\(c.name)",
+                healthy: drift <= tolerance,
+                message: drift <= tolerance
+                    ? "OK (\(indexed)/\(c.source))"
+                    : "index drift \(indexed)/\(c.source)\(c.heal != nil ? " — heal triggered" : " — no auto-heal")",
+                timestamp: time))
+        }
+
+        return out
+    }
+
+    /// Recursive count of files with the given extensions under `root`.
+    private static func countFiles(_ root: String, exts: Set<String>) -> Int {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(atPath: root) else { return 0 }
+        var n = 0
+        while let rel = en.nextObject() as? String {
+            if exts.contains((rel as NSString).pathExtension.lowercased()) { n += 1 }
+        }
+        return n
     }
 
     /// Returns `nil` when no pool-status provider is configured (test mode).
