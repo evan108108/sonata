@@ -867,18 +867,26 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 if restartNudge, let lastEventId, !lastEventId.isEmpty {
                     let nudgeLabel = self.worker.label
                     let nudgeWorkerId = self.worker.id
-                    let nudgeText = """
-                    You are worker '\(nudgeLabel)' (workerId: \(nudgeWorkerId)). \
-                    Before Sonata restarted you had been dispatched event \(lastEventId) \
-                    and were partway through it. Continue working on YOUR OWN event — \
-                    \(lastEventId). Do NOT take supervisor responsibilities, do NOT \
-                    impersonate any other worker, and do NOT pick up someone else's \
-                    work from `worker_list`. If your prior work on this event already \
-                    completed before the restart, call `complete_event` for it now and \
-                    then idle yourself.
-                    """
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
-                        self?.terminalView?.send(txt: nudgeText + "\r")
+                    // Keep the typed nudge SHORT — long single-line prompts in
+                    // Claude Code's TUI sometimes leave the cursor in an
+                    // ambiguous state where the trailing \r gets buffered as
+                    // text instead of submitted. Identity preamble lives in
+                    // the MCP `instructions` field (see MCPInstructions), so
+                    // this just has to anchor the worker on its own event.
+                    let nudgeText = "Continue your assigned event \(lastEventId). You are worker '\(nudgeLabel)' (workerId: \(nudgeWorkerId)) — do NOT take any other role or pick up another worker's work."
+                    // Send text and submit as TWO separate writes with a gap
+                    // between them. The single-write `text+\r` path produced
+                    // workers where the text typed but enter was never hit
+                    // (observed on Scout 2026-06-22). A separate CR with a
+                    // gap gives the TUI's input field time to settle before
+                    // the submit keystroke. The 14s base delay is past the
+                    // last autoConfirm CR at +10s so any startup modals are
+                    // already dismissed.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
+                        self?.terminalView?.send(txt: nudgeText)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 15.5) { [weak self] in
+                        self?.terminalView?.send(txt: "\r")
                     }
                 }
             }
