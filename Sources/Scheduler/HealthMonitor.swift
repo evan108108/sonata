@@ -882,10 +882,8 @@ actor HealthMonitor {
                           AND sessionId IS NOT NULL
                           AND sessionId != ''
                           AND (lastProgressAt IS NULL OR lastProgressAt < ?)
-                          AND assignedAt IS NOT NULL
-                          AND assignedAt < ?
                         """,
-                    arguments: [aliveSinceMs, stuckBeforeMs, stuckBeforeMs]
+                    arguments: [aliveSinceMs, stuckBeforeMs]
                 ).compactMap { row -> StuckWorker? in
                     guard let workerId = row["workerId"] as? String,
                           let sessionId = row["sessionId"] as? String,
