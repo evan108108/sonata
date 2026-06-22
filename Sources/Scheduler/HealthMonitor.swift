@@ -284,7 +284,14 @@ actor HealthMonitor {
             }
 
             // Nudge any workers that look stuck on the current event.
-            await nudgeStuckWorkers()
+            // GATED OFF until the bridge bumps `lastProgressMs` on every tool
+            // call. Today, that signal only updates in complete_event /
+            // fail_event handlers, so a worker chugging through tool calls
+            // looks "stuck" to the nudger and gets interrupted with a useless
+            // "Continue" DM. Flip SONA_WORKER_NUDGE=1 once the bridge fix lands.
+            if ProcessInfo.processInfo.environment["SONA_WORKER_NUDGE"] == "1" {
+                await nudgeStuckWorkers()
+            }
 
             // Push a periodic check event to the supervisor, driven by
             // the configurable day/night schedule in supervisorConfig.

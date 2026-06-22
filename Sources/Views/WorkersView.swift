@@ -852,6 +852,35 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             if self.worker.engine == .claude {
                 self.scheduleAutoConfirm()
                 self.startContextWatch()
+                // Restart-recovery nudge: when respawning a worker that was
+                // mid-event before Sonata bounced, the `--resume`d session
+                // doesn't automatically pick its work back up — Claude Code
+                // sits idle at the prompt waiting for a user message. Type
+                // a "Continue" with identity + event context so it lands as
+                // a real user message in the conversation. Identity is spelled
+                // out explicitly (workerId + sessionLabel + "do not take any
+                // other role") because on 2026-06-22 a worker that received
+                // a bare "Continue" misidentified itself and assumed the
+                // supervisor role from a `worker_list` lookup. We send AFTER
+                // the auto-confirm CR series (last one at 10s) so any startup
+                // modals are dismissed first.
+                if restartNudge, let lastEventId, !lastEventId.isEmpty {
+                    let nudgeLabel = self.worker.label
+                    let nudgeWorkerId = self.worker.id
+                    let nudgeText = """
+                    You are worker '\(nudgeLabel)' (workerId: \(nudgeWorkerId)). \
+                    Before Sonata restarted you had been dispatched event \(lastEventId) \
+                    and were partway through it. Continue working on YOUR OWN event — \
+                    \(lastEventId). Do NOT take supervisor responsibilities, do NOT \
+                    impersonate any other worker, and do NOT pick up someone else's \
+                    work from `worker_list`. If your prior work on this event already \
+                    completed before the restart, call `complete_event` for it now and \
+                    then idle yourself.
+                    """
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 12.0) { [weak self] in
+                        self?.terminalView?.send(txt: nudgeText + "\r")
+                    }
+                }
             }
 
             // Register worker with Sonata HTTP API and set status to idle after startup
