@@ -864,29 +864,40 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 // supervisor role from a `worker_list` lookup. We send AFTER
                 // the auto-confirm CR series (last one at 10s) so any startup
                 // modals are dismissed first.
-                if restartNudge, let lastEventId, !lastEventId.isEmpty {
-                    let nudgeLabel = self.worker.label
-                    let nudgeWorkerId = self.worker.id
-                    // Keep the typed nudge SHORT — long single-line prompts in
-                    // Claude Code's TUI sometimes leave the cursor in an
-                    // ambiguous state where the trailing \r gets buffered as
-                    // text instead of submitted. Identity preamble lives in
-                    // the MCP `instructions` field (see MCPInstructions), so
-                    // this just has to anchor the worker on its own event.
-                    let nudgeText = "Continue your assigned event \(lastEventId). You are worker '\(nudgeLabel)' (workerId: \(nudgeWorkerId)) — do NOT take any other role or pick up another worker's work."
-                    // Send text and submit as TWO separate writes with a gap
-                    // between them. The single-write `text+\r` path produced
-                    // workers where the text typed but enter was never hit
-                    // (observed on Scout 2026-06-22). A separate CR with a
-                    // gap gives the TUI's input field time to settle before
-                    // the submit keystroke. The 14s base delay is past the
-                    // last autoConfirm CR at +10s so any startup modals are
-                    // already dismissed.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
-                        self?.terminalView?.send(txt: nudgeText)
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 15.5) { [weak self] in
-                        self?.terminalView?.send(txt: "\r")
+                // Type a "Continue your event X" prompt for any spawn where
+                // Sonata's workers-table row already shows an assigned
+                // currentEventId — NOT just the explicit restart-recovery
+                // path. The auto-restart after exit-256 creates a fresh
+                // `--session-id` process with no conversation history, but
+                // the DB still has the prior session's event assignment.
+                // Without a typed nudge, the fresh worker sits idle at the
+                // prompt while Sonata thinks it's busy. Schedule the read
+                // INSIDE the delayed block so we see the row that exists at
+                // send time, not at spawn time. The 14s base delay is past
+                // the last autoConfirm CR at +10s so any startup modals are
+                // already dismissed. Send text and CR as TWO writes 1.5s
+                // apart — the single-write `text + CR` path produced workers
+                // where text typed but enter was never hit (Scout, 2026-06-22).
+                let dbPoolForNudge = MCPSessionRegistry.shared?.dbPool
+                let nudgeWorkerId = self.worker.id
+                let nudgeLabel = self.worker.label
+                DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
+                    guard let self, self.terminalView != nil, let pool = dbPoolForNudge else { return }
+                    Task.detached {
+                        let assignedEventId: String? = (try? await pool.read { db in
+                            try String.fetchOne(db,
+                                sql: "SELECT currentEventId FROM workers WHERE workerId = ?",
+                                arguments: [nudgeWorkerId])
+                        }) ?? nil
+                        guard let eventId = assignedEventId, !eventId.isEmpty else { return }
+                        let nudgeText = "Continue your assigned event \(eventId). You are worker '\(nudgeLabel)' (workerId: \(nudgeWorkerId)) — do NOT take any other role or pick up another worker's work."
+                        await MainActor.run { [weak self] in
+                            self?.terminalView?.send(txt: nudgeText)
+                        }
+                        try? await Task.sleep(for: .milliseconds(1500))
+                        await MainActor.run { [weak self] in
+                            self?.terminalView?.send(txt: "\r")
+                        }
                     }
                 }
             }
