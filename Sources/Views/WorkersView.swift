@@ -838,6 +838,24 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 )
             }
 
+            // [DEBUG] Mirror the worker's PTY output to a per-worker log file
+            // so we can see what claude --resume actually said before exiting.
+            // SwiftTerm's LocalProcess feeds bytes through dataReceived(slice:)
+            // on DropEnabledTerminalView, which already tees to scrollbackLogURL
+            // when set. Workers normally don't set it; pointing it at
+            // ~/.sonata/logs/worker-<label>.log captures the full session
+            // including any startup error claude --resume emits. Added 2026-06-22
+            // to diagnose the exit-256 crash loop on Scout where the dying
+            // process printed its reason to stderr but no upstream log captured it.
+            let logDir = ("\(NSHomeDirectory())/.sonata/logs" as NSString).expandingTildeInPath
+            try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+            let safeLabel = self.worker.label.replacingOccurrences(of: "/", with: "-")
+            let workerLogURL = URL(fileURLWithPath: "\(logDir)/worker-\(safeLabel).log")
+            if let drop = view as? DropEnabledTerminalView {
+                drop.scrollbackLogURL = workerLogURL
+            }
+            print("[DEBUG] [\(self.worker.label)] spawn: workerId=\(self.worker.id) sessionId=\(self.worker.sessionId) restartNudge=\(restartNudge) args=\(args.joined(separator: " ")) ptyLog=\(workerLogURL.path)")
+
             view.startProcess(
                 executable: WorkerManager.binary(for: self.worker.engine),
                 args: args,
@@ -1202,6 +1220,13 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
     func processTerminated(source: SwiftTerm.TerminalView, exitCode: Int32?) {
         print("[\(worker.label)] Process exited with code: \(exitCode ?? -1)")
+        // [DEBUG] structured spawn-failure context — Sonata's stdout override
+        // routes this to Sonata.log so we can correlate the exit with the
+        // worker's identity / session / JSONL state when debugging the
+        // exit-256 crash loop on Scout (2026-06-22).
+        let jsonlPath = "\(NSHomeDirectory())/.claude/projects/-Users-\(NSUserName())--sonata-worker/\(worker.sessionId).jsonl"
+        let jsonlSize = (try? FileManager.default.attributesOfItem(atPath: jsonlPath)[.size] as? Int) ?? -1
+        print("[DEBUG] [\(worker.label)] exit detail: workerId=\(worker.id) sessionId=\(worker.sessionId) jsonl=\(jsonlPath) jsonl_size=\(jsonlSize) exitCode=\(exitCode ?? -1) restartAttempts=\(restartAttempts)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.worker.status = .offline
