@@ -891,12 +891,20 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                         }) ?? nil
                         guard let eventId = assignedEventId, !eventId.isEmpty else { return }
                         let nudgeText = "Continue your assigned event \(eventId). You are worker '\(nudgeLabel)' (workerId: \(nudgeWorkerId)) — do NOT take any other role or pick up another worker's work."
+                        // Type the text, then fire \r at multiple delays.
+                        // Modeled on scheduleAutoConfirm — the TUI isn't
+                        // always at a submit-ready state at the first try,
+                        // so we make several attempts. Extra CRs that land
+                        // after the text already submitted hit an empty
+                        // input field and are no-ops.
                         await MainActor.run { [weak self] in
                             self?.terminalView?.send(txt: nudgeText)
                         }
-                        try? await Task.sleep(for: .milliseconds(1500))
-                        await MainActor.run { [weak self] in
-                            self?.terminalView?.send(txt: "\r")
+                        for delayMs in [600, 1800, 3500, 6000] {
+                            try? await Task.sleep(for: .milliseconds(delayMs))
+                            await MainActor.run { [weak self] in
+                                self?.terminalView?.send(txt: "\r")
+                            }
                         }
                     }
                 }
