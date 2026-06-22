@@ -318,8 +318,25 @@ class WorkerManager: ObservableObject {
             selectedWorkerId = worker.id
             let taskId = candidate.taskId
             let lastEventId = candidate.currentEventId
+            // Only resume the prior Claude session if its JSONL actually
+            // exists on disk. Otherwise `claude --resume <id>` exits with
+            // "No conversation found with session ID: <id>" and the worker
+            // crash-loops forever. This guard exists in the auto-restart
+            // path (line ~1255) but was missing here — surfaced 2026-06-22
+            // on Scout where a worker had its sessionId persisted in the
+            // DB but no transcript was ever written (probably crashed
+            // before the first JSONL flush). The auto-restart path then
+            // also picks the no-resume path via the same helper, but
+            // doesn't carry forward `lastEventId`, so the recovered
+            // worker has no event context — the typed-Continue nudge
+            // (now gated on DB currentEventId, not lastEventId) picks
+            // that up at +14s.
+            let canResume = WorkerCoordinator.sessionJSONLExists(sessionId: candidate.sessionId)
+            if !canResume {
+                print("[restart-recovery] sessionJSONL missing for workerId=\(candidate.workerId) sessionId=\(candidate.sessionId) — spawning fresh (--session-id) instead of --resume")
+            }
             DispatchQueue.main.async {
-                worker.startProcess(restartNudge: true, taskId: taskId, lastEventId: lastEventId)
+                worker.startProcess(restartNudge: canResume, taskId: taskId, lastEventId: lastEventId)
             }
             spawned += 1
         }
