@@ -255,12 +255,27 @@ class WorkerManager: ObservableObject {
     /// (sonata-restart-recovery-v0-plan §4).
     @MainActor
     func spawnDefaultWorkers(reservingFor: Int = 0) {
-        guard workers.count <= reservingFor else { return } // don't double-spawn
-        let count = WorkerManager.defaultWorkerCount
-        let total = max(reservingFor, count)
-        guard total > reservingFor else { return }
-        for i in (reservingFor + 1)...total {
-            addWorker(label: "sona-worker-\(i)")
+        // `reservingFor` is the count of recovery workers respawnRecoveryWorkers
+        // already populated, but recovery preserves each worker's ORIGINAL
+        // label (sona-worker-2, sona-worker-4, etc.) — so we can't assume the
+        // first `reservingFor` slots (1..N) are taken. Scan in-memory workers
+        // by label, then fill any sona-worker-<i> slot up to defaultWorkerCount
+        // whose label isn't already in use. Fixes the 3/4 startup hang on
+        // Scout 2026-06-22 where sona-worker-1 had been offline pre-restart
+        // so recovery brought back 2/3/4 — and the old prefix-count loop
+        // tried to spawn sona-worker-4 as a duplicate, leaving slot 1 empty.
+        let target = WorkerManager.defaultWorkerCount
+        guard target > 0 else { return }
+        var existingLabels = Set(workers.map { $0.label })
+        var slotIdx = 1
+        let maxSlotScan = max(target, 32) * 4   // safety bound against runaway
+        while workers.count < target && slotIdx <= maxSlotScan {
+            let label = "sona-worker-\(slotIdx)"
+            if !existingLabels.contains(label) {
+                addWorker(label: label)
+                existingLabels.insert(label)
+            }
+            slotIdx += 1
         }
     }
 
