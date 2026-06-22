@@ -55,11 +55,48 @@ actor HealthMonitor {
     /// Session outcome tracking: label → (successes, failures).
     private var sessionOutcomes: [String: (successes: Int, failures: Int)] = [:]
 
-    /// Last alert sent timestamp by check name (to avoid spamming).
-    private var lastAlertSent: [String: Date] = [:]
-
-    /// Minimum interval between alerts for the same check (5 minutes).
+    /// Base interval before the FIRST repeat of an unchanged alert (5 minutes).
+    /// Repeats then back off exponentially up to `alertMaxInterval`.
     private let alertCooldown: TimeInterval = 300
+
+    /// Hard ceiling on the interval between repeat alerts for an unchanged
+    /// condition. Without this, a persistently-failing check re-emails at the
+    /// 5-min cadence forever — on 2026-06-21 a stuck disk_space reading sent
+    /// Evan 1153 near-identical alerts over ~19h. With exponential backoff
+    /// capped here, the same condition emails ~20×, each a digest.
+    private let alertMaxInterval: TimeInterval = 3600
+
+    /// Per-check alert dedup state, keyed by check name. An alert fires
+    /// immediately when the condition is NEW or its signature CHANGES; an
+    /// unchanged condition is throttled with exponential backoff.
+    private struct AlertState {
+        var signature: String        // count-free fingerprint of the condition
+        var firstSentAt: Date
+        var lastSentAt: Date
+        var sentCount: Int           // emails actually sent for this signature
+        var suppressedSinceLast: Int // checks observed since the last email
+    }
+    private var alertStates: [String: AlertState] = [:]
+
+    /// A worker is considered "stuck" if it's been on the same event without
+    /// progress for this long. The bridge heartbeats every 15s, so any worker
+    /// here is alive — but its state machine isn't progressing the work. Evan
+    /// observed this pattern repeatedly on 2026-06-22: workers completing
+    /// tasks but never flipping status from 'busy', or claiming events but
+    /// never starting them. A "Continue" DM nudges the underlying agent loop
+    /// back into action without touching state in the DB (which is the cheap,
+    /// correct response — let the worker drive its own state machine).
+    private let workerStuckThreshold: TimeInterval = 5 * 60   // 5 min no progress
+    /// Worker must have heartbeated this recently to still be "alive" and
+    /// worth nudging. Past this it's the reaper's job, not the nudger's.
+    private let workerHeartbeatFreshness: TimeInterval = 90   // 90s
+    /// Don't re-nudge the same worker more often than this.
+    private let workerNudgeCooldown: TimeInterval = 5 * 60    // 5 min
+
+    /// In-memory dedup for nudges: workerId → last nudge timestamp. Reset on
+    /// process restart, which is intentional — a fresh boot wants to re-evaluate
+    /// every stuck worker from scratch (the on-boot sweep Evan asked for).
+    private var lastWorkerNudgeAt: [String: Date] = [:]
 
     /// Fallback interval between supervisor check-event pushes (3 minutes).
     /// Only used if the supervisorConfig singleton row cannot be read.
@@ -215,8 +252,10 @@ actor HealthMonitor {
 
             for check in checks {
                 if check.healthy {
-                    // Reset consecutive failures on success
+                    // Reset consecutive failures on success, and emit a one-shot
+                    // all-clear if we had been alerting on this check.
                     consecutiveFailures[check.name] = 0
+                    await noteRecovery(check: check.name)
                 } else {
                     let count = (consecutiveFailures[check.name] ?? 0) + 1
                     consecutiveFailures[check.name] = count
@@ -224,9 +263,13 @@ actor HealthMonitor {
                     logger.warning("Health check '\(check.name)' failed (\(count)x): \(check.message)")
 
                     if count >= alertThreshold {
+                        // Pass the underlying check message as the dedup
+                        // signature — NOT the string above, whose embedded
+                        // count changes every cycle and would defeat dedup.
                         await sendAlert(
                             check: check.name,
-                            message: "Health check '\(check.name)' has failed \(count) consecutive times: \(check.message)"
+                            message: "Health check '\(check.name)' has failed \(count) consecutive times: \(check.message)",
+                            signature: check.message
                         )
                         postDistributedNotification(check: check.name, message: check.message)
                     }
@@ -239,6 +282,9 @@ actor HealthMonitor {
             } else {
                 logger.warning("\(failedChecks.count) health check(s) failed: \(failedChecks.map(\.name).joined(separator: ", "))")
             }
+
+            // Nudge any workers that look stuck on the current event.
+            await nudgeStuckWorkers()
 
             // Push a periodic check event to the supervisor, driven by
             // the configurable day/night schedule in supervisorConfig.
@@ -599,24 +645,53 @@ actor HealthMonitor {
     }
 
     /// Check available disk space on the data volume.
+    ///
+    /// Reads free space TWO independent ways and trusts the larger. On
+    /// 2026-06-21 `.systemFreeSize` reported 0.3 GB free on a volume that
+    /// `df` showed with 123 GB free, and the monitor then alerted 1153×. A
+    /// single spuriously-low statfs read must not be able to wedge the verdict,
+    /// so we cross-check it against `volumeAvailableCapacityForImportantUsage`.
     private func checkDiskSpace(at time: Date) -> CheckResult {
         let dataDir = NSHomeDirectory() + "/.sonata"
-        do {
-            let attrs = try FileManager.default.attributesOfFileSystem(forPath: dataDir)
-            guard let freeSpace = attrs[.systemFreeSize] as? UInt64 else {
-                return CheckResult(name: "disk_space", healthy: false, message: "Could not read free space", timestamp: time)
-            }
+        let viaAttrs = freeBytesViaAttributes(dataDir)
+        let viaURL = freeBytesViaResourceValues(dataDir)
 
-            let freeGB = Double(freeSpace) / (1024 * 1024 * 1024)
-            let healthy = freeSpace >= minFreeDiskBytes
-            let message = healthy
-                ? String(format: "OK (%.1f GB free)", freeGB)
-                : String(format: "Low disk space: %.1f GB free (< 10 GB)", freeGB)
-
-            return CheckResult(name: "disk_space", healthy: healthy, message: message, timestamp: time)
-        } catch {
-            return CheckResult(name: "disk_space", healthy: false, message: "Error: \(error.localizedDescription)", timestamp: time)
+        let candidates = [viaAttrs, viaURL].compactMap { $0 }
+        guard let freeSpace = candidates.max() else {
+            return CheckResult(name: "disk_space", healthy: false, message: "Could not read free space", timestamp: time)
         }
+
+        // If the two reads disagree sharply, the low one is suspect — keep the
+        // larger (done above) but log the divergence so it's diagnosable.
+        if let a = viaAttrs, let b = viaURL {
+            let lo = min(a, b), hi = max(a, b)
+            if (lo == 0 && hi > 0) || (lo > 0 && hi / lo >= 2) {
+                logger.warning("disk_space reads diverge (attrs=\(a) url=\(b)) — trusting larger (\(hi))")
+            }
+        }
+
+        let freeGB = Double(freeSpace) / (1024 * 1024 * 1024)
+        let healthy = freeSpace >= minFreeDiskBytes
+        let message = healthy
+            ? String(format: "OK (%.1f GB free)", freeGB)
+            : String(format: "Low disk space: %.1f GB free (< 10 GB)", freeGB)
+
+        return CheckResult(name: "disk_space", healthy: healthy, message: message, timestamp: time)
+    }
+
+    /// Free bytes via `statfs` (classic POSIX free-block count).
+    private func freeBytesViaAttributes(_ path: String) -> UInt64? {
+        (try? FileManager.default.attributesOfFileSystem(forPath: path))?[.systemFreeSize] as? UInt64
+    }
+
+    /// Free bytes via the modern URL resource API. On APFS this reports
+    /// capacity available for "important" usage (includes reclaimable/purgeable
+    /// space) and is the value the OS itself uses — a good independent witness.
+    private func freeBytesViaResourceValues(_ path: String) -> UInt64? {
+        let url = URL(fileURLWithPath: path)
+        let vals = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        guard let bytes = vals?.volumeAvailableCapacityForImportantUsage, bytes >= 0 else { return nil }
+        return UInt64(bytes)
     }
 
     // MARK: - Alerts
@@ -645,15 +720,88 @@ actor HealthMonitor {
         }
     }
 
-    /// Send an alert email via AgentMail HTTP API.
-    private func sendAlert(check: String, message: String) async {
-        // Cooldown check — don't spam alerts
-        if let lastSent = lastAlertSent[check],
-           Date().timeIntervalSince(lastSent) < alertCooldown {
+    /// Dedup/throttle gate in front of `deliverAlert`.
+    ///
+    /// - An alert fires immediately when the condition is NEW or its
+    ///   `signature` differs from the last one sent for this check.
+    /// - An UNCHANGED condition backs off exponentially from `alertCooldown`,
+    ///   capped at `alertMaxInterval`, and its repeat carries a digest
+    ///   ("persisted for Xh; N checks suppressed").
+    /// `signature` defaults to `message`; health checks pass the count-free
+    /// underlying message so the per-cycle failure counter can't defeat dedup.
+    private func sendAlert(check: String, message: String, signature: String? = nil) async {
+        let sig = Self.normalizedSignature(signature ?? message)
+        let now = Date()
+
+        if var state = alertStates[check], state.signature == sig {
+            let interval = min(alertMaxInterval, alertCooldown * pow(2, Double(state.sentCount - 1)))
+            state.suppressedSinceLast += 1
+            if now.timeIntervalSince(state.lastSentAt) < interval {
+                alertStates[check] = state   // within backoff window — stay quiet
+                return
+            }
+            let suppressed = state.suppressedSinceLast
+            state.lastSentAt = now
+            state.sentCount += 1
+            state.suppressedSinceLast = 0
+            alertStates[check] = state
+            let persisted = Self.humanDuration(now.timeIntervalSince(state.firstSentAt))
+            let body = """
+            \(message)
+
+            (Repeat alert #\(state.sentCount). This condition has persisted for \(persisted); \
+            \(suppressed) check(s) suppressed since the last alert. Repeats are throttled and \
+            will stop with an all-clear once the check recovers.)
+            """
+            await deliverAlert(check: check, message: body)
             return
         }
-        lastAlertSent[check] = Date()
 
+        // New condition (or first failure for this check) — alert now.
+        alertStates[check] = AlertState(
+            signature: sig, firstSentAt: now, lastSentAt: now, sentCount: 1, suppressedSinceLast: 0
+        )
+        await deliverAlert(check: check, message: message)
+    }
+
+    /// One-shot "recovered" notice when a check that we'd alerted on goes
+    /// healthy again. No-op for checks that never crossed the alert threshold.
+    private func noteRecovery(check: String) async {
+        guard let state = alertStates.removeValue(forKey: check) else { return }
+        let persisted = Self.humanDuration(Date().timeIntervalSince(state.firstSentAt))
+        await deliverAlert(
+            check: check,
+            message: "RECOVERED: health check '\(check)' is healthy again after \(persisted) and \(state.sentCount) alert(s)."
+        )
+    }
+
+    /// Collapse runs of digits/decimal points to a single '#' so a condition's
+    /// fingerprint is stable across volatile numbers (free-GB jitter, the
+    /// per-cycle failure counter) but still changes when the qualitative
+    /// message changes (a different error → re-alert immediately).
+    private static func normalizedSignature(_ s: String) -> String {
+        var out = ""
+        var lastWasNum = false
+        for ch in s {
+            if ch.isNumber || ch == "." {
+                if !lastWasNum { out.append("#"); lastWasNum = true }
+            } else {
+                out.append(ch); lastWasNum = false
+            }
+        }
+        return out
+    }
+
+    /// Compact human duration for alert digests (e.g. "19h 12m", "2d 3h").
+    private static func humanDuration(_ secs: TimeInterval) -> String {
+        let s = max(0, Int(secs))
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h \((s % 3600) / 60)m" }
+        return "\(s / 86400)d \((s % 86400) / 3600)h"
+    }
+
+    /// Send an alert email via AgentMail HTTP API.
+    private func deliverAlert(check: String, message: String) async {
         logger.error("ALERT [\(check)]: \(message)")
 
         // Resolve sender/recipient from DB on first use
@@ -697,5 +845,112 @@ actor HealthMonitor {
             userInfo: ["check": check, "message": message],
             deliverImmediately: true
         )
+    }
+
+    // MARK: - Worker nudges
+
+    /// Sweep for "stuck" workers — heartbeating but not making progress on
+    /// their current event — and DM them a literal "Continue" so the agent
+    /// loop re-engages. No DB state change: the worker drives its own state
+    /// machine. The first call after process start acts as the on-boot sweep
+    /// (`lastWorkerNudgeAt` starts empty), which is intentional.
+    private func nudgeStuckWorkers() async {
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
+        let stuckBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+
+        struct StuckWorker {
+            let workerId: String
+            let sessionId: String
+            let sessionLabel: String
+            let currentEventId: String
+        }
+
+        let candidates: [StuckWorker]
+        do {
+            candidates = try await dbPool.read { db in
+                try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT workerId, sessionId, sessionLabel, currentEventId
+                        FROM workers
+                        WHERE status = 'busy'
+                          AND lastHeartbeat >= ?
+                          AND currentEventId IS NOT NULL
+                          AND currentEventId != ''
+                          AND sessionId IS NOT NULL
+                          AND sessionId != ''
+                          AND (lastProgressAt IS NULL OR lastProgressAt < ?)
+                          AND assignedAt IS NOT NULL
+                          AND assignedAt < ?
+                        """,
+                    arguments: [aliveSinceMs, stuckBeforeMs, stuckBeforeMs]
+                ).compactMap { row -> StuckWorker? in
+                    guard let workerId = row["workerId"] as? String,
+                          let sessionId = row["sessionId"] as? String,
+                          let sessionLabel = row["sessionLabel"] as? String,
+                          let eventId = row["currentEventId"] as? String else { return nil }
+                    return StuckWorker(workerId: workerId, sessionId: sessionId,
+                                       sessionLabel: sessionLabel, currentEventId: eventId)
+                }
+            }
+        } catch {
+            logger.warning("nudgeStuckWorkers: query failed: \(error)")
+            return
+        }
+
+        guard !candidates.isEmpty else { return }
+
+        for c in candidates {
+            if let last = lastWorkerNudgeAt[c.workerId],
+               now.timeIntervalSince(last) < workerNudgeCooldown {
+                continue
+            }
+            lastWorkerNudgeAt[c.workerId] = now
+            await sendContinueNudge(to: c.sessionId, workerLabel: c.sessionLabel, eventId: c.currentEventId)
+        }
+    }
+
+    /// Send a literal "Continue" DM to a worker's session. Persists to the
+    /// durable inbox AND tries the live SSE push, matching what the regular
+    /// dm_send path does.
+    private func sendContinueNudge(to targetSessionId: String, workerLabel: String, eventId: String) async {
+        let messageId = UUID().uuidString
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let body = "Continue"
+        let context = "health-monitor-nudge:\(eventId)"
+        let fromSessionId = "sonata-health-monitor"
+
+        logger.info("nudging stuck worker '\(workerLabel)' (session \(targetSessionId), event \(eventId)) with Continue")
+
+        do {
+            try await dbPool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO dm_messages (
+                            messageId, targetSessionId, fromSessionId, fromPubkey, fromPeerId,
+                            body, context, metaJson, sentAtMs, receivedAtMs, deliveryStatus
+                        ) VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?, 'queued')
+                        """,
+                    arguments: [messageId, targetSessionId, fromSessionId, body, context, nowMs, nowMs]
+                )
+            }
+        } catch {
+            logger.warning("nudgeStuckWorkers: dm_messages insert failed for \(targetSessionId): \(error)")
+            return
+        }
+
+        if let mcpReg = MCPSessionRegistry.shared {
+            _ = await mcpReg.deliverDM(
+                target: targetSessionId,
+                messageId: messageId,
+                body: body,
+                fromSessionId: fromSessionId,
+                context: context,
+                metaJson: nil,
+                sentAtMs: nowMs
+            )
+        }
     }
 }

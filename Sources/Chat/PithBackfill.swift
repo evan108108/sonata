@@ -43,6 +43,27 @@ actor PithBackfill {
     /// server flakiness without burning forever on dead-letter content.
     private static let maxAttempts = 3
 
+    /// Cap on the sleep between batches when the chat server is unhealthy.
+    /// Without this, a wedged chat server (e.g. the Scout GPU-OOM incident on
+    /// 2026-06-22 — Metal allocator returned kIOGPU…OutOfMemory and stayed
+    /// down) made this loop spin millions of iterations: every row threw
+    /// notHealthy instantly, no UPDATE happened so the row stayed in the next
+    /// SELECT, and there was no inter-batch sleep. The log grew 297 MB in ~3
+    /// minutes. 60 seconds is enough to keep retries honest while letting a
+    /// recovered chat server be discovered within a minute.
+    private static let maxServerDownBackoffSeconds: TimeInterval = 60
+
+    /// Count of consecutive batches where every row tripped a server-side
+    /// failure (notHealthy / URL error). Drives exponential backoff between
+    /// batches; reset on any per-row success or per-row parse failure.
+    private var consecutiveServerDownBatches = 0
+
+    /// Count of server-side failures observed inside the CURRENT batch.
+    /// Reset to 0 at the start of each batch loop. If this equals
+    /// `batch.count` after processing, the whole batch hit server-side
+    /// failures and we back off before re-fetching.
+    private var serverDownInBatch = 0
+
     struct Status: Sendable {
         let isRunning: Bool
         let totalNeeded: Int
@@ -130,6 +151,7 @@ actor PithBackfill {
 
             if batch.isEmpty { break }
 
+            serverDownInBatch = 0
             for row in batch {
                 if Task.isCancelled { break }
                 await processOne(id: row.id, content: row.content, dbPool: dbPool)
@@ -137,6 +159,20 @@ actor PithBackfill {
                 if processed % Self.progressInterval == 0 {
                     logger.info("backfill progress: \(processed)/\(totalNeeded) (succeeded=\(succeeded), failed=\(failed))")
                 }
+            }
+
+            // Whole batch was server-side failures? Sleep before the next
+            // round so a wedged chat server can't drive a hot retry loop.
+            if serverDownInBatch == batch.count && !Task.isCancelled {
+                consecutiveServerDownBatches += 1
+                let sleepSecs = min(
+                    Self.maxServerDownBackoffSeconds,
+                    pow(2.0, Double(consecutiveServerDownBatches))
+                )
+                logger.warning("backfill: chat server unhealthy for full batch (round \(consecutiveServerDownBatches)); sleeping \(Int(sleepSecs))s before retry")
+                try? await Task.sleep(for: .seconds(sleepSecs))
+            } else {
+                consecutiveServerDownBatches = 0
             }
         }
 
@@ -160,6 +196,7 @@ actor PithBackfill {
             // Server-side: do not UPDATE at all, will be re-selected next sweep.
             logger.warning("backfill: chat server unhealthy; skipping \(id) for this round (will retry)")
             failed += 1
+            serverDownInBatch += 1
             return
         } catch {
             // Likely URLSession transient (timeout, connection reset). Treat as
@@ -170,6 +207,7 @@ actor PithBackfill {
             if nsError.domain == NSURLErrorDomain {
                 logger.warning("backfill: URL error \(nsError.code) for \(id); skipping this round")
                 failed += 1
+                serverDownInBatch += 1
                 return
             }
             // Row-level: model returned something we couldn't parse / content

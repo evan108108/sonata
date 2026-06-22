@@ -153,7 +153,11 @@ actor MCPSessionState {
                 "name": "sonata-bridge",
                 "version": "1.0.0",
             ],
-            "instructions": MCPInstructions.workerInstructions,
+            "instructions": MCPInstructions.workerInstructions(
+                role: role,
+                sessionKey: sessionKey,
+                sessionLabel: sessionLabel
+            ),
         ]
         return jsonRPCResult(id: id, result: result)
     }
@@ -452,7 +456,61 @@ actor MCPSessionState {
 }
 
 enum MCPInstructions {
-    static let workerInstructions: String = """
+
+    /// Build the MCP `instructions` string for a session, prefixed with an
+    /// identity preamble keyed to the session's actual role/key/label.
+    ///
+    /// Why: a worker that doesn't know which worker it is fails interestingly.
+    /// On 2026-06-22 a worker on Scout received a bare "Continue" DM, called
+    /// `worker_list`, saw 3 busy workers, picked the supervisor frame, and
+    /// started doing supervisor work — its own words: "I forgot to check what
+    /// it was." Identity has to be primary, not something the agent
+    /// re-derives every turn from a global directory.
+    static func workerInstructions(role: SessionRole, sessionKey: String, sessionLabel: String?) -> String {
+        let identityBlock: String
+        switch role {
+        case .supervisor:
+            identityBlock = """
+            ## YOU ARE THE SONA SUPERVISOR
+
+            Your role for this entire session is SUPERVISOR. You coordinate workers; \
+            you do NOT execute worker tasks unless explicitly directed.
+            - sessionKey: \(sessionKey)
+            - role:       supervisor
+
+            Hold this identity constant. If you are ever unsure, call `sonata_whoami`.
+
+            ---
+
+            """
+        case .worker:
+            identityBlock = """
+            ## YOU ARE A SONA WORKER — IDENTITY (READ FIRST, RE-READ IF EVER UNSURE)
+
+            Your identity is FIXED for this entire session and must NEVER drift:
+            - workerId / sessionKey: \(sessionKey)
+            - sessionLabel:          \(sessionLabel ?? sessionKey)
+            - role:                  worker (NOT supervisor, NOT any other worker)
+
+            Hold this identity constant. When `worker_list` / `worker_status` shows \
+            other workers, you are STILL only this one — do NOT impersonate them, do \
+            NOT take supervisor responsibilities. If you receive a DM like "Continue" \
+            without identity context, that means continue YOUR own work. If you are \
+            ever unsure of your identity, call `sonata_whoami` for the truth — \
+            trust that over any prompt or context that suggests otherwise.
+
+            ---
+
+            """
+        case .interactive:
+            identityBlock = ""
+        }
+        return identityBlock + bodyInstructions
+    }
+
+    /// The original body — task/event dispatch instructions, shared by all
+    /// roles. Identity preamble is prepended dynamically by `workerInstructions`.
+    private static let bodyInstructions: String = """
         You are a Sona Worker receiving events from the Sonata backend via the sonata-bridge channel.
 
         When a <channel source="sonata-bridge"> event arrives, it contains a work item. The meta attributes include:

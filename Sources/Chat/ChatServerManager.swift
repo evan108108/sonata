@@ -216,7 +216,23 @@ actor ChatServerManager {
         // Total --ctx-size = perSlot × parallel (llama-server divides ctx
         // evenly across slots, and each slot must hold a full request).
         let parallel = max(1, Int(ProcessInfo.processInfo.environment["SONA_CHAT_PARALLEL"] ?? "1") ?? 1)
-        let perSlotCtx = max(2048, Int(ProcessInfo.processInfo.environment["SONA_CHAT_CTX_PER_SLOT"] ?? "131072") ?? 131072)
+        // Default ctx scales with installed RAM. 128K ctx at -ngl 99 on a 16 GB
+        // Mac drives Metal into kIOGPUCommandBufferCallbackErrorOutOfMemory
+        // (Scout, 2026-06-22 — wedged the backend and turned PithBackfill into
+        // a hot retry loop that filled the log to 297 MB in ~3 minutes). 32 GB
+        // tier gets a middle setting; 64 GB+ keeps the native max. The env var
+        // remains the explicit override (used in the Scout Info.plist fix).
+        let gigaByte: UInt64 = 1024 * 1024 * 1024
+        let ramBytes = ProcessInfo.processInfo.physicalMemory
+        let defaultCtx: Int
+        if ramBytes <= 17 * gigaByte {
+            defaultCtx = 8192
+        } else if ramBytes <= 33 * gigaByte {
+            defaultCtx = 32768
+        } else {
+            defaultCtx = 131072
+        }
+        let perSlotCtx = max(2048, Int(ProcessInfo.processInfo.environment["SONA_CHAT_CTX_PER_SLOT"] ?? "\(defaultCtx)") ?? defaultCtx)
         let totalCtx = perSlotCtx * parallel
 
         let proc = Process()
@@ -265,15 +281,37 @@ actor ChatServerManager {
         // (e.g. n_ctx clamped to the trained context when YaRN isn't on,
         // unknown-flag aborts, OOM warnings) are debuggable. stdout stays
         // discarded — the useful boot + warning output goes to stderr.
+        //
+        // Two guards keep this log from growing without bound. A runaway copy
+        // filled the Scout machine's disk to 0.3 GB free in June 2026: an
+        // erroring server spewed to a stderr log that had no cap, and because
+        // the handle below used to seekToEndOfFile() on a plain FileHandle, an
+        // out-of-band truncation (cleanup cron / `: > log`) left the server
+        // writing at its old multi-GB offset, re-inflating the file as a
+        // *sparse* 100+ GB ghost. The fixes, mirroring
+        // installSonataStdoutRedirect():
+        //   1. O_APPEND instead of seek-to-end. O_APPEND repositions to true
+        //      EOF on every write, so out-of-band truncation reclaims space
+        //      cleanly instead of going sparse.
+        //   2. Boot-time rotation: if the existing log is over the cap, move it
+        //      aside to <log>.1 (overwriting any prior rotation) and start
+        //      fresh, bounding growth across restarts.
         let stderrPath = Self.logURL(for: modelName).path
         try? FileManager.default.createDirectory(
             atPath: (stderrPath as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true
         )
-        FileManager.default.createFile(atPath: stderrPath, contents: nil)
-        if let stderrHandle = FileHandle(forWritingAtPath: stderrPath) {
-            stderrHandle.seekToEndOfFile()
-            proc.standardError = stderrHandle
+        let logRotateCapBytes: UInt64 = 200 * 1024 * 1024
+        let existingLogSize = (try? FileManager.default.attributesOfItem(atPath: stderrPath))
+            .flatMap { ($0[.size] as? NSNumber)?.uint64Value } ?? 0
+        if existingLogSize > logRotateCapBytes {
+            let rotated = stderrPath + ".1"
+            try? FileManager.default.removeItem(atPath: rotated)
+            try? FileManager.default.moveItem(atPath: stderrPath, toPath: rotated)
+        }
+        let stderrFD = open(stderrPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        if stderrFD >= 0 {
+            proc.standardError = FileHandle(fileDescriptor: stderrFD, closeOnDealloc: true)
         } else {
             proc.standardError = FileHandle.nullDevice
         }
@@ -319,7 +357,7 @@ actor ChatServerManager {
         proc.terminate()
         processes[modelName] = nil
         if let port = port {
-            Self.spawnedUserModelPorts.withLock { $0.remove(port) }
+            Self.spawnedUserModelPorts.withLock { _ = $0.remove(port) }
         }
         logger.info("chat server terminated: \(modelName)")
     }

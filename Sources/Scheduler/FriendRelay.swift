@@ -348,9 +348,13 @@ actor FriendRelay {
                 ))
             }
 
-            if !loaded.isEmpty {
-                friends = loaded
-            }
+            // Unconditional replace on a successful HTTP+JSON parse — including
+            // an empty list. The prior `if !loaded.isEmpty` guard conflated
+            // "API errored" with "API returned zero AI friends", so clearing
+            // the last AI friend's `provider` (or deleting the row) left the
+            // poller still chasing a stale cached entry forever. Cache-keep on
+            // failure is preserved by the `return`s above and this `catch`.
+            friends = loaded
         } catch {
             // Keep using cached friends on failure
             logger.debug("FriendRelay: failed to refresh contacts: \(error)")
