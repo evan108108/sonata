@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Logging
 
 /// Side-effects that fire when Global AFK flips: broadcast the directive to
@@ -22,11 +23,17 @@ actor GlobalAFKOrchestrator {
         ProcessInfo.processInfo.environment["SONATA_USER_EMAIL"] ?? "evan108108@gmail.com"
     }()
 
+    /// Fallback outbound inbox when this instance has no configured inbox row
+    /// (or the DB read fails). The live sender is resolved per-instance from
+    /// the `emailInboxes` table — see `resolvePrimaryInbox()` — so the Scout
+    /// machine signs its AFK email as scoutleader@ rather than impersonating
+    /// sona@.
     private static let sonaInbox = "sona@agentmail.to"
 
     private let logger: Logging.Logger
     private var notifObserver: NSObjectProtocol?
     private var attachObserver: NSObjectProtocol?
+    private var dbPool: DatabasePool?
 
     private init() {
         var log = Logging.Logger(label: "sonata.globalafk.orchestrator")
@@ -36,7 +43,8 @@ actor GlobalAFKOrchestrator {
 
     /// Subscribe to controller flips. Called once from SonataApp boot, after
     /// `GlobalAFKController.shared.bootstrap` runs. Idempotent.
-    func start() {
+    func start(dbPool: DatabasePool) {
+        self.dbPool = dbPool
         if notifObserver != nil { return }
         notifObserver = NotificationCenter.default.addObserver(
             forName: .sonataGlobalAFKChanged,
@@ -174,11 +182,35 @@ actor GlobalAFKOrchestrator {
     /// sessionKey-derived tokens means the mailto link works immediately and
     /// the EmailHandler can still route the reply by matching the token to
     /// the session.
+    /// Resolve THIS Sonata instance's primary outbound inbox — the first
+    /// enabled row in `emailInboxes`, the same rule HealthMonitor uses for
+    /// alert senders. On the Scout machine this is scoutleader@agentmail.to;
+    /// on a default install it's sona@. Falls back to the hardcoded sona@
+    /// address if the table is empty or the read fails, preserving prior
+    /// behavior. Fixes the bug where the Scout-machine Sonata signed its AFK
+    /// notification as sona@ and looked like Scout impersonating Sona.
+    private func resolvePrimaryInbox() async -> String {
+        guard let dbPool else { return Self.sonaInbox }
+        do {
+            let address: String? = try await dbPool.read { db in
+                try String.fetchOne(db, sql: """
+                    SELECT address FROM emailInboxes
+                    WHERE enabled = 1 ORDER BY createdAt ASC LIMIT 1
+                """)
+            }
+            return address ?? Self.sonaInbox
+        } catch {
+            logger.warning("global AFK: primary inbox resolution failed (\(error)) — falling back to \(Self.sonaInbox)")
+            return Self.sonaInbox
+        }
+    }
+
     private func sendKickoffEmail(targets: [MCPSessionRegistry.SessionSnapshot]) async {
         guard !targets.isEmpty else {
             logger.info("global AFK kickoff email skipped — no targets")
             return
         }
+        let fromInbox = await resolvePrimaryInbox()
         let provider = EmailProviderResolver().defaultProvider
         let timestamp = Date().formatted(date: .abbreviated, time: .shortened)
 
@@ -228,10 +260,10 @@ actor GlobalAFKOrchestrator {
         let ownedTabs = enriched.filter { $0.isOwnedTab }
         let externalSessions = enriched.filter { !$0.isOwnedTab }
 
-        let ownedTextLines = ownedTabs.map { $0.plainLine(sonaInbox: Self.sonaInbox) }
-        let externalTextLines = externalSessions.map { $0.plainLine(sonaInbox: Self.sonaInbox) }
-        let ownedHtmlLines = ownedTabs.map { $0.htmlLine(sonaInbox: Self.sonaInbox) }
-        let externalHtmlLines = externalSessions.map { $0.htmlLine(sonaInbox: Self.sonaInbox) }
+        let ownedTextLines = ownedTabs.map { $0.plainLine(sonaInbox: fromInbox) }
+        let externalTextLines = externalSessions.map { $0.plainLine(sonaInbox: fromInbox) }
+        let ownedHtmlLines = ownedTabs.map { $0.htmlLine(sonaInbox: fromInbox) }
+        let externalHtmlLines = externalSessions.map { $0.htmlLine(sonaInbox: fromInbox) }
 
         var textSections: [String] = []
         if !ownedTextLines.isEmpty {
@@ -273,7 +305,7 @@ actor GlobalAFKOrchestrator {
 
         do {
             try await provider.sendHTML(
-                inbox: Self.sonaInbox,
+                inbox: fromInbox,
                 to: [Self.userEmailAddress],
                 subject: "Sonata Global AFK on — \(targets.count) session(s) notified",
                 text: textBody,

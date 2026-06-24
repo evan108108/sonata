@@ -803,7 +803,7 @@ struct SonataApp: App {
                     _ = InteractiveSessionsViewModel.shared.bootstrap(dbPool: pool)
                     GlobalAFKController.shared.bootstrap(dbPool: pool)
                 }
-                await GlobalAFKOrchestrator.shared.start()
+                await GlobalAFKOrchestrator.shared.start(dbPool: pool)
                 logger.info("Auto-started restored interactive sessions")
 
                 // Register shutdown handler
