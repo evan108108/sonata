@@ -293,6 +293,13 @@ actor HealthMonitor {
                 await nudgeStuckWorkers()
             }
 
+            // Self-heal stranded events every cycle (always on, unlike the
+            // nudge above). A worker holding an event whose SSE push was lost
+            // never completes it, and no heartbeat-based sweep catches it
+            // (the bridge keeps heartbeating). Reclaim it within one monitor
+            // cycle instead of waiting for the 30/75-min supervisor pass.
+            await reclaimStrandedEvents()
+
             // Push a periodic check event to the supervisor, driven by
             // the configurable day/night schedule in supervisorConfig.
             let schedule = await loadSupervisorSchedule()
@@ -956,6 +963,84 @@ actor HealthMonitor {
                 metaJson: nil,
                 sentAtMs: nowMs
             )
+        }
+    }
+
+    /// Reclaim events stranded on a worker that never received them.
+    ///
+    /// A worker can sit 'busy' with a currentEventId whose SSE push was lost
+    /// (MCP disconnect/reconnect, or a cycle in the assign→deliver gap): the
+    /// agent never saw the event so never completes it, yet the bridge keeps
+    /// heartbeating, so no heartbeat-based sweep ever fires. The discriminator
+    /// is `lastProgressAt`: a stranded worker has inFlightEventId==nil, so
+    /// MCPSessionSweeper never bumps its lastProgressAt — it goes stale while
+    /// lastHeartbeat stays fresh. (A genuinely long-running task keeps
+    /// inFlightEventId set, so the sweeper bumps lastProgressAt every 15s and is
+    /// never caught here — this only fires for the never-received case.)
+    ///
+    /// Recovery: re-enqueue the event to 'pending' for another worker and reset
+    /// the worker to idle, so the slot self-heals within one monitor cycle
+    /// instead of waiting for the 30/75-min supervisor pass. Safe against
+    /// double-processing: nobody was working the event, and a later stale
+    /// completion from the original worker is rejected by the complete/fail
+    /// owner-guard.
+    private func reclaimStrandedEvents() async {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
+        let stuckBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+
+        struct Stranded { let workerId: String; let eventId: String }
+        let stranded: [Stranded]
+        do {
+            stranded = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT w.workerId AS workerId, w.currentEventId AS eventId
+                    FROM workers w
+                    JOIN workerEvents e ON e.id = w.currentEventId
+                    WHERE w.status = 'busy'
+                      AND w.lastHeartbeat >= ?
+                      AND w.currentEventId IS NOT NULL AND w.currentEventId != ''
+                      AND e.status = 'assigned'
+                      AND e.assignedAt IS NOT NULL AND e.assignedAt < ?
+                      AND (w.lastProgressAt IS NULL OR w.lastProgressAt < ?)
+                    """, arguments: [aliveSinceMs, stuckBeforeMs, stuckBeforeMs])
+                    .compactMap { row -> Stranded? in
+                        guard let wid = row["workerId"] as? String,
+                              let eid = row["eventId"] as? String else { return nil }
+                        return Stranded(workerId: wid, eventId: eid)
+                    }
+            }
+        } catch {
+            logger.warning("reclaimStrandedEvents: query failed: \(error)")
+            return
+        }
+
+        guard !stranded.isEmpty else { return }
+
+        for s in stranded {
+            do {
+                try await dbPool.write { db in
+                    // Re-enqueue the stranded event for another worker.
+                    try db.execute(sql: """
+                        UPDATE workerEvents SET status = 'pending', assignedTo = NULL
+                        WHERE id = ? AND status = 'assigned'
+                    """, arguments: [s.eventId])
+                    // Free the worker — but only if it still holds this exact
+                    // event and is still busy, so we never clobber a completion
+                    // that landed between the read and this write.
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'idle',
+                            currentEventId = NULL, currentEventTokens = NULL, currentSlug = NULL,
+                            currentCacheReadTokens = NULL, currentInputTokens = NULL,
+                            currentPromptHash = NULL, currentSessionLabel = NULL,
+                            currentCwdBasename = NULL
+                        WHERE workerId = ? AND status = 'busy' AND currentEventId = ?
+                    """, arguments: [s.workerId, s.eventId])
+                }
+                logger.info("reclaimStrandedEvents: re-enqueued stranded event \(s.eventId), freed worker \(s.workerId)")
+            } catch {
+                logger.warning("reclaimStrandedEvents: recovery failed for \(s.workerId): \(error)")
+            }
         }
     }
 }

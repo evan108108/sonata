@@ -104,16 +104,26 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
             guard let workerId = row["workerId"] as? String,
                   let eventId = row["currentEventId"] as? String, !eventId.isEmpty else { continue }
 
-            try db.execute(sql: """
-                UPDATE workerEvents SET status = 'failed', result = 'Worker lost heartbeat', completedAt = ?
-                WHERE id = ? AND status = 'assigned'
-            """, arguments: [now, eventId])
-
+            // Decide recovery by event KIND before mutating the event. A
+            // task-backed event is marked 'failed' and re-dispatched via the
+            // task's retry/fail logic below. A non-task event (email /
+            // sonar_message / pr_review / alert) has NO task to retry, so
+            // marking it 'failed' would permanently DROP it — instead re-enqueue
+            // the event itself to 'pending' so a healthy worker picks it up
+            // (mirrors worker_purge's recovery).
+            var recoveryTaskId: String? = nil
             if let event = try Row.fetchOne(db, sql: "SELECT payload FROM workerEvents WHERE id = ?", arguments: [eventId]),
                let payload = event["payload"] as? String,
                let payloadData = payload.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-               let taskId = json["task_id"] as? String {
+               let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
+                recoveryTaskId = json["task_id"] as? String
+            }
+
+            if let taskId = recoveryTaskId {
+                try db.execute(sql: """
+                    UPDATE workerEvents SET status = 'failed', result = 'Worker lost heartbeat', completedAt = ?
+                    WHERE id = ? AND status = 'assigned'
+                """, arguments: [now, eventId])
                 // Heartbeat loss is usually a transient worker-process failure,
                 // not a problem with the task itself. Auto-retry once before
                 // giving up so a flapping session doesn't strand its work.
@@ -179,6 +189,14 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
                         }
                     }
                 }
+            } else {
+                // Non-task event (email / sonar_message / pr_review / alert): no
+                // task to retry, so marking it 'failed' would permanently drop it.
+                // Re-enqueue the event itself so a healthy worker picks it up.
+                try db.execute(sql: """
+                    UPDATE workerEvents SET status = 'pending', assignedTo = NULL
+                    WHERE id = ? AND status = 'assigned'
+                """, arguments: [eventId])
             }
 
             try db.execute(sql: """
@@ -516,8 +534,28 @@ let workerActions: [SonataAction] = [
             let workerId = try ctx.params.require("workerId")
             do {
                 try await ctx.dbPool.write { db in
-                    try db.execute(sql: "UPDATE workers SET status = 'draining' WHERE workerId = ?",
-                                   arguments: [workerId])
+                    // Event-aware drain. A worker can be racily re-assigned a fresh
+                    // event in the window between going idle (post-complete) and this
+                    // drain landing — the complete→idle→EventPusher(1s tick)→drain race
+                    // behind the 4-task auto-cycle. A blind flip to 'draining' would
+                    // strand that event on a worker we are about to SIGTERM (its SSE
+                    // push most likely went to the dying session and was never seen).
+                    // So, in one transaction: re-enqueue any still-'assigned'
+                    // currentEvent back to 'pending' for another worker, clear it, then
+                    // set 'draining'. Draining must never orphan an event.
+                    if let evtId = try String.fetchOne(db, sql:
+                            "SELECT currentEventId FROM workers WHERE workerId = ?",
+                            arguments: [workerId]),
+                       !evtId.isEmpty {
+                        try db.execute(sql: """
+                            UPDATE workerEvents SET assignedTo = NULL, status = 'pending'
+                            WHERE id = ? AND status = 'assigned'
+                        """, arguments: [evtId])
+                    }
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'draining', currentEventId = NULL
+                        WHERE workerId = ?
+                    """, arguments: [workerId])
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -883,15 +921,32 @@ let workerEventActions: [SonataAction] = [
                     }
                     if attributedModel == nil { attributedModel = ModelPricing.defaultModel }
 
-                    try db.execute(sql: """
-                        UPDATE workerEvents
-                        SET status = 'completed',
-                            result = ?,
-                            completedAt = ?,
-                            totalTokens = COALESCE(?, totalTokens),
-                            model = COALESCE(?, model)
-                        WHERE id = ?
-                    """, arguments: [resultText, now, attributedTokens, attributedModel, eventId])
+                    // Owner-guard: only terminate the event if it is still
+                    // 'assigned' to the CALLER. A stale completion from a zombie
+                    // session whose event was already reaped or reassigned must
+                    // NOT complete the (possibly re-dispatched, now-active) task
+                    // or reset the worker that currently owns the event. Legacy
+                    // callers without a workerId fall back to the status guard.
+                    let callerWorkerId = ctx.params.string("workerId")
+                    if let callerWorkerId, !callerWorkerId.isEmpty {
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'completed', result = ?, completedAt = ?,
+                                totalTokens = COALESCE(?, totalTokens), model = COALESCE(?, model)
+                            WHERE id = ? AND status = 'assigned' AND assignedTo = ?
+                        """, arguments: [resultText, now, attributedTokens, attributedModel, eventId, callerWorkerId])
+                    } else {
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'completed', result = ?, completedAt = ?,
+                                totalTokens = COALESCE(?, totalTokens), model = COALESCE(?, model)
+                            WHERE id = ? AND status = 'assigned'
+                        """, arguments: [resultText, now, attributedTokens, attributedModel, eventId])
+                    }
+                    // Stale/duplicate completion (event already terminal or no
+                    // longer owned by this caller): skip ALL side effects so we
+                    // don't disturb the current owner or a re-dispatched task.
+                    guard db.changesCount > 0 else { return nil }
 
                     // Set worker back to idle (unless draining — keep draining status)
                     var captured: String?
@@ -1030,15 +1085,30 @@ let workerEventActions: [SonataAction] = [
                     }
                     if attributedModel == nil { attributedModel = ModelPricing.defaultModel }
 
-                    try db.execute(sql: """
-                        UPDATE workerEvents
-                        SET status = 'failed',
-                            result = ?,
-                            completedAt = ?,
-                            totalTokens = COALESCE(?, totalTokens),
-                            model = COALESCE(?, model)
-                        WHERE id = ?
-                    """, arguments: [errorText, now, attributedTokens, attributedModel, eventId])
+                    // Owner-guard (see worker_event_complete): only fail the
+                    // event if it is still 'assigned' to THIS caller. A stale
+                    // fail from a zombie session must not free the worker that
+                    // currently owns a re-dispatched event, nor re-fail a task
+                    // that has already moved on. Legacy callers without a
+                    // workerId fall back to the status guard alone.
+                    let callerWorkerId = ctx.params.string("workerId")
+                    if let callerWorkerId, !callerWorkerId.isEmpty {
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'failed', result = ?, completedAt = ?,
+                                totalTokens = COALESCE(?, totalTokens), model = COALESCE(?, model)
+                            WHERE id = ? AND status = 'assigned' AND assignedTo = ?
+                        """, arguments: [errorText, now, attributedTokens, attributedModel, eventId, callerWorkerId])
+                    } else {
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'failed', result = ?, completedAt = ?,
+                                totalTokens = COALESCE(?, totalTokens), model = COALESCE(?, model)
+                            WHERE id = ? AND status = 'assigned'
+                        """, arguments: [errorText, now, attributedTokens, attributedModel, eventId])
+                    }
+                    // Stale/duplicate fail: skip side effects (see complete path).
+                    guard db.changesCount > 0 else { return nil }
 
                     var captured: String?
                     if let workerId = row?.assignedTo {
