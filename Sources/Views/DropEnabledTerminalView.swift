@@ -60,7 +60,47 @@ final class DropEnabledTerminalView: LocalProcessTerminalView {
         // TUI apps that request mouse mode; the wheel scrolls our scrollback
         // instead. Live-toggleable if a TUI ever needs the mouse back.
         allowMouseReporting = false
+        _ = Self.installWheelSwizzle
     }
+
+    // MARK: Wheel scrollback (alt-screen aware)
+    //
+    // SwiftTerm's scrollWheel unconditionally scrolls terminal.displayBuffer,
+    // which resolves to the *alt* buffer when a full-screen TUI (Claude Code,
+    // vim, htop) is active. Alt buffers have no history above the viewport, so
+    // the wheel does nothing visible — the user's "can't scroll back in Sona
+    // sessions" bug. Mirror SwiftTerm's own pageUp/pageDown convention: on alt-
+    // screen, forward wheel deltas as PgUp/PgDn keystrokes so the TUI can walk
+    // its own transcript; on primary buffer, defer to SwiftTerm to walk our
+    // scrollback the normal way.
+    //
+    // MacTerminalView declared scrollWheel `public` (not `open`), which seals
+    // it against a Swift-level override. Swizzling the ObjC method table at
+    // class-load time is the pragmatic escape hatch — the original IMP is
+    // captured so the primary-buffer path still gets SwiftTerm's own scroller.
+    private static let installWheelSwizzle: Void = {
+        let cls: AnyClass = DropEnabledTerminalView.self
+        let sel = #selector(NSResponder.scrollWheel(with:))
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        typealias IMPType = @convention(c) (AnyObject, Selector, NSEvent) -> Void
+        let originalIMP = unsafeBitCast(method_getImplementation(method), to: IMPType.self)
+        let block: @convention(block) (DropEnabledTerminalView, NSEvent) -> Void = { instance, event in
+            if event.deltaY != 0, instance.getTerminal().isCurrentBufferAlternate {
+                let steps = max(1, min(6, Int(abs(event.deltaY).rounded())))
+                let seq: [UInt8] = event.deltaY > 0
+                    ? EscapeSequences.cmdPageUp
+                    : EscapeSequences.cmdPageDown
+                var payload: [UInt8] = []
+                payload.reserveCapacity(seq.count * steps)
+                for _ in 0..<steps { payload.append(contentsOf: seq) }
+                instance.process.send(data: payload[...])
+                return
+            }
+            originalIMP(instance, sel, event)
+        }
+        let newIMP = imp_implementationWithBlock(block)
+        method_setImplementation(method, newIMP)
+    }()
 
     deinit {
         NotificationCenter.default.removeObserver(self, name: .sonataTerminalColorsChanged, object: nil)
