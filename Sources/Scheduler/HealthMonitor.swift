@@ -300,6 +300,14 @@ actor HealthMonitor {
             // cycle instead of waiting for the 30/75-min supervisor pass.
             await reclaimStrandedEvents()
 
+            // Deterministic wall-clock timeout enforcement — fail any active
+            // task past its metadata.timeoutSeconds and recycle the pool worker
+            // holding it. Always on and independent of supervisor-session
+            // liveness, so an overnight gap with no live session can't let a
+            // task overrun for hours before a waking session batch-kills the
+            // whole backlog at once with inconsistent error text.
+            await reapOverdueTasks()
+
             // Push a periodic check event to the supervisor, driven by
             // the configurable day/night schedule in supervisorConfig.
             let schedule = await loadSupervisorSchedule()
@@ -1042,5 +1050,142 @@ actor HealthMonitor {
                 logger.warning("reclaimStrandedEvents: recovery failed for \(s.workerId): \(error)")
             }
         }
+    }
+
+    /// Deterministic wall-clock timeout enforcement for active tasks.
+    ///
+    /// A task's `metadata.timeoutSeconds` (set e.g. via `--timeout 7200` on a
+    /// nightly scout dispatch) is a hard deadline: once the task has been
+    /// `active` longer than that, it must be failed. Historically the ONLY
+    /// thing enforcing it was a live `/supervisor` LLM session — and
+    /// `pushSupervisorCheck()` silently skips when no supervisor has heartbeated
+    /// recently, so on nights with no session running the deadline went
+    /// unenforced for hours, then a waking session batch-killed the whole
+    /// backlog at once with inconsistent, hand-composed error text (2026-07-01:
+    /// BKSK / Up Studio / Salas O'Brien each ran 5-6× past their 120-min config,
+    /// all killed within 1.5s, message "Exceeded 75-minute timeout" instead of a
+    /// timeoutSeconds-aware string).
+    ///
+    /// This sweep runs every monitor cycle (always on, like reclaimStrandedEvents),
+    /// independent of supervisor liveness, and the instant a task crosses its own
+    /// deadline it: (1) fails the task with a single consistent message and the
+    /// same graph-consistency side effects as `mem_task_fail` (unblockDependents +
+    /// rollUpParentStatus + watcher DMs), then (2) recycles the pool worker holding
+    /// it — tasks are dispatched to idle pool workers, so leaving the worker busy
+    /// on a dead task is the actual cause of the "pool below target" alert. The
+    /// terminal task UPDATE is guarded on status='active' so a task that finished
+    /// between read and write is never clobbered, and the freed worker's stale
+    /// completion (if its session is still finishing) is rejected by the
+    /// complete/fail owner-guard. Tasks without a positive `timeoutSeconds` are
+    /// never touched.
+    private func reapOverdueTasks() async {
+        let now = nowMs()
+
+        struct Overdue { let id: String; let title: String; let ranMs: Int64; let timeoutSec: Int64 }
+        let overdue: [Overdue]
+        do {
+            overdue = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT id, title, startedAt, metadata
+                    FROM tasks
+                    WHERE status = 'active'
+                      AND startedAt IS NOT NULL
+                      AND metadata IS NOT NULL
+                    """)
+                    .compactMap { row -> Overdue? in
+                        let id: String? = row["id"]
+                        let startedAt: Int64? = row["startedAt"]
+                        let metaStr: String? = row["metadata"]
+                        guard let id, let startedAt, let metaStr,
+                              let metaData = metaStr.data(using: .utf8),
+                              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any]
+                        else { return nil }
+                        // timeoutSeconds may be a JSON number or a numeric string.
+                        let timeoutSec: Int64
+                        if let n = meta["timeoutSeconds"] as? NSNumber {
+                            timeoutSec = n.int64Value
+                        } else if let s = meta["timeoutSeconds"] as? String, let v = Int64(s) {
+                            timeoutSec = v
+                        } else {
+                            return nil
+                        }
+                        guard timeoutSec > 0 else { return nil }
+                        let ranMs = now - startedAt
+                        guard ranMs > timeoutSec * 1000 else { return nil }
+                        let title: String? = row["title"]
+                        return Overdue(id: id, title: title ?? id, ranMs: ranMs, timeoutSec: timeoutSec)
+                    }
+            }
+        } catch {
+            logger.warning("reapOverdueTasks: query failed: \(error)")
+            return
+        }
+
+        guard !overdue.isEmpty else { return }
+
+        for t in overdue {
+            let ranMin = t.ranMs / 60_000
+            let limitMin = t.timeoutSec / 60
+            let message = "Exceeded \(limitMin)m timeout (timeoutSeconds:\(t.timeoutSec)) "
+                + "— killed by deterministic watchdog after ~\(ranMin)m"
+            do {
+                let didFail: Bool = try await dbPool.write { db in
+                    // Fail the task, guarded on status='active' so a completion
+                    // that landed between the read and this write is never
+                    // clobbered. If nothing changed, skip ALL side effects.
+                    try db.execute(sql: """
+                        UPDATE tasks SET status = 'failed', lastError = ?, updatedAt = ?
+                        WHERE id = ? AND status = 'active'
+                        """, arguments: [message, now, t.id])
+                    guard db.changesCount > 0 else { return false }
+
+                    // Same graph-consistency side effects as mem_task_fail so a
+                    // reaper-killed task behaves identically to a hand-failed one.
+                    try unblockDependents(taskId: t.id, in: db, now: now)
+                    try rollUpParentStatus(childTaskId: t.id, in: db, now: now)
+
+                    // Recycle the pool worker(s) holding this task's dispatch
+                    // event. The task→worker link is the event payload's
+                    // `task_id` (SonataChannelServer dispatch), joined via
+                    // workers.currentEventId. Terminate the event and free the
+                    // worker so the pool slot recovers within one monitor cycle.
+                    let eventIds = try String.fetchAll(db, sql: """
+                        SELECT id FROM workerEvents
+                        WHERE json_extract(payload, '$.task_id') = ?
+                          AND status = 'assigned'
+                        """, arguments: [t.id])
+                    for eventId in eventIds {
+                        try db.execute(sql: """
+                            UPDATE workerEvents SET status = 'failed', result = ?, completedAt = ?
+                            WHERE id = ? AND status = 'assigned'
+                            """, arguments: [message, now, eventId])
+                        // Free the worker only if it still holds this exact event
+                        // and is still busy — never clobber a slot that moved on.
+                        try db.execute(sql: """
+                            UPDATE workers SET status = 'idle',
+                                currentEventId = NULL, currentEventTokens = NULL, currentSlug = NULL,
+                                currentCacheReadTokens = NULL, currentInputTokens = NULL,
+                                currentPromptHash = NULL, currentSessionLabel = NULL,
+                                currentCwdBasename = NULL
+                            WHERE currentEventId = ? AND status = 'busy'
+                            """, arguments: [eventId])
+                    }
+                    return true
+                }
+                if didFail {
+                    logger.warning("reapOverdueTasks: failed overdue task \(t.id) '\(t.title)' — \(message)")
+                    _ = await fireTaskWatcherDMs(
+                        taskId: t.id, oldStatus: "active", newStatus: "failed", dbPool: dbPool
+                    )
+                }
+            } catch {
+                logger.warning("reapOverdueTasks: fail write failed for \(t.id): \(error)")
+            }
+        }
+    }
+
+    /// Test-only invoker for the deterministic timeout reaper (private otherwise).
+    func reapOverdueTasksForTesting() async {
+        await reapOverdueTasks()
     }
 }
