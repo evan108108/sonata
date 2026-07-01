@@ -117,6 +117,13 @@ actor HealthMonitor {
     /// Weak reference to the scheduler for status checks.
     private let schedulerStatus: (@Sendable () async -> Bool)?
 
+    /// Hand a workerId to the pool for a full drain+respawn (SIGTERM the
+    /// existing claude PTY, spawn a replacement in the same slot). Called by
+    /// the reaper when it fails an overdue task so a wedged worker actually
+    /// gets replaced instead of being handed a fresh event it can't process.
+    /// Optional — nil in test harnesses that don't boot a WorkerManager.
+    private let cycleStuckWorkers: (@Sendable ([String]) async -> Void)?
+
     /// Returns `(target, effective)` for the worker pool. `effective` is the
     /// count of workers in a non-terminal status (i.e. NOT `.offline`).
     /// Optional — when nil, the worker_pool check is skipped (e.g. in test
@@ -168,6 +175,7 @@ actor HealthMonitor {
         port: Int = 3212,
         schedulerStatus: (@Sendable () async -> Bool)? = nil,
         workerPoolStatus: (@Sendable () async -> (target: Int, effective: Int))? = nil,
+        cycleStuckWorkers: (@Sendable ([String]) async -> Void)? = nil,
         emailProvider: EmailProvider = AgentMailProvider(),
         search: (any SearchService)? = nil,
         logger: Logger? = nil
@@ -177,6 +185,7 @@ actor HealthMonitor {
         self.serverURL = "http://127.0.0.1:\(port)/api/ping"
         self.schedulerStatus = schedulerStatus
         self.workerPoolStatus = workerPoolStatus
+        self.cycleStuckWorkers = cycleStuckWorkers
         self.search = search
         var log = logger ?? Logger(label: "sonata.health")
         log.logLevel = .info
@@ -1070,14 +1079,19 @@ actor HealthMonitor {
     /// independent of supervisor liveness, and the instant a task crosses its own
     /// deadline it: (1) fails the task with a single consistent message and the
     /// same graph-consistency side effects as `mem_task_fail` (unblockDependents +
-    /// rollUpParentStatus + watcher DMs), then (2) recycles the pool worker holding
-    /// it — tasks are dispatched to idle pool workers, so leaving the worker busy
-    /// on a dead task is the actual cause of the "pool below target" alert. The
-    /// terminal task UPDATE is guarded on status='active' so a task that finished
-    /// between read and write is never clobbered, and the freed worker's stale
-    /// completion (if its session is still finishing) is rejected by the
-    /// complete/fail owner-guard. Tasks without a positive `timeoutSeconds` are
-    /// never touched.
+    /// rollUpParentStatus + watcher DMs), (2) fails the workerEvent that
+    /// dispatched it so the drain re-enqueue guard treats it as terminal, then
+    /// (3) hands the assigned worker(s) to `cycleStuckWorkers` for a full
+    /// drain+respawn. The transaction deliberately does NOT flip the worker to
+    /// 'idle': idling a wedged worker just opens a race window where the
+    /// dispatcher hands it a new event that its stuck claude PTY will never
+    /// process — the exact regression this reaper is meant to prevent. Leaving
+    /// the worker 'busy' with `currentEventId` pointing at the just-failed
+    /// event is a safe waypoint until the cycle path swaps it out. The terminal
+    /// task UPDATE is guarded on status='active' so a task that finished
+    /// between read and write is never clobbered, and any stale completion
+    /// from the dying session is rejected by the complete/fail owner-guard.
+    /// Tasks without a positive `timeoutSeconds` are never touched.
     private func reapOverdueTasks() async {
         let now = nowMs()
 
@@ -1129,7 +1143,8 @@ actor HealthMonitor {
             let message = "Exceeded \(limitMin)m timeout (timeoutSeconds:\(t.timeoutSec)) "
                 + "— killed by deterministic watchdog after ~\(ranMin)m"
             do {
-                let didFail: Bool = try await dbPool.write { db in
+                struct ReapOutcome { let didFail: Bool; let workerIds: [String] }
+                let outcome: ReapOutcome = try await dbPool.write { db in
                     // Fail the task, guarded on status='active' so a completion
                     // that landed between the read and this write is never
                     // clobbered. If nothing changed, skip ALL side effects.
@@ -1137,46 +1152,49 @@ actor HealthMonitor {
                         UPDATE tasks SET status = 'failed', lastError = ?, updatedAt = ?
                         WHERE id = ? AND status = 'active'
                         """, arguments: [message, now, t.id])
-                    guard db.changesCount > 0 else { return false }
+                    guard db.changesCount > 0 else { return ReapOutcome(didFail: false, workerIds: []) }
 
                     // Same graph-consistency side effects as mem_task_fail so a
                     // reaper-killed task behaves identically to a hand-failed one.
                     try unblockDependents(taskId: t.id, in: db, now: now)
                     try rollUpParentStatus(childTaskId: t.id, in: db, now: now)
 
-                    // Recycle the pool worker(s) holding this task's dispatch
-                    // event. The task→worker link is the event payload's
-                    // `task_id` (SonataChannelServer dispatch), joined via
-                    // workers.currentEventId. Terminate the event and free the
-                    // worker so the pool slot recovers within one monitor cycle.
-                    let eventIds = try String.fetchAll(db, sql: """
-                        SELECT id FROM workerEvents
+                    // Terminate the dispatch event(s) that carried this task and
+                    // collect the worker(s) that were assigned. The task→worker
+                    // link is the event payload's `task_id` joined to
+                    // workerEvents.assignedTo. We do NOT touch `workers` here —
+                    // idling a wedged worker would let the dispatcher hand it a
+                    // fresh event while its claude PTY is still stuck. cycle-
+                    // Worker handles the state transitions (draining → starting
+                    // → idle) via drain+SIGTERM+respawn.
+                    let assignedRows = try Row.fetchAll(db, sql: """
+                        SELECT id, assignedTo FROM workerEvents
                         WHERE json_extract(payload, '$.task_id') = ?
                           AND status = 'assigned'
                         """, arguments: [t.id])
-                    for eventId in eventIds {
+                    var workerIds: [String] = []
+                    for row in assignedRows {
+                        guard let eventId: String = row["id"] else { continue }
                         try db.execute(sql: """
                             UPDATE workerEvents SET status = 'failed', result = ?, completedAt = ?
                             WHERE id = ? AND status = 'assigned'
                             """, arguments: [message, now, eventId])
-                        // Free the worker only if it still holds this exact event
-                        // and is still busy — never clobber a slot that moved on.
-                        try db.execute(sql: """
-                            UPDATE workers SET status = 'idle',
-                                currentEventId = NULL, currentEventTokens = NULL, currentSlug = NULL,
-                                currentCacheReadTokens = NULL, currentInputTokens = NULL,
-                                currentPromptHash = NULL, currentSessionLabel = NULL,
-                                currentCwdBasename = NULL
-                            WHERE currentEventId = ? AND status = 'busy'
-                            """, arguments: [eventId])
+                        if let workerId: String = row["assignedTo"], !workerId.isEmpty {
+                            workerIds.append(workerId)
+                        }
                     }
-                    return true
+                    return ReapOutcome(didFail: true, workerIds: workerIds)
                 }
-                if didFail {
+                if outcome.didFail {
                     logger.warning("reapOverdueTasks: failed overdue task \(t.id) '\(t.title)' — \(message)")
                     _ = await fireTaskWatcherDMs(
                         taskId: t.id, oldStatus: "active", newStatus: "failed", dbPool: dbPool
                     )
+                    if !outcome.workerIds.isEmpty, let cycler = cycleStuckWorkers {
+                        let joined = outcome.workerIds.joined(separator: ",")
+                        logger.warning("reapOverdueTasks: cycling \(outcome.workerIds.count) worker(s) that held task \(t.id): \(joined)")
+                        await cycler(outcome.workerIds)
+                    }
                 }
             } catch {
                 logger.warning("reapOverdueTasks: fail write failed for \(t.id): \(error)")

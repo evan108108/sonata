@@ -714,6 +714,18 @@ struct SonataApp: App {
                             return (target: target, effective: effective)
                         }
                     },
+                    // Hand overdue-task worker IDs to the pool for a full
+                    // drain+SIGTERM+respawn (reapOverdueTasks → cycleWorkerById).
+                    // Read on MainActor since WorkerManager.workers + cycleWorker
+                    // are @MainActor-adjacent. Skips workers already gone or
+                    // mid-transition.
+                    cycleStuckWorkers: { workerIds in
+                        await MainActor.run {
+                            for wid in workerIds {
+                                WorkerManager.shared.cycleWorkerById(wid)
+                            }
+                        }
+                    },
                     // Enables the periodic search-index + embedding-coverage
                     // reconcile (self-heals docs drift, alarms on any index or
                     // vector gap) — the standing guard against silent drift.

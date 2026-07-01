@@ -524,6 +524,28 @@ class WorkerManager: ObservableObject {
         }
     }
 
+    /// Look up a live worker by DB workerId and cycle it. Called by the
+    /// HealthMonitor reaper when a task times out so the wedged claude PTY
+    /// gets replaced instead of quietly re-dispatched. Skips workers that are
+    /// already gone or mid-transition (`.draining`, `.restarting`, `.starting`,
+    /// `.offline`) so a burst of reaps for related tasks doesn't try to cycle
+    /// the same slot twice.
+    func cycleWorkerById(_ workerId: String) {
+        guard let worker = workers.first(where: { $0.id == workerId }) else {
+            print("[reap-cycle] worker \(workerId) no longer tracked — skipping")
+            return
+        }
+        switch worker.status {
+        case .draining, .restarting, .starting, .offline:
+            print("[reap-cycle] worker \(worker.label) already \(worker.status) — skipping")
+            return
+        default:
+            break
+        }
+        print("[reap-cycle] cycling stuck worker \(worker.label) after task timeout")
+        cycleWorker(worker)
+    }
+
     /// Spawn replacement → drain old → SIGTERM → SIGKILL if needed.
     func cycleWorker(_ oldWorker: Worker) {
         let slotLabel = oldWorker.label
