@@ -475,23 +475,115 @@ class WorkerManager: ObservableObject {
         }
     }
 
-    /// Remove a worker permanently — drain in DB, SIGTERM/SIGKILL the process, do
-    /// NOT spawn a replacement. Shrinks the pool by one. Use cycleWorker if you
-    /// want a replacement.
+    /// Remove a worker permanently. Guarantees three things end-state:
+    ///   (a) the underlying claude PTY is dead — verified via kill(pid, 0),
+    ///       not just "we sent SIGKILL and hoped." An unkillable process
+    ///       fires a supervisor alert instead of leaking silently.
+    ///   (b) the workers DB row is DELETEd — so no dispatcher can pick this
+    ///       workerId again, even if the process somehow survives.
+    ///   (c) any in-flight event is re-enqueued (assignedTo=NULL,
+    ///       status='pending') atomically with the row DELETE, via
+    ///       worker_unregister — no lost work.
+    ///
+    /// Failure mode this replaces: the previous flow marked the row
+    /// 'draining', SIGTERM'd, then SIGKILL'd after sigtermGrace and left DB
+    /// cleanup to the 30s-stale sweeper. If SIGTERM/SIGKILL didn't take (PTY
+    /// child reparented, monitor cancelled early, whatever), the process kept
+    /// heartbeating, the sweeper's `lastHeartbeat < cutoff` guard never
+    /// matched, the row lingered as 'draining', and — in the observed bug —
+    /// some other path (worker_undrain from a racing spawn-failure recovery,
+    /// or a lost drain POST that never landed) flipped it back to 'idle',
+    /// letting `SonataChannelServer.findIdleWorker` re-dispatch to a UI-
+    /// invisible ghost worker that kept eating memory and completing tasks.
+    ///
+    /// Sequence: freeze coordinator → capture shellPid → drain (belt for the
+    /// race window before SIGKILL) → SIGTERM → wait sigtermGrace → verify via
+    /// kill(pid, 0) → SIGKILL if still alive → verify again with 2s of
+    /// polling → alert if refused to die → unregister (DELETE + re-enqueue)
+    /// → remove from UI. Every step runs even if a prior step failed, so we
+    /// never leave the DB row alive on a kill failure.
     func removeWorker(_ worker: Worker) {
         let slotLabel = worker.label
         let sigtermGrace = CycleSettings.shared.sigtermGrace
-
-        // Mark draining in DB so the server stale-sweep treats it correctly.
-        worker.status = .draining
+        let workerId = worker.id
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+
+        // Capture the shellPid BEFORE terminate() — SwiftTerm keeps shellPid
+        // populated after terminate today, but that's an implementation detail
+        // of LocalProcess.terminate() we shouldn't lean on.
+        let shellPid = worker.coordinator?.terminalView?.process?.shellPid ?? 0
+
+        // Freeze the coordinator: no auto-restart, no future ops on this row.
+        worker.coordinator?.autoRestartEnabled = false
+        worker.status = .draining
+
+        print("[remove] term-sent: \(slotLabel) pid=\(shellPid)")
+
+        // Belt: drain the row so the dispatcher can't pick it during the kill
+        // window. Fire-and-forget — unregister below is the authoritative
+        // cleanup and doesn't depend on this landing.
         Task {
-            var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/drain?workerId=\(worker.id)")!)
+            var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/drain?workerId=\(workerId)")!)
             req.httpMethod = "POST"
             _ = try? await URLSession.shared.data(for: req)
         }
 
-        teardownWorker(worker, sigtermGrace: sigtermGrace, slotLabel: slotLabel)
+        // SIGTERM via SwiftTerm's PTY path (closes I/O + kill(shellPid, SIGTERM)).
+        worker.coordinator?.terminalView?.terminate()
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + sigtermGrace) { [weak self] in
+            guard let self else { return }
+
+            // Verify the process is actually dead. kill(pid, 0) returns 0 if
+            // the process still exists (even as a zombie); -1 with ESRCH if
+            // fully gone. shellPid == 0 means we never had a valid pid — treat
+            // as "no process to kill" and proceed to the DB cleanup.
+            let stillAlive: Bool = shellPid > 0 && kill(shellPid, 0) == 0
+            if stillAlive {
+                print("[remove] kill-required: \(slotLabel) pid=\(shellPid)")
+                kill(shellPid, SIGKILL)
+            }
+
+            // Poll for actual death — SIGKILL is synchronous in-kernel, but
+            // reaping (removal from the process table) can lag a bit. Waiting
+            // ~2s in 200ms slices catches the common case without stalling
+            // the UI. `pid == 0` (no valid pid) skips straight to "dead."
+            var dead = shellPid == 0 || !stillAlive
+            for _ in 0..<10 {
+                if dead { break }
+                usleep(200_000)
+                if kill(shellPid, 0) != 0 { dead = true; break }
+            }
+
+            if !dead {
+                let msg = "Worker \(slotLabel) (pid \(shellPid)) survived SIGKILL. DB row will still be deleted, but a zombie process may be leaking memory. Consider a manual `kill -9 \(shellPid)`."
+                print("[remove] kill-failed: \(msg)")
+                DispatchQueue.main.async { self.alertSupervisor(message: msg) }
+            } else {
+                print("[remove] exit-confirmed: \(slotLabel)")
+            }
+
+            // Authoritative DB cleanup: unregister DELETEs the workers row and
+            // atomically re-enqueues any still-'assigned' event
+            // (WorkerActions.swift:387-400). Fires regardless of whether the
+            // process actually died — the DB row must not outlive the UI
+            // removal, or a live-but-orphaned bridge could keep processing
+            // work assigned by findIdleWorker.
+            Task {
+                var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/unregister?workerId=\(workerId)")!)
+                req.httpMethod = "POST"
+                _ = try? await URLSession.shared.data(for: req)
+            }
+
+            // Remove from UI last so a user watching the list sees the slot
+            // vanish only after the kill/cleanup sequence completes.
+            DispatchQueue.main.async {
+                self.workers.removeAll { $0.id == workerId }
+                if self.selectedWorkerId == workerId {
+                    self.selectedWorkerId = self.workers.first?.id
+                }
+            }
+        }
     }
 
     func restartWorker(_ worker: Worker) {
