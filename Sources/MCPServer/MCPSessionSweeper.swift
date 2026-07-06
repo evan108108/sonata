@@ -3,28 +3,20 @@ import GRDB
 import Logging
 
 /// Periodic sweeper that:
-///   1. Pumps SSE keepalive frames so long-lived MCP streams don't time out.
-///   2. Refreshes the workers.lastHeartbeat (and supervisorState.lastHeartbeat)
-///      DB columns for every session whose SSE is currently attached.
-///   3. **Staleness backstop**: evicts registry entries with no SSE writer and
-///      a `lastContactedAt` older than `staleGrace`. The primary eviction rule
-///      lives in MCPHTTPRouter (SSE onClose), but entries can be created via a
-///      POST initialize/tool call *before* an SSE attach — anon-XXX handshakes
-///      that never identify, or sessions whose SSE close wasn't detected — so
-///      those would otherwise linger forever. The grace window covers normal
-///      handshake/attach latency.
+///   1. Pumps SSE keep-alive frames on live connections.
+///   2. Refreshes workers.lastHeartbeat and supervisorState.lastHeartbeat for
+///      every currently-attached session.
+///
+/// Staleness eviction is trivial now: SSE close is the ONLY eviction signal
+/// (handled by MCPHTTPRouter's onClose callback). No registry entries to
+/// prune — the connection dict is the only in-memory state.
 actor MCPSessionSweeper {
-    private let registry: MCPSessionRegistry
     private let dbPool: DatabasePool
     private let logger: Logger
     private var task: Task<Void, Never>?
-
     private let tickInterval: TimeInterval = 15.0
-    /// Evict no-SSE entries whose lastContactedAt is older than this.
-    private let staleGrace: Int64 = 3 * 60 * 1000  // 3 minutes
 
-    init(registry: MCPSessionRegistry, dbPool: DatabasePool, logger: Logger) {
-        self.registry = registry
+    init(dbPool: DatabasePool, logger: Logger) {
         self.dbPool = dbPool
         self.logger = logger
     }
@@ -45,47 +37,41 @@ actor MCPSessionSweeper {
     }
 
     private func tick() async {
-        await registry.tickKeepAlives()
+        await MCPConnections.shared.tickKeepAlives()
 
-        let snapshots = await registry.snapshot()
+        let liveKeys = await MCPConnections.shared.liveSessionKeys()
         let now = nowMs()
 
-        for snap in snapshots {
-            // Staleness backstop (see actor doc): an entry with no SSE writer
-            // and no contact in `staleGrace` is an abandoned POST-only/anon
-            // handshake or a missed SSE-close — evict it so the registry stays
-            // accurate for DM routing, broadcast, and the dashboard.
-            if !snap.hasSSE && (now - snap.lastContactedAt) > staleGrace {
-                await registry.evict(snap.sessionKey)
-                logger.info("Sweeper pruned stale registry entry \(snap.sessionKey) (no SSE, lastContact \((now - snap.lastContactedAt) / 1000)s ago)")
+        for key in liveKeys {
+            if key == "supervisor" {
+                await updateSupervisorHeartbeat(at: now)
                 continue
             }
-            // Only sessions with an attached SSE writer count as
-            // "currently connected." For those, bump the DB heartbeat
-            // column so other subsystems (worker pool monitor,
-            // supervisor health check) see the worker as alive.
-            guard snap.hasSSE else { continue }
-            switch snap.role {
-            case .worker:
-                await updateWorkerHeartbeat(
-                    workerId: snap.sessionKey,
-                    at: now,
-                    inFlightEventId: snap.inFlightEventId
-                )
-            case .supervisor:
-                await updateSupervisorHeartbeat(at: now)
-            case .interactive:
-                break
+            // Workers first (workerId lookup); interactive sessions don't
+            // update lastHeartbeat anywhere durable, so we skip them.
+            let isWorker: Bool = (try? await dbPool.read { db in
+                let n = try Int.fetchOne(db, sql:
+                    "SELECT COUNT(*) FROM workers WHERE workerId = ?",
+                    arguments: [key]) ?? 0
+                return n > 0
+            }) ?? false
+            if isWorker {
+                await updateWorkerHeartbeat(workerId: key, at: now)
             }
         }
     }
 
-    private func updateWorkerHeartbeat(
-        workerId: String,
-        at heartbeatAt: Int64,
-        inFlightEventId: String?
-    ) async {
-        let usage = inFlightEventId == nil ? nil : await readWorkerTranscriptUsage(workerId: workerId)
+    private func updateWorkerHeartbeat(workerId: String, at heartbeatAt: Int64) async {
+        // Transcript-usage sampling (from old sweeper) preserved verbatim.
+        // Determines if there's an in-flight event by reading currentEventId
+        // from DB instead of registry snapshot.
+        let inFlight: String? = (try? await dbPool.read { db in
+            try String.fetchOne(db, sql:
+                "SELECT currentEventId FROM workers WHERE workerId = ?",
+                arguments: [workerId])
+        }) ?? nil
+
+        let usage = inFlight == nil ? nil : await readWorkerTranscriptUsage(workerId: workerId)
         do {
             try await dbPool.write { db in
                 try db.execute(sql: """
@@ -98,7 +84,7 @@ actor MCPSessionSweeper {
                     WHERE workerId = ?
                 """, arguments: [
                     heartbeatAt,
-                    inFlightEventId == nil ? nil : heartbeatAt,
+                    inFlight == nil ? nil : heartbeatAt,
                     usage?.totalTokens,
                     usage?.inputTokens,
                     usage?.cacheReadTokens,
@@ -124,6 +110,8 @@ actor MCPSessionSweeper {
         }
     }
 
+    // Transcript-usage helper — unchanged from the old sweeper.
+
     private struct TranscriptUsage {
         let totalTokens: Int64
         let inputTokens: Int64
@@ -138,22 +126,18 @@ actor MCPSessionSweeper {
         let projectsDir = "\(home)/.claude/projects/\(encoded)"
 
         guard let path = mostRecentJSONL(in: projectsDir) else { return nil }
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
-            return nil
-        }
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         var totalTokens: Int64 = 0
         var inputTokens: Int64 = 0
         var cacheReadTokens: Int64 = 0
         var sawAssistant = false
-
         for line in text.split(separator: "\n") {
             guard !line.isEmpty,
                   let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   obj["type"] as? String == "assistant",
                   let msg = obj["message"] as? [String: Any],
-                  let usage = msg["usage"] as? [String: Any]
-            else { continue }
+                  let usage = msg["usage"] as? [String: Any] else { continue }
             sawAssistant = true
             let input = (usage["input_tokens"] as? Int64) ?? 0
             let cacheCreate = (usage["cache_creation_input_tokens"] as? Int64) ?? 0
@@ -164,11 +148,7 @@ actor MCPSessionSweeper {
             cacheReadTokens += cacheRead
         }
         if !sawAssistant { return nil }
-        return TranscriptUsage(
-            totalTokens: totalTokens,
-            inputTokens: inputTokens,
-            cacheReadTokens: cacheReadTokens
-        )
+        return TranscriptUsage(totalTokens: totalTokens, inputTokens: inputTokens, cacheReadTokens: cacheReadTokens)
     }
 
     private func mostRecentJSONL(in dir: String) -> String? {
@@ -179,9 +159,7 @@ actor MCPSessionSweeper {
             let p = "\(dir)/\(entry)"
             let attrs = try? fm.attributesOfItem(atPath: p)
             let m = attrs?[.modificationDate] as? Date ?? Date.distantPast
-            if best == nil || m > best!.1 {
-                best = (p, m)
-            }
+            if best == nil || m > best!.1 { best = (p, m) }
         }
         return best?.0
     }

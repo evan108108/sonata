@@ -381,6 +381,11 @@ func waitForSonataHTTP(port: Int, timeoutSeconds: Double = 5.0) -> Bool {
 struct SonataApp: App {
     let dbPool: DatabasePool
 
+    // Process-wide handle to the DatabasePool so no-registry callers (e.g.
+    // WorkersView) can reach the DB without a passed-in dependency. Set once,
+    // immediately after `pool` is initialized in init().
+    nonisolated(unsafe) static var sharedDbPool: DatabasePool?
+
     init() {
         // Tee stdout/stderr into ~/Library/Logs/Sonata.log so every print() and
         // runtime stderr write is captured by the in-app LogsView. Must run
@@ -446,6 +451,7 @@ struct SonataApp: App {
         ensureBundledSkills()
 
         let pool = self.dbPool
+        SonataApp.sharedDbPool = pool
         let port = sonataPort
 
         // Start the HTTP server + all Phase 3 services in a detached task
@@ -515,18 +521,14 @@ struct SonataApp: App {
                 registry.register(statsActions)
                 registry.register(compositeActions)
 
-                // Publish MCPSessionRegistry.shared as early as possible — before
-                // PluginManager, mountHTTP, or anything else that could yield to
-                // the MainActor. Coordinators that spawn claude sessions on
-                // launch (InteractiveSessionTab from ContentView.onAppear,
-                // SupervisorCoordinator, WorkerCoordinator) race with this Task;
-                // if .shared is still nil when they reach MCPSpawn, they would
-                // fall back to the legacy stdio bridge and never attach SSE.
-                // The router/dispatcher/sweeper bindings below stay where they
-                // are — they only need the registry object to exist, which it
-                // now does.
-                let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: registry)
-                MCPSessionRegistry.shared = mcpRegistry
+                // No registry to publish. MCPConnections.shared and MCPAuth.shared are
+                // process-init singletons — no explicit wiring needed. Callers that used
+                // to consult the old registry now query the DB directly.
+                //
+                // NOTE: MCPHTTPRouter.register no longer takes a `registry` argument —
+                // state comes from MCPConnections.shared + MCPAuth.shared inside the router.
+                _ = MCPAuth.shared
+                _ = MCPConnections.shared
 
                 // Create PluginManager (before mountHTTP so plugin management routes are included)
                 let pluginManager = PluginManager(dbPool: pool, registry: registry)
@@ -558,14 +560,13 @@ struct SonataApp: App {
                 // into the HTTP router, notification dispatcher, and sweepers.
                 MCPHTTPRouter.register(
                     on: router,
-                    registry: mcpRegistry,
                     actionRegistry: registry,
                     dbPool: pool,
                     logger: logger
                 )
-                await MCPNotificationDispatcher.shared.bind(registry: mcpRegistry)
+                // MCPNotificationDispatcher.bind(registry:) deleted — the dispatcher
+                // uses MCPConnections.shared directly, no binding needed.
                 let mcpSweeper = MCPSessionSweeper(
-                    registry: mcpRegistry,
                     dbPool: pool,
                     logger: logger
                 )
@@ -578,9 +579,15 @@ struct SonataApp: App {
                 let embeddingSweeper = EmbeddingSweeper(
                     dbPool: pool, logger: Logger(label: "sonata.embedding.sweeper"))
                 await embeddingSweeper.start()
-                let mcpEventPusher = MCPEventPusher(dbPool: pool, registry: mcpRegistry, logger: logger)
+                let mcpEventPusher = MCPEventPusher(dbPool: pool, logger: logger)
                 await mcpEventPusher.start()
                 logger.info("MCP HTTP endpoint registered at http://127.0.0.1:\(port)/mcp/{sessionKey} (flag SONATA_MCP_INPROC gates coordinator-side cutover)")
+
+                // Prime the SelfInstanceIdCache in the background so the first
+                // dm_send doesn't pay the sonar-card fetch cost. Best-effort, no
+                // wait. Non-empty sentinel is REQUIRED — isSelf("") short-circuits
+                // without touching the cache.
+                Task.detached { _ = await SonarPeerLookup.isSelf("__warm_cache_sentinel__") }
 
                 // Dispatcher singleton retired (2026-05-18). External
                 // launchers identify themselves via bearer = sessionKey

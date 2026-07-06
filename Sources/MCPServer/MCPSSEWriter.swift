@@ -2,7 +2,7 @@ import Foundation
 import NIOCore
 
 /// One per active SSE connection. The router creates a writer on GET,
-/// hands it to MCPSessionRegistry.attachSSE, and uses writer.stream as
+/// hands it to MCPConnections.attach, and uses writer.stream as
 /// the AsyncSequence backing the ResponseBody.
 ///
 /// AsyncStream supports only ONE consumer — the ResponseBody is that

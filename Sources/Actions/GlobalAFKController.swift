@@ -104,7 +104,7 @@ extension Notification.Name {
     static let sonataGlobalAFKChanged = Notification.Name("sonataGlobalAFKChanged")
 
     // sonataMCPSessionAttached is referenced by string literal at the post
-    // and subscribe sites in MCPSessionState + GlobalAFKOrchestrator. A
+    // and subscribe sites in GlobalAFKOrchestrator. A
     // static-let extension cross-file fails to link (Swift's strict static
     // addressor resolution); the literal-string approach sidesteps it.
 }

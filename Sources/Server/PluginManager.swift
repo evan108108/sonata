@@ -369,9 +369,9 @@ final class PluginManager: @unchecked Sendable {
             // re-pull tools/list. This is the moment that fixes the
             // reconnect-while-plugin-still-booting race: a session that
             // re-pulled before this plugin registered would otherwise hold a
-            // plugin-less surface forever (see MCPSessionRegistry
+            // plugin-less surface forever (see MCPNotificationDispatcher
             // .broadcastToolsListChanged).
-            Task { await MCPSessionRegistry.shared?.broadcastToolsListChanged() }
+            Task { await MCPNotificationDispatcher.shared.broadcastToolsListChanged() }
         } catch {
             sonataFileLog("Plugin \(runtime.name): discovery failed — \(error)")
         }
@@ -535,7 +535,7 @@ final class PluginManager: @unchecked Sendable {
 
         let actionNames = runtime.discoveredActions.map { "\(pluginName)_\($0.name)" }
         registry.unregister(actionNames)
-        Task { await MCPSessionRegistry.shared?.broadcastToolsListChanged() }
+        Task { await MCPNotificationDispatcher.shared.broadcastToolsListChanged() }
 
         if runtime.crashCount > backoffIntervals.count {
             runtime.status = "failed"
@@ -819,7 +819,7 @@ final class PluginManager: @unchecked Sendable {
             let actionNames = runtime.discoveredActions.map { "\(name)_\($0.name)" }
             registry.unregister(actionNames)
             runtime.discoveredActions = []
-            Task { await MCPSessionRegistry.shared?.broadcastToolsListChanged() }
+            Task { await MCPNotificationDispatcher.shared.broadcastToolsListChanged() }
 
             if runtime.mode == "managed" {
                 // Use the release's stop command to cleanly shut down the BEAM daemon
@@ -1098,38 +1098,19 @@ final class PluginManager: @unchecked Sendable {
     func handlePluginEvent(pluginName: String, event: String, payload: [String: Any]) async {
         switch event {
         case "new_message":
-            // sonar-dm v0 pre-filter: if the inbound message carries a non-empty
-            // `target_session_id`, route through DMActions and short-circuit
-            // the legacy SONAR_MESSAGE worker dispatch. Old payloads without
-            // the field fall through unchanged so mixed-Sonar-version fleets
-            // remain backwards compatible.
-            if let target = payload["target_session_id"] as? String, !target.isEmpty {
-                await DMActions.routeInbound(payload: payload, dbPool: dbPool)
-                sonataFileLog("Plugin \(pluginName): routed DM target=\(target) (pre-filter, no legacy dispatch)")
-                return
-            }
+            // Every inbound peer DM lands here now. DMActionsInbound decides whether
+            // to route directly (in_reply_to present → chain continuation) or create
+            // a sonar_dm workerEvent (thread initiation). Legacy SONAR_MESSAGE path
+            // deleted — no more mixed-version fallback.
+            await DMActionsInbound.routePeerInbound(payload: payload, dbPool: dbPool)
+            sonataFileLog("Plugin \(pluginName): routed peer DM messageId=\(payload["message_id"] as? String ?? "?")")
+            return
 
-            let messageId = payload["message_id"] as? String ?? ""
-            let fromPeer = payload["from_peer"] as? String ?? "unknown"
-            let question = payload["question"] as? String ?? ""
-
-            let eventPayload: [String: Any] = [
-                "plugin": pluginName,
-                "type": "SONAR_MESSAGE",
-                "message_id": messageId,
-                "from_peer": fromPeer,
-                "question": question
-            ]
-            let payloadJSON = (try? JSONSerialization.data(withJSONObject: eventPayload))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-
-            try? await dbPool.write { db in
-                try db.execute(sql: """
-                    INSERT INTO workerEvents (id, type, payload, priority, status, createdAt)
-                    VALUES (?, 'SONAR_MESSAGE', ?, 5, 'pending', ?)
-                """, arguments: [newUUID(), payloadJSON, nowMs()])
-            }
-            sonataFileLog("Plugin \(pluginName): dispatched SONAR_MESSAGE from \(fromPeer) to worker queue")
+        case "ack_forward":
+            // Peer forwarded an ACK for a DM we originally sent. Update audit +
+            // push dm_ack notification to the original local sender's SSE.
+            await DMActionsInbound.routePeerAckForward(payload: payload, dbPool: dbPool)
+            return
 
         case "reply_received":
             let messageId = payload["message_id"] as? String ?? ""

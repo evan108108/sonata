@@ -2,150 +2,371 @@ import Foundation
 import GRDB
 import SQLite3
 
-// Sonar DMs — Sonata-side routing.
+// Sonata-side DM routing.
 //
-// Unified model after the DMRegistry surface was removed:
-//   - dm_send always persists to `dm_messages` (durable inbox), then attempts
-//     a live SSE push via MCPSessionRegistry.deliverDM. Status is "delivered"
-//     or "queued"; never 404.
-//   - dm_inbox is the only backfill path — recipients pull anything that
-//     wasn't live-pushed.
-//   - routeInbound (federated DMs landing locally) does the same: persist
-//     first, then try a live SSE push.
+// Design principle (2026-07-02): no registry. DB is single source of truth
+// for identity. DMs are fire-and-observe — dm_send returns immediately with
+// sent | not_live | not_found + optional reason. ACKs arrive async as
+// dm_ack notifications on the sender's SSE stream when the receiver's
+// worker calls dm_ack(message_id).
 //
-// No registration step exists. Every session is reachable by its session key
-// (or claudeSessionId alias, via MCPSessionRegistry.resolveSession).
+// Two send paths:
+//   dm_send(target, body)             — opens a thread. Target is opaque:
+//                                        peer name / local session / worker / supervisor.
+//   dm_reply(to_message_id, body)     — continues a thread. Direct routing
+//                                        via message chain, no workerEvent.
+//
+// Endpoints/tools deleted: dm_registry, dm_inbox, dm_poll. If any external
+// caller hits these, they get 404.
+//
+// dm_messages table: append-only audit log. Never read for delivery.
 
-// MARK: - Types
+// MARK: - Response types
 
-struct DMRegistration: Codable, Sendable {
-    let sessionId: String
-    let sessionLabel: String?
-    let role: String?           // "worker" | "interactive" | "supervisor" | caller-supplied
-    let registeredAt: Int64
+struct DMSendResponse: Encodable, Sendable {
+    let status: String       // "sent" | "not_live" | "not_found"
+    let messageId: String?
+    let reason: String?
 }
 
-struct DMEnvelope: Codable, Sendable {
-    let messageId: String        // Sonar message id (16-byte hex) or local UUID
-    let fromSessionId: String?   // claimed by sender — NOT verified for federated
-    let fromPubkey: String?      // verified peer instance_id (federation only)
-    let fromPeerId: String?      // local peers.id (sender side); nil for inbound on receiver
-    let targetSessionId: String
-    let body: String
-    let context: String?
-    let sentAtMs: Int64          // sender wall clock
-    let receivedAtMs: Int64      // Sonata wall clock on inbound
-    let metaJson: String?        // optional caller-supplied JSON blob, ≤ 4 KB
-}
+struct DMBroadcastResponse: Encodable, Sendable {
+    let sent: Int
+    let notLive: Int
+    let notFound: Int
+    let total: Int
+    let results: [DMSendResponse]
 
-// MARK: - Limits & validation
-
-enum DMLimits {
-    static let bodyMaxBytes = 256 * 1024
-    static let metaMaxBytes = 4 * 1024
-    static let sessionIdRegex = #"^[A-Za-z0-9_-]{1,128}$"#
-}
-
-private func isValidSessionId(_ s: String) -> Bool {
-    s.range(of: DMLimits.sessionIdRegex, options: .regularExpression) != nil
-}
-
-// MARK: - Persistence
-
-/// INSERT OR IGNORE on messageId (replay de-dup belt #2). Returns true iff
-/// a row was newly inserted (changes() == 1).
-@discardableResult
-func dmMessagesPersist(_ env: DMEnvelope, deliveryStatus: String, db: Database) throws -> Bool {
-    let before = db.changesCount
-    try db.execute(sql: """
-        INSERT OR IGNORE INTO dm_messages (
-            messageId, targetSessionId, fromSessionId, fromPubkey, fromPeerId,
-            body, context, metaJson, sentAtMs, receivedAtMs, deliveryStatus
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, arguments: [
-        env.messageId, env.targetSessionId, env.fromSessionId, env.fromPubkey, env.fromPeerId,
-        env.body, env.context, env.metaJson, env.sentAtMs, env.receivedAtMs, deliveryStatus,
-    ])
-    return db.changesCount > before
-}
-
-private extension Database {
-    var changesCount: Int { Int(sqlite3_changes(sqliteConnection)) }
-}
-
-// MARK: - DMActions namespace (inbound dispatcher)
-
-enum DMActions {
-    /// Inbound DM dispatcher. Called by PluginManager.handlePluginEvent for
-    /// federated "new_message" payloads whose `target_session_id` is non-empty.
-    /// Persists the dm_messages row FIRST (so backfill via dm_inbox always
-    /// works), then attempts a live SSE push via MCPSessionRegistry. Idempotent
-    /// on messageId.
-    static func routeInbound(
-        payload: [String: Any],
-        dbPool: DatabasePool,
-        nowFn: () -> Int64 = nowMs
-    ) async {
-        guard let target = (payload["target_session_id"] as? String), !target.isEmpty else { return }
-        let messageId = (payload["message_id"] as? String) ?? newUUID()
-        let fromSessionId = payload["from_session_id"] as? String
-        let fromPubkey = payload["from_peer"] as? String
-        let body = (payload["question"] as? String) ?? ""
-        let context = payload["context"] as? String
-        let metaJson = payload["meta_json"] as? String
-        let now = nowFn()
-        let sentAt = (payload["sent_at_ms"] as? Int64) ?? (payload["sent_at_ms"] as? Int).map(Int64.init) ?? now
-        let env = DMEnvelope(
-            messageId: messageId,
-            fromSessionId: fromSessionId,
-            fromPubkey: fromPubkey,
-            fromPeerId: nil,
-            targetSessionId: target,
-            body: body,
-            context: context,
-            sentAtMs: sentAt,
-            receivedAtMs: now,
-            metaJson: metaJson
-        )
-        do {
-            try await dbPool.write { db in
-                _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
-            }
-        } catch {
-            sonataFileLog("DMActions.routeInbound: persist failed messageId=\(messageId) — \(error)")
-        }
-        if let mcpReg = MCPSessionRegistry.shared {
-            _ = await mcpReg.deliverDM(
-                target: target,
-                messageId: messageId,
-                body: body,
-                fromSessionId: fromSessionId ?? "",
-                context: context,
-                metaJson: metaJson,
-                sentAtMs: sentAt
-            )
-        }
+    enum CodingKeys: String, CodingKey {
+        case sent
+        case notLive = "not_live"
+        case notFound = "not_found"
+        case total
+        case results
     }
 }
 
-// MARK: - HTTP responses
-
-private struct DMSendResponse: Encodable {
-    let messageId: String
-    let queuedAtMs: Int64
-    let deliveryStatus: String
+struct DMTarget: Encodable, Sendable {
+    let name: String
+    let kind: String
+    let workerId: String?
+    let sessionId: String?
+    let sessionKey: String?
+    let peerId: String?
 }
 
-private struct DMInboxResponse: Encodable {
-    let messages: [DMEnvelope]
-}
-
-private struct DMRegistryResponse: Encodable {
-    let entries: [DMRegistration]
+struct DMTargetsResponse: Encodable, Sendable {
+    let targets: [DMTarget]
     let generatedAt: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case targets
+        case generatedAt = "generated_at"
+    }
 }
 
-/// 7-day TTL cleanup. Hooked into nightly maintenance (BackupManager).
+struct DMAckResponse: Encodable, Sendable {
+    let status: String       // "acknowledged" | "unknown_message"
+}
+
+// MARK: - Inbound routing (called by PluginManager.handlePluginEvent)
+
+enum DMActionsInbound {
+    /// Inbound DM from a peer, delivered via the sonar plugin's new_message
+    /// webhook. Two cases based on `in_reply_to`:
+    ///   • present → route DIRECTLY to the original endpoint's SSE (chain
+    ///     continuation). No workerEvent.
+    ///   • absent  → create a sonar_dm workerEvent for a local worker to
+    ///     pick up (thread initiation). Same shape as inbound email.
+    static func routePeerInbound(
+        payload: [String: Any],
+        dbPool: DatabasePool
+    ) async {
+        let messageId = (payload["message_id"] as? String) ?? newUUID()
+        let fromPeerName = payload["from_peer_name"] as? String
+        let fromPeerId = payload["from_peer_id"] as? String
+        let senderPeerName = fromPeerName ?? fromPeerId ?? "unknown"
+        let fromSessionId = payload["from_session_id"] as? String
+        let senderDisplay = payload["sender_display"] as? String
+        let body = (payload["question"] as? String) ?? (payload["body"] as? String) ?? ""
+        let context = payload["context"] as? String
+        let inReplyTo = payload["in_reply_to"] as? String
+        let now = nowMs()
+
+        // Audit inbound.
+        try? await dbPool.write { db in
+            try DMAudit.insert(DMAuditRow(
+                messageId: messageId,
+                target: fromSessionId ?? senderPeerName,
+                resolvedSessionKey: nil,
+                resolvedKind: nil,
+                senderSessionKey: fromSessionId ?? "",
+                senderPeerName: senderPeerName,
+                body: body,
+                context: context,
+                sentAtMs: now,
+                inReplyToMessageId: inReplyTo,
+                direction: "inbound",
+                initialStatus: "sent",
+                failureReason: nil
+            ), db: db)
+        }
+
+        if let inReplyTo {
+            // Chain-continuation: route DIRECTLY to the original endpoint.
+            // Look up the original outbound row and push to its senderSessionKey.
+            let originSenderKey: String? = try? await dbPool.read { db in
+                try String.fetchOne(db, sql: """
+                    SELECT senderSessionKey FROM dm_messages
+                    WHERE messageId = ? AND direction = 'outbound'
+                """, arguments: [inReplyTo])
+            } ?? nil
+            guard let originSenderKey, !originSenderKey.isEmpty else {
+                sonataFileLog("DMActionsInbound: cannot route reply — no outbound row for in_reply_to=\(inReplyTo)")
+                return
+            }
+            let frame = DMFrames.sonarDMNotification(
+                messageId: messageId,
+                body: body,
+                context: context,
+                sender: senderPeerName,
+                inReplyToMessageId: inReplyTo
+            )
+            let pushed = await MCPConnections.shared.push(originSenderKey, jsonRPC: frame)
+            if !pushed {
+                sonataFileLog("DMActionsInbound: reply target \(originSenderKey) not live — dropping inbound reply \(messageId)")
+            } else {
+                try? await dbPool.write { db in
+                    try DMAudit.markDelivered(messageId: messageId, at: now, db: db)
+                }
+            }
+            return
+        }
+
+        // Thread initiation: materialize as a sonar_dm workerEvent for a
+        // local worker to pick up. Mirrors inbound email pattern.
+        let payloadJSON: [String: Any] = [
+            "message_id": messageId,
+            "from_peer_name": fromPeerName ?? "",
+            "from_peer_id": fromPeerId ?? "",
+            "from_session_id": fromSessionId ?? "",
+            "sender_display": senderDisplay ?? "",
+            "body": body,
+            "context": context ?? "",
+            "received_at_ms": now,
+        ]
+        let payloadStr = (try? JSONSerialization.data(withJSONObject: payloadJSON))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        try? await dbPool.write { db in
+            try db.execute(sql: """
+                INSERT INTO workerEvents (id, type, payload, priority, status, createdAt)
+                VALUES (?, 'sonar_dm', ?, 5, 'pending', ?)
+            """, arguments: [newUUID(), payloadStr, now])
+        }
+    }
+
+    /// Peer-forwarded ACK for a DM we originally sent. Update our own
+    /// dm_messages audit and push a dm_ack notification to the original
+    /// local sender's SSE stream.
+    static func routePeerAckForward(
+        payload: [String: Any],
+        dbPool: DatabasePool
+    ) async {
+        guard let messageId = payload["message_id"] as? String else { return }
+        // JSONSerialization returns numbers as NSNumber on Apple platforms;
+        // don't rely on Int/Int64 direct casts (they may fail for large
+        // timestamps or lose data). Fetch via NSNumber, then int64Value.
+        let ackedAtMs: Int64 = {
+            if let n = payload["acked_at_ms"] as? NSNumber { return n.int64Value }
+            if let s = payload["acked_at_ms"] as? String, let v = Int64(s) { return v }
+            return nowMs()
+        }()
+
+        // Look up who originally sent this DM.
+        let senderKey: String? = try? await dbPool.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT senderSessionKey FROM dm_messages
+                WHERE messageId = ? AND direction = 'outbound'
+            """, arguments: [messageId])
+        } ?? nil
+        guard let senderKey else {
+            sonataFileLog("DMActionsInbound: peer ack for unknown messageId=\(messageId)")
+            return
+        }
+        try? await dbPool.write { db in
+            try DMAudit.markAcked(messageId: messageId, at: ackedAtMs, db: db)
+        }
+        let frame = DMFrames.dmAckNotification(messageId: messageId, ackedAtMs: ackedAtMs)
+        _ = await MCPConnections.shared.push(senderKey, jsonRPC: frame)
+    }
+}
+
+// MARK: - Shared internal helpers
+
+/// Enumerate every currently-live DM-eligible target from DB + connections.
+/// Reused by dm_targets handler and dm_broadcast.
+func enumerateDMTargets(dbPool: DatabasePool) async -> [DMTarget] {
+    var out: [DMTarget] = []
+    let conns = MCPConnections.shared
+
+    // Workers.
+    if let rows = try? await dbPool.read({ db -> [Row] in
+        try Row.fetchAll(db, sql: """
+            SELECT workerId, sessionLabel FROM workers
+            WHERE status != 'offline'
+        """)
+    }) {
+        for row in rows {
+            guard let wid: String = row["workerId"],
+                  let label: String = row["sessionLabel"] else { continue }
+            if await conns.hasLive(wid) {
+                out.append(DMTarget(
+                    name: label, kind: "worker",
+                    workerId: wid, sessionId: nil,
+                    sessionKey: wid, peerId: nil
+                ))
+            }
+        }
+    }
+
+    // Interactive sessions.
+    if let rows = try? await dbPool.read({ db -> [Row] in
+        try Row.fetchAll(db, sql: """
+            SELECT sessionId, name FROM interactiveSessions
+            WHERE status = 'live'
+        """)
+    }) {
+        for row in rows {
+            guard let sid: String = row["sessionId"],
+                  let name: String = row["name"] else { continue }
+            let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
+            if await conns.hasLive(key) {
+                out.append(DMTarget(
+                    name: name, kind: "session",
+                    workerId: nil, sessionId: sid,
+                    sessionKey: key, peerId: nil
+                ))
+            }
+        }
+    }
+
+    // Supervisor singleton.
+    if await conns.hasLive("supervisor") {
+        out.append(DMTarget(
+            name: "supervisor", kind: "supervisor",
+            workerId: nil, sessionId: nil,
+            sessionKey: "supervisor", peerId: nil
+        ))
+    }
+
+    // Sonar peers — include only online ones (federation-live).
+    if let peers = await SonarPeerLookup.allPeers() {
+        for peer in peers where peer.connectionStatus == "online" {
+            out.append(DMTarget(
+                name: peer.name, kind: "peer",
+                workerId: nil, sessionId: nil,
+                sessionKey: nil, peerId: peer.id
+            ))
+        }
+    }
+    return out
+}
+
+/// Execute the send pipeline against a resolved target. Handles peer vs
+/// local routing, audit persistence, and status/reason mapping. Used by
+/// dm_send and dm_broadcast.
+func sendResolved(
+    target rawTarget: String,
+    resolved: DMResolvedTarget,
+    body: String,
+    context: String?,
+    senderKey: String,
+    inReplyToMessageId: String?,
+    dbPool: DatabasePool
+) async -> DMSendResponse {
+    let now = nowMs()
+    let messageId = newUUID()
+
+    // Audit up front — status defaults to 'sent' and gets updated on failure.
+    try? await dbPool.write { db in
+        try DMAudit.insert(DMAuditRow(
+            messageId: messageId,
+            target: rawTarget,
+            resolvedSessionKey: resolved.sessionKey,
+            resolvedKind: resolved.kind.rawValue,
+            senderSessionKey: senderKey,
+            senderPeerName: nil,
+            body: body,
+            context: context,
+            sentAtMs: now,
+            inReplyToMessageId: inReplyToMessageId,
+            direction: "outbound",
+            initialStatus: "sent",
+            failureReason: nil
+        ), db: db)
+    }
+
+    switch resolved.kind {
+    case .peer:
+        guard let peerId = resolved.peerId else {
+            try? await dbPool.write { db in
+                try DMAudit.markNotLive(messageId: messageId, reason: "peer_offline", db: db)
+            }
+            return DMSendResponse(status: "not_live", messageId: messageId, reason: "peer_offline")
+        }
+        let outcome = await sonarPushToPeer(
+            peerId: peerId,
+            messageId: messageId,
+            body: body,
+            context: context,
+            fromSessionId: senderKey,
+            inReplyToMessageId: inReplyToMessageId
+        )
+        switch outcome {
+        case .ok:
+            try? await dbPool.write { db in
+                try DMAudit.markDelivered(messageId: messageId, at: now, db: db)
+            }
+            return DMSendResponse(status: "sent", messageId: messageId, reason: nil)
+        case .failed(let reason):
+            try? await dbPool.write { db in
+                try DMAudit.markNotLive(messageId: messageId, reason: "peer_offline", db: db)
+            }
+            sonataFileLog("dm_send: peer forward failed msg=\(messageId): \(reason)")
+            return DMSendResponse(status: "not_live", messageId: messageId, reason: "peer_offline")
+        }
+
+    case .selfPeer:
+        // Shouldn't reach here — caller should map selfPeer to not_found
+        // before calling sendResolved. Belt.
+        try? await dbPool.write { db in
+            try DMAudit.markNotLive(messageId: messageId, reason: "self_peer", db: db)
+        }
+        return DMSendResponse(status: "not_found", messageId: nil, reason: "self_peer")
+
+    case .worker, .session, .supervisor:
+        let frame = DMFrames.sonarDMNotification(
+            messageId: messageId,
+            body: body,
+            context: context,
+            sender: senderKey,
+            inReplyToMessageId: inReplyToMessageId
+        )
+        let pushed = await MCPConnections.shared.push(resolved.sessionKey, jsonRPC: frame)
+        if !pushed {
+            try? await dbPool.write { db in
+                try DMAudit.markNotLive(messageId: messageId, reason: "no_live_connection", db: db)
+            }
+            return DMSendResponse(status: "not_live", messageId: messageId, reason: "no_live_connection")
+        }
+        try? await dbPool.write { db in
+            try DMAudit.markDelivered(messageId: messageId, at: now, db: db)
+        }
+        return DMSendResponse(status: "sent", messageId: messageId, reason: nil)
+    }
+}
+
+// MARK: - dm_messages 7-day audit cleanup (unchanged)
+
 @discardableResult
 func dmMessagesCleanupOld(dbPool: DatabasePool, ttlMs: Int64 = 7 * 24 * 60 * 60 * 1000) async -> Int {
     let cutoff = nowMs() - ttlMs
@@ -163,440 +384,355 @@ func dmMessagesCleanupOld(dbPool: DatabasePool, ttlMs: Int64 = 7 * 24 * 60 * 60 
     }
 }
 
-// MARK: - Endpoints
+// MARK: - Public action list
 
 let dmActions: [SonataAction] = [
 
-    // POST /api/dm/send — local loopback or peer-forwarded send.
+    // POST /api/dm/send — open a new DM thread.
     SonataAction(
         name: "dm_send",
-        description: "Send a session-addressed DM. Local: omit peerId. Remote: include peerId (Sonar peers.id).",
+        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). Returns immediately with sent | not_live | not_found and an optional reason. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
         group: "/api/dm",
         path: "/send",
         method: .post,
         params: [
-            ActionParam("targetSessionId", .string, required: true, description: "Target bridge session id"),
-            ActionParam("fromSessionId", .string, required: true, description: "Sender bridge session id"),
-            ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB"),
-            ActionParam("peerId", .string, required: false, description: "Sonar peers.id for remote target; omit for local loopback"),
-            ActionParam("context", .string, required: false, description: "Optional context"),
-            ActionParam("meta", .object, required: false, description: "Optional ≤4KB JSON metadata blob"),
+            ActionParam("target", .string, required: true, description: "Any identifier for the recipient — name, id, label, 'supervisor', peer name."),
+            ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB."),
+            ActionParam("fromSessionId", .string, required: true, description: "Sender's sessionKey."),
+            ActionParam("context", .string, required: false, description: "Optional context string, passed through to the receiver."),
         ],
         handler: { ctx in
-            let targetSessionId = try ctx.params.require("targetSessionId")
-            let fromSessionId = try ctx.params.require("fromSessionId")
+            let target = try ctx.params.require("target")
             let body = try ctx.params.require("body")
-            let peerId = ctx.params.string("peerId").flatMap { $0.isEmpty ? nil : $0 }
+            let senderKey = try ctx.params.require("fromSessionId")
             let context = ctx.params.string("context")
-            let metaObj = ctx.params.object("meta")
 
-            // Validation matrix per plan §7 + Pass E.7 (empty body).
-            guard isValidSessionId(targetSessionId) else {
-                throw ActionError.custom("bad_session_id: \(targetSessionId)", .unprocessableContent)
-            }
-            guard isValidSessionId(fromSessionId) else {
-                throw ActionError.custom("bad_session_id: \(fromSessionId)", .unprocessableContent)
+            guard body.utf8.count <= 256 * 1024 else {
+                throw ActionError.custom("body_too_large", .unprocessableContent)
             }
             guard !body.isEmpty else {
                 throw ActionError.custom("body_empty", .unprocessableContent)
             }
-            guard body.utf8.count <= DMLimits.bodyMaxBytes else {
-                throw ActionError.custom("body_too_large", .unprocessableContent)
-            }
-            var metaJson: String? = nil
-            if let metaObj {
-                let data = try JSONSerialization.data(withJSONObject: metaObj, options: [.sortedKeys])
-                guard data.count <= DMLimits.metaMaxBytes else {
-                    throw ActionError.custom("meta_too_large", .unprocessableContent)
+
+            guard let resolved = await DMTargetResolver.resolve(target, dbPool: ctx.dbPool) else {
+                // Distinguish "typo / no such target" from "sonar offline"
+                // via a fast probe on the peer plugin.
+                let reason: String
+                if await SonarPeerLookup.pluginReachable() {
+                    reason = "no_such_target"
+                } else {
+                    reason = "sonar_offline"
                 }
-                metaJson = String(data: data, encoding: .utf8)
-            }
-
-            let now = nowMs()
-            let messageId = newUUID()
-
-            if let peerId {
-                // Forward via Sonar plugin (capability-gated per §11.5).
-                let cardCheck = await fetchAndCheckSonarPeerCapability(peerId: peerId)
-                switch cardCheck {
-                case .ok:
-                    break
-                case .missing:
-                    throw ActionError.custom("peer_capability_missing: peer \(peerId) does not advertise dm_v1", .serviceUnavailable)
-                case .error(let msg):
-                    throw ActionError.custom("peer_send_failed: peer card lookup — \(msg)", .badGateway)
-                }
-
-                let sendResult = await sonarSendForward(
-                    peerId: peerId,
-                    body: body,
-                    context: context,
-                    targetSessionId: targetSessionId,
-                    fromSessionId: fromSessionId
-                )
-                switch sendResult {
-                case .ok(let remoteMessageId):
-                    let env = DMEnvelope(
-                        messageId: remoteMessageId ?? messageId,
-                        fromSessionId: fromSessionId,
-                        fromPubkey: nil,
-                        fromPeerId: peerId,
-                        targetSessionId: targetSessionId,
+                let now = nowMs()
+                try? await ctx.dbPool.write { db in
+                    try DMAudit.insert(DMAuditRow(
+                        messageId: newUUID(),
+                        target: target,
+                        resolvedSessionKey: nil,
+                        resolvedKind: nil,
+                        senderSessionKey: senderKey,
+                        senderPeerName: nil,
                         body: body,
                         context: context,
                         sentAtMs: now,
-                        receivedAtMs: now,
-                        metaJson: metaJson
-                    )
-                    try? await ctx.dbPool.write { db in
-                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
-                    }
-                    return DMSendResponse(messageId: env.messageId, queuedAtMs: now, deliveryStatus: "queued")
-                case .failed(let msg):
-                    throw ActionError.custom("peer_send_failed: \(msg)", .badGateway)
+                        inReplyToMessageId: nil,
+                        direction: "outbound",
+                        initialStatus: "not_found",
+                        failureReason: reason
+                    ), db: db)
                 }
+                return DMSendResponse(status: "not_found", messageId: nil, reason: reason)
+            }
+            if resolved.kind == .selfPeer {
+                let now = nowMs()
+                try? await ctx.dbPool.write { db in
+                    try DMAudit.insert(DMAuditRow(
+                        messageId: newUUID(),
+                        target: target,
+                        resolvedSessionKey: nil,
+                        resolvedKind: "selfPeer",
+                        senderSessionKey: senderKey,
+                        senderPeerName: nil,
+                        body: body,
+                        context: context,
+                        sentAtMs: now,
+                        inReplyToMessageId: nil,
+                        direction: "outbound",
+                        initialStatus: "not_found",
+                        failureReason: "self_peer"
+                    ), db: db)
+                }
+                return DMSendResponse(status: "not_found", messageId: nil, reason: "self_peer")
             }
 
-            // Local loopback. Always persists to dm_messages (durable inbox),
-            // then attempts a live SSE push via MCPSessionRegistry. No
-            // registration gate, no 404 — if the target isn't currently
-            // SSE-attached, the message sits in dm_messages and the recipient
-            // pulls it via dm_inbox whenever it next polls.
-            let env = DMEnvelope(
-                messageId: messageId,
-                fromSessionId: fromSessionId,
-                fromPubkey: nil,
-                fromPeerId: nil,
-                targetSessionId: targetSessionId,
+            return await sendResolved(
+                target: target,
+                resolved: resolved,
                 body: body,
                 context: context,
-                sentAtMs: now,
-                receivedAtMs: now,
-                metaJson: metaJson
+                senderKey: senderKey,
+                inReplyToMessageId: nil,
+                dbPool: ctx.dbPool
             )
-
-            try? await ctx.dbPool.write { db in
-                _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
-            }
-
-            var delivered = false
-            if let mcpReg = MCPSessionRegistry.shared {
-                delivered = await mcpReg.deliverDM(
-                    target: targetSessionId,
-                    messageId: messageId,
-                    body: body,
-                    fromSessionId: fromSessionId,
-                    context: context,
-                    metaJson: metaJson,
-                    sentAtMs: now
-                )
-            }
-
-            let status = delivered ? "delivered" : "queued"
-            if delivered {
-                try? await ctx.dbPool.write { db in
-                    try db.execute(
-                        sql: "UPDATE dm_messages SET deliveryStatus = 'delivered', deliveredAtMs = ? WHERE messageId = ?",
-                        arguments: [now, messageId]
-                    )
-                }
-            }
-            return DMSendResponse(messageId: messageId, queuedAtMs: now, deliveryStatus: status)
         }
     ),
 
-    // GET /api/dm/inbox?sessionId&since&limit — durable backfill (NOT drained).
+    // POST /api/dm/reply — continue an existing DM thread.
     SonataAction(
-        name: "dm_inbox",
-        description: "Backfill: durable DM rows addressed to a session, ordered receivedAtMs ASC. NOT drained.",
+        name: "dm_reply",
+        description: "Reply to a prior DM by messageId. Routes directly to the original endpoint via the message chain — no workerEvent is created on the receive side. If the original endpoint is no longer live (session closed, worker gone, peer offline), returns not_live. Use dm_send to open a new thread.",
         group: "/api/dm",
-        path: "/inbox",
-        method: .get,
+        path: "/reply",
+        method: .post,
         params: [
-            ActionParam("sessionId", .string, required: true, description: "Bridge session id", source: .query),
-            ActionParam("since", .integer, required: false, description: "Min receivedAtMs (epoch ms); default 0", source: .query),
-            ActionParam("limit", .integer, required: false, description: "Max rows (default 50, max 500)", source: .query),
+            ActionParam("to_message_id", .string, required: true, description: "The messageId of the prior DM this is a reply to."),
+            ActionParam("body", .string, required: true, description: "Reply body, ≤ 256 KB."),
+            ActionParam("fromSessionId", .string, required: true, description: "Sender's sessionKey."),
         ],
         handler: { ctx in
-            let sessionId = try ctx.params.require("sessionId")
-            guard isValidSessionId(sessionId) else {
-                throw ActionError.custom("bad_session_id: \(sessionId)", .unprocessableContent)
+            let toMessageId = try ctx.params.require("to_message_id")
+            let body = try ctx.params.require("body")
+            let senderKey = try ctx.params.require("fromSessionId")
+            guard body.utf8.count <= 256 * 1024 else {
+                throw ActionError.custom("body_too_large", .unprocessableContent)
             }
-            let since = Int64(ctx.params.int("since") ?? 0)
-            let limit = max(1, min(ctx.params.int("limit") ?? 50, 500))
-            let rows = try await ctx.dbPool.read { db -> [DMEnvelope] in
-                let stmt = try db.makeStatement(sql: """
-                    SELECT messageId, targetSessionId, fromSessionId, fromPubkey, fromPeerId,
-                           body, context, metaJson, sentAtMs, receivedAtMs
-                    FROM dm_messages
-                    WHERE targetSessionId = ? AND receivedAtMs >= ?
-                    ORDER BY receivedAtMs ASC
-                    LIMIT ?
-                """)
-                let cursor = try Row.fetchCursor(stmt, arguments: [sessionId, since, limit])
-                var out: [DMEnvelope] = []
-                while let r = try cursor.next() {
-                    out.append(DMEnvelope(
-                        messageId: r["messageId"],
-                        fromSessionId: r["fromSessionId"],
-                        fromPubkey: r["fromPubkey"],
-                        fromPeerId: r["fromPeerId"],
-                        targetSessionId: r["targetSessionId"],
-                        body: r["body"],
-                        context: r["context"],
-                        sentAtMs: r["sentAtMs"],
-                        receivedAtMs: r["receivedAtMs"],
-                        metaJson: r["metaJson"]
-                    ))
+            guard !body.isEmpty else {
+                throw ActionError.custom("body_empty", .unprocessableContent)
+            }
+
+            // Look up the prior audit row.
+            let prior: (senderSessionKey: String?, resolvedSessionKey: String?, resolvedKind: String?, senderPeerName: String?, direction: String)? =
+                try? await ctx.dbPool.read { db in
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT senderSessionKey, resolvedSessionKey, resolvedKind,
+                               senderPeerName, direction
+                        FROM dm_messages WHERE messageId = ?
+                    """, arguments: [toMessageId]) else { return nil }
+                    return (
+                        row["senderSessionKey"] as? String,
+                        row["resolvedSessionKey"] as? String,
+                        row["resolvedKind"] as? String,
+                        row["senderPeerName"] as? String,
+                        row["direction"] as? String ?? "outbound"
+                    )
+                } ?? nil
+
+            guard let prior else {
+                return DMSendResponse(status: "not_found", messageId: nil, reason: "unknown_prior_message")
+            }
+
+            // Determine reply target from the chain. Two axes:
+            //   • direction of the prior (outbound = we sent it; inbound = we
+            //     received it from a peer)
+            //   • caller identity relative to the prior (are we the original
+            //     sender following up, or the original recipient replying?)
+            //
+            // Outbound prior:
+            //   • caller == prior.senderSessionKey → follow-up → route to
+            //     the original RECIPIENT (prior.resolvedSessionKey)
+            //   • caller != prior.senderSessionKey → this caller RECEIVED the
+            //     DM via SSE push and is replying → route to the original
+            //     SENDER (prior.senderSessionKey)
+            //
+            // Inbound prior (we materialized it from a peer webhook):
+            //   • Route back through the peer (senderPeerName) with an
+            //     in_reply_to marker so the origin peer routes directly to
+            //     the specific session that sent it.
+            let replyTarget: DMResolvedTarget
+            let replyTargetName: String    // for audit `target` column
+            if prior.direction == "outbound" {
+                let priorSender = prior.senderSessionKey ?? ""
+                if senderKey == priorSender && !priorSender.isEmpty {
+                    // Follow-up from the original sender → send to the recipient.
+                    guard let sessKey = prior.resolvedSessionKey,
+                          let kindStr = prior.resolvedKind,
+                          let kind = DMTargetKind(rawValue: kindStr),
+                          !sessKey.isEmpty else {
+                        return DMSendResponse(status: "not_found", messageId: nil, reason: "cannot_resolve_reply_target")
+                    }
+                    replyTarget = DMResolvedTarget(
+                        sessionKey: sessKey, kind: kind,
+                        peerId: kind == .peer ? sessKey : nil,
+                        sessionId: nil
+                    )
+                    replyTargetName = sessKey
+                } else if !priorSender.isEmpty {
+                    // Reply from the original RECIPIENT → send back to the
+                    // original SENDER. Infer kind from the sessionKey shape.
+                    let kind: DMTargetKind = priorSender.hasPrefix("worker-") ? .worker :
+                        (priorSender == "supervisor" ? .supervisor : .session)
+                    replyTarget = DMResolvedTarget(
+                        sessionKey: priorSender, kind: kind,
+                        peerId: nil, sessionId: nil
+                    )
+                    replyTargetName = priorSender
+                } else {
+                    return DMSendResponse(status: "not_found", messageId: nil, reason: "cannot_resolve_reply_target")
                 }
-                return out
+            } else {
+                // Inbound prior — we received this DM from a peer webhook.
+                if let peerName = prior.senderPeerName, !peerName.isEmpty {
+                    guard let peer = await SonarPeerLookup.byName(peerName.lowercased()) else {
+                        return DMSendResponse(status: "not_found", messageId: nil, reason: "unknown_peer")
+                    }
+                    replyTarget = DMResolvedTarget(sessionKey: peer.id, kind: .peer, peerId: peer.id, sessionId: nil)
+                    replyTargetName = peerName
+                } else if let senderKeyPrior = prior.senderSessionKey, !senderKeyPrior.isEmpty {
+                    // Defensive fallback for hypothetical inbound-with-local-sender.
+                    let kind: DMTargetKind = senderKeyPrior.hasPrefix("worker-") ? .worker :
+                        (senderKeyPrior == "supervisor" ? .supervisor : .session)
+                    replyTarget = DMResolvedTarget(sessionKey: senderKeyPrior, kind: kind, peerId: nil, sessionId: nil)
+                    replyTargetName = senderKeyPrior
+                } else {
+                    return DMSendResponse(status: "not_found", messageId: nil, reason: "cannot_resolve_reply_target")
+                }
             }
-            return DMInboxResponse(messages: rows)
+
+            return await sendResolved(
+                target: replyTargetName,
+                resolved: replyTarget,
+                body: body,
+                context: nil,
+                senderKey: senderKey,
+                inReplyToMessageId: toMessageId,
+                dbPool: ctx.dbPool
+            )
         }
     ),
 
-    // GET /api/dm/registry — snapshot of DM-reachable sessions.
-    //
-    // Backing store is MCPSessionRegistry (the live SSE-attached sessions) —
-    // the only thing that determines DM reachability now. Response shape kept
-    // identical to the legacy DMRegistry-backed version so any existing caller
-    // (e.g. Sonar's sonar_session_list) keeps working. `sessionId` is the
-    // bridge sessionKey, `role` is the session's role, `registeredAt` is the
-    // session's lastContactedAt (kept named "registeredAt" for shape stability).
+    // POST /api/dm/ack — receiver's ack of a DM they processed.
     SonataAction(
-        name: "dm_registry",
-        description: "Snapshot of DM-reachable sessions (live SSE-attached). Response shape kept stable for back-compat callers.",
+        name: "dm_ack",
+        description: "Acknowledge receipt of a DM. Called by the receiver after processing a sonar_dm notification. Sonata updates the audit row and forwards the ack to the sender's SSE stream so they know their message was received.",
         group: "/api/dm",
-        path: "/registry",
+        path: "/ack",
+        method: .post,
+        params: [
+            ActionParam("messageId", .string, required: true, description: "The messageId from the sonar_dm notification."),
+        ],
+        handler: { ctx in
+            let messageId = try ctx.params.require("messageId")
+            let now = nowMs()
+
+            // Fetch the audit row to determine sender identity and whether
+            // this was an inbound-from-peer DM (in which case we forward the
+            // ack back via sonar) or a local DM (push to sender's SSE).
+            let audit: (senderSessionKey: String?, senderPeerName: String?, direction: String)? =
+                try? await ctx.dbPool.read { db in
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT senderSessionKey, senderPeerName, direction
+                        FROM dm_messages WHERE messageId = ?
+                    """, arguments: [messageId]) else { return nil }
+                    return (
+                        row["senderSessionKey"] as? String,
+                        row["senderPeerName"] as? String,
+                        row["direction"] as? String ?? "outbound"
+                    )
+                } ?? nil
+
+            guard let audit else {
+                return DMAckResponse(status: "unknown_message")
+            }
+
+            try? await ctx.dbPool.write { db in
+                try DMAudit.markAcked(messageId: messageId, at: now, db: db)
+            }
+
+            if audit.direction == "inbound", let peerName = audit.senderPeerName,
+               let peer = await SonarPeerLookup.byName(peerName.lowercased()) {
+                // Ack forwards back through sonar to the origin peer, which
+                // updates its own audit + pushes dm_ack to its local sender.
+                _ = await sonarPushAckToPeer(peerId: peer.id, messageId: messageId, ackedAtMs: now)
+            } else if let senderKey = audit.senderSessionKey, !senderKey.isEmpty {
+                // Local DM — push dm_ack notification directly to the sender's SSE.
+                let frame = DMFrames.dmAckNotification(messageId: messageId, ackedAtMs: now)
+                _ = await MCPConnections.shared.push(senderKey, jsonRPC: frame)
+            }
+
+            return DMAckResponse(status: "acknowledged")
+        }
+    ),
+
+    // GET /api/dm/targets — enumerate every currently-DM-able target.
+    SonataAction(
+        name: "dm_targets",
+        description: "List every session, worker, supervisor session, and sonar peer currently DM-able. Presence in this list means a DM can be pushed live right now.",
+        group: "/api/dm",
+        path: "/targets",
         method: .get,
         params: [],
-        handler: { _ in
-            let entries: [DMRegistration]
-            if let mcpReg = MCPSessionRegistry.shared {
-                let snapshot = await mcpReg.snapshot()
-                entries = snapshot
-                    .filter { $0.hasSSE }
-                    .sorted { $0.lastContactedAt < $1.lastContactedAt }
-                    .map { snap in
-                        DMRegistration(
-                            sessionId: snap.sessionKey,
-                            sessionLabel: snap.claudeKind,
-                            role: "\(snap.role)",
-                            registeredAt: snap.lastContactedAt
-                        )
-                    }
-            } else {
-                entries = []
-            }
-            return DMRegistryResponse(entries: entries, generatedAt: nowMs())
+        handler: { ctx in
+            let targets = await enumerateDMTargets(dbPool: ctx.dbPool)
+            return DMTargetsResponse(targets: targets, generatedAt: nowMs())
         }
     ),
 
-    // POST /api/dm/broadcast — DMAll. Fan a single DM to every
-    // SSE-attached session matching the optional kind filter. Used by
-    // the dashboard "Broadcast" affordance and the sonar_dm_broadcast
-    // MCP tool (the MCP tool routes through MCPToolHandlers; the HTTP
-    // route lets non-MCP callers — dashboard, scripts — do the same
-    // thing).
+    // POST /api/dm/broadcast — fan to every matching target.
     SonataAction(
         name: "dm_broadcast",
-        description: "Send a DM to every SSE-attached session matching the optional kind filter ('all'|'workers'|'interactive'|'supervisor'; default 'all'). Excludes the sender.",
+        description: "Send a DM to every currently-DM-able target matching the filter. Filter values: 'all' | 'workers' | 'sessions' | 'supervisor' | 'peers'. Excludes the sender.",
         group: "/api/dm",
         path: "/broadcast",
         method: .post,
         params: [
-            ActionParam("fromSessionId", .string, required: true, description: "Sender session id"),
-            ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB"),
-            ActionParam("filter", .string, required: false, description: "Recipient kind filter (default 'all')"),
-            ActionParam("context", .string, required: false, description: "Optional context string"),
+            ActionParam("fromSessionId", .string, required: true, description: "Sender's sessionKey."),
+            ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB."),
+            ActionParam("filter", .string, required: false, description: "Recipient kind filter (default 'all')."),
+            ActionParam("context", .string, required: false, description: "Optional context string."),
         ],
         handler: { ctx in
-            let fromSessionId = try ctx.params.require("fromSessionId")
+            let senderKey = try ctx.params.require("fromSessionId")
             let body = try ctx.params.require("body")
-            let filterRaw = (ctx.params.string("filter") ?? "all").lowercased()
-            let context = ctx.params.string("context")
-            guard !body.isEmpty else {
-                throw ActionError.custom("body required", .unprocessableContent)
-            }
             guard body.utf8.count <= 256 * 1024 else {
-                throw ActionError.custom("body exceeds 256 KiB", .unprocessableContent)
+                throw ActionError.custom("body_too_large", .unprocessableContent)
             }
-            let allow: (SessionRole) -> Bool
-            switch filterRaw {
-            case "worker", "workers": allow = { $0 == .worker }
-            case "interactive", "humans": allow = { $0 == .interactive }
-            case "supervisor": allow = { $0 == .supervisor }
-            case "all", "": allow = { _ in true }
-            default:
-                throw ActionError.custom("unknown filter '\(filterRaw)'", .unprocessableContent)
-            }
-            guard let reg = MCPSessionRegistry.shared else {
-                return DMBroadcastResponse(
-                    filter: filterRaw, deliveredCount: 0, skippedCount: 0,
-                    deliveredTo: [])
-            }
-            let snaps = await reg.snapshot()
-            var delivered: [String] = []
-            var skipped = 0
-            let now = nowMs()
-            for snap in snaps {
-                guard allow(snap.role), snap.hasSSE,
-                      snap.sessionKey != fromSessionId else {
-                    skipped += 1; continue
+            let filter = (ctx.params.string("filter") ?? "all").lowercased()
+            let context = ctx.params.string("context")
+
+            let allTargets = await enumerateDMTargets(dbPool: ctx.dbPool)
+            let filtered = allTargets.filter { t in
+                if t.sessionKey == senderKey { return false }
+                switch filter {
+                case "all": return true
+                case "workers", "worker": return t.kind == "worker"
+                case "sessions", "session", "interactive", "humans": return t.kind == "session"
+                case "supervisor": return t.kind == "supervisor"
+                case "peers", "peer": return t.kind == "peer"
+                default: return false
                 }
-                let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
-                let pushed = await reg.deliverDM(
-                    target: snap.sessionKey,
-                    messageId: messageId,
-                    body: body,
-                    fromSessionId: fromSessionId,
-                    context: context,
-                    metaJson: nil,
-                    sentAtMs: now
+            }
+
+            var results: [DMSendResponse] = []
+            var sent = 0, notLive = 0, notFound = 0
+            for t in filtered {
+                let kind = DMTargetKind(rawValue: t.kind) ?? .session
+                let resolved = DMResolvedTarget(
+                    sessionKey: t.sessionKey ?? (t.peerId ?? ""),
+                    kind: kind,
+                    peerId: t.peerId,
+                    sessionId: t.sessionId
                 )
-                if pushed {
-                    delivered.append(snap.sessionKey)
-                    let env = DMEnvelope(
-                        messageId: messageId,
-                        fromSessionId: fromSessionId,
-                        fromPubkey: nil,
-                        fromPeerId: nil,
-                        targetSessionId: snap.sessionKey,
-                        body: body,
-                        context: context,
-                        sentAtMs: now,
-                        receivedAtMs: now,
-                        metaJson: nil
-                    )
-                    try? await ctx.dbPool.write { db in
-                        _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
-                    }
-                } else {
-                    skipped += 1
+                let res = await sendResolved(
+                    target: t.name,
+                    resolved: resolved,
+                    body: body,
+                    context: context,
+                    senderKey: senderKey,
+                    inReplyToMessageId: nil,
+                    dbPool: ctx.dbPool
+                )
+                switch res.status {
+                case "sent": sent += 1
+                case "not_live": notLive += 1
+                case "not_found": notFound += 1
+                default: break
                 }
+                results.append(res)
             }
             return DMBroadcastResponse(
-                filter: filterRaw,
-                deliveredCount: delivered.count,
-                skippedCount: skipped,
-                deliveredTo: delivered
+                sent: sent, notLive: notLive, notFound: notFound,
+                total: results.count, results: results
             )
         }
     ),
 ]
-
-private struct DMBroadcastResponse: Encodable {
-    let filter: String
-    let deliveredCount: Int
-    let skippedCount: Int
-    let deliveredTo: [String]
-
-    enum CodingKeys: String, CodingKey {
-        case filter
-        case deliveredCount = "delivered_count"
-        case skippedCount = "skipped_count"
-        case deliveredTo = "delivered_to"
-    }
-}
-
-// MARK: - Sonar peer-card + send wiring
-
-private enum SonarPeerCapability { case ok, missing, error(String) }
-private enum SonarSendOutcome { case ok(remoteMessageId: String?); case failed(String) }
-
-private actor SonarPeerCardCache {
-    static let shared = SonarPeerCardCache()
-    private var byPeerId: [String: (capability: SonarPeerCapability, fetchedAtMs: Int64)] = [:]
-    private let ttlMs: Int64 = 5 * 60 * 1000  // §11.5 — 5 min cache
-
-    func get(_ peerId: String) -> SonarPeerCapability? {
-        guard let entry = byPeerId[peerId] else { return nil }
-        if nowMs() - entry.fetchedAtMs > ttlMs { return nil }
-        return entry.capability
-    }
-
-    func set(_ peerId: String, _ cap: SonarPeerCapability) {
-        byPeerId[peerId] = (cap, nowMs())
-    }
-}
-
-private func fetchAndCheckSonarPeerCapability(peerId: String) async -> SonarPeerCapability {
-    if let cached = await SonarPeerCardCache.shared.get(peerId) { return cached }
-    // Sonar exposes peer_card.json over loopback at /api/peers/<id>/card. Plan §3.5
-    // names "/.well-known/sonar/card.json" — that's the *remote* peer's surface.
-    // Locally we ask Sonar to fetch it for us via /api/peers/<id>/card.
-    let urlStr = "http://127.0.0.1:4000/api/peers/\(peerId)/card"
-    guard let url = URL(string: urlStr) else {
-        return .error("invalid peer card URL")
-    }
-    var req = URLRequest(url: url)
-    req.timeoutInterval = 5
-    do {
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            let result: SonarPeerCapability = .error("non-HTTP response from Sonar peer card lookup")
-            await SonarPeerCardCache.shared.set(peerId, result)
-            return result
-        }
-        if http.statusCode == 404 {
-            let result: SonarPeerCapability = .error("peer not found")
-            await SonarPeerCardCache.shared.set(peerId, result)
-            return result
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let result: SonarPeerCapability = .error("HTTP \(http.statusCode)")
-            await SonarPeerCardCache.shared.set(peerId, result)
-            return result
-        }
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        let caps = (json["capabilities"] as? [String]) ?? []
-        let cap: SonarPeerCapability = caps.contains("dm_v1") ? .ok : .missing
-        await SonarPeerCardCache.shared.set(peerId, cap)
-        return cap
-    } catch {
-        return .error(error.localizedDescription)
-    }
-}
-
-private func sonarSendForward(
-    peerId: String,
-    body: String,
-    context: String?,
-    targetSessionId: String,
-    fromSessionId: String
-) async -> SonarSendOutcome {
-    guard let url = URL(string: "http://127.0.0.1:4000/api/messages/send") else {
-        return .failed("invalid Sonar send URL")
-    }
-    var req = URLRequest(url: url)
-    req.httpMethod = "POST"
-    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    req.timeoutInterval = 10
-    var payload: [String: Any] = [
-        "peer_id": peerId,
-        "question": body,
-        "target_session_id": targetSessionId,
-        "from_session_id": fromSessionId,
-    ]
-    if let context { payload["context"] = context }
-    do {
-        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-    } catch {
-        return .failed("payload encode failed: \(error)")
-    }
-    do {
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            return .failed("non-HTTP response from Sonar send")
-        }
-        if !(200..<300).contains(http.statusCode) {
-            return .failed("Sonar HTTP \(http.statusCode)")
-        }
-        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let remoteId = json?["message_id"] as? String
-        return .ok(remoteMessageId: remoteId)
-    } catch {
-        return .failed(error.localizedDescription)
-    }
-}
-

@@ -214,37 +214,41 @@ actor EmailHandler {
     /// sessionId IS the routing key. Returns the leftover emails (no AFK match
     /// or no live session for the sessionId).
     ///
-    /// SessionId is matched against `MCPSessionRegistry.resolveDMTarget`, which
+    /// SessionId is matched against `DMTargetResolver.resolve`, which
     /// accepts either an exact `sessionKey` (the MCP bearer-derived hex) or a
     /// `claudeSessionId` alias (the UUID set after `sonata_identify`). So the
     /// subject can carry whichever the session emitted at send time and it
     /// still routes.
     private func routeAFKReplies(_ emails: [EmailRecord]) async -> [EmailRecord] {
         var leftover: [EmailRecord] = []
-        guard let reg = MCPSessionRegistry.shared else { return emails }
         for email in emails {
             guard let target = Self.extractAFKSessionId(from: email.subject) else {
-                leftover.append(email)
-                continue
+                leftover.append(email); continue
             }
-            guard let state = await reg.resolveSession(target) else {
-                logger.info("EmailHandler: AFK target \(target) is not a live session; falling through")
-                leftover.append(email)
-                continue
+            guard let resolved = await DMTargetResolver.resolve(target, dbPool: dbPool) else {
+                logger.info("EmailHandler: AFK target \(target) doesn't resolve; falling through")
+                leftover.append(email); continue
             }
-            let resolved = state.sessionKey
+            // Only local kinds — AFK doesn't federate.
+            guard resolved.kind == .session || resolved.kind == .worker || resolved.kind == .supervisor else {
+                leftover.append(email); continue
+            }
+            guard await MCPConnections.shared.hasLive(resolved.sessionKey) else {
+                logger.info("EmailHandler: AFK target \(target) resolved to \(resolved.sessionKey) but not live; falling through")
+                leftover.append(email); continue
+            }
             let pushed = await MCPNotificationDispatcher.shared.pushAFKReply(
-                sessionKey: resolved,
+                sessionKey: resolved.sessionKey,
                 fromAddr: email.from,
                 subject: email.subject,
                 messageId: email.messageId,
                 replyText: email.body
             )
             if pushed {
-                logger.info("EmailHandler: routed AFK reply to session \(resolved) (subject sessionId=\(target), msg \(email.messageId))")
+                logger.info("EmailHandler: routed AFK reply to session \(resolved.sessionKey) (subject sessionId=\(target), msg \(email.messageId))")
                 try? await markEmailProcessed(messageId: email.messageId, success: true)
             } else {
-                logger.info("EmailHandler: AFK target \(target) resolved to \(resolved) but channel push failed; falling through")
+                logger.info("EmailHandler: AFK target \(target) resolved to \(resolved.sessionKey) but channel push failed; falling through")
                 leftover.append(email)
             }
         }
@@ -546,8 +550,8 @@ actor EmailHandler {
     /// in the subject. The separator after `AFK` can be any of `-`, `#`, `:`
     /// (or a run of them, e.g. the canonical `-#`). Returns the captured id.
     /// Legacy `[AFK:<token>]` subjects from in-flight email threads parse
-    /// here too — they'll fail to resolve against MCPSessionRegistry (because
-    /// the token is not a sessionId) and fall through gracefully.
+    /// here too — they'll fail to resolve against MCPConnections (because
+    /// they're not attached) and fall through gracefully.
     static func extractAFKSessionId(from subject: String) -> String? {
         let pattern = #"\[AFK[-:#]+([A-Za-z0-9_-]+)\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }

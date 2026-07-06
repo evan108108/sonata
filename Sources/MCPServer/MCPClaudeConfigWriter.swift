@@ -1,10 +1,12 @@
 import Foundation
 
 enum MCPClaudeConfigWriter {
-    static func writeAndRegister(
+    /// Mint a per-session bearer token, register it with MCPAuth, write the
+    /// per-session `--mcp-config` file, and return the credential.
+    static func writeAndMint(
         sessionKey: String,
         role: SessionRole,
-        registry: MCPSessionRegistry,
+        auth: MCPAuth,
         port: Int = 3211
     ) async throws -> MCPSessionCredential {
         guard MCPSessionKey.isValid(sessionKey) else {
@@ -13,17 +15,7 @@ enum MCPClaudeConfigWriter {
         let token = MCPTokenGenerator.newToken()
         let configPath = try ensureConfigDir().appendingPathComponent("\(sessionKey).json")
 
-        // Single unified MCP server — see ~/.sonata/wiki/sonata/mcp-identity.md
-        // ("The single rule"). The `/mcp/:sessionKey` endpoint serves the
-        // entire tool surface (236 tools, incl. all 76 mem_* tools), so one
-        // server entry is all a session needs.
-        //
-        // A second "memory" entry pointing at `/mcp-memory/:sessionKey` used
-        // to be emitted here, but MCPHTTPRouter never registered that route —
-        // it 404'd from day one, surfacing as a low-visibility "Failed to
-        // reconnect to memory" in the /mcp panel while the mem_* tools kept
-        // working through sonata-bridge. Emitting only the route that exists
-        // removes the config↔route divergence permanently.
+        // Single unified MCP server — see ~/.sonata/wiki/sonata/mcp-identity.md.
         let config: [String: Any] = [
             "mcpServers": [
                 "sonata-bridge": [
@@ -46,8 +38,7 @@ enum MCPClaudeConfigWriter {
             throw MCPError.internalError("failed to write per-session MCP config at \(configPath.path)")
         }
 
-        await registry.registerToken(
-            sessionKey: sessionKey, token: token, role: role)
+        await auth.mint(sessionKey: sessionKey, token: token)
 
         return MCPSessionCredential(
             sessionKey: sessionKey,
@@ -60,18 +51,18 @@ enum MCPClaudeConfigWriter {
     static func reconcileAll(
         workers: [String],
         supervisor: Bool,
-        registry: MCPSessionRegistry,
+        auth: MCPAuth,
         port: Int = 3211
     ) async throws {
         if supervisor {
-            _ = try await writeAndRegister(
+            _ = try await writeAndMint(
                 sessionKey: "supervisor", role: .supervisor,
-                registry: registry, port: port)
+                auth: auth, port: port)
         }
         for workerId in workers {
-            _ = try await writeAndRegister(
+            _ = try await writeAndMint(
                 sessionKey: workerId, role: .worker,
-                registry: registry, port: port)
+                auth: auth, port: port)
         }
     }
 

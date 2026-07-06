@@ -3,39 +3,19 @@ import Foundation
 final class MCPNotificationDispatcher: @unchecked Sendable {
     static let shared = MCPNotificationDispatcher()
 
-    private let lock = NSLock()
-    private var registry: MCPSessionRegistry?
-    private var bound: Bool = false
-
-    func bind(registry: MCPSessionRegistry) async {
-        guard claimBound(registry) else { return }
-        // AFK replies route directly through EmailHandler now — no registry,
-        // no outbox, no delivery hook. EmailHandler parses the sessionId from
-        // the `[AFK-#<sessionId>]` subject and calls pushAFKReply on the
-        // resolved live session. See Sources/Scheduler/EmailHandler.swift.
-    }
-
-    private func claimBound(_ registry: MCPSessionRegistry) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        if bound { return false }
-        self.registry = registry
-        bound = true
-        return true
-    }
-
+    /// Push an arbitrary `notifications/claude/channel` frame to a session.
+    /// Returns true if the session had a live SSE writer.
     @discardableResult
     func pushChannel(
         sessionKey: String,
         content: String,
         meta: [String: String]
     ) async -> Bool {
-        guard let registry = currentRegistry() else { return false }
         let params: [String: Any] = ["content": content, "meta": meta]
-        return await registry.pushNotification(
-            sessionKey: sessionKey,
-            method: "notifications/claude/channel",
-            params: params
+        let frame = DMFrames.notification(
+            method: "notifications/claude/channel", params: params
         )
+        return await MCPConnections.shared.push(sessionKey, jsonRPC: frame)
     }
 
     @discardableResult
@@ -69,18 +49,9 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
             "event_id": eventId,
             "event_type": eventType,
         ]
-        return await pushChannel(
-            sessionKey: "supervisor",
-            content: content,
-            meta: meta
-        )
+        return await pushChannel(sessionKey: "supervisor", content: content, meta: meta)
     }
 
-    /// Push an AFK email reply to a live session as a channel notification.
-    /// Called by EmailHandler after it has parsed the sessionId from a
-    /// `[AFK-#<sessionId>]` subject and resolved it to a live sessionKey
-    /// via MCPSessionRegistry. The receiving session's AFK skill matches
-    /// on `meta.event_type == "afk_reply"`.
     @discardableResult
     func pushAFKReply(
         sessionKey: String,
@@ -123,8 +94,12 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
         return await pushChannel(sessionKey: sessionKey, content: content, meta: meta)
     }
 
-    private func currentRegistry() -> MCPSessionRegistry? {
-        lock.lock(); defer { lock.unlock() }
-        return registry
+    /// Broadcast tools/list_changed to every attached session so clients
+    /// re-request tools/list. Called when a plugin registers new actions.
+    func broadcastToolsListChanged() async {
+        let frame = DMFrames.notification(
+            method: "notifications/tools/list_changed", params: [:]
+        )
+        _ = await MCPConnections.shared.broadcast(jsonRPC: frame)
     }
 }

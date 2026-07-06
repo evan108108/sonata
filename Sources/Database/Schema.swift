@@ -759,12 +759,11 @@ extension DatabaseMigrator {
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS tasks_by_acknowledgedAt ON tasks(acknowledgedAt)")
         }
 
-        // v9: dm_messages — durable inbox for session-addressed Sonar DMs.
-        // dm_send always persists here, then attempts a live SSE push via
-        // MCPSessionRegistry. Recipients pull missed messages via
-        // /api/dm/inbox?since=<ms>. 7-day TTL on `deliveredAtMs IS NOT NULL`
-        // rows is enforced by the nightly maintenance task; undelivered rows
-        // are retained until the recipient picks them up.
+        // v9: dm_messages — originally a durable inbox for session-addressed
+        // Sonar DMs with pull-based backfill. Since v27 (DM eradication
+        // refactor, 2026-07-02) the table is an append-only audit log:
+        // delivery is fire-and-observe via live SSE push, there is no inbox
+        // and no queue. Columns here are the v9 baseline; v27 extends them.
         registerMigration("v9_dm_messages") { db in
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS dm_messages (
@@ -1106,6 +1105,31 @@ extension DatabaseMigrator {
                     chunkCount  INTEGER NOT NULL,
                     indexedAt   INTEGER NOT NULL
                 )
+            """)
+        }
+
+        registerMigration("v27_dm_registry_eradication") { db in
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN resolvedSessionKey TEXT")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN resolvedKind TEXT")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN ackedAtMs INTEGER")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN senderSessionKey TEXT")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN senderPeerName TEXT")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN inReplyToMessageId TEXT")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN direction TEXT NOT NULL DEFAULT 'outbound'")
+            try db.execute(sql: "ALTER TABLE dm_messages ADD COLUMN failureReason TEXT")
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS dm_messages_by_reply_to
+                ON dm_messages(inReplyToMessageId) WHERE inReplyToMessageId IS NOT NULL
+            """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS dm_messages_by_sender
+                ON dm_messages(senderSessionKey) WHERE senderSessionKey IS NOT NULL
+            """)
+
+            try db.execute(sql: "ALTER TABLE interactiveSessions ADD COLUMN claudeSessionId TEXT")
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS interactiveSessions_by_claude_session_id
+                ON interactiveSessions(claudeSessionId) WHERE claudeSessionId IS NOT NULL
             """)
         }
     }

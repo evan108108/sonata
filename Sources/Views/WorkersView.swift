@@ -1042,7 +1042,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 // already dismissed. Send text and CR as TWO writes 1.5s
                 // apart — the single-write `text + CR` path produced workers
                 // where text typed but enter was never hit (Scout, 2026-06-22).
-                let dbPoolForNudge = MCPSessionRegistry.shared?.dbPool
+                let dbPoolForNudge: DatabasePool? = SonataApp.sharedDbPool
                 let nudgeWorkerId = self.worker.id
                 let nudgeLabel = self.worker.label
                 DispatchQueue.main.asyncAfter(deadline: .now() + 14.0) { [weak self] in
@@ -1182,7 +1182,7 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
     /// Per plan §6: returns env-vars plus any extra args to spread into
     /// the claude command line. When SONATA_MCP_INPROC=1 and the
-    /// MCPSessionRegistry is published, `extraArgs` carries
+    /// MCPAuth.shared is available (always, in practice), `extraArgs` carries
     /// `["--mcp-config", "<path>"]` and the legacy WORKER_ID /
     /// SONA_SESSION_ID / restart-nudge env-vars are omitted (the new
     /// MCP server learns identity from the URL path). Flag unset =

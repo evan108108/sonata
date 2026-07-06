@@ -7,24 +7,52 @@ enum MCPToolHandlers {
         args: [String: Any],
         role: SessionRole,
         sessionKey: String,
-        state: MCPSessionState,
-        registry: MCPSessionRegistry,
         actionRegistry: ActionRegistry,
         dbPool: DatabasePool
     ) async -> (success: Bool, result: String) {
         switch toolName {
         case "complete_event":
             return await completeEvent(args: args, role: role, sessionKey: sessionKey,
-                state: state, actionRegistry: actionRegistry, dbPool: dbPool)
+                actionRegistry: actionRegistry, dbPool: dbPool)
         case "fail_event":
             return await failEvent(args: args, role: role, sessionKey: sessionKey,
-                state: state, actionRegistry: actionRegistry, dbPool: dbPool)
-        case "sonar_dm_send":
-            return await sonarDMSend(args: args, sessionKey: sessionKey,
-                registry: registry, actionRegistry: actionRegistry, dbPool: dbPool)
-        case "sonar_dm_inbox":
-            return await sonarDMInbox(args: args, sessionKey: sessionKey,
                 actionRegistry: actionRegistry, dbPool: dbPool)
+        case "sonar_dm_send", "dm_send":
+            // Both names route to the same action. sonar_dm_send is legacy; dm_send
+            // is the new canonical name. Args mapped: targetSessionId → target,
+            // fromSessionId, body, peerId (ignored — peers resolve by name now),
+            // context → context.
+            var normalizedArgs = args
+            if let t = args["targetSessionId"] as? String, args["target"] == nil {
+                normalizedArgs["target"] = t
+            }
+            // Legacy sonar_dm_send schema declares target_session_id — map it too.
+            if let t = args["target_session_id"] as? String, normalizedArgs["target"] == nil {
+                normalizedArgs["target"] = t
+            }
+            // Legacy sonar_dm_send callers never sent fromSessionId (old handler
+            // used sessionKey implicitly). The dm_send action requires it.
+            if normalizedArgs["fromSessionId"] == nil {
+                normalizedArgs["fromSessionId"] = sessionKey
+            }
+            // Ignore peerId — target resolution is unified now.
+            normalizedArgs["peerId"] = nil
+            return await actionRegistry.executeMCPTool(
+                name: "dm_send", args: normalizedArgs, dbPool: dbPool
+            )
+        case "dm_reply":
+            return await actionRegistry.executeMCPTool(
+                name: "dm_reply", args: args, dbPool: dbPool
+            )
+        case "dm_ack":
+            return await actionRegistry.executeMCPTool(
+                name: "dm_ack", args: args, dbPool: dbPool
+            )
+        case "dm_targets":
+            return await actionRegistry.executeMCPTool(
+                name: "dm_targets", args: args, dbPool: dbPool
+            )
+        // case "sonar_dm_inbox": DELETED — no queue to poll.
         case "mem_task_list":
             return await actionRegistry.executeMCPTool(
                 name: "mem_task_list", args: args, dbPool: dbPool)
@@ -43,12 +71,19 @@ enum MCPToolHandlers {
                 args: args, sessionKey: sessionKey,
                 actionRegistry: actionRegistry, dbPool: dbPool)
         case "sonata_identify":
-            return await sonataIdentify(args: args, state: state)
+            return await sonataIdentify(args: args, sessionKey: sessionKey, dbPool: dbPool)
         case "sonata_whoami":
-            return await sonataWhoami(state: state)
-        case "sonar_dm_broadcast":
-            return await sonarDMBroadcast(
-                args: args, sessionKey: sessionKey, registry: registry, dbPool: dbPool)
+            return await sonataWhoami(sessionKey: sessionKey, role: role, dbPool: dbPool)
+        case "sonar_dm_broadcast", "dm_broadcast":
+            // The dm_broadcast action requires fromSessionId to exclude the
+            // sender; legacy sonar_dm_broadcast had no such arg.
+            var broadcastArgs = args
+            if broadcastArgs["fromSessionId"] == nil {
+                broadcastArgs["fromSessionId"] = sessionKey
+            }
+            return await actionRegistry.executeMCPTool(
+                name: "dm_broadcast", args: broadcastArgs, dbPool: dbPool
+            )
         case "session_create":
             return await webviewCreate(args: args, sessionKey: sessionKey)
         case "session_close":
@@ -123,6 +158,20 @@ enum MCPToolHandlers {
         }
     }
 
+    // Worker tool-denial check — reads from this table on every worker tool
+    // call. Returns true when the given tool is denied for the given worker.
+    static func checkToolDenial(
+        workerId: String, toolName: String, dbPool: DatabasePool
+    ) async -> Bool {
+        let count = (try? await dbPool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM workerToolDenials
+                WHERE workerId = ? AND toolName = ?
+            """, arguments: [workerId, toolName]) ?? 0
+        }) ?? 0
+        return count > 0
+    }
+
     // MARK: - Webview session tools (Phase 1)
 
     private static func webviewCreate(
@@ -171,147 +220,58 @@ enum MCPToolHandlers {
         do { return try await op(sid) } catch { return (false, "\(error)") }
     }
 
-    /// Fan a DM to every SSE-attached session matching the optional
-    /// kind filter. Used for blasts that don't have a specific
-    /// recipient — e.g. "any human, please ack" or "all workers,
-    /// pause." Persists each delivery into dm_messages so backfill
-    /// via dm_inbox works the same as for unicast DMs.
-    private static func sonarDMBroadcast(
-        args: [String: Any],
-        sessionKey: String,
-        registry: MCPSessionRegistry,
-        dbPool: DatabasePool
-    ) async -> (success: Bool, result: String) {
-        guard let body = args["body"] as? String, !body.isEmpty else {
-            return (false, "sonar_dm_broadcast: body required")
+    // Replaces the old sonataIdentify helper. Writes claudeSessionId to
+    // interactiveSessions row identified by the derived mcpSessionKey.
+    //
+    // Uses `SELECT changes()` for the affected-row count so MCPToolHandlers.swift
+    // doesn't need to import SQLite3 (unlike DMActions.swift which does).
+    private static func sonataIdentify(args: [String: Any], sessionKey: String, dbPool: DatabasePool) async -> (Bool, String) {
+        guard let claudeSessionId = (args["claudeSessionId"] as? String) ?? (args["sessionId"] as? String) else {
+            return (false, "sonata_identify: claudeSessionId (or legacy sessionId) required")
         }
-        if body.utf8.count > 256 * 1024 {
-            return (false, "sonar_dm_broadcast: body exceeds 256 KiB")
-        }
-        let filterRaw = (args["filter"] as? String)?.lowercased() ?? "all"
-        let context = args["context"] as? String
-        let metaJson: String?
-        if let metaDict = args["meta"] as? [String: Any] {
-            metaJson = (try? JSONSerialization.data(
-                withJSONObject: metaDict, options: [.sortedKeys])).flatMap {
-                    String(data: $0, encoding: .utf8)
-                }
-        } else {
-            metaJson = nil
-        }
+        let cwd = args["cwd"] as? String
+        _ = args["pid"] as? Int   // accepted for caller compat, ignored — there is
+                                  // no durable pid store and none is needed.
 
-        let allow: (SessionRole) -> Bool
-        switch filterRaw {
-        case "worker", "workers": allow = { $0 == .worker }
-        case "interactive", "humans": allow = { $0 == .interactive }
-        case "supervisor": allow = { $0 == .supervisor }
-        case "all", "": allow = { _ in true }
-        default:
-            return (false, "sonar_dm_broadcast: unknown filter '\(filterRaw)' — use all|workers|interactive|supervisor")
-        }
+        let updated = (try? await dbPool.write { db -> Int in
+            try db.execute(sql: """
+                UPDATE interactiveSessions
+                SET claudeSessionId = ?,
+                    cwd = COALESCE(?, cwd)
+                WHERE ('session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)) = ?
+            """, arguments: [claudeSessionId, cwd, sessionKey])
+            return (try? Int.fetchOne(db, sql: "SELECT changes()")) ?? 0
+        }) ?? 0
 
-        let snapshots = await registry.snapshot()
-        var delivered: [String] = []
-        var skipped = 0
-        let now = nowMs()
-        for snap in snapshots {
-            guard allow(snap.role), snap.hasSSE else { skipped += 1; continue }
-            if snap.sessionKey == sessionKey { skipped += 1; continue }  // don't echo to sender
-            let messageId = MCPTokenGenerator.newToken().prefix(32)
-            let pushed = await registry.deliverDM(
-                target: snap.sessionKey,
-                messageId: String(messageId),
-                body: body,
-                fromSessionId: sessionKey,
-                context: context,
-                metaJson: metaJson,
-                sentAtMs: now
-            )
-            if pushed {
-                delivered.append(snap.sessionKey)
-                let env = DMEnvelope(
-                    messageId: String(messageId),
-                    fromSessionId: sessionKey,
-                    fromPubkey: nil,
-                    fromPeerId: nil,
-                    targetSessionId: snap.sessionKey,
-                    body: body,
-                    context: context,
-                    sentAtMs: now,
-                    receivedAtMs: now,
-                    metaJson: metaJson
-                )
-                try? await dbPool.write { db in
-                    _ = try dmMessagesPersist(env, deliveryStatus: "queued", db: db)
-                }
-            } else {
-                skipped += 1
-            }
-        }
+        return (true, "identified sessionKey=\(sessionKey) claudeSessionId=\(claudeSessionId) updated=\(updated)")
+    }
 
-        let payload: [String: Any] = [
-            "filter": filterRaw,
-            "delivered_count": delivered.count,
-            "skipped_count": skipped,
-            "delivered_to": delivered,
+    private static func sonataWhoami(sessionKey: String, role: SessionRole, dbPool: DatabasePool) async -> (Bool, String) {
+        // Look up label from DB.
+        let label: String?
+        switch role {
+        case .worker:
+            label = (try? await dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT sessionLabel FROM workers WHERE workerId = ?", arguments: [sessionKey])
+            }).flatMap { $0 }
+        case .interactive:
+            label = (try? await dbPool.read { db in
+                try String.fetchOne(db, sql: """
+                    SELECT name FROM interactiveSessions
+                    WHERE ('session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)) = ?
+                """, arguments: [sessionKey])
+            }).flatMap { $0 }
+        case .supervisor:
+            label = "supervisor"
+        }
+        let out: [String: Any] = [
+            "sessionKey": sessionKey,
+            "role": String(describing: role),
+            "sessionLabel": label ?? sessionKey,
         ]
-        let json = (try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]))
+        let json = (try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys, .prettyPrinted]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         return (true, json)
-    }
-
-    /// Self-registration call. Non-sona-launched sessions land with a
-    /// temporary "anon-XXX" sessionKey; after the channel-pushed
-    /// "identify yourself" notification, they read
-    /// ~/.claude/sessions/$PPID.json and call this with the fields.
-    /// Sona-launched sessions already match bearer == sessionId so this
-    /// call is mostly redundant for them — but harmless and idempotent.
-    private static func sonataIdentify(
-        args: [String: Any],
-        state: MCPSessionState
-    ) async -> (success: Bool, result: String) {
-        let claudeSessionId = (args["sessionId"] as? String) ?? ""
-        let cwd = args["cwd"] as? String
-        let kindStr = args["kind"] as? String
-        let pidNumber = args["pid"]
-        let pid: Int? = (pidNumber as? Int) ?? (pidNumber as? Int64).map(Int.init) ?? (pidNumber as? Double).map(Int.init)
-        guard !claudeSessionId.isEmpty else {
-            return (false, "sonata_identify: sessionId required")
-        }
-        await state.identify(
-            claudeSessionId: claudeSessionId,
-            cwd: cwd,
-            kind: kindStr,
-            pid: pid
-        )
-        return (true, "Identified as \(claudeSessionId)")
-    }
-
-    /// Return the calling session's identity. Used by the /afk skill to learn
-    /// the routing id it should embed in `[AFK-#<id>]` subjects so EmailHandler
-    /// can push replies back via channel notification.
-    ///
-    /// `routingId` is the preferred handle: claudeSessionId if known (stable
-    /// across `--resume`), otherwise the bearer-derived sessionKey. Both forms
-    /// resolve via MCPSessionRegistry.resolveSession.
-    private static func sonataWhoami(
-        state: MCPSessionState
-    ) async -> (success: Bool, result: String) {
-        let sessionKey = state.sessionKey
-        let claudeSessionId = await state.claudeSessionId
-        let cwd = await state.cwd
-        let role = await state.role
-        let routingId = claudeSessionId ?? sessionKey
-        var dict: [String: Any] = [
-            "sessionKey": sessionKey,
-            "routingId": routingId,
-            "role": String(describing: role),
-        ]
-        if let cid = claudeSessionId { dict["claudeSessionId"] = cid }
-        if let c = cwd { dict["cwd"] = c }
-        let data = (try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])) ?? Data()
-        return (true, String(data: data, encoding: .utf8) ?? "{}")
     }
 
     /// Defaults target_session_id to the caller's sessionKey when omitted —
@@ -371,7 +331,6 @@ enum MCPToolHandlers {
         args: [String: Any],
         role: SessionRole,
         sessionKey: String,
-        state: MCPSessionState,
         actionRegistry: ActionRegistry,
         dbPool: DatabasePool
     ) async -> (success: Bool, result: String) {
@@ -391,7 +350,6 @@ enum MCPToolHandlers {
                 args: ["sessionId": sessionKey],
                 dbPool: dbPool
             )
-            await state.clearInFlight()
             if success {
                 return (true, "Supervisor event \(eventId) acknowledged")
             } else {
@@ -407,7 +365,6 @@ enum MCPToolHandlers {
                 args: callArgs,
                 dbPool: dbPool
             )
-            await state.clearInFlight()
             return (success, success ? "Event \(eventId) completed" : output)
         }
     }
@@ -416,7 +373,6 @@ enum MCPToolHandlers {
         args: [String: Any],
         role: SessionRole,
         sessionKey: String,
-        state: MCPSessionState,
         actionRegistry: ActionRegistry,
         dbPool: DatabasePool
     ) async -> (success: Bool, result: String) {
@@ -431,7 +387,6 @@ enum MCPToolHandlers {
                 args: ["sessionId": sessionKey],
                 dbPool: dbPool
             )
-            await state.clearInFlight()
             if success {
                 return (true, "Supervisor event \(eventId) failed: \(errMsg)")
             } else {
@@ -449,113 +404,8 @@ enum MCPToolHandlers {
                 args: callArgs,
                 dbPool: dbPool
             )
-            await state.clearInFlight()
             return (success, success ? "Event \(eventId) failed" : output)
         }
-    }
-
-    /// Local target: persist to dm_messages, then push inline via
-    /// MCPSessionRegistry.deliverDM (live SSE if attached, otherwise the
-    /// recipient pulls via dm_inbox). Federation (peer_id set): delegate to
-    /// the dm_send action which handles peer routing via Sonar.
-    private static func sonarDMSend(
-        args: [String: Any],
-        sessionKey: String,
-        registry: MCPSessionRegistry,
-        actionRegistry: ActionRegistry,
-        dbPool: DatabasePool
-    ) async -> (success: Bool, result: String) {
-        guard let target = args["target_session_id"] as? String,
-              MCPSessionKey.isValid(target) else {
-            return (false, "bad_session_id")
-        }
-        guard let body = args["body"] as? String, !body.isEmpty else {
-            return (false, "body_empty")
-        }
-        if body.utf8.count > 262_144 { return (false, "body_too_large") }
-
-        if let peerId = args["peer_id"] as? String, !peerId.isEmpty {
-            var callArgs: [String: Any] = [
-                "targetSessionId": target,
-                "fromSessionId": sessionKey,
-                "body": body,
-                "peerId": peerId,
-            ]
-            if let context = args["context"] as? String { callArgs["context"] = context }
-            if let meta = args["meta"] as? [String: Any] { callArgs["meta"] = meta }
-            return await actionRegistry.executeMCPTool(
-                name: "dm_send", args: callArgs, dbPool: dbPool)
-        }
-
-        let messageId = newUUID()
-        let sentAt = nowMs()
-        let context = args["context"] as? String
-        let metaJson: String? = (args["meta"] as? [String: Any]).flatMap { m in
-            guard let d = try? JSONSerialization.data(withJSONObject: m, options: [.sortedKeys]),
-                  let s = String(data: d, encoding: .utf8) else { return nil }
-            return s
-        }
-
-        do {
-            try await dbPool.write { db in
-                try db.execute(sql: """
-                    INSERT INTO dm_messages
-                        (messageId, fromSessionId, targetSessionId, body,
-                         context, metaJson, sentAtMs, receivedAtMs, deliveryStatus)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, arguments: [
-                    messageId, sessionKey, target, body, context, metaJson,
-                    sentAt, sentAt, "queued",
-                ])
-            }
-        } catch {
-            return (false, "db_error: \(error)")
-        }
-
-        let delivered = await registry.deliverDM(
-            target: target,
-            messageId: messageId,
-            body: body,
-            fromSessionId: sessionKey,
-            context: context,
-            metaJson: metaJson,
-            sentAtMs: sentAt
-        )
-
-        let status = delivered ? "delivered" : "queued"
-        let deliveredAt: Int64? = delivered ? nowMs() : nil
-        try? await dbPool.write { db in
-            try db.execute(sql:
-                "UPDATE dm_messages SET deliveryStatus = ?, deliveredAtMs = ? WHERE messageId = ?",
-                arguments: [status, deliveredAt, messageId])
-        }
-
-        let result: [String: Any] = [
-            "message_id": messageId,
-            "queued_at_ms": sentAt,
-            "delivery_status": status,
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data()
-        return (true, String(data: data, encoding: .utf8) ?? "{}")
-    }
-
-    private static func sonarDMInbox(
-        args: [String: Any],
-        sessionKey: String,
-        actionRegistry: ActionRegistry,
-        dbPool: DatabasePool
-    ) async -> (success: Bool, result: String) {
-        let since = args["since_ts"] as? Int64 ?? 0
-        let limit = args["limit"] as? Int ?? 50
-        return await actionRegistry.executeMCPTool(
-            name: "dm_inbox",
-            args: [
-                "sessionId": sessionKey,
-                "since": since,
-                "limit": limit,
-            ],
-            dbPool: dbPool
-        )
     }
 }
 
@@ -587,7 +437,7 @@ enum MCPToolSchemas {
         ],
         [
             "name": "sonar_dm_send",
-            "description": "Send a DM to a session. Always queued durably in dm_messages; pushed live immediately if the target has an SSE connection, otherwise delivered the next time the target calls sonar_dm_inbox. No registration step — every session is reachable by id. Local target: omit peer_id. Remote target: include peer_id (Sonar peers.id, NOT instance_id).",
+            "description": "Legacy alias of dm_send. Fire-and-observe: pushed immediately if the target has a live connection, otherwise returns not_live — there is no queue and no inbox. Prefer dm_send.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -615,6 +465,52 @@ enum MCPToolSchemas {
             ],
         ],
         [
+            "name": "dm_send",
+            "description": "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), 'supervisor', or a sonar peer (by name). Returns immediately with sent | not_live | not_found. ACK arrives async as dm_ack notification.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "target": ["type": "string", "description": "Any identifier for the recipient."],
+                    "body": ["type": "string", "description": "Message body, ≤ 256 KB."],
+                    "fromSessionId": ["type": "string", "description": "Sender's sessionKey."],
+                    "context": ["type": "string", "description": "Optional context string."],
+                ],
+                "required": ["target", "body", "fromSessionId"],
+            ],
+        ],
+        [
+            "name": "dm_reply",
+            "description": "Reply to a prior DM by messageId. Routes directly to the original endpoint via the message chain — no workerEvent is created on receive.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "to_message_id": ["type": "string"],
+                    "body": ["type": "string"],
+                    "fromSessionId": ["type": "string"],
+                ],
+                "required": ["to_message_id", "body", "fromSessionId"],
+            ],
+        ],
+        [
+            "name": "dm_ack",
+            "description": "Acknowledge receipt of a DM after processing it. Called by the receiver. Sonata forwards the ack to the sender's SSE stream.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "messageId": ["type": "string"],
+                ],
+                "required": ["messageId"],
+            ],
+        ],
+        [
+            "name": "dm_targets",
+            "description": "List every currently DM-able target (session, worker, supervisor, peer). Presence in the list means live.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [:],
+            ],
+        ],
+        [
             "name": "sonata_identify",
             "description": "Self-register this session's claude metadata. Required for non-sona-launched sessions after the channel-pushed identify request. Idempotent.",
             "inputSchema": [
@@ -634,17 +530,6 @@ enum MCPToolSchemas {
             "inputSchema": [
                 "type": "object",
                 "properties": [:],
-            ],
-        ],
-        [
-            "name": "sonar_dm_inbox",
-            "description": "Backfill: fetch persisted DMs addressed to this session since a timestamp. Use after restart, or to pull DMs that arrived while not SSE-attached.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "since_ts": ["type": "number", "description": "Epoch ms; default 0 (returns up to limit)"],
-                    "limit": ["type": "number", "description": "Max rows (default 50, max 500)"],
-                ],
             ],
         ],
         [

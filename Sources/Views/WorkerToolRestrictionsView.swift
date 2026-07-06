@@ -2,7 +2,7 @@ import SwiftUI
 
 // Settings → Workers → Tool Restrictions. Per-tool toggle that updates
 // the workerToolDenials table. The runtime gate lives in
-// MCPSessionState.checkToolDenial — toggles take effect on the next
+// MCPToolHandlers.checkToolDenial — toggles take effect on the next
 // tool call without restart.
 //
 // IMPORTANT — banner copy is load-bearing. See plan

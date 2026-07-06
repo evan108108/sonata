@@ -77,21 +77,32 @@ actor GlobalAFKOrchestrator {
         guard roleStr == "interactive" || roleStr == "supervisor" else { return }
         let isOn = await MainActor.run { GlobalAFKController.shared.isEnabled }
         guard isOn else { return }
-        guard let reg = MCPSessionRegistry.shared else { return }
-        // No registration needed — EmailHandler routes [AFK-#<sessionId>]
-        // replies directly via MCPSessionRegistry. Just push the directive.
         let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
-        let pushed = await reg.deliverDM(
-            target: sessionKey,
-            messageId: messageId,
-            body: directiveBody(action: "enter"),
-            fromSessionId: "sonata-global-afk",
-            context: "global_afk_directive_late_join",
-            metaJson: directiveMeta(action: "enter"),
-            sentAtMs: Int64(Date().timeIntervalSince1970 * 1000.0)
+        let now = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let meta = directiveMeta(action: "enter", messageId: messageId, context: "global_afk_directive_late_join")
+        let bodyText = directiveBody(action: "enter")
+        let frame = DMFrames.notification(
+            method: "notifications/claude/channel",
+            params: ["content": bodyText, "meta": meta]
         )
+        let pushed = await MCPConnections.shared.push(sessionKey, jsonRPC: frame)
         if pushed {
             logger.info("global AFK late-join directive pushed to new session \(sessionKey) (\(roleStr))")
+            // Audit the directive so its lifecycle is inspectable.
+            if let dbPool = self.dbPool {
+                try? await dbPool.write { db in
+                    try DMAudit.insert(DMAuditRow(
+                        messageId: messageId, target: sessionKey,
+                        resolvedSessionKey: sessionKey, resolvedKind: "session",
+                        senderSessionKey: "sonata-global-afk", senderPeerName: nil,
+                        body: bodyText,
+                        context: "global_afk_directive_late_join",
+                        sentAtMs: now, inReplyToMessageId: nil,
+                        direction: "outbound", initialStatus: "sent", failureReason: nil
+                    ), db: db)
+                    try DMAudit.markDelivered(messageId: messageId, at: now, db: db)
+                }
+            }
         }
     }
 
@@ -101,48 +112,41 @@ actor GlobalAFKOrchestrator {
     /// fails, and vice versa.
     private func handleFlip(enabled: Bool) async {
         let action = enabled ? "enter" : "exit"
-        let snaps = await collectTargetSessions()
-        logger.info("global AFK flip: action=\(action) targets=\(snaps.count)")
+        let targets = await collectTargetSessions()
+        logger.info("global AFK flip: action=\(action) targets=\(targets.count)")
 
-        // No registration step — EmailHandler routes by sessionId now.
-        // Broadcast directive to each session.
-        var deliveredCount = 0
-        let directiveMetaJson = directiveMeta(action: action)
-        guard let reg = MCPSessionRegistry.shared else { return }
-        for snap in snaps {
+        var delivered = 0
+        for target in targets {
+            guard let key = target.sessionKey else { continue }
             let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
-            let pushed = await reg.deliverDM(
-                target: snap.sessionKey,
-                messageId: messageId,
-                body: directiveBody(action: action),
-                fromSessionId: "sonata-global-afk",
-                context: "global_afk_directive",
-                metaJson: directiveMetaJson,
-                sentAtMs: Int64(Date().timeIntervalSince1970 * 1000.0)
+            let meta = directiveMeta(action: action, messageId: messageId, context: "global_afk_directive")
+            let frame = DMFrames.notification(
+                method: "notifications/claude/channel",
+                params: ["content": directiveBody(action: action), "meta": meta]
             )
-            if pushed { deliveredCount += 1 }
+            if await MCPConnections.shared.push(key, jsonRPC: frame) {
+                delivered += 1
+            }
         }
-        logger.info("global AFK directives pushed: \(deliveredCount)/\(snaps.count)")
+        logger.info("global AFK directives pushed: \(delivered)/\(targets.count)")
 
         // Send kickoff email on enable transitions only — disabling doesn't
         // need an email (you toggled it off, you know it's off).
         if enabled {
-            await sendKickoffEmail(targets: snaps)
+            await sendKickoffEmail(targets: targets)
         }
     }
 
     /// Sessions that should receive the directive. Interactive + supervisor;
     /// excludes workers (already event-driven async).
-    private func collectTargetSessions() async -> [MCPSessionRegistry.SessionSnapshot] {
-        guard let reg = MCPSessionRegistry.shared else { return [] }
-        let snaps = await reg.snapshot()
-        return snaps.filter { snap in
-            snap.hasSSE && (snap.role == .interactive || snap.role == .supervisor)
-        }
+    private func collectTargetSessions() async -> [DMTarget] {
+        guard let dbPool = self.dbPool else { return [] }
+        let all = await enumerateDMTargets(dbPool: dbPool)
+        return all.filter { $0.kind == "session" || $0.kind == "supervisor" }
     }
 
     /// DM body — readable plain text, in case the model glances at it. The
-    /// metaJson is the authoritative signal; this body is documentation.
+    /// meta is the authoritative signal; this body is documentation.
     private func directiveBody(action: String) -> String {
         switch action {
         case "enter":
@@ -154,16 +158,16 @@ actor GlobalAFKOrchestrator {
         }
     }
 
-    /// metaJson the session reads from the channel event. event_type is the
-    /// authoritative key the model's CLAUDE.md tells it to look for.
-    private func directiveMeta(action: String) -> String {
-        let dict: [String: Any] = [
+    /// The channel-event meta the session reads. event_type + action are the
+    /// authoritative keys the model's CLAUDE.md tells it to look for.
+    private func directiveMeta(action: String, messageId: String, context: String) -> [String: Any] {
+        return [
             "event_type": "global_afk_directive",
             "action": action,
             "user_email": Self.userEmailAddress,
+            "message_id": messageId,
+            "context": context,
         ]
-        let data = (try? JSONSerialization.data(withJSONObject: dict)) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     /// One email summarizing the flip, with a mailto: link per session. Each
@@ -205,7 +209,7 @@ actor GlobalAFKOrchestrator {
         }
     }
 
-    private func sendKickoffEmail(targets: [MCPSessionRegistry.SessionSnapshot]) async {
+    private func sendKickoffEmail(targets: [DMTarget]) async {
         guard !targets.isEmpty else {
             logger.info("global AFK kickoff email skipped — no targets")
             return
@@ -224,18 +228,19 @@ actor GlobalAFKOrchestrator {
         // case email send time = ceil(N/2) × echoTimeout.
         let echoConcurrencyCap = 2
         // Scan running Claude Code processes ONCE — recovers claudeSessionId
-        // and cwd for sessions whose MCPSessionState never had identify()
-        // called (the common case for ttys-bound sessions Sonata spawned via
-        // bash). Without this, every such row in the email collapses to a
-        // bare "interactive" label with no path.
+        // and cwd for sessions that were never identified via sonata_identify()
+        // (the common case for ttys-bound sessions Sonata spawned via bash).
+        // Without this, every such row in the email collapses to a bare
+        // "interactive" label with no path.
         let procMap = Self.scanClaudeProcesses()
+        let dbPoolOpt = self.dbPool
         let enriched: [EnrichedTarget] = await withTaskGroup(of: EnrichedTarget.self) { group in
             var inFlight = 0
             var pending = targets.makeIterator()
             // Prime the first cap-many tasks.
             for _ in 0..<echoConcurrencyCap {
-                guard let snap = pending.next() else { break }
-                group.addTask { await Self.enrich(snap: snap, procMap: procMap) }
+                guard let target = pending.next() else { break }
+                group.addTask { await Self.enrichForEmail(target: target, procMap: procMap, dbPool: dbPoolOpt) }
                 inFlight += 1
             }
             var out: [EnrichedTarget] = []
@@ -243,14 +248,14 @@ actor GlobalAFKOrchestrator {
                 out.append(item)
                 inFlight -= 1
                 if let next = pending.next() {
-                    group.addTask { await Self.enrich(snap: next, procMap: procMap) }
+                    group.addTask { await Self.enrichForEmail(target: next, procMap: procMap, dbPool: dbPoolOpt) }
                     inFlight += 1
                 }
             }
             _ = inFlight
             // Preserve the input ordering so the email lines are stable.
-            let order = Dictionary(uniqueKeysWithValues: targets.enumerated().map { ($0.element.sessionKey, $0.offset) })
-            out.sort { (order[$0.snap.sessionKey] ?? 0) < (order[$1.snap.sessionKey] ?? 0) }
+            let order = Dictionary(uniqueKeysWithValues: targets.enumerated().map { ($0.element.sessionKey ?? $0.element.name, $0.offset) })
+            out.sort { (order[$0.target.sessionKey ?? $0.target.name] ?? 0) < (order[$1.target.sessionKey ?? $1.target.name] ?? 0) }
             return out
         }
 
@@ -324,7 +329,7 @@ actor GlobalAFKOrchestrator {
 /// `GlobalAFKOrchestrator.enrich` so a slow Echo summary on one session
 /// doesn't block the others. All optional fields fall back gracefully.
 struct EnrichedTarget {
-    let snap: MCPSessionRegistry.SessionSnapshot
+    let target: DMTarget
     /// User-facing identifier. For Sonata tabs: the tab name. For external
     /// sessions: Echo handle → cwd basename → short claudeSessionId → role
     /// label, in that order. Never empty.
@@ -343,11 +348,11 @@ struct EnrichedTarget {
     let isOwnedTab: Bool
 
     /// Routing key for the subject. Prefers the stable Claude session UUID;
-    /// falls back to the bearer-derived sessionKey when no UUID is known.
-    /// EmailHandler.extractAFKSessionId pulls this out and
-    /// MCPSessionRegistry.resolveSession accepts either form.
+    /// falls back to the derived session key when no UUID is known.
+    /// EmailHandler.extractAFKSessionId pulls this out and the DM target
+    /// resolver accepts either form.
     var subjectSessionId: String {
-        claudeSessionId ?? snap.sessionKey
+        claudeSessionId ?? target.sessionKey ?? target.name
     }
 
     func subject() -> String {
@@ -386,6 +391,16 @@ struct EnrichedTarget {
     }
 }
 
+/// DB-backed fields for a DM target, replacing the in-memory registry
+/// snapshot the kickoff email used to read. All optional; callers fall
+/// back to proc-scan and role defaults.
+private struct AFKEnrichedTarget {
+    let target: DMTarget
+    let claudeSessionId: String?
+    let cwd: String?
+    let sessionLabel: String?
+}
+
 extension GlobalAFKOrchestrator {
     /// Build an EnrichedTarget for one session.
     ///
@@ -402,31 +417,40 @@ extension GlobalAFKOrchestrator {
     ///   ≤4-word handle ("Auth Bug Debugging") that becomes the displayName
     ///   — that's the actual disambiguator when multiple "interactive"
     ///   sessions are in the list.
-    static func enrich(
-        snap: MCPSessionRegistry.SessionSnapshot,
-        procMap: [String: ClaudeProcInfo] = [:]
+    static func enrichForEmail(
+        target: DMTarget,
+        procMap: [String: ClaudeProcInfo] = [:],
+        dbPool: DatabasePool?
     ) async -> EnrichedTarget {
-        let lookup = await tabLookup(for: snap)
+        // DB-backed fields (claudeSessionId / cwd / sessionLabel) replace what
+        // the old registry snapshot carried in memory.
+        let enriched: AFKEnrichedTarget
+        if let dbPool {
+            enriched = await enrich(target: target, dbPool: dbPool)
+        } else {
+            enriched = AFKEnrichedTarget(target: target, claudeSessionId: nil, cwd: nil, sessionLabel: nil)
+        }
+        let lookup = await tabLookup(for: target)
         if let tabName = lookup.tabName {
             // Sonata-owned: name + cwd are enough. No Echo call. claudeSessionId
-            // comes straight from the snapshot or proc scan if the tab has been
+            // comes from the DB row or the proc scan if the tab has been
             // identified — otherwise we route by the sessionKey (still stable
             // for owned tabs within a single Sonata launch).
-            let procInfo = procMap[snap.sessionKey]
+            let procInfo = procMap[target.sessionKey ?? ""]
             return EnrichedTarget(
-                snap: snap,
+                target: target,
                 displayName: tabName,
                 cwd: lookup.cwd,
-                claudeSessionId: snap.claudeSessionId ?? procInfo?.claudeSessionId,
+                claudeSessionId: enriched.claudeSessionId ?? procInfo?.claudeSessionId,
                 summary: nil,
                 isOwnedTab: true
             )
         }
         // External: derive the displayName from Echo. claudeSessionId
         // resolution order:
-        //   1. snapshot.claudeSessionId (from sonata_identify, if called)
-        //   2. snapshot.sessionKey itself when it's a UUID (paired Claude
-        //      Code uses its own session UUID as the MCP bearer)
+        //   1. DB claudeSessionId (from sonata_identify, if called)
+        //   2. the sessionKey itself when it's a UUID (legacy paired Claude
+        //      Code used its own session UUID as the MCP bearer)
         //   3. supervisor special-case: the supervisor's sessionKey is the
         //      literal string "supervisor" — fall back to finding the
         //      most-recently-modified jsonl in its known project dir
@@ -434,21 +458,21 @@ extension GlobalAFKOrchestrator {
         //      argv carries `--mcp-config session-<sessionKey>.json` and
         //      pull `--resume <uuid>` + cwd from there. Covers ttys-bound
         //      sessions Sonata spawned via bash that never called identify().
-        let procInfo = procMap[snap.sessionKey]
-        let cwd = snap.cwd ?? procInfo?.cwd ?? defaultCwdForRole(snap.role)
+        let procInfo = procMap[target.sessionKey ?? ""]
+        let cwd = enriched.cwd ?? procInfo?.cwd ?? defaultCwdForKind(target.kind)
         let claudeSessionId: String?
-        if let id = snap.claudeSessionId {
+        if let id = enriched.claudeSessionId {
             claudeSessionId = id
-        } else if isUUID(snap.sessionKey) {
-            claudeSessionId = snap.sessionKey
-        } else if snap.role == .supervisor {
+        } else if isUUID(target.sessionKey ?? "") {
+            claudeSessionId = target.sessionKey
+        } else if target.kind == "supervisor" {
             claudeSessionId = mostRecentTranscriptId(forProjectDir: "-Users-evan--sonata-supervisor")
         } else if let pid = procInfo?.claudeSessionId {
             claudeSessionId = pid
         } else {
             claudeSessionId = nil
         }
-        let echoName = await echoSessionName(for: snap, claudeSessionId: claudeSessionId, cwd: cwd)
+        let echoName = await echoSessionName(for: target, claudeSessionId: claudeSessionId, cwd: cwd)
         // Fallback chain — Echo first (best), then cwd basename (still useful
         // for disambiguating multiple "interactive" rows), then short Claude
         // session id, finally the role label. Echo is the only chain element
@@ -461,16 +485,47 @@ extension GlobalAFKOrchestrator {
         } else if let cid = claudeSessionId, !cid.isEmpty {
             displayName = String(cid.prefix(8))
         } else {
-            displayName = snap.role.label
+            displayName = roleLabel(forKind: target.kind)
         }
         return EnrichedTarget(
-            snap: snap,
+            target: target,
             displayName: displayName,
             cwd: cwd,
             claudeSessionId: claudeSessionId,
             summary: nil,
             isOwnedTab: false
         )
+    }
+
+    /// DB-backed enrichment for a DM target — replaces what the in-memory
+    /// registry snapshot used to carry (claudeSessionId / cwd / sessionLabel).
+    private static func enrich(target: DMTarget, dbPool: DatabasePool) async -> AFKEnrichedTarget {
+        if target.kind == "session", let sid = target.sessionId {
+            let row: Row? = try? await dbPool.read { db in
+                try Row.fetchOne(db, sql: """
+                    SELECT claudeSessionId, cwd, name FROM interactiveSessions
+                    WHERE sessionId = ?
+                """, arguments: [sid])
+            }
+            return AFKEnrichedTarget(
+                target: target,
+                claudeSessionId: row?["claudeSessionId"] as? String,
+                cwd: row?["cwd"] as? String,
+                sessionLabel: row?["name"] as? String
+            )
+        }
+        if target.kind == "worker", let wid = target.workerId {
+            let row: Row? = try? await dbPool.read { db in
+                try Row.fetchOne(db, sql:
+                    "SELECT sessionLabel FROM workers WHERE workerId = ?",
+                    arguments: [wid])
+            }
+            return AFKEnrichedTarget(
+                target: target, claudeSessionId: nil, cwd: nil,
+                sessionLabel: row?["sessionLabel"] as? String
+            )
+        }
+        return AFKEnrichedTarget(target: target, claudeSessionId: nil, cwd: nil, sessionLabel: nil)
     }
 
     /// Last path component of a cwd, skipping trivial ones (empty, "/", "~").
@@ -495,7 +550,7 @@ extension GlobalAFKOrchestrator {
     }
 
     /// Walk running processes once, build sessionKey → ClaudeProcInfo.
-    /// Used as a fallback in `enrich` when MCPSessionState has no
+    /// Used as a fallback in `enrichForEmail` when the DB row has no
     /// claudeSessionId/cwd because the session never called sonata_identify.
     ///
     /// Two key shapes are emitted per matching process so this catches both
@@ -512,8 +567,8 @@ extension GlobalAFKOrchestrator {
     ///   registry stores the session under that exact key.
     ///
     /// A process can produce both keys (entry under each); either will hit
-    /// the same ClaudeProcInfo, so the matcher in enrich() just looks up by
-    /// snap.sessionKey directly.
+    /// the same ClaudeProcInfo, so the matcher in enrichForEmail() just looks
+    /// up by target.sessionKey directly.
     static func scanClaudeProcesses() -> [String: ClaudeProcInfo] {
         guard let psOutput = runShell(["/bin/ps", "-axww", "-o", "pid=,args="]) else {
             return [:]
@@ -608,9 +663,9 @@ extension GlobalAFKOrchestrator {
     /// when a match exists; nil tabName indicates this is an external
     /// (non-Sonata-owned) session that needs Echo to pick a handle.
     @MainActor
-    private static func tabLookup(for snap: MCPSessionRegistry.SessionSnapshot) async -> (tabName: String?, cwd: String?) {
-        if snap.role == .interactive {
-            if let tab = InteractiveSessionsViewModel.shared.tabs.first(where: { $0.mcpSessionKey == snap.sessionKey }) {
+    private static func tabLookup(for target: DMTarget) async -> (tabName: String?, cwd: String?) {
+        if target.kind == "session" {
+            if let tab = InteractiveSessionsViewModel.shared.tabs.first(where: { $0.mcpSessionKey == target.sessionKey }) {
                 return (tab.name, tab.cwd.path)
             }
         }
@@ -626,17 +681,18 @@ extension GlobalAFKOrchestrator {
     /// (e.g. "Auth Bug Debugging"). Used as the displayName for external
     /// sessions so multiple "interactive" rows are distinguishable. Returns
     /// nil on any failure — the caller falls back to the role label.
-    private static func echoSessionName(for snap: MCPSessionRegistry.SessionSnapshot, claudeSessionId: String?, cwd: String?) async -> String? {
+    private static func echoSessionName(for target: DMTarget, claudeSessionId: String?, cwd: String?) async -> String? {
         let log = Self.diagLogger
+        let sk = target.sessionKey ?? target.name
         guard let claudeSessionId = claudeSessionId else {
-            log.info("echoSessionName skip session=\(snap.sessionKey.prefix(12)) reason=no_claude_session_id")
+            log.info("echoSessionName skip session=\(sk.prefix(12)) reason=no_claude_session_id")
             return nil
         }
         guard let transcriptTail = readTranscriptTail(claudeSessionId: claudeSessionId, cwd: cwd, log: log) else {
             return nil
         }
         guard !transcriptTail.isEmpty else {
-            log.info("echoSessionName skip session=\(snap.sessionKey.prefix(12)) reason=empty_transcript")
+            log.info("echoSessionName skip session=\(sk.prefix(12)) reason=empty_transcript")
             return nil
         }
         return await withTimeout(seconds: 12.0) {
@@ -656,13 +712,13 @@ extension GlobalAFKOrchestrator {
                 let words = cleaned.split(separator: " ", maxSplits: 8).map(String.init)
                 let capped = words.prefix(4).joined(separator: " ")
                 if capped.isEmpty {
-                    log.info("echoSessionName skip session=\(snap.sessionKey.prefix(12)) reason=empty_completion")
+                    log.info("echoSessionName skip session=\(sk.prefix(12)) reason=empty_completion")
                     return nil
                 }
-                log.info("echoSessionName got session=\(snap.sessionKey.prefix(12)) name='\(capped)'")
+                log.info("echoSessionName got session=\(sk.prefix(12)) name='\(capped)'")
                 return capped
             } catch {
-                log.info("echoSessionName skip session=\(snap.sessionKey.prefix(12)) reason=chat_error=\(error)")
+                log.info("echoSessionName skip session=\(sk.prefix(12)) reason=chat_error=\(error)")
                 return nil
             }
         }
@@ -685,10 +741,21 @@ extension GlobalAFKOrchestrator {
 
     /// Default cwd for sessions whose snapshot.cwd is nil, falling back to
     /// well-known role-specific working directories Sonata creates itself.
-    private static func defaultCwdForRole(_ role: SessionRole) -> String? {
-        switch role {
-        case .supervisor: return NSHomeDirectory() + "/.sonata-supervisor"
-        case .worker, .interactive: return nil
+    private static func defaultCwdForKind(_ kind: String) -> String? {
+        switch kind {
+        case "supervisor": return NSHomeDirectory() + "/.sonata-supervisor"
+        default: return nil
+        }
+    }
+
+    /// Last-resort display label for a target kind. Preserves the old
+    /// SessionRole.label strings ("interactive" for a session tab).
+    private static func roleLabel(forKind kind: String) -> String {
+        switch kind {
+        case "session": return "interactive"
+        case "supervisor": return "supervisor"
+        case "worker": return "worker"
+        default: return kind
         }
     }
 
@@ -803,16 +870,6 @@ extension GlobalAFKOrchestrator {
             let first = await group.next() ?? nil
             group.cancelAll()
             return first ?? nil
-        }
-    }
-}
-
-private extension SessionRole {
-    var label: String {
-        switch self {
-        case .worker: return "worker"
-        case .interactive: return "interactive"
-        case .supervisor: return "supervisor"
         }
     }
 }

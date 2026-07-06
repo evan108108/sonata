@@ -148,10 +148,8 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         }
     }
 
-    /// Stable MCP-side identifier for this tab — what shows up as the
-    /// sessionKey in MCPSessionRegistry, used by the dashboard's
-    /// Connected/Unconnected sections to find the human-readable name
-    /// ("Session 1" / "My Session") attached to the tab.
+    /// Stable MCP-side identifier for this tab — the sessionKey used by
+    /// MCPConnections for SSE push and by DMTargetResolver for name resolution.
     var mcpSessionKey: String {
         Self.mcpSessionKey(forClaudeSessionId: sessionId)
     }
@@ -778,14 +776,8 @@ final class InteractiveSessionsViewModel: ObservableObject {
         bootstrapped = true
         self.dbPool = dbPool
 
-        // Belt-and-braces: any sona session spawned below will call
-        // MCPSpawn.extraArgsForInProcMCP which requires MCPSessionRegistry.shared.
-        // SonataApp publishes .shared near the top of its launch Task; if we get
-        // here first, the spawn helper's bounded wait will cover it, but emit a
-        // log so the race is visible if it shifts.
-        if MCPSessionRegistry.shared == nil {
-            sonataFileLog("InteractiveSessionsViewModel.bootstrap: MCPSessionRegistry.shared is nil — spawn helper will wait for publication")
-        }
+        // No registry to wait for. MCPAuth.shared is process-init and always
+        // available by the time bootstrap runs.
 
         let rows = InteractiveSessionsStore.loadAll(dbPool: dbPool)
         guard !rows.isEmpty else { return 0 }

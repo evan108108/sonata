@@ -3,7 +3,7 @@ import GRDB
 
 // Settings-driven tool denylist for the HTTP MCP transport. Backed by the
 // `workerToolDenials` table (migration v13). The runtime check lives in
-// MCPSessionState.checkToolDenial — it reads from this table on every
+// MCPToolHandlers checkToolDenial — it reads from this table on every
 // tools/call and short-circuits a denied tool with isError before reaching
 // ActionRegistry.executeMCPTool. Default empty: every tool callable.
 //

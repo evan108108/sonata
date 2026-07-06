@@ -970,17 +970,14 @@ actor HealthMonitor {
             return
         }
 
-        if let mcpReg = MCPSessionRegistry.shared {
-            _ = await mcpReg.deliverDM(
-                target: targetSessionId,
-                messageId: messageId,
-                body: body,
-                fromSessionId: fromSessionId,
-                context: context,
-                metaJson: nil,
-                sentAtMs: nowMs
-            )
-        }
+        let frame = DMFrames.sonarDMNotification(
+            messageId: messageId,
+            body: body,
+            context: context,
+            sender: fromSessionId,
+            inReplyToMessageId: nil
+        )
+        _ = await MCPConnections.shared.push(targetSessionId, jsonRPC: frame)
     }
 
     /// Reclaim events stranded on a worker that never received them.

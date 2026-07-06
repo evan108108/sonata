@@ -50,12 +50,31 @@ struct TaskWatcherLiveness: Sendable {
     var lastContactedAtMs: @Sendable (_ sessionId: String) async -> Int64?
 }
 
-/// Production liveness check — consults `MCPSessionRegistry.shared`.
-func makeProductionTaskWatcherLiveness() -> TaskWatcherLiveness {
-    TaskWatcherLiveness(lastContactedAtMs: { sessionId in
-        guard let reg = MCPSessionRegistry.shared else { return nil }
-        let snaps = await reg.snapshot()
-        return snaps.first(where: { $0.sessionKey == sessionId })?.lastContactedAt
+/// Production liveness check — consults `MCPConnections` and, for interactive
+/// sessions, may resolve a claudeSessionId alias via DB. Returns the current
+/// epoch ms when the session has a live SSE stream (directly or via its
+/// derived key), nil otherwise. Under the old registry the timestamp was a
+/// proxy for "really connected"; `hasLive` is the actual SSE connection state
+/// (strictly stronger), so a live-but-idle watcher still qualifies — the
+/// 15-min staleness window no longer gates delivery.
+func makeProductionTaskWatcherLiveness(dbPool: DatabasePool) -> TaskWatcherLiveness {
+    TaskWatcherLiveness(lastContactedAtMs: { sessionKey in
+        // Direct hit — the passed key is already the sessionKey.
+        if await MCPConnections.shared.hasLive(sessionKey) {
+            return nowMs()
+        }
+        // Alias hit — the passed key is a claude session UUID for an
+        // interactive tab. Look up the derived mcpSessionKey via DB.
+        if let derived: String = try? await dbPool.read({ db -> String? in
+            try String.fetchOne(db, sql: """
+                SELECT 'session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)
+                FROM interactiveSessions
+                WHERE status = 'live' AND (sessionId = ? OR claudeSessionId = ?)
+            """, arguments: [sessionKey, sessionKey])
+        }).flatMap({ $0 }), await MCPConnections.shared.hasLive(derived) {
+            return nowMs()
+        }
+        return nil
     })
 }
 
@@ -79,7 +98,7 @@ struct TaskWatcherDispatcher: Sendable {
 /// sessionKey, so we mark `fromSessionId="sonata"`).
 func makeProductionTaskWatcherDispatcher(dbPool: DatabasePool) -> TaskWatcherDispatcher {
     TaskWatcherDispatcher(send: { target, body, context, meta in
-        let messageId = newUUID()
+        let messageId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))
         let sentAt = nowMs()
         let metaJson: String? = {
             guard let d = try? JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys]),
@@ -101,17 +120,40 @@ func makeProductionTaskWatcherDispatcher(dbPool: DatabasePool) -> TaskWatcherDis
         } catch {
             return false
         }
+        // Resolve the live SSE key: the watcher target may be the sessionKey
+        // directly, or a claude session UUID that maps to a derived
+        // 'session-<hex16>' key. Prefer a direct live hit, then the alias.
+        var resolved: String? = nil
+        if await MCPConnections.shared.hasLive(target) {
+            resolved = target
+        } else if let derived: String = try? await dbPool.read({ db -> String? in
+            try String.fetchOne(db, sql: """
+                SELECT 'session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)
+                FROM interactiveSessions
+                WHERE status = 'live' AND (sessionId = ? OR claudeSessionId = ?)
+            """, arguments: [target, target])
+        }).flatMap({ $0 }), await MCPConnections.shared.hasLive(derived) {
+            resolved = derived
+        }
         var delivered = false
-        if let reg = MCPSessionRegistry.shared {
-            delivered = await reg.deliverDM(
-                target: target,
-                messageId: messageId,
-                body: body,
-                fromSessionId: "sonata",
-                context: context,
-                metaJson: metaJson,
-                sentAtMs: sentAt
+        if let resolved {
+            // Wire-identical to the old registry deliverDM: sender "sonata",
+            // the caller's context param, and the task_watch_event meta_json
+            // so watching sessions correlate on kind/taskId/oldStatus/newStatus.
+            let frame = DMFrames.notification(
+                method: "notifications/claude/channel",
+                params: [
+                    "content": body,
+                    "meta": [
+                        "event_type": "sonar_dm",
+                        "message_id": messageId,
+                        "from_session_id": "sonata",
+                        "context": context,
+                        "meta_json": metaJson ?? "",
+                    ] as [String: Any],
+                ]
             )
+            delivered = await MCPConnections.shared.push(resolved, jsonRPC: frame)
         }
         let status = delivered ? "delivered" : "queued"
         let deliveredAt: Int64? = delivered ? nowMs() : nil
@@ -140,7 +182,7 @@ func fireTaskWatcherDMs(
     oldStatus: String,
     newStatus: String,
     dbPool: DatabasePool,
-    liveness: TaskWatcherLiveness = makeProductionTaskWatcherLiveness(),
+    liveness: TaskWatcherLiveness? = nil,
     dispatcher: TaskWatcherDispatcher? = nil
 ) async -> Int {
     // No-op when nothing actually changed — saves a query on idempotent
@@ -168,11 +210,12 @@ func fireTaskWatcherDMs(
     let now = nowMs()
     let cutoff = now - taskWatcherStaleAfterMs
     let actualDispatcher = dispatcher ?? makeProductionTaskWatcherDispatcher(dbPool: dbPool)
+    let actualLiveness = liveness ?? makeProductionTaskWatcherLiveness(dbPool: dbPool)
 
     var deadTargets: [String] = []
     var fired = 0
     for w in watchers {
-        let lastContacted = await liveness.lastContactedAtMs(w.target)
+        let lastContacted = await actualLiveness.lastContactedAtMs(w.target)
         let isDead = (lastContacted == nil) || (lastContacted! < cutoff)
         if isDead {
             deadTargets.append(w.target)

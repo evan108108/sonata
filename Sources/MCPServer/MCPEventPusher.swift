@@ -4,16 +4,14 @@ import Logging
 
 actor MCPEventPusher {
     private let dbPool: DatabasePool
-    private let registry: MCPSessionRegistry
     private let logger: Logger
     private var knownWorkerEventIds: Set<String> = []
     private var knownSupervisorEventIds: Set<String> = []
     private var task: Task<Void, Never>?
     private let pollInterval: TimeInterval = 1.0
 
-    init(dbPool: DatabasePool, registry: MCPSessionRegistry, logger: Logger) {
+    init(dbPool: DatabasePool, logger: Logger) {
         self.dbPool = dbPool
-        self.registry = registry
         self.logger = logger
     }
 
@@ -33,44 +31,39 @@ actor MCPEventPusher {
     }
 
     private func tick() async {
-        // In the legacy bridge model, workers polled `worker_event_claim`
-        // to move events from pending → assigned. The new in-app model
-        // inverts this: workers idle until pushed. So Sonata must do the
-        // assignment itself for any idle worker with SSE attached, then
-        // push the notification.
         await assignPendingToIdleWorkers()
         await pushPendingWorkerEvents()
         await pushPendingSupervisorEvents()
     }
 
-    /// Atomically claim pending events for any worker that has SSE attached,
-    /// is currently idle in both the registry (no inFlightEventId) and the
-    /// DB (status='idle', currentEventId IS NULL), and whose sessionLabel
-    /// matches `sona-worker-N`. Mirrors the `worker_event_claim` action's
-    /// state-machine transitions but runs from the server side.
+    /// Find live workers with no assigned event and hand them pending work.
+    /// "Live" = has an SSE stream in MCPConnections. "Idle" = DB says
+    /// status='idle', currentEventId IS NULL, sessionLabel is a valid pool
+    /// slot.
     private func assignPendingToIdleWorkers() async {
-        let snapshots = await registry.snapshot()
-        let candidates = snapshots.filter {
-            $0.role == .worker && $0.hasSSE && $0.inFlightEventId == nil
-        }
+        // Query the DB for eligible workers, cross-check hasLive.
+        let candidates: [String] = (try? await dbPool.read { db -> [String] in
+            try String.fetchAll(db, sql: """
+                SELECT workerId FROM workers
+                WHERE status = 'idle' AND currentEventId IS NULL
+                  AND (sessionLabel = 'supervisor'
+                       OR sessionLabel GLOB 'sona-worker-*')
+            """)
+        }) ?? []
         if candidates.isEmpty { return }
 
-        for snap in candidates {
+        for workerId in candidates {
+            guard await MCPConnections.shared.hasLive(workerId) else { continue }
             do {
                 try await dbPool.write { db in
+                    // Re-verify state (may have changed since read).
                     let workerRow = try Row.fetchOne(db, sql: """
-                        SELECT status, currentEventId, sessionLabel
-                        FROM workers WHERE workerId = ?
-                    """, arguments: [snap.sessionKey])
+                        SELECT status, currentEventId FROM workers WHERE workerId = ?
+                    """, arguments: [workerId])
                     guard let workerRow else { return }
                     let status = workerRow["status"] as? String ?? ""
-                    if status == "busy" || status == "draining" { return }
+                    if status != "idle" { return }
                     if (workerRow["currentEventId"] as? String) != nil { return }
-                    let label = workerRow["sessionLabel"] as? String ?? ""
-                    let isValidLabel = label == "supervisor"
-                        || label.range(of: #"^sona-worker-\d+$"#,
-                                       options: .regularExpression) != nil
-                    if !isValidLabel { return }
 
                     guard let evtId = try String.fetchOne(db, sql: """
                         SELECT id FROM workerEvents
@@ -81,21 +74,21 @@ actor MCPEventPusher {
                     let now = nowMs()
                     let workerSessionId = try String.fetchOne(db, sql:
                         "SELECT sessionId FROM workers WHERE workerId = ?",
-                        arguments: [snap.sessionKey])
+                        arguments: [workerId])
                     try db.execute(sql: """
                         UPDATE workerEvents
                         SET assignedTo = ?, status = 'assigned',
                             assignedAt = ?, sessionId = ?
                         WHERE id = ? AND status = 'pending'
-                    """, arguments: [snap.sessionKey, now, workerSessionId, evtId])
+                    """, arguments: [workerId, now, workerSessionId, evtId])
                     try db.execute(sql: """
                         UPDATE workers SET status = 'busy',
                             currentEventId = ?, lastHeartbeat = ?
                         WHERE workerId = ?
-                    """, arguments: [evtId, now, snap.sessionKey])
+                    """, arguments: [evtId, now, workerId])
                 }
             } catch {
-                logger.warning("EventPusher auto-assign failed for \(snap.sessionKey): \(error)")
+                logger.warning("EventPusher auto-assign failed for \(workerId): \(error)")
             }
         }
     }
@@ -120,8 +113,7 @@ actor MCPEventPusher {
                     ORDER BY priority DESC, createdAt ASC
                     LIMIT 50
                 """).compactMap { row in
-                    guard let assignedTo = row["assignedTo"] as? String,
-                          !assignedTo.isEmpty else { return nil }
+                    guard let assignedTo = row["assignedTo"] as? String, !assignedTo.isEmpty else { return nil }
                     return PendingWorkerEvent(
                         id: row["id"] as? String ?? "",
                         assignedTo: assignedTo,
@@ -148,16 +140,11 @@ actor MCPEventPusher {
                 createdAt: evt.createdAt,
                 content: content
             )
-            if delivered {
-                // Mark the session as in-flight so the sweeper knows to read
-                // transcript usage for this worker on each heartbeat tick.
-                // Cleared by completeEvent / failEvent in MCPToolHandlers.
-                if let state = await registry.get(evt.assignedTo) {
-                    await state.markInFlight(eventId: evt.id)
-                }
-            } else {
+            if !delivered {
                 knownWorkerEventIds.remove(evt.id)
             }
+            // In-flight state lives only in the DB (workers.currentEventId) —
+            // there is no in-memory shadow to update.
         }
     }
 
@@ -205,11 +192,9 @@ actor MCPEventPusher {
 
         for evt in rows where !knownSupervisorEventIds.contains(evt.id) {
             knownSupervisorEventIds.insert(evt.id)
-            let content = renderSupervisorEventContent(
-                type: evt.type, payload: evt.payload)
+            let content = renderSupervisorEventContent(type: evt.type, payload: evt.payload)
             let delivered = await MCPNotificationDispatcher.shared
-                .pushSupervisorEvent(
-                    eventId: evt.id, eventType: evt.type, content: content)
+                .pushSupervisorEvent(eventId: evt.id, eventType: evt.type, content: content)
             if delivered {
                 do {
                     try await dbPool.write { db in

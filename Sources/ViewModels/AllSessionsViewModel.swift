@@ -1,11 +1,12 @@
 import Foundation
+import GRDB
 import SwiftUI
 
 /// Snapshot of one row in the All-Sessions dashboard. Each row is one
-/// claude session — either visible to Sonata via MCPSessionRegistry
-/// (Workers / Connected) or visible only via ~/.claude/sessions/
-/// (Unconnected — a live claude process not currently speaking MCP
-/// to Sonata).
+/// claude session — either DB-known and cross-checked live via
+/// MCPConnections.hasLive (Workers / Connected) or visible only via
+/// ~/.claude/sessions/ (Unconnected — a live claude process not
+/// currently speaking MCP to Sonata).
 struct AllSessionsRow: Identifiable, Sendable, Equatable {
     enum Kind: String, Sendable {
         case worker, supervisor, interactive
@@ -102,7 +103,7 @@ final class AllSessionsViewModel: ObservableObject {
     }
 
     /// Webview sessions grouped by owning agent, for the Agent Webviews tree.
-    /// Reads the live tabs directly (the registry is the source of truth);
+    /// Reads the live tabs directly (the view model's tab list is the source of truth);
     /// SwiftUI re-renders because InteractiveSessionsViewModel is observed.
     var webviewGroups: [WebviewGroup] {
         let webs = InteractiveSessionsViewModel.shared.tabs.filter { $0.kind == .webview }
@@ -170,53 +171,85 @@ final class AllSessionsViewModel: ObservableObject {
             }
         }
 
-        // 2. MCP-attached sessions from the registry.
-        // attachedIds collects both sessionKey AND claudeSessionId so the
-        // Unconnected pass can dedup either way.
+        // 2. DB-known entities, cross-checked against live SSE connections
+        // (MCPConnections.hasLive). Replaces the old registry snapshot.
+        // attachedIds collects sessionId / claudeSessionId / derived key so
+        // the Unconnected pass can dedup either way.
         var attachedIds: Set<String> = []
-        if let reg = MCPSessionRegistry.shared {
-            let snaps = await reg.snapshot()
-            for snap in snaps {
-                let kind: AllSessionsRow.Kind
-                let section: AllSessionsRow.Section
-                switch snap.role {
-                case .worker:
-                    kind = .worker
-                    section = .workers
-                case .supervisor:
-                    kind = .supervisor
-                    section = .workers
-                case .interactive:
-                    kind = .interactive
-                    section = .connected
-                }
-                // Look up the backing claude process by matching sessionKey
-                // to a claude session id. Works for sona-launched sessions
-                // (bearer == sessionKey == claude session id). Workers fall
-                // through (sessionKey == workerId, not in the map).
-                let proc = byClaudeSessionId[snap.sessionKey]
-                let cwd = snap.cwd ?? proc?.cwd
-                let (first, last) = Self.transcriptPrompts(
-                    sessionId: snap.sessionKey, cwd: cwd)
-                collected.append(AllSessionsRow(
-                    sessionKey: snap.sessionKey,
-                    claudeSessionId: snap.claudeSessionId ?? snap.sessionKey,
-                    kind: kind,
-                    section: section,
-                    cwd: cwd,
-                    pid: snap.pid ?? proc?.pid,
-                    hasSSE: snap.hasSSE,
-                    inFlightEventId: snap.inFlightEventId,
-                    lastSeenMs: snap.lastContactedAt,
-                    firstPrompt: first,
-                    lastPrompt: last,
-                    displayName: interactiveSessionNames[snap.sessionKey]
-                ))
-                attachedIds.insert(snap.sessionKey)
-                if let csid = snap.claudeSessionId {
-                    attachedIds.insert(csid)
-                }
-            }
+        let dbPool = SonataApp.sharedDbPool
+
+        let workerRows: [Row] = (try? await dbPool?.read { db in
+            try Row.fetchAll(db, sql: "SELECT workerId, sessionLabel, currentEventId, lastHeartbeat FROM workers WHERE status != 'offline'")
+        }).flatMap { $0 } ?? []
+        for row in workerRows {
+            guard let wid: String = row["workerId"] else { continue }
+            let currentEventId: String? = row["currentEventId"]
+            let lastHeartbeat: Int64 = row["lastHeartbeat"] ?? 0
+            let label: String? = row["sessionLabel"]
+            collected.append(AllSessionsRow(
+                sessionKey: wid,
+                claudeSessionId: wid,
+                kind: .worker,
+                section: .workers,
+                cwd: nil,
+                pid: nil,
+                hasSSE: await MCPConnections.shared.hasLive(wid),
+                inFlightEventId: (currentEventId?.isEmpty ?? true) ? nil : currentEventId,
+                lastSeenMs: lastHeartbeat,
+                firstPrompt: nil,
+                lastPrompt: nil,
+                displayName: label
+            ))
+            attachedIds.insert(wid)
+        }
+
+        let sessionRows: [Row] = (try? await dbPool?.read { db in
+            try Row.fetchAll(db, sql: "SELECT sessionId, name, cwd, claudeSessionId, lastActivityAt FROM interactiveSessions WHERE status = 'live'")
+        }).flatMap { $0 } ?? []
+        for row in sessionRows {
+            guard let sid: String = row["sessionId"] else { continue }
+            let ckey: String = row["claudeSessionId"] ?? sid
+            let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
+            let proc = byClaudeSessionId[ckey]
+            let rowCwd: String? = row["cwd"]
+            let cwd = (rowCwd?.isEmpty ?? true) ? proc?.cwd : rowCwd
+            let (first, last) = Self.transcriptPrompts(sessionId: ckey, cwd: cwd)
+            let lastActivityAt: Int64? = row["lastActivityAt"]
+            let name: String? = row["name"]
+            collected.append(AllSessionsRow(
+                sessionKey: key,
+                claudeSessionId: ckey,
+                kind: .interactive,
+                section: .connected,
+                cwd: cwd,
+                pid: proc?.pid,
+                hasSSE: await MCPConnections.shared.hasLive(key),
+                inFlightEventId: nil,
+                lastSeenMs: proc?.updatedAt ?? lastActivityAt ?? 0,
+                firstPrompt: first,
+                lastPrompt: last,
+                displayName: name
+            ))
+            attachedIds.insert(sid)
+            attachedIds.insert(ckey)
+            attachedIds.insert(key)
+        }
+
+        if await MCPConnections.shared.hasLive("supervisor") {
+            collected.append(AllSessionsRow(
+                sessionKey: "supervisor",
+                claudeSessionId: "supervisor",
+                kind: .supervisor,
+                section: .workers,
+                cwd: nil,
+                pid: nil,
+                hasSSE: true,
+                inFlightEventId: nil,
+                lastSeenMs: Int64(Date().timeIntervalSince1970 * 1000),
+                firstPrompt: nil,
+                lastPrompt: nil,
+                displayName: "supervisor"
+            ))
         }
 
         // 3. Unconnected: live claude processes NOT in the registry.
