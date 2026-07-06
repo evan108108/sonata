@@ -680,10 +680,19 @@ final class PluginManager: @unchecked Sendable {
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         try await dbPool.write { db in
+            // Preserve existing config_json across reinstall — the row already
+            // exists on upgrade/reinstall paths and holds plugin identity keys
+            // (studio's schnorr keypair, sonar's discovery config, etc). The
+            // prior hardcoded '{}' wiped those on every reinstall, silently
+            // reissuing the plugin's identity and orphaning every prior
+            // artifact it signed (studio cards, room memberships).
+            let existingConfig: String = (try? String.fetchOne(db,
+                sql: "SELECT config_json FROM plugins WHERE name = ?",
+                arguments: [manifest.name])).flatMap { $0 } ?? "{}"
             try db.execute(sql: """
                 INSERT OR REPLACE INTO plugins (name, version, description, port, status, mode, path, config_json, installedAt, updatedAt)
-                VALUES (?, ?, ?, ?, 'installed', 'managed', ?, '{}', ?, ?)
-            """, arguments: [manifest.name, manifest.version, manifest.description, manifest.port, finalDir, now, now])
+                VALUES (?, ?, ?, ?, 'installed', 'managed', ?, ?, ?, ?)
+            """, arguments: [manifest.name, manifest.version, manifest.description, manifest.port, finalDir, existingConfig, now, now])
         }
 
         sonataFileLog("Plugin \(manifest.name) v\(manifest.version): installed to \(finalDir)")
@@ -719,10 +728,15 @@ final class PluginManager: @unchecked Sendable {
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         try await dbPool.write { db in
+            // Preserve existing config_json across re-connect (see the
+            // matching preservation logic in install() above).
+            let existingConfig: String = (try? String.fetchOne(db,
+                sql: "SELECT config_json FROM plugins WHERE name = ?",
+                arguments: [name])).flatMap { $0 } ?? "{}"
             try db.execute(sql: """
                 INSERT OR REPLACE INTO plugins (name, version, description, port, status, mode, url, path, config_json, installedAt, updatedAt)
-                VALUES (?, ?, ?, ?, 'installed', 'external', ?, '', '{}', ?, ?)
-            """, arguments: [name, version, description, port, url, now, now])
+                VALUES (?, ?, ?, ?, 'installed', 'external', ?, '', ?, ?, ?)
+            """, arguments: [name, version, description, port, url, existingConfig, now, now])
         }
 
         let runtime = PluginRuntime(
