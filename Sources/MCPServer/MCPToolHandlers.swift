@@ -154,7 +154,12 @@ enum MCPToolHandlers {
                 let r = try await WebviewSessionService.shared.getPageInfo(sessionId: sid); return (true, r)
             }
         default:
-            return (false, "Unknown tool: \(toolName)")
+            // Fall through to the full ActionRegistry surface — MCPHandshake
+            // advertises every registered action via mergedToolSchemas, so
+            // tools like worker_list that aren't explicitly cased above must
+            // dispatch here. executeMCPTool returns "Unknown tool: …" if
+            // nothing matches, preserving the old error text.
+            return await actionRegistry.executeMCPTool(name: toolName, args: args, dbPool: dbPool)
         }
     }
 
@@ -247,28 +252,39 @@ enum MCPToolHandlers {
     }
 
     private static func sonataWhoami(sessionKey: String, role: SessionRole, dbPool: DatabasePool) async -> (Bool, String) {
-        // Look up label from DB.
-        let label: String?
+        var label: String?
+        var claudeSessionId: String?
+        var cwd: String?
         switch role {
         case .worker:
             label = (try? await dbPool.read { db in
                 try String.fetchOne(db, sql: "SELECT sessionLabel FROM workers WHERE workerId = ?", arguments: [sessionKey])
             }).flatMap { $0 }
         case .interactive:
-            label = (try? await dbPool.read { db in
-                try String.fetchOne(db, sql: """
-                    SELECT name FROM interactiveSessions
+            let row: Row? = try? await dbPool.read { db in
+                try Row.fetchOne(db, sql: """
+                    SELECT name, claudeSessionId, cwd FROM interactiveSessions
                     WHERE ('session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)) = ?
                 """, arguments: [sessionKey])
-            }).flatMap { $0 }
+            }.flatMap { $0 }
+            label = row?["name"]
+            claudeSessionId = row?["claudeSessionId"]
+            cwd = row?["cwd"]
         case .supervisor:
             label = "supervisor"
         }
-        let out: [String: Any] = [
+        // routingId is the preferred handle: claudeSessionId when known (stable
+        // across --resume), otherwise the bearer-derived sessionKey. Used by
+        // /afk to embed in `[AFK-#<id>]` subjects so replies route back.
+        let routingId = claudeSessionId ?? sessionKey
+        var out: [String: Any] = [
             "sessionKey": sessionKey,
+            "routingId": routingId,
             "role": String(describing: role),
             "sessionLabel": label ?? sessionKey,
         ]
+        if let claudeSessionId, !claudeSessionId.isEmpty { out["claudeSessionId"] = claudeSessionId }
+        if let cwd, !cwd.isEmpty { out["cwd"] = cwd }
         let json = (try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys, .prettyPrinted]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         return (true, json)
