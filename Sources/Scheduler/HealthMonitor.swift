@@ -986,11 +986,26 @@ actor HealthMonitor {
     /// (MCP disconnect/reconnect, or a cycle in the assign→deliver gap): the
     /// agent never saw the event so never completes it, yet the bridge keeps
     /// heartbeating, so no heartbeat-based sweep ever fires. The discriminator
-    /// is `lastProgressAt`: a stranded worker has inFlightEventId==nil, so
-    /// MCPSessionSweeper never bumps its lastProgressAt — it goes stale while
-    /// lastHeartbeat stays fresh. (A genuinely long-running task keeps
-    /// inFlightEventId set, so the sweeper bumps lastProgressAt every 15s and is
-    /// never caught here — this only fires for the never-received case.)
+    /// is `lastProgressAt` — a stranded worker's stops advancing while
+    /// `lastHeartbeat` stays fresh.
+    ///
+    /// `lastProgressAt` is bumped from two paths, both driven by
+    /// `workers.currentEventId != NULL`:
+    ///   • `MCPSessionSweeper` — every SSE keepalive tick (~15s), for workers
+    ///     with a live SSE stream in `MCPConnections`.
+    ///   • `worker_heartbeat` (POST /api/worker/heartbeat) — every daemon
+    ///     heartbeat, INDEPENDENT of SSE state. This is the fallback for
+    ///     brief SSE reconnects mid-tool-call, added 2026-07-06 to close a
+    ///     false-positive class (see plan reclaim-stranded-events-fix.md +
+    ///     studio card 0d079c2d… in project-sonata/bugs).
+    ///
+    /// A genuinely-working worker gets `lastProgressAt` bumps from either
+    /// path and is never caught here. This fires only for the true stranded
+    /// case: worker sits 'busy' with a currentEventId, heartbeats keep coming,
+    /// but the agent never received the event so no tool call is running
+    /// against it. (Previously this fired ALSO on live workers whose SSE
+    /// briefly dropped mid-tool-call — the HTTP-heartbeat auto-bump above
+    /// closes that gap.)
     ///
     /// Recovery: re-enqueue the event to 'pending' for another worker and reset
     /// the worker to idle, so the slot self-heals within one monitor cycle

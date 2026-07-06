@@ -336,7 +336,21 @@ let workerActions: [SonataAction] = [
                         sql: """
                         UPDATE workers SET
                             lastHeartbeat = ?,
-                            lastProgressAt = COALESCE(?, lastProgressAt),
+                            -- lastProgressAt precedence:
+                            --   (1) caller-supplied wins when present (future-proof —
+                            --       lets a daemon send a more-accurate stamp than the
+                            --       heartbeat clock);
+                            --   (2) if the worker holds an in-flight event, the
+                            --       heartbeat itself IS progress (the daemon
+                            --       heartbeats over HTTP independent of SSE state, so
+                            --       this closes the "SSE briefly dropped mid-tool-call
+                            --       → reclaimStrandedEvents false-positive" window);
+                            --   (3) otherwise preserve whatever's there.
+                            lastProgressAt = CASE
+                                WHEN ? IS NOT NULL THEN ?
+                                WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN ?
+                                ELSE lastProgressAt
+                            END,
                             currentEventTokens = COALESCE(?, currentEventTokens),
                             currentSlug = COALESCE(?, currentSlug),
                             currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
@@ -351,7 +365,8 @@ let workerActions: [SonataAction] = [
                             END
                         WHERE workerId = ?
                         """,
-                        arguments: [now, lastProgressAt,
+                        arguments: [now,
+                                    lastProgressAt, lastProgressAt, now,
                                     currentEventTokens, currentSlug,
                                     currentCacheReadTokens, currentInputTokens,
                                     promptHash, sessionLabel, cwdBasename, workerId]
