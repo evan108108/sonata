@@ -736,7 +736,7 @@ private struct LiveWorkersSection: View {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let payload: [String: Any] = [
-            "targetSessionId": target,
+            "target": target,
             "fromSessionId": "dashboard",
             "body": body,
             "context": "dashboard-worker-dm",
@@ -747,8 +747,10 @@ private struct LiveWorkersSection: View {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200,
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let delivery = obj["deliveryStatus"] as? String {
-                return "Sent to \(target) — \(delivery)"
+               let status = obj["status"] as? String {
+                let reason = obj["reason"] as? String
+                let suffix = reason.map { " (\($0))" } ?? ""
+                return "Sent to \(target) — \(status)\(suffix)"
             }
             let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
             return "Failed (HTTP \(code)) — \(snippet)"

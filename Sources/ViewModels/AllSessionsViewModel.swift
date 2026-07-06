@@ -398,16 +398,16 @@ final class AllSessionsViewModel: ObservableObject {
         return t
     }
 
-    /// Send a DM via the existing `/api/dm/send` action. fromSessionId is
-    /// "dashboard" so recipients can tell the message originated from this
-    /// UI rather than another agent.
+    /// Send a DM via `/api/dm/send`. fromSessionId is "dashboard" so
+    /// recipients can tell the message originated from this UI rather than
+    /// another agent.
     func sendDM(target: String, body: String) async {
         let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/dm/send")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let payload: [String: Any] = [
-            "targetSessionId": target,
+            "target": target,
             "fromSessionId": "dashboard",
             "body": body,
             "context": "dashboard-manual",
@@ -416,21 +416,24 @@ final class AllSessionsViewModel: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             let http = response as? HTTPURLResponse
-            let status = http?.statusCode ?? 0
-            if status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let delivery = obj["deliveryStatus"] as? String {
-                self.dmResult = "Sent to \(target) — \(delivery)"
+            let code = http?.statusCode ?? 0
+            if code == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let status = obj["status"] as? String {
+                let reason = obj["reason"] as? String
+                let suffix = reason.map { " (\($0))" } ?? ""
+                self.dmResult = "Sent to \(target) — \(status)\(suffix)"
             } else {
                 let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
-                self.dmResult = "Failed (HTTP \(status)) — \(snippet)"
+                self.dmResult = "Failed (HTTP \(code)) — \(snippet)"
             }
         } catch {
             self.dmResult = "Failed — \(error.localizedDescription)"
         }
     }
 
-    /// Broadcast a DM via `/api/dm/broadcast` (sonar_dm_broadcast).
-    /// Filter: "all" | "workers" | "interactive" | "supervisor".
+    /// Broadcast a DM via `/api/dm/broadcast`.
+    /// Filter: "all" | "workers" | "sessions" | "supervisor" | "peers"
+    /// (also accepts the legacy "interactive"/"humans" aliases).
     func broadcast(filter: String, body: String) async {
         let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/dm/broadcast")!
         var req = URLRequest(url: url)
@@ -446,13 +449,19 @@ final class AllSessionsViewModel: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             let http = response as? HTTPURLResponse
-            let status = http?.statusCode ?? 0
-            if status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let count = obj["delivered_count"] as? Int {
-                self.dmResult = "Broadcast \(filter): delivered to \(count) session(s)"
+            let code = http?.statusCode ?? 0
+            if code == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let sent = obj["sent"] as? Int {
+                let notLive = obj["not_live"] as? Int ?? 0
+                let notFound = obj["not_found"] as? Int ?? 0
+                let total = obj["total"] as? Int ?? sent
+                var summary = "Broadcast \(filter): \(sent)/\(total) sent"
+                if notLive > 0 { summary += ", \(notLive) not live" }
+                if notFound > 0 { summary += ", \(notFound) not found" }
+                self.dmResult = summary
             } else {
                 let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
-                self.dmResult = "Broadcast failed (HTTP \(status)) — \(snippet)"
+                self.dmResult = "Broadcast failed (HTTP \(code)) — \(snippet)"
             }
         } catch {
             self.dmResult = "Broadcast failed — \(error.localizedDescription)"
