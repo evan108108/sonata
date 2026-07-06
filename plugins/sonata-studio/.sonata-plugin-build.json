@@ -1,0 +1,7 @@
+{
+  "name": "sonata-studio",
+  "kind": "bun-single-bin",
+  "buildCommand": "./build.sh",
+  "artifactDir": ".",
+  "excludePatterns": ["node_modules", "logs", "*.log", "tests", ".git"]
+}

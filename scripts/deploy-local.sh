@@ -25,9 +25,18 @@
 #   ! /Users/evan/memory/Sonata/scripts/build-status.sh
 #
 # Usage:
-#   ./scripts/deploy-local.sh             # swift build -c release + deploy + relaunch
-#   ./scripts/deploy-local.sh --no-build  # deploy the existing .build/release binary
-#   ./scripts/deploy-local.sh --no-launch # swap the binary but don't relaunch
+#   ./scripts/deploy-local.sh                # swift build -c release + deploy + relaunch
+#   ./scripts/deploy-local.sh --no-build     # deploy the existing .build/release binary
+#   ./scripts/deploy-local.sh --no-launch    # swap the binary but don't relaunch
+#   ./scripts/deploy-local.sh --skip-plugins # skip the managed-plugin drift check + rebuild
+#
+# Managed-plugin drift: by default the script checks whether any registered
+# plugin's source repo is ahead of the installed release at
+# ~/.sonata/plugins/<name>/. Any drifted plugin is rebuilt and reinstalled
+# via scripts/deploy-plugin-local.sh BEFORE the Sonata binary swap, so the
+# running Sonata always matches the current source tree. --skip-plugins
+# bypasses this (Sonata-only change, staged rollout, etc). A plugin build
+# failure aborts the whole deploy.
 set -euo pipefail
 
 REPO="/Users/evan/memory/Sonata"
@@ -39,15 +48,21 @@ TMP_BUNDLE="/tmp/Sonata_Sonata.bundle.deploytmp"
 BRIDGE_URL="http://localhost:3211/mcp"
 
 BUILD=1; LAUNCH=1; BAR=0
+SKIP_PLUGINS=0
 for a in "$@"; do
   case "$a" in
-    --no-build)  BUILD=0 ;;
-    --no-launch) LAUNCH=0 ;;
-    --bar|--live) BAR=1 ;;   # force the animated build bar even without a TTY
+    --no-build)     BUILD=0 ;;
+    --no-launch)    LAUNCH=0 ;;
+    --bar|--live)   BAR=1 ;;   # force the animated build bar even without a TTY
+    --skip-plugins) SKIP_PLUGINS=1 ;;
     -h|--help)   sed -n '1,34p' "$0"; exit 0 ;;
     *) echo "unknown flag: $a" >&2; exit 2 ;;
   esac
 done
+# Plugin drift check runs AFTER Sonata is confirmed healthy at the bottom
+# of the script — see the "managed-plugin drift" block near EOF. The check
+# needs the bridge up so plugin_install can be called, and putting it
+# after the swap+relaunch means it always has a running Sonata to talk to.
 
 # Always restore the resource bundle to the app root, even if signing aborts,
 # so a failed run never leaves the .app structurally broken.
@@ -161,4 +176,41 @@ if ! bridge_up; then
   echo "ERROR: Sonata bridge (:3211) not reachable after 2 launch attempts — check the Plugins tab / Console" >&2
   exit 1
 fi
-echo "==> deploy-local done (bridge healthy)"
+echo "==> Sonata bridge healthy"
+
+# Managed-plugin drift. Runs AFTER Sonata is confirmed healthy so
+# plugin_install has a live bridge to talk to. Default: rebuild + install
+# any plugin whose source is ahead of the installed release, so the
+# running Sonata matches the current source tree.
+#
+# Failure policy: WARN (don't exit non-zero). Sonata itself is already
+# deployed and healthy at this point — an exit code would suggest the
+# whole deploy failed, which isn't accurate. The user gets a clear
+# "plugin X is stale, run deploy-plugin-local.sh X" summary instead.
+if [ "$SKIP_PLUGINS" -eq 0 ]; then
+  echo "==> checking managed plugin drift"
+  DRIFTED=$("$REPO/scripts/check-plugin-drift.sh" --names-only --quiet 2>/dev/null || true)
+  if [ -n "$DRIFTED" ]; then
+    echo "==> plugins with drift — rebuilding + reinstalling:"
+    while IFS= read -r p; do [ -n "$p" ] && echo "     - $p"; done <<< "$DRIFTED"
+    FAILED=()
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      if ! "$REPO/scripts/deploy-plugin-local.sh" "$p"; then
+        FAILED+=("$p")
+      fi
+    done <<< "$DRIFTED"
+    if [ "${#FAILED[@]}" -gt 0 ]; then
+      echo >&2
+      echo "==> WARN: Sonata is deployed, but ${#FAILED[@]} plugin(s) FAILED to rebuild/install:" >&2
+      for p in "${FAILED[@]}"; do echo "     - $p" >&2; done
+      echo "==> retry each with:  ./scripts/deploy-plugin-local.sh <name>" >&2
+    else
+      echo "==> plugin rebuild pass complete"
+    fi
+  else
+    echo "==> managed plugins: clean"
+  fi
+fi
+
+echo "==> deploy-local done"
