@@ -628,13 +628,19 @@ class WorkerManager: ObservableObject {
             return
         }
         switch worker.status {
-        case .draining, .restarting, .starting, .offline:
+        case .draining, .restarting, .starting:
+            // Already being cycled — skip. Offline is NOT skipped: the
+            // offline-escalation reap in HealthMonitor invokes us against
+            // workers whose sweep has already flipped them to 'offline'.
+            // Those still need SIGTERM+respawn (the process may be alive
+            // but quiet; if truly dead SIGTERM is a no-op and spawn goes
+            // through).
             print("[reap-cycle] worker \(worker.label) already \(worker.status) — skipping")
             return
         default:
             break
         }
-        print("[reap-cycle] cycling stuck worker \(worker.label) after task timeout")
+        print("[reap-cycle] cycling stuck worker \(worker.label) (\(worker.status)) after reap")
         cycleWorker(worker)
     }
 

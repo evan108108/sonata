@@ -63,31 +63,40 @@ private struct PromptCacheStatsItem: Encodable {
 
 // MARK: - Helpers
 
-/// Sweep workers whose lastHeartbeat is older than 30s ago, set them offline,
-/// fail their active events and associated tasks. Bridge heartbeats every 15s,
-/// so 30s gives a 2x margin while clearing ghost rows quickly when a session dies.
+/// Sweep workers whose lastHeartbeat is older than 30s ago — mark them
+/// `offline` (an ALERT), delete draining ones. Bridge heartbeats every 15s,
+/// so 30s gives a 2x margin while clearing ghost rows quickly when a session
+/// dies.
+///
+/// This sweep used to ALSO fail the assigned event and retry-or-fail the
+/// backing task in the same pass. That was tight and destructive: a legit
+/// long tool call over the 30s window would flip the task to pending, the
+/// dispatcher would race the returning worker's next claim, and two workers
+/// would end up on the same task_id (wiki-compilation dupe 2026-07-07).
+///
+/// The sweep is now ALERT-only. The escalation loop in HealthMonitor
+/// (`escalateOfflineWorkers`) reads the `offline` signal, DMs the worker as
+/// a second-signal liveness check, and reaps (cancel event + retry task +
+/// cycle process) only after a grace period without recovery. Fix #2 in
+/// worker_heartbeat lets a heartbeat un-stick `offline` back to `busy`/`idle`,
+/// so a false-positive sweep flip self-heals in the normal case.
 private func sweepStaleWorkersForActions(in db: Database) throws {
     let cutoff = nowMs() - 30_000
 
     // Restart-recovery v0: exclude `recovering` so freshly-respawned workers
-    // get their 30s grace window before the sweeper marks them offline + the
-    // task-failure path auto-retries their work (sonata-restart-recovery-v0
-    // §4 / §7). The recovery path stamps lastHeartbeat=now when it flips
-    // status='recovering', so this guard is a redundant belt-and-suspenders.
-    let staleWorkers = try Row.fetchAll(db, sql: """
-        SELECT workerId, currentEventId FROM workers
-        WHERE lastHeartbeat < ? AND status NOT IN ('offline', 'recovering')
-    """, arguments: [cutoff])
-
-    // Workers that lost heartbeat unexpectedly flip to 'offline' so the supervisor
-    // sees them and can repair. Draining workers were intentionally retired by
-    // WorkerManager — surfacing them as 'offline' makes the supervisor try to fix
-    // a worker that is supposed to be going away. Drop them outright instead.
+    // get their 30s grace window before the sweeper marks them offline
+    // (sonata-restart-recovery-v0 §4 / §7). The recovery path stamps
+    // lastHeartbeat=now when it flips status='recovering', so this guard is
+    // a redundant belt-and-suspenders.
     try db.execute(sql: """
         UPDATE workers SET status = 'offline'
         WHERE lastHeartbeat < ? AND status NOT IN ('offline', 'draining', 'recovering')
     """, arguments: [cutoff])
 
+    // Draining workers were intentionally retired by WorkerManager — surfacing
+    // them as 'offline' makes the supervisor try to fix a worker that is
+    // supposed to be going away. Drop them outright once they stop
+    // heartbeating.
     try db.execute(sql: """
         DELETE FROM workers
         WHERE lastHeartbeat < ? AND status = 'draining'
@@ -97,124 +106,6 @@ private func sweepStaleWorkersForActions(in db: Database) throws {
     // worker_purge only. Auto-deleting here caused live sessions to lose their DB
     // registration while still running, making the pool appear empty even when
     // workers were alive.
-
-    let now = nowMs()
-    for row in staleWorkers {
-        do {
-            guard let workerId = row["workerId"] as? String,
-                  let eventId = row["currentEventId"] as? String, !eventId.isEmpty else { continue }
-
-            // Decide recovery by event KIND before mutating the event. A
-            // task-backed event is marked 'failed' and re-dispatched via the
-            // task's retry/fail logic below. A non-task event (email /
-            // sonar_message / pr_review / alert) has NO task to retry, so
-            // marking it 'failed' would permanently DROP it — instead re-enqueue
-            // the event itself to 'pending' so a healthy worker picks it up
-            // (mirrors worker_purge's recovery).
-            var recoveryTaskId: String? = nil
-            if let event = try Row.fetchOne(db, sql: "SELECT payload FROM workerEvents WHERE id = ?", arguments: [eventId]),
-               let payload = event["payload"] as? String,
-               let payloadData = payload.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
-                recoveryTaskId = json["task_id"] as? String
-            }
-
-            if let taskId = recoveryTaskId {
-                try db.execute(sql: """
-                    UPDATE workerEvents SET status = 'failed', result = 'Worker lost heartbeat', completedAt = ?
-                    WHERE id = ? AND status = 'assigned'
-                """, arguments: [now, eventId])
-                // Heartbeat loss is usually a transient worker-process failure,
-                // not a problem with the task itself. Auto-retry once before
-                // giving up so a flapping session doesn't strand its work.
-                let taskRow = try Row.fetchOne(db, sql: """
-                    SELECT status, retryCount, COALESCE(maxRetries, 1) AS maxRetries FROM tasks WHERE id = ?
-                """, arguments: [taskId])
-                let currentStatus = taskRow?["status"] as? String
-                let retryCount = taskRow?["retryCount"] as? Int ?? 0
-                let maxRetries = taskRow?["maxRetries"] as? Int ?? 1
-
-                if currentStatus == "active" && retryCount < maxRetries {
-                    try db.execute(sql: """
-                        UPDATE tasks SET status = 'pending',
-                                         retryCount = retryCount + 1,
-                                         startedAt = NULL,
-                                         lastError = 'Worker lost heartbeat — auto-retry',
-                                         updatedAt = ?
-                        WHERE id = ? AND status = 'active'
-                    """, arguments: [now, taskId])
-                    // Skip dependent unblocking — the task will run again.
-                    try db.execute(sql: """
-                        UPDATE workers SET
-                            currentEventId = NULL,
-                            currentEventTokens = NULL,
-                            currentSlug = NULL,
-                            currentCacheReadTokens = NULL,
-                            currentInputTokens = NULL,
-                            currentPromptHash = NULL,
-                            currentSessionLabel = NULL,
-                            currentCwdBasename = NULL
-                        WHERE workerId = ?
-                    """, arguments: [workerId])
-                    continue
-                }
-
-                try db.execute(sql: """
-                    UPDATE tasks SET status = 'failed', lastError = 'Worker lost heartbeat', updatedAt = ?
-                    WHERE id = ? AND status = 'active'
-                """, arguments: [now, taskId])
-
-                let dependents = try Row.fetchAll(db, sql: """
-                    SELECT id, blockedBy FROM tasks WHERE status = 'pending' AND blockedBy LIKE ?
-                """, arguments: ["%\(taskId)%"])
-                for dep in dependents {
-                    guard let depId = dep["id"] as? String else { continue }
-                    let blockedByJSON = dep["blockedBy"] as? String ?? "[]"
-                    if let data = blockedByJSON.data(using: .utf8),
-                       var arr = try? JSONDecoder().decode([String].self, from: data) {
-                        arr = arr.flatMap { s -> [String] in
-                            let t = s.trimmingCharacters(in: .whitespaces)
-                            if t.hasPrefix("["),
-                               let d = t.data(using: .utf8),
-                               let inner = try? JSONDecoder().decode([String].self, from: d) {
-                                return inner
-                            }
-                            return [s]
-                        }
-                        arr.removeAll { $0 == taskId }
-                        if let newJSON = try? JSONEncoder().encode(arr),
-                           let newStr = String(data: newJSON, encoding: .utf8) {
-                            try db.execute(sql: "UPDATE tasks SET blockedBy = ?, updatedAt = ? WHERE id = ?",
-                                           arguments: [newStr, now, depId])
-                        }
-                    }
-                }
-            } else {
-                // Non-task event (email / sonar_message / pr_review / alert): no
-                // task to retry, so marking it 'failed' would permanently drop it.
-                // Re-enqueue the event itself so a healthy worker picks it up.
-                try db.execute(sql: """
-                    UPDATE workerEvents SET status = 'pending', assignedTo = NULL
-                    WHERE id = ? AND status = 'assigned'
-                """, arguments: [eventId])
-            }
-
-            try db.execute(sql: """
-                UPDATE workers SET
-                    currentEventId = NULL,
-                    currentEventTokens = NULL,
-                    currentSlug = NULL,
-                    currentCacheReadTokens = NULL,
-                    currentInputTokens = NULL,
-                    currentPromptHash = NULL,
-                    currentSessionLabel = NULL,
-                    currentCwdBasename = NULL
-                WHERE workerId = ?
-            """, arguments: [workerId])
-        } catch {
-            continue
-        }
-    }
 }
 
 let workerActions: [SonataAction] = [
@@ -277,7 +168,7 @@ let workerActions: [SonataAction] = [
                             lastHeartbeat = excluded.lastHeartbeat,
                             sessionId = excluded.sessionId,
                             status = CASE
-                                WHEN status IN ('offline', 'draining') THEN status
+                                WHEN status = 'draining' THEN status
                                 WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
                                 ELSE 'idle'
                             END
@@ -326,12 +217,14 @@ let workerActions: [SonataAction] = [
             do {
                 let changed = try await ctx.dbPool.write { db -> Int in
                     // Status is derived on every heartbeat: any worker with a
-                    // currentEventId is BUSY, any without one is IDLE. Terminal
-                    // states (offline, draining) are not overridden — those are
-                    // explicit lifecycle decisions. This makes status rock-solid
-                    // for the UI: the workers row always reflects truth, and
-                    // restart-recovery's transient 'recovering' state auto-resolves
-                    // to busy/idle as soon as the new bridge heartbeats.
+                    // currentEventId is BUSY, any without one is IDLE. Draining
+                    // stays sticky (explicit lifecycle exit). Offline is NOT
+                    // sticky — if a heartbeat arrives, the worker is alive by
+                    // definition; a stale sweep flip must self-heal rather than
+                    // sitting until Evan manually DMs the worker to fix itself.
+                    // The escalation loop in HealthMonitor still catches genuine
+                    // deaths via missing-heartbeat, so this only recovers
+                    // false-positive offline flags.
                     try db.execute(
                         sql: """
                         UPDATE workers SET
@@ -359,7 +252,7 @@ let workerActions: [SonataAction] = [
                             currentSessionLabel = COALESCE(?, currentSessionLabel),
                             currentCwdBasename = COALESCE(?, currentCwdBasename),
                             status = CASE
-                                WHEN status IN ('offline', 'draining') THEN status
+                                WHEN status = 'draining' THEN status
                                 WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
                                 ELSE 'idle'
                             END
@@ -854,6 +747,34 @@ let workerEventActions: [SonataAction] = [
                         LIMIT 1
                     """, arguments: [workerId, workerId]) else {
                         return nil
+                    }
+
+                    // Task-level dupe guard for FRESH pending picks. If another
+                    // event for the same task_id is already assigned (to any
+                    // worker) or pending, THIS event is a stale duplicate — a
+                    // sweep or reclaim re-enqueue that raced past the dispatcher-
+                    // side guard. Cancel it and refuse to claim. Skip the check
+                    // when we're resuming our OWN pre-assigned event (that IS
+                    // the canonical event for this worker).
+                    let isResumingOwnAssigned = row.status == "assigned" && row.assignedTo == workerId
+                    if !isResumingOwnAssigned,
+                       let payloadData = row.payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                       let claimTaskId = json["task_id"] as? String, !claimTaskId.isEmpty {
+                        let otherActive = try Int.fetchOne(db, sql: """
+                            SELECT COUNT(*) FROM workerEvents
+                            WHERE json_extract(payload, '$.task_id') = ?
+                              AND id != ?
+                              AND status IN ('pending', 'assigned')
+                        """, arguments: [claimTaskId, row.id]) ?? 0
+                        if otherActive > 0 {
+                            try db.execute(sql: """
+                                UPDATE workerEvents
+                                SET status = 'cancelled', completedAt = ?, result = ?
+                                WHERE id = ? AND status = 'pending'
+                            """, arguments: [now, "cancelled by task-level dupe guard: another event for task \(claimTaskId) is already active", row.id])
+                            return nil
+                        }
                     }
 
                     // Look up worker's sessionId for cycling/resume

@@ -16,6 +16,12 @@ import Logging
 /// 4. Claude receives the task as a `<channel source="sonata-channel">` event
 /// 5. Claude processes it and calls `complete_task` / `fail_task` via channel tools
 /// 6. The channel server calls `/api/worker/events/complete` or `/fail`
+private enum DispatchOutcome {
+    case dispatched
+    case workerTaken
+    case taskAlreadyActive
+}
+
 actor SonataChannelServer {
     private let dbPool: DatabasePool
     private let logger: Logger
@@ -95,7 +101,23 @@ actor SonataChannelServer {
         }
 
         do {
-            let claimed = try await dbPool.write { db -> Bool in
+            let outcome = try await dbPool.write { db -> DispatchOutcome in
+                // Task-level dupe guard. Complements 5e547ea's worker-level
+                // guard: that one prevents stacking two events onto ONE
+                // worker; this one prevents stacking two events for ONE
+                // task across DIFFERENT workers. The race we saw:
+                // TaskDispatcher.dispatch() creates a fresh event while a
+                // stale event for the same task is still pending or
+                // assigned (e.g. sweep re-enqueued it), and worker_event_claim
+                // picks the stale one — two workers now working the same
+                // task. Wiki compilation (task 86843193) hit this 2026-07-07.
+                let activeForTask = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM workerEvents
+                    WHERE json_extract(payload, '$.task_id') = ?
+                      AND status IN ('pending', 'assigned')
+                """, arguments: [taskId]) ?? 0
+                if activeForTask > 0 { return .taskAlreadyActive }
+
                 // Claim the worker FIRST, guarded on it still being free.
                 // findIdleWorker() ran outside this transaction, so a concurrent
                 // dispatch (nightly per-profile bursts) can have taken this worker
@@ -110,7 +132,7 @@ actor SonataChannelServer {
                       AND status = 'idle'
                       AND (currentEventId IS NULL OR currentEventId = '')
                 """, arguments: [eventId, workerId])
-                guard db.changesCount == 1 else { return false }
+                guard db.changesCount == 1 else { return .workerTaken }
 
                 // Look up worker's sessionId for cycling/resume
                 let workerSessionId = try String.fetchOne(db, sql: """
@@ -122,19 +144,23 @@ actor SonataChannelServer {
                     INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, sessionId)
                     VALUES (?, 'task', ?, ?, ?, 'assigned', ?, ?, ?)
                 """, arguments: [eventId, payloadJSON, priority, workerId, now, now, workerSessionId])
-                return true
+                return .dispatched
             }
 
-            guard claimed else {
+            switch outcome {
+            case .taskAlreadyActive:
+                logger.info("Skipping dispatch — task \(taskId) already has an active workerEvent (task-level dupe guard)")
+                return nil
+            case .workerTaken:
                 // Worker was taken between findIdleWorker() and the claim.
                 // Treat like "no idle workers" — the task stays pending and the
                 // dispatcher retries on its next poll.
                 logger.info("Worker \(workerId) no longer idle at claim time for task \(taskId); skipping dispatch")
                 return nil
+            case .dispatched:
+                logger.info("Dispatched task \"\(title)\" to worker \(workerId) via channel (event: \(eventId))")
+                return eventId
             }
-
-            logger.info("Dispatched task \"\(title)\" to worker \(workerId) via channel (event: \(eventId))")
-            return eventId
         } catch {
             logger.error("Failed to dispatch to channel: \(error.localizedDescription)")
             return nil

@@ -98,6 +98,27 @@ actor HealthMonitor {
     /// every stuck worker from scratch (the on-boot sweep Evan asked for).
     private var lastWorkerNudgeAt: [String: Date] = [:]
 
+    /// Grace period between "flagged offline" and destructive reap. The sweep
+    /// only sets status='offline' now — an ALERT, not an action. The
+    /// escalation loop DMs the worker as a second-signal liveness check and
+    /// waits this long for recovery. Fix #2 in worker_heartbeat lets a
+    /// heartbeat un-stick 'offline' back to 'busy'/'idle', so a false-positive
+    /// sweep flip self-heals in the normal case. Only the persistently-quiet
+    /// worker (or one whose SSE is also dead — two negative signals, no
+    /// grace) gets reaped.
+    private let offlineGracePeriod: TimeInterval = 5 * 60
+
+    /// Per-worker escalation state for the offline reap ladder. Reset on
+    /// process restart. Cleared for a workerId whenever that worker's DB
+    /// status transitions out of 'offline' (recovery) or the deadline fires
+    /// (reap).
+    private struct OfflineEscalation {
+        let firstOfflineAt: Date
+        let dmSentAt: Date?
+        let deadline: Date
+    }
+    private var offlineEscalations: [String: OfflineEscalation] = [:]
+
     /// Fallback interval between supervisor check-event pushes (3 minutes).
     /// Only used if the supervisorConfig singleton row cannot be read.
     private let fallbackSupervisorCheckInterval: TimeInterval = 180
@@ -308,6 +329,16 @@ actor HealthMonitor {
             // (the bridge keeps heartbeating). Reclaim it within one monitor
             // cycle instead of waiting for the 30/75-min supervisor pass.
             await reclaimStrandedEvents()
+
+            // Offline escalation ladder. sweepStaleWorkersForActions now only
+            // MARKS workers offline (Fix #3 in dispatch-hardening-bundle) — it
+            // no longer flips events or tasks. This loop reads the offline
+            // signal, DMs the worker as a second-signal liveness check, and
+            // reaps only after grace passes without recovery. Prevents the
+            // "busy worker briefly quiet → tasks re-enqueued → duplicate
+            // dispatch" class that produced the wiki-compilation dupe
+            // 2026-07-07.
+            await escalateOfflineWorkers()
 
             // Deterministic wall-clock timeout enforcement — fail any active
             // task past its metadata.timeoutSeconds and recycle the pool worker
@@ -1070,6 +1101,233 @@ actor HealthMonitor {
             } catch {
                 logger.warning("reclaimStrandedEvents: recovery failed for \(s.workerId): \(error)")
             }
+        }
+    }
+
+    /// Row shape used by escalateOfflineWorkers / reapOfflineWorker.
+    private struct OfflineWorkerRow {
+        let workerId: String
+        let sessionId: String?
+        let sessionLabel: String
+        let currentEventId: String?
+    }
+
+    /// Offline escalation ladder.
+    ///
+    /// The sweep (`sweepStaleWorkersForActions` in WorkerActions.swift) marks
+    /// workers whose HTTP heartbeat has lapsed as `status='offline'` — an
+    /// ALERT signal, not a decision. This loop reads that signal and:
+    ///
+    ///   1. On first sight of an offline worker not yet in escalation:
+    ///      send a DM to its session ("you've been flagged offline; heartbeat
+    ///      immediately or we cycle you in N minutes"). If the SSE push
+    ///      succeeds, start a grace timer. If the SSE push fails, that's a
+    ///      second negative liveness signal — skip grace and reap now.
+    ///   2. On each subsequent tick while the worker is still offline:
+    ///      if the grace deadline has passed, invoke the reap path.
+    ///   3. If the worker's DB status transitions out of `offline` (Fix #2
+    ///      in worker_heartbeat lets a heartbeat un-stick offline back to
+    ///      busy/idle), clear the escalation. False-positive self-healed.
+    ///
+    /// Reap = cancel the worker's assigned workerEvent, retry-or-fail the
+    /// backing task, then hand the workerId to the WorkerManager cycler for
+    /// SIGTERM+respawn. Cancelling the event (not re-enqueueing) satisfies
+    /// the task-level dupe guard in dispatchToChannel — the fresh redispatch
+    /// creates a new event only because no other pending/assigned event
+    /// exists for that task_id.
+    private func escalateOfflineWorkers() async {
+        let now = Date()
+        let rows: [OfflineWorkerRow]
+        do {
+            rows = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT workerId, sessionId, sessionLabel, currentEventId
+                    FROM workers
+                    WHERE status = 'offline'
+                """).compactMap { row -> OfflineWorkerRow? in
+                    guard let workerId = row["workerId"] as? String,
+                          let sessionLabel = row["sessionLabel"] as? String else { return nil }
+                    return OfflineWorkerRow(
+                        workerId: workerId,
+                        sessionId: row["sessionId"] as? String,
+                        sessionLabel: sessionLabel,
+                        currentEventId: row["currentEventId"] as? String
+                    )
+                }
+            }
+        } catch {
+            logger.warning("escalateOfflineWorkers: query failed: \(error)")
+            return
+        }
+
+        // Clear escalation for workers that recovered out of 'offline'.
+        let currentlyOffline = Set(rows.map { $0.workerId })
+        for wid in offlineEscalations.keys where !currentlyOffline.contains(wid) {
+            logger.info("escalation: worker \(wid) recovered from offline — clearing escalation")
+            offlineEscalations.removeValue(forKey: wid)
+        }
+
+        for r in rows {
+            if let esc = offlineEscalations[r.workerId] {
+                // Already escalating — check deadline.
+                if now >= esc.deadline {
+                    logger.warning("escalation: worker \(r.workerId) still offline past grace — reaping")
+                    await reapOfflineWorker(row: r, reason: "no recovery within \(Int(offlineGracePeriod))s grace")
+                    offlineEscalations.removeValue(forKey: r.workerId)
+                }
+                continue
+            }
+
+            // Fresh offline transition — DM the worker as a second-signal
+            // liveness check.
+            let minutes = Int(offlineGracePeriod / 60)
+            let body = "You've been flagged offline because your HTTP heartbeat lapsed. "
+                + "If you're still alive, call worker_heartbeat immediately to restore your status. "
+                + "You have \(minutes) minute\(minutes == 1 ? "" : "s") before we assume you're dead and cycle your process."
+            let pushed = await sendOfflineNudge(row: r, body: body)
+            if pushed {
+                offlineEscalations[r.workerId] = OfflineEscalation(
+                    firstOfflineAt: now,
+                    dmSentAt: now,
+                    deadline: now.addingTimeInterval(offlineGracePeriod)
+                )
+                logger.info("escalation: DM'd offline worker \(r.workerId) (\(r.sessionLabel)); grace \(Int(offlineGracePeriod))s")
+            } else {
+                // SSE dead too — two negative liveness signals, no grace.
+                logger.warning("escalation: worker \(r.workerId) offline + SSE not live — reaping immediately")
+                await reapOfflineWorker(row: r, reason: "offline + SSE not live")
+            }
+        }
+    }
+
+    /// Persist + push the escalation DM to a worker session. Mirrors the
+    /// nudge path (durable insert + live SSE push). Returns true only if the
+    /// SSE push landed on a live writer — a false return means SSE is dead.
+    private func sendOfflineNudge(row: OfflineWorkerRow, body: String) async -> Bool {
+        guard let targetSessionId = row.sessionId, !targetSessionId.isEmpty else {
+            return false
+        }
+        let messageId = UUID().uuidString
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let context = "health-monitor-offline-escalation:\(row.workerId)"
+        let fromSessionId = "sonata-health-monitor"
+
+        do {
+            try await dbPool.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO dm_messages (
+                            messageId, targetSessionId, fromSessionId, fromPubkey, fromPeerId,
+                            body, context, metaJson, sentAtMs, receivedAtMs, deliveryStatus
+                        ) VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?, 'queued')
+                        """,
+                    arguments: [messageId, targetSessionId, fromSessionId, body, context, nowMs, nowMs]
+                )
+            }
+        } catch {
+            logger.warning("escalation: dm_messages insert failed for \(targetSessionId): \(error)")
+            return false
+        }
+
+        let frame = DMFrames.sonarDMNotification(
+            messageId: messageId,
+            body: body,
+            context: context,
+            sender: fromSessionId,
+            inReplyToMessageId: nil
+        )
+        return await MCPConnections.shared.push(targetSessionId, jsonRPC: frame)
+    }
+
+    /// Reap an offline worker: cancel its assigned event, retry-or-fail the
+    /// backing task, then hand the workerId to the WorkerManager cycler for
+    /// SIGTERM+respawn. All DB mutations happen in a single transaction so a
+    /// concurrent completion can't be clobbered — writes are guarded on the
+    /// pre-reap status of each row.
+    private func reapOfflineWorker(row: OfflineWorkerRow, reason: String) async {
+        let now = nowMs()
+        let result = "Offline escalation reap (\(reason))"
+
+        do {
+            try await dbPool.write { db in
+                guard let eventId = row.currentEventId, !eventId.isEmpty else { return }
+
+                // Discover the backing task (if any) from the event payload.
+                var recoveryTaskId: String? = nil
+                if let ev = try Row.fetchOne(db,
+                    sql: "SELECT payload FROM workerEvents WHERE id = ?",
+                    arguments: [eventId]),
+                   let payload = ev["payload"] as? String,
+                   let data = payload.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    recoveryTaskId = json["task_id"] as? String
+                }
+
+                // Cancel the event (not re-enqueue). Cancellation satisfies
+                // the task-level dupe guard in dispatchToChannel — a fresh
+                // dispatch for the task will succeed because no other
+                // pending/assigned event exists for that task_id.
+                try db.execute(sql: """
+                    UPDATE workerEvents SET status = 'cancelled', completedAt = ?, result = ?
+                    WHERE id = ? AND status IN ('pending', 'assigned')
+                """, arguments: [now, result, eventId])
+
+                if let taskId = recoveryTaskId {
+                    let taskRow = try Row.fetchOne(db, sql: """
+                        SELECT status, retryCount, COALESCE(maxRetries, 1) AS maxRetries
+                        FROM tasks WHERE id = ?
+                    """, arguments: [taskId])
+                    let currentStatus = taskRow?["status"] as? String
+                    let retryCount = taskRow?["retryCount"] as? Int ?? 0
+                    let maxRetries = taskRow?["maxRetries"] as? Int ?? 1
+
+                    if currentStatus == "active" && retryCount < maxRetries {
+                        try db.execute(sql: """
+                            UPDATE tasks SET status = 'pending',
+                                             retryCount = retryCount + 1,
+                                             startedAt = NULL,
+                                             lastError = ?,
+                                             updatedAt = ?
+                            WHERE id = ? AND status = 'active'
+                        """, arguments: ["\(result) — auto-retry", now, taskId])
+                    } else if currentStatus == "active" {
+                        try db.execute(sql: """
+                            UPDATE tasks SET status = 'failed',
+                                             lastError = ?,
+                                             updatedAt = ?
+                            WHERE id = ? AND status = 'active'
+                        """, arguments: ["\(result) — retries exhausted", now, taskId])
+                        try unblockDependents(taskId: taskId, in: db, now: now)
+                        try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
+                    }
+                }
+
+                // Clear the worker's current* fields so the cycler sees a
+                // clean state to displace.
+                try db.execute(sql: """
+                    UPDATE workers SET
+                        currentEventId = NULL,
+                        currentEventTokens = NULL,
+                        currentSlug = NULL,
+                        currentCacheReadTokens = NULL,
+                        currentInputTokens = NULL,
+                        currentPromptHash = NULL,
+                        currentSessionLabel = NULL,
+                        currentCwdBasename = NULL
+                    WHERE workerId = ?
+                """, arguments: [row.workerId])
+            }
+        } catch {
+            logger.warning("escalation: DB cleanup failed for worker \(row.workerId): \(error)")
+        }
+
+        // Hand off to WorkerManager for SIGTERM+respawn. cycleWorkerById is
+        // idempotent for workers already in draining/starting/restarting.
+        if let cycler = cycleStuckWorkers {
+            logger.warning("escalation: cycling worker \(row.workerId) (\(row.sessionLabel))")
+            await cycler([row.workerId])
+        } else {
+            logger.warning("escalation: no cycler available for worker \(row.workerId) — skipping process cycle")
         }
     }
 
