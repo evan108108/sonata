@@ -31,10 +31,24 @@ actor MCPEventPusher {
     }
 
     private func tick() async {
+        // Deliver notification-type events FIRST, before regular assignment.
+        // Otherwise an incoming DM would go through the assign path, pin a
+        // worker to 'busy' with a currentEventId, and stay stuck (workers
+        // don't call complete_event on notifications). See `notificationTypes`.
+        await pushPendingNotifications()
         await assignPendingToIdleWorkers()
         await pushPendingWorkerEvents()
         await pushPendingSupervisorEvents()
     }
+
+    /// workerEvents.type values that are notifications, not work items.
+    /// These get pushed to a live worker's SSE stream and immediately
+    /// marked completed — they do NOT go through the assign lifecycle
+    /// that pins worker.status='busy' and sets currentEventId. Adding a
+    /// new notification type here is a one-liner; do not forget to also
+    /// exclude it from `assignPendingToIdleWorkers`'s pending pick query
+    /// (matched via the same set).
+    private static let notificationTypes: Set<String> = ["sonar_dm"]
 
     /// Find live workers with no assigned event and hand them pending work.
     /// "Live" = has an SSE stream in MCPConnections. "Idle" = DB says
@@ -65,11 +79,20 @@ actor MCPEventPusher {
                     if status != "idle" { return }
                     if (workerRow["currentEventId"] as? String) != nil { return }
 
+                    // Skip notification-type pending events — they're delivered
+                    // by pushPendingNotifications and must NOT pin a worker to
+                    // 'busy'. Bind the notification types via SQL parameters
+                    // so the set stays authoritative in one place.
+                    let notifiablePlaceholders = MCPEventPusher.notificationTypes
+                        .map { _ in "?" }.joined(separator: ",")
+                    var args: [DatabaseValueConvertible] = []
+                    args.append(contentsOf: MCPEventPusher.notificationTypes.map { $0 as DatabaseValueConvertible })
                     guard let evtId = try String.fetchOne(db, sql: """
                         SELECT id FROM workerEvents
                         WHERE status = 'pending'
+                          AND type NOT IN (\(notifiablePlaceholders))
                         ORDER BY priority DESC, createdAt ASC LIMIT 1
-                    """) else { return }
+                    """, arguments: StatementArguments(args)) else { return }
 
                     let now = nowMs()
                     let workerSessionId = try String.fetchOne(db, sql:
@@ -90,6 +113,98 @@ actor MCPEventPusher {
             } catch {
                 logger.warning("EventPusher auto-assign failed for \(workerId): \(error)")
             }
+        }
+    }
+
+    /// Notification-type events (see `notificationTypes`): SSE push to a
+    /// live worker + immediate mark-completed. NO worker.status='busy',
+    /// NO currentEventId pin. Rationale: notifications are fire-and-forget;
+    /// receivers don't call complete_event on them (see AFK/DM patterns),
+    /// so if they went through the normal assign lifecycle they'd sit
+    /// `assigned` forever and pin the worker to `busy`.
+    private struct PendingNotification: Sendable {
+        let id: String
+        let type: String
+        let payload: String
+        let priority: Int
+        let createdAt: Int64
+    }
+
+    private func pushPendingNotifications() async {
+        let notifs: [PendingNotification]
+        do {
+            let placeholders = MCPEventPusher.notificationTypes
+                .map { _ in "?" }.joined(separator: ",")
+            let args: [DatabaseValueConvertible] = MCPEventPusher.notificationTypes
+                .map { $0 as DatabaseValueConvertible }
+            notifs = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT id, type, payload, priority, createdAt
+                    FROM workerEvents
+                    WHERE status = 'pending' AND type IN (\(placeholders))
+                    ORDER BY priority DESC, createdAt ASC
+                    LIMIT 20
+                """, arguments: StatementArguments(args)).map { row in
+                    PendingNotification(
+                        id: row["id"] as? String ?? "",
+                        type: row["type"] as? String ?? "",
+                        payload: row["payload"] as? String ?? "{}",
+                        priority: row["priority"] as? Int ?? 5,
+                        createdAt: row["createdAt"] as? Int64 ?? 0
+                    )
+                }
+            }
+        } catch {
+            logger.warning("EventPusher notification query failed: \(error)")
+            return
+        }
+
+        guard !notifs.isEmpty else { return }
+
+        // Live worker sessionKeys (workerId is the MCP session key — see
+        // MCPHTTPRouter's /mcp/:sessionKey). Skip 'supervisor'; DMs to
+        // supervisor are a separate path.
+        let liveKeys = await MCPConnections.shared.liveSessionKeys()
+        let workerKeys: [String] = liveKeys.filter { $0 != "supervisor" }
+        guard !workerKeys.isEmpty else {
+            // No live workers to deliver to — leave events pending; next tick
+            // will retry once a worker attaches its SSE stream.
+            return
+        }
+
+        for notif in notifs {
+            let content = renderWorkerEventContent(payload: notif.payload)
+            var delivered = false
+            for key in workerKeys {
+                if await MCPNotificationDispatcher.shared.pushWorkerEvent(
+                    sessionKey: key,
+                    eventId: notif.id,
+                    eventType: notif.type,
+                    priority: notif.priority,
+                    createdAt: notif.createdAt,
+                    content: content
+                ) {
+                    delivered = true
+                    break
+                }
+            }
+            if delivered {
+                let now = nowMs()
+                do {
+                    try await dbPool.write { db in
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'completed', completedAt = ?,
+                                result = 'notification delivered via SSE'
+                            WHERE id = ? AND status = 'pending'
+                        """, arguments: [now, notif.id])
+                    }
+                } catch {
+                    logger.warning("EventPusher: failed to mark notification completed for \(notif.id): \(error)")
+                }
+            }
+            // If not delivered (no live worker SSE), leave as pending —
+            // next tick tries again once a worker attaches.
         }
     }
 

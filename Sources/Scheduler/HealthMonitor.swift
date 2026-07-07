@@ -330,6 +330,19 @@ actor HealthMonitor {
             // cycle instead of waiting for the 30/75-min supervisor pass.
             await reclaimStrandedEvents()
 
+            // Orphan-event sweep. When sweepStaleWorkersForActions was
+            // gutted to alert-only (d179191), it stopped failing/re-enqueueing
+            // events on stale heartbeat. The escalation ladder covers workers
+            // still in the DB; but workers deleted via UI kill / worker_purge /
+            // predecessor-cleanup vanish from the workers table entirely, and
+            // any workerEvents still `assigned` to their dead workerIds have
+            // NO reaper. Left uncleaned, they accumulate (41 rows from April-May
+            // observed 2026-07-07) and get resurrected onto fresh spawns via
+            // predecessor-cleanup's `SET status='pending'` release path —
+            // "phantom tasks" pinning new workers. This sweep cancels those
+            // orphans within one monitor cycle.
+            await sweepOrphanedEvents()
+
             // Offline escalation ladder. sweepStaleWorkersForActions now only
             // MARKS workers offline (Fix #3 in dispatch-hardening-bundle) — it
             // no longer flips events or tasks. This loop reads the offline
@@ -1101,6 +1114,115 @@ actor HealthMonitor {
             } catch {
                 logger.warning("reclaimStrandedEvents: recovery failed for \(s.workerId): \(error)")
             }
+        }
+    }
+
+    /// Row shape used by sweepOrphanedEvents.
+    private struct OrphanedEvent {
+        let eventId: String
+        let type: String
+        let taskId: String?
+    }
+
+    /// Cancel `assigned` and `pending` events whose `assignedTo` workerId no
+    /// longer exists in the workers table (e.g. worker was killed / purged /
+    /// displaced by predecessor-cleanup). Un-cancelled orphans accumulate and
+    /// get resurrected as "phantom tasks" pinning fresh worker spawns.
+    ///
+    /// For task-backed orphans, also retry the underlying task (mirrors
+    /// reapOfflineWorker's retry policy: pending + retryCount++ if under
+    /// maxRetries, else failed with dependent-unblock).
+    private func sweepOrphanedEvents() async {
+        let now = nowMs()
+        let result = "Orphan sweep: assigned worker no longer exists"
+
+        let orphans: [OrphanedEvent]
+        do {
+            orphans = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT id, type, payload
+                    FROM workerEvents
+                    WHERE status IN ('pending', 'assigned')
+                      AND assignedTo IS NOT NULL AND assignedTo != ''
+                      AND assignedTo NOT IN (SELECT workerId FROM workers)
+                    LIMIT 200
+                """).compactMap { row -> OrphanedEvent? in
+                    guard let id = row["id"] as? String,
+                          let type = row["type"] as? String else { return nil }
+                    var taskId: String? = nil
+                    if let payload = row["payload"] as? String,
+                       let data = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        taskId = json["task_id"] as? String
+                    }
+                    return OrphanedEvent(eventId: id, type: type, taskId: taskId)
+                }
+            }
+        } catch {
+            logger.warning("sweepOrphanedEvents: query failed: \(error)")
+            return
+        }
+
+        guard !orphans.isEmpty else { return }
+
+        struct Tally { var cancelled = 0; var retried = 0; var failed = 0 }
+        var tally = Tally()
+
+        for orphan in orphans {
+            do {
+                let step: Tally = try await dbPool.write { db in
+                    var step = Tally()
+                    try db.execute(sql: """
+                        UPDATE workerEvents
+                        SET status = 'cancelled', completedAt = ?, result = ?
+                        WHERE id = ? AND status IN ('pending', 'assigned')
+                    """, arguments: [now, result, orphan.eventId])
+                    guard db.changesCount > 0 else { return step }
+                    step.cancelled = 1
+
+                    guard let taskId = orphan.taskId else { return step }
+
+                    let taskRow = try Row.fetchOne(db, sql: """
+                        SELECT status, retryCount, COALESCE(maxRetries, 1) AS maxRetries
+                        FROM tasks WHERE id = ?
+                    """, arguments: [taskId])
+                    let currentStatus = taskRow?["status"] as? String
+                    let retryCount = taskRow?["retryCount"] as? Int ?? 0
+                    let maxRetries = taskRow?["maxRetries"] as? Int ?? 1
+
+                    if currentStatus == "active" && retryCount < maxRetries {
+                        try db.execute(sql: """
+                            UPDATE tasks SET status = 'pending',
+                                             retryCount = retryCount + 1,
+                                             startedAt = NULL,
+                                             lastError = ?,
+                                             updatedAt = ?
+                            WHERE id = ? AND status = 'active'
+                        """, arguments: ["\(result) — auto-retry", now, taskId])
+                        step.retried = 1
+                    } else if currentStatus == "active" {
+                        try db.execute(sql: """
+                            UPDATE tasks SET status = 'failed',
+                                             lastError = ?,
+                                             updatedAt = ?
+                            WHERE id = ? AND status = 'active'
+                        """, arguments: ["\(result) — retries exhausted", now, taskId])
+                        try unblockDependents(taskId: taskId, in: db, now: now)
+                        try rollUpParentStatus(childTaskId: taskId, in: db, now: now)
+                        step.failed = 1
+                    }
+                    return step
+                }
+                tally.cancelled += step.cancelled
+                tally.retried += step.retried
+                tally.failed += step.failed
+            } catch {
+                logger.warning("sweepOrphanedEvents: cleanup failed for event \(orphan.eventId): \(error)")
+            }
+        }
+
+        if tally.cancelled > 0 {
+            logger.warning("sweepOrphanedEvents: cancelled \(tally.cancelled) orphan event(s) (retried \(tally.retried) task(s), failed \(tally.failed))")
         }
     }
 
