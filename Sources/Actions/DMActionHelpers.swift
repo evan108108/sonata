@@ -173,8 +173,24 @@ func sonarPushToPeer(
         if !(200..<300).contains(http.statusCode) {
             return .failed(reason: "Sonar HTTP \(http.statusCode)")
         }
-        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return .ok(remoteMessageId: json?["message_id"] as? String)
+        // A 2xx alone is not delivery — sonar historically returned
+        // 202 {status:"pending"} even when the downstream relay failed.
+        // Only "relayed" means the message actually reached the peer.
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let status = json["status"] as? String else {
+            return .failed(reason: "missing_status")
+        }
+        switch status {
+        case "relayed":
+            return .ok(remoteMessageId: json["message_id"] as? String)
+        case "pending":
+            return .failed(reason: "pending_no_relay")
+        default:
+            if let failureReason = json["failure_reason"] as? String {
+                return .failed(reason: "relay_failed: \(failureReason)")
+            }
+            return .failed(reason: "unexpected_status: \(status)")
+        }
     } catch {
         return .failed(reason: error.localizedDescription)
     }

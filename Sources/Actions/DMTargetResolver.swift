@@ -67,6 +67,12 @@ enum DMTargetResolver {
             if await SonarPeerLookup.isSelf(peer.instanceId) {
                 return DMResolvedTarget(sessionKey: peer.id, kind: .selfPeer, peerId: peer.id, sessionId: nil)
             }
+            // Offline peers resolve with peerId=nil so dm_send takes its
+            // not_live/"peer_offline" path — matching dm_targets' contract
+            // of only offering peers whose connectionStatus is "online".
+            guard peer.connectionStatus == "online" else {
+                return DMResolvedTarget(sessionKey: peer.id, kind: .peer, peerId: nil, sessionId: nil)
+            }
             return DMResolvedTarget(sessionKey: peer.id, kind: .peer, peerId: peer.id, sessionId: nil)
         }
 
