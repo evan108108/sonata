@@ -95,7 +95,23 @@ actor SonataChannelServer {
         }
 
         do {
-            try await dbPool.write { db in
+            let claimed = try await dbPool.write { db -> Bool in
+                // Claim the worker FIRST, guarded on it still being free.
+                // findIdleWorker() ran outside this transaction, so a concurrent
+                // dispatch (nightly per-profile bursts) can have taken this worker
+                // in between. An unguarded UPDATE overwrites currentEventId,
+                // orphaning the open event ('assigned' but unreferenced — its
+                // session becomes untracked) and stacking a second prompt onto a
+                // busy worker. Seen 2026-07-07 on Scout: CPG p17 orphaned, then
+                // MaassWorks p53 + Up Studio p57 stacked and watchdog-killed.
+                try db.execute(sql: """
+                    UPDATE workers SET status = 'busy', currentEventId = ?
+                    WHERE workerId = ?
+                      AND status = 'idle'
+                      AND (currentEventId IS NULL OR currentEventId = '')
+                """, arguments: [eventId, workerId])
+                guard db.changesCount == 1 else { return false }
+
                 // Look up worker's sessionId for cycling/resume
                 let workerSessionId = try String.fetchOne(db, sql: """
                     SELECT sessionId FROM workers WHERE workerId = ?
@@ -106,11 +122,15 @@ actor SonataChannelServer {
                     INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, sessionId)
                     VALUES (?, 'task', ?, ?, ?, 'assigned', ?, ?, ?)
                 """, arguments: [eventId, payloadJSON, priority, workerId, now, now, workerSessionId])
+                return true
+            }
 
-                // Mark worker as busy
-                try db.execute(sql: """
-                    UPDATE workers SET status = 'busy', currentEventId = ? WHERE workerId = ?
-                """, arguments: [eventId, workerId])
+            guard claimed else {
+                // Worker was taken between findIdleWorker() and the claim.
+                // Treat like "no idle workers" — the task stays pending and the
+                // dispatcher retries on its next poll.
+                logger.info("Worker \(workerId) no longer idle at claim time for task \(taskId); skipping dispatch")
+                return nil
             }
 
             logger.info("Dispatched task \"\(title)\" to worker \(workerId) via channel (event: \(eventId))")
