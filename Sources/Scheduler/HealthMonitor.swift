@@ -1200,9 +1200,15 @@ actor HealthMonitor {
         }
     }
 
-    /// Persist + push the escalation DM to a worker session. Mirrors the
-    /// nudge path (durable insert + live SSE push). Returns true only if the
-    /// SSE push landed on a live writer — a false return means SSE is dead.
+    /// Persist + push the escalation DM to a worker session. The durable
+    /// dm_messages row is keyed by the worker's Claude sessionId (dm-subsystem
+    /// convention); the SSE push must use the workerId — that's the MCP
+    /// session key the HTTP router registered when the worker's bridge
+    /// attached (see MCPHTTPRouter's `/mcp/:sessionKey` route). Passing
+    /// sessionId to `MCPConnections.push` returns false 100% of the time —
+    /// no writer is keyed by it — which would collapse the escalation
+    /// ladder's DM+grace path into an immediate reap. Returns true only if
+    /// the SSE push landed on a live writer.
     private func sendOfflineNudge(row: OfflineWorkerRow, body: String) async -> Bool {
         guard let targetSessionId = row.sessionId, !targetSessionId.isEmpty else {
             return false
@@ -1236,7 +1242,7 @@ actor HealthMonitor {
             sender: fromSessionId,
             inReplyToMessageId: nil
         )
-        return await MCPConnections.shared.push(targetSessionId, jsonRPC: frame)
+        return await MCPConnections.shared.push(row.workerId, jsonRPC: frame)
     }
 
     /// Reap an offline worker: cancel its assigned event, retry-or-fail the
