@@ -330,6 +330,15 @@ actor HealthMonitor {
             // cycle instead of waiting for the 30/75-min supervisor pass.
             await reclaimStrandedEvents()
 
+            // Ghost worker process sweep. `pgrep -f mcp-cfg/worker-*.json`
+            // enumerates every claude worker process on the host;
+            // cross-referenced with the workers table, anything unregistered
+            // and older than 30s gets SIGTERM/SIGKILL. Catches (a) Sonata
+            // restart survivors, (b) processes leaked by removeWorker's
+            // nil-shellPid failure mode (weak var terminalView collapses
+            // when SwiftUI releases the view — kill path silently no-ops).
+            _ = await GhostWorkerReaper.reap(dbPool: dbPool, logger: logger, source: "monitor")
+
             // Orphan-event sweep. When sweepStaleWorkersForActions was
             // gutted to alert-only (d179191), it stopped failing/re-enqueueing
             // events on stale heartbeat. The escalation ladder covers workers

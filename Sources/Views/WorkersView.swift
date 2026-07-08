@@ -37,6 +37,17 @@ class Worker: ObservableObject, Identifiable {
     let terminalView: LocalProcessTerminalView
     var coordinator: WorkerCoordinator?
 
+    /// PID of the currently-running claude process, captured at spawn time
+    /// (see WorkerCoordinator.startProcess). This is the SOURCE OF TRUTH for
+    /// the kill path — it survives even when the coordinator's `weak var
+    /// terminalView` collapses (SwiftUI view lifecycle can release the strong
+    /// reference; the coordinator's weak ref then nils, `?.` chains all
+    /// short-circuit to 0, and removeWorker's `if shellPid > 0` guard
+    /// silently skips SIGKILL, leaking the process as a ghost). Zero means
+    /// no process has been captured yet (fresh Worker, not-yet-started, or
+    /// recovery pre-startProcess). Cleared on confirmed process exit.
+    @Published var spawnedPid: pid_t = 0
+
     init(label: String, engine: WorkerEngine = WorkerEngine.defaultEngine, model: String? = nil) {
         self.id = "worker-\(Date().timeIntervalSince1970.description.replacingOccurrences(of: ".", with: "").suffix(10))"
         self.label = label
@@ -508,16 +519,37 @@ class WorkerManager: ObservableObject {
         let workerId = worker.id
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
 
-        // Capture the shellPid BEFORE terminate() — SwiftTerm keeps shellPid
-        // populated after terminate today, but that's an implementation detail
-        // of LocalProcess.terminate() we shouldn't lean on.
-        let shellPid = worker.coordinator?.terminalView?.process?.shellPid ?? 0
+        // Resolve the pid via three fallback sources in order of trust:
+        //   1. Worker.spawnedPid — captured at startProcess time on the Worker
+        //      instance (strong ref). Survives coordinator/terminalView being
+        //      released (SwiftUI view lifecycle nils the coordinator's
+        //      `weak var terminalView`).
+        //   2. Coordinator chain (legacy) — worker.coordinator?.terminalView?
+        //      .process?.shellPid. Silently returns 0 when the weak ref
+        //      collapses. Historical primary source; the load-bearing bug
+        //      that caused ghost workers before D1 (2026-07-08).
+        //   3. pgrep by mcp-cfg path — asks the OS for the current pid
+        //      running with THIS workerId's mcp-cfg. Belt for the case where
+        //      spawnedPid was never captured (fresh Worker construction that
+        //      predates the fix, recovery init) and the coordinator chain
+        //      is already nil.
+        let spawnedPid = worker.spawnedPid
+        let coordPid = worker.coordinator?.terminalView?.process?.shellPid ?? 0
+        var pgrepPid: pid_t = 0
+        if spawnedPid == 0 && coordPid == 0 {
+            pgrepPid = GhostWorkerReaper.enumerateWorkerProcesses()
+                .first(where: { $0.workerId == workerId })?.pid ?? 0
+        }
+        let shellPid: pid_t = spawnedPid > 0 ? spawnedPid
+            : (coordPid > 0 ? coordPid : pgrepPid)
+        let source: String = spawnedPid > 0 ? "spawnedPid"
+            : (coordPid > 0 ? "coordinator" : (pgrepPid > 0 ? "pgrep" : "none"))
 
         // Freeze the coordinator: no auto-restart, no future ops on this row.
         worker.coordinator?.autoRestartEnabled = false
         worker.status = .draining
 
-        print("[remove] term-sent: \(slotLabel) pid=\(shellPid)")
+        print("[remove] term-sent: \(slotLabel) pid=\(shellPid) source=\(source)")
 
         // Belt: drain the row so the dispatcher can't pick it during the kill
         // window. Fire-and-forget — unregister below is the authoritative
@@ -529,7 +561,16 @@ class WorkerManager: ObservableObject {
         }
 
         // SIGTERM via SwiftTerm's PTY path (closes I/O + kill(shellPid, SIGTERM)).
-        worker.coordinator?.terminalView?.terminate()
+        // If the terminalView (weak) has already been released, terminate()
+        // no-ops silently — and the process keeps running. That was the
+        // ghost-worker bug. Send SIGTERM directly as a belt when we have a
+        // pid but the terminalView chain is gone.
+        if worker.coordinator?.terminalView != nil {
+            worker.coordinator?.terminalView?.terminate()
+        } else if shellPid > 0 {
+            print("[remove] terminalView nil — direct SIGTERM: \(slotLabel) pid=\(shellPid)")
+            kill(shellPid, SIGTERM)
+        }
 
         DispatchQueue.global().asyncAfter(deadline: .now() + sigtermGrace) { [weak self] in
             guard let self else { return }
@@ -1015,6 +1056,20 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 currentDirectory: WorkerManager.workingDirectory
             )
 
+            // Capture the spawned pid on the Worker instance itself. This is
+            // the SOURCE OF TRUTH for the kill path — the coordinator's
+            // `weak var terminalView` can collapse (SwiftUI view lifecycle
+            // releases the strong ref), whereupon `?.terminalView?.process?
+            // .shellPid` short-circuits to nil → 0, and removeWorker's
+            // `if shellPid > 0` guard silently skips SIGKILL — the primary
+            // known root cause of ghost workers (Evan+AE II session 2026-07-08).
+            // Read after startProcess so shellPid reflects the fresh fork.
+            let pid = view.process?.shellPid ?? 0
+            if pid > 0 {
+                self.worker.spawnedPid = pid
+                print("[DEBUG] [\(self.worker.label)] spawnedPid captured: pid=\(pid)")
+            }
+
             // Auto-confirm + context-limit watch are Claude-Code-TUI specific
             // (carriage-return dismissals + "Context limit reached" → /compact).
             // Goose's interactive prompts differ and GOOSE_MODE=auto avoids tool
@@ -1383,6 +1438,11 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             guard let self = self else { return }
             self.worker.status = .offline
             self.lastExitCode = exitCode
+            // Clear the spawnedPid on confirmed exit. If auto-restart fires
+            // below, startProcess captures a fresh pid. If not, spawnedPid
+            // stays 0 and removeWorker falls through to the coordinator/
+            // pgrep fallbacks — which is safe because the process is dead.
+            self.worker.spawnedPid = 0
 
             guard self.autoRestartEnabled else { return }
 

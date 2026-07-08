@@ -782,6 +782,14 @@ struct SonataApp: App {
 
                 logger.info("Sonata scheduler started: \(calendarCount) calendar events, \(cronCount) cron jobs, email polling every 2m, nightly backups enabled, wiki file watcher active")
 
+                // 6a. Reap ghost worker processes left over from any prior Sonata
+                // run. `pgrep -f mcp-cfg/worker-*.json` enumerates every claude
+                // worker on the host; anything without a matching workers row
+                // gets SIGTERM/SIGKILL. Runs BEFORE spawnDefaultWorkers so a
+                // fresh pool doesn't compete for the same slot indices with
+                // ghosts still holding MCP SSE streams. See GhostWorkerReaper.
+                _ = await GhostWorkerReaper.reap(dbPool: pool, logger: logger, source: "boot")
+
                 // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up
                 // the default pool. Both run on MainActor since they create terminal views.
                 let workerCount = WorkerManager.defaultWorkerCount
