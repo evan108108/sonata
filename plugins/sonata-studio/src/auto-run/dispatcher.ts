@@ -41,8 +41,17 @@ export interface DispatchResult {
 
 const AUTO_RUN_PROJECT = "studio-auto-run";
 
+// `POST /api/task/` returns the created task's id + success flag at the top
+// level: `{"id": "…", "success": true}`. An older release wrapped the payload
+// as `{result: {id}}` — kept as an optional fallback so the plugin can talk
+// to any Sonata that still returns the old shape. See ticket
+// c2bfbfb8a1be4cde9f0da6902a3dd923 (Scout DM 2026-07-08) for the failure
+// this fix resolves — Scout couldn't dispatch Studio auto-run tasks because
+// its response envelope check missed the top-level id.
 interface TaskCreateResponse {
   ok?: boolean;
+  success?: boolean;
+  id?: string;
   result?: { id?: string };
 }
 
@@ -90,9 +99,10 @@ async function createSonataTask(args: DispatchArgs): Promise<string> {
   } catch {
     throw new Error(`mem_task_create returned non-JSON: ${text.slice(0, 200)}`);
   }
-  const id = parsed.result?.id;
+  // Top-level `id` is the current shape; `result.id` was the older envelope.
+  const id = parsed.id ?? parsed.result?.id;
   if (!id) {
-    throw new Error(`mem_task_create response missing result.id: ${text.slice(0, 200)}`);
+    throw new Error(`mem_task_create response missing id (checked both top-level and result.id): ${text.slice(0, 200)}`);
   }
   return id;
 }
