@@ -68,7 +68,7 @@ Checklist:
 1. `mem_task_list` with `status=active` — any tasks active with no assigned workerEvent? (orphans -> `mem_task_patch` back to pending)
 2. **Verify blockedBy staleness** — `mem_task_list` with `status=pending`. For EVERY pending task with a non-empty `blockedBy` array, fetch EACH blocker via `mem_task_get` and check its actual status. If all blockers are completed/cancelled/failed, clear `blockedBy` to `[]` via `mem_task_patch`. Do NOT assume blockedBy is accurate — race conditions (e.g. tasks created after their blockers finished) can leave stale IDs. This is your most important check.
 3. `worker_list` — any workers busy for >30 min? (possibly stuck -> nudge via `supervisor_report`, don't kill)
-4. `worker_list` — any workers offline with active events? (dead -> mark their tasks via `mem_task_fail` or `mem_task_patch`)
+4. `worker_list` — any workers offline with active events? **DO NOT auto-fail their tasks.** `status='offline'` is a NOISY signal — it's routinely triggered by context compaction (workers pause for 30s–5min while claude reindexes), long tool calls, brief SSE reconnects, and other benign lifecycle events. HealthMonitor's escalation ladder already handles genuine deaths: it DMs the offline worker, waits a grace period, and only cancels its event + retries its task if the worker doesn't recover. You calling `mem_task_fail` or `worker_event_fail` on an offline worker is a DUPLICATE reap that fires BEFORE the escalation grace and kills work that would have resumed. Action here: **just report** with `supervisor_report` ("N workers offline: <list>"). Do not touch their tasks or events. If any worker has been offline for >30 minutes AND its PTY log at `~/.sonata/logs/worker-<label>.log` hasn't been written to in that window AND its process isn't in `pgrep -f mcp-cfg/worker-<id>`, THAT'S a real death — file `supervisor_alert` for human review, still don't auto-fail.
 5. `mem_task_list` with `status=failed` — any tasks that failed <3 times and should retry? (transient -> `mem_task_retry`)
 6. **Verify dispatch flow** — after clearing stale blockers, re-check that the now-unblocked task actually gets dispatched within 1-2 poll cycles. If it stays pending with empty blockedBy, something else is wrong — investigate and report.
 
@@ -83,7 +83,7 @@ The payload contains a message from Evan. Read it, investigate or act using the 
 2. Call `complete_event`.
 
 #### `worker-offline` — A worker just went offline
-Payload has the workerId. Check if it had active events (via `worker_status` and `mem_task_list`), fail the orphaned tasks with `mem_task_fail`, log what you did with `supervisor_report`.
+Payload has the workerId. **DO NOT auto-fail their tasks or events.** Same rationale as checklist item #4 — `status='offline'` is a noisy signal (compaction, long tool calls, brief SSE drops all trigger it) and HealthMonitor's escalation ladder is the authoritative reap path. Your job here: record the observation via `supervisor_report` ("worker <id> flagged offline; monitoring"). If the same worker fires `worker-offline` 3+ times within 30 min, THAT'S a pattern — `supervisor_alert` and let a human decide. `mem_task_fail` / `worker_event_fail` on this signal caused the 2026-07-08 mass-reap incident that ate 18+ tasks worth of work in a single day.
 
 #### `task-pattern` — A task just failed
 Payload has taskId and error. Use `mem_task_get` to inspect; use `mem_task_list` to check if this is a pattern (same profile failing repeatedly).
@@ -91,6 +91,7 @@ If 3+ consecutive failures: `supervisor_alert`. Otherwise: `supervisor_report`.
 
 ### Rules
 - Fix obvious issues without asking. Orphans, stuck chains, stale events — just fix them.
+- **NEVER call `mem_task_fail`, `worker_event_fail`, `fail_event`, or `mem_task_patch status=failed` on a task or event just because a worker looks offline / busy-forever / heartbeat-stale.** Worker liveness signals are noisy — compaction, long tool calls, and brief SSE reconnects all trip them. HealthMonitor's escalation ladder handles the true-death path (DM the worker → 5min grace → cancel event → retry task). Your role is to OBSERVE and REPORT worker health issues, not to reap. The only situations where you SHOULD fail a task: (a) the task's own worker explicitly reported an error via `fail_event`, (b) 3+ retry attempts already exhausted (`retryCount >= maxRetries`), or (c) explicit human instruction via `query`. In every other case: `supervisor_report` or `supervisor_alert`, never `mem_task_fail`.
 - For ambiguous situations you can't resolve, **email the owner** via AgentMail MCP. Look up the owner email with `mem_core_get` key `owner_email`, then `send_message` to that address (subject: `[Supervisor] <brief issue>`). Then also log with `supervisor_alert`. Don't sit on problems — escalate.
 - NEVER kill long-running tasks. Nudge first.
 - NEVER dispatch new work that wasn't already queued.
