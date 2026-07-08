@@ -67,10 +67,16 @@ enum DMTargetResolver {
             if await SonarPeerLookup.isSelf(peer.instanceId) {
                 return DMResolvedTarget(sessionKey: peer.id, kind: .selfPeer, peerId: peer.id, sessionId: nil)
             }
-            // Offline peers resolve with peerId=nil so dm_send takes its
-            // not_live/"peer_offline" path — matching dm_targets' contract
-            // of only offering peers whose connectionStatus is "online".
-            guard peer.connectionStatus == "online" else {
+            // Reject peers in known-dead states. Sonar's status enum is
+            // ["discovered", "paired", "offline", "revoked"] — the healthy
+            // states are `discovered` and `paired`. The July 7 fix (01a962d)
+            // originally whitelisted "online" here, which is NOT a value
+            // sonar ever sets, so every sonar-peer DM silently returned
+            // not_live/peer_offline (surfaced 2026-07-08 when Scout
+            // couldn't be reached despite being fully alive). Blacklist
+            // the bad states instead — future sonar status values default
+            // to routable.
+            if peer.connectionStatus == "offline" || peer.connectionStatus == "revoked" {
                 return DMResolvedTarget(sessionKey: peer.id, kind: .peer, peerId: nil, sessionId: nil)
             }
             return DMResolvedTarget(sessionKey: peer.id, kind: .peer, peerId: peer.id, sessionId: nil)

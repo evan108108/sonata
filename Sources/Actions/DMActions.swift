@@ -258,9 +258,12 @@ func enumerateDMTargets(dbPool: DatabasePool) async -> [DMTarget] {
         ))
     }
 
-    // Sonar peers — include only online ones (federation-live).
+    // Sonar peers — include federation-live ones. Sonar's healthy states
+    // are `discovered` and `paired`; blacklist the dead states so future
+    // sonar status additions default to visible (matches DMTargetResolver).
     if let peers = await SonarPeerLookup.allPeers() {
-        for peer in peers where peer.connectionStatus == "online" {
+        for peer in peers where peer.connectionStatus != "offline"
+                                 && peer.connectionStatus != "revoked" {
             out.append(DMTarget(
                 name: peer.name, kind: "peer",
                 workerId: nil, sessionId: nil,
