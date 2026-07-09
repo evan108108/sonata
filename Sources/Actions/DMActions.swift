@@ -156,11 +156,13 @@ enum DMActionsInbound {
         ]
         let payloadStr = (try? JSONSerialization.data(withJSONObject: payloadJSON))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let idemKey = WorkerEventIdempotency.key(type: "sonar_dm", payload: payloadJSON)
         try? await dbPool.write { db in
             try db.execute(sql: """
-                INSERT INTO workerEvents (id, type, payload, priority, status, createdAt)
-                VALUES (?, 'sonar_dm', ?, 5, 'pending', ?)
-            """, arguments: [newUUID(), payloadStr, now])
+                INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
+                VALUES (?, 'sonar_dm', ?, 5, 'pending', ?, ?)
+                ON CONFLICT(idempotencyKey) DO NOTHING
+            """, arguments: [newUUID(), payloadStr, now, idemKey])
         }
     }
 

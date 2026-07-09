@@ -691,12 +691,14 @@ let workerEventActions: [SonataAction] = [
             let priority = ctx.params.int("priority") ?? 5
             let now = nowMs()
             let id = newUUID()
+            let idemKey = WorkerEventIdempotency.key(type: type, payloadJSON: payload)
             do {
                 try await ctx.dbPool.write { db in
                     try db.execute(sql: """
-                        INSERT INTO workerEvents (id, type, payload, priority, status, createdAt)
-                        VALUES (?, ?, ?, ?, 'pending', ?)
-                    """, arguments: [id, type, payload, priority, now])
+                        INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
+                        VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                        ON CONFLICT(idempotencyKey) DO NOTHING
+                    """, arguments: [id, type, payload, priority, now, idemKey])
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -761,11 +763,20 @@ let workerEventActions: [SonataAction] = [
                        let payloadData = row.payload.data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
                        let claimTaskId = json["task_id"] as? String, !claimTaskId.isEmpty {
+                        // assignedTo IS NULL/'' clause: defense in depth against a
+                        // race where an event was reset to 'pending' but its
+                        // assignedTo lingered on the row — that row is still
+                        // owned by someone. Without this clause we'd read it
+                        // as an "active other" and cancel our own fresh pick,
+                        // even though the other event is stranded.
                         let otherActive = try Int.fetchOne(db, sql: """
                             SELECT COUNT(*) FROM workerEvents
                             WHERE json_extract(payload, '$.task_id') = ?
                               AND id != ?
-                              AND status IN ('pending', 'assigned')
+                              AND (
+                                status = 'assigned'
+                                OR (status = 'pending' AND (assignedTo IS NULL OR assignedTo = ''))
+                              )
                         """, arguments: [claimTaskId, row.id]) ?? 0
                         if otherActive > 0 {
                             try db.execute(sql: """
@@ -782,11 +793,27 @@ let workerEventActions: [SonataAction] = [
                         SELECT sessionId FROM workers WHERE workerId = ?
                     """, arguments: [workerId])
 
-                    // Assign it (copy sessionId from worker to event)
-                    try db.execute(sql: """
-                        UPDATE workerEvents SET assignedTo = ?, status = 'assigned', assignedAt = ?, sessionId = ?
-                        WHERE id = ?
-                    """, arguments: [workerId, now, workerSessionId, row.id])
+                    // Assign it (copy sessionId from worker to event).
+                    // Explicit SQL CAS: only pick up the row if it's still
+                    // pending AND unassigned. GRDB's write serializer already
+                    // gives us statement-atomicity, but this converts the
+                    // guarantee from "no concurrent writers thanks to the
+                    // mutex" to "the UPDATE itself refuses the row if the
+                    // premise no longer holds." Skips the pre-assigned branch:
+                    // when we're resuming our OWN assigned event, the row
+                    // already has assignedTo=workerId and status='assigned',
+                    // so the guard would (correctly) refuse — no update
+                    // needed, the row is already in the state we want.
+                    if !isResumingOwnAssigned {
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET assignedTo = ?, status = 'assigned', assignedAt = ?, sessionId = ?
+                            WHERE id = ?
+                              AND status = 'pending'
+                              AND (assignedTo IS NULL OR assignedTo = '')
+                        """, arguments: [workerId, now, workerSessionId, row.id])
+                        guard db.changesCount == 1 else { return nil }
+                    }
 
                     // Mark worker busy. Bump lastHeartbeat to `now` at claim time so
                     // that lastHeartbeat >= assignedAt; otherwise the supervisor sees a

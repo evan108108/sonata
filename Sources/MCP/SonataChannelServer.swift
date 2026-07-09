@@ -139,11 +139,30 @@ actor SonataChannelServer {
                     SELECT sessionId FROM workers WHERE workerId = ?
                 """, arguments: [workerId])
 
-                // Create the worker event (copy sessionId from worker)
+                // Create the worker event (copy sessionId from worker).
+                // idempotencyKey belt: even though the task-level COUNT guard
+                // above catches most dupes, a same-millisecond double-dispatch
+                // could race past it (both see COUNT=0). The partial UNIQUE
+                // index on idempotencyKey makes the second INSERT a no-op via
+                // ON CONFLICT. Zero rows changed means we lost the race —
+                // return .taskAlreadyActive so the caller un-busies the worker
+                // it just claimed.
+                let idemKey = WorkerEventIdempotency.key(type: "task", payload: payload)
                 try db.execute(sql: """
-                    INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, sessionId)
-                    VALUES (?, 'task', ?, ?, ?, 'assigned', ?, ?, ?)
-                """, arguments: [eventId, payloadJSON, priority, workerId, now, now, workerSessionId])
+                    INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, sessionId, idempotencyKey)
+                    VALUES (?, 'task', ?, ?, ?, 'assigned', ?, ?, ?, ?)
+                    ON CONFLICT(idempotencyKey) DO NOTHING
+                """, arguments: [eventId, payloadJSON, priority, workerId, now, now, workerSessionId, idemKey])
+                if db.changesCount == 0 {
+                    // Roll back the worker claim we did above — the event
+                    // never landed. Leaving currentEventId set would strand
+                    // the worker as "busy on a nonexistent event."
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'idle', currentEventId = NULL
+                        WHERE workerId = ? AND currentEventId = ?
+                    """, arguments: [workerId, eventId])
+                    return .taskAlreadyActive
+                }
                 return .dispatched
             }
 

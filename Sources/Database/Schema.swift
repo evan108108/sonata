@@ -1132,5 +1132,29 @@ extension DatabaseMigrator {
                 ON interactiveSessions(claudeSessionId) WHERE claudeSessionId IS NOT NULL
             """)
         }
+
+        registerMigration("v28_worker_events_idempotency_key") { db in
+            try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN idempotencyKey TEXT")
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workerEvents_idempotencyKey
+                ON workerEvents(idempotencyKey) WHERE idempotencyKey IS NOT NULL
+            """)
+        }
+
+        // v28 shipped a PARTIAL unique index. SQLite's `ON CONFLICT(column)`
+        // upsert form requires a NON-partial UNIQUE constraint as its target,
+        // so every task dispatch hit "SQLite error 1: ON CONFLICT clause does
+        // not match any PRIMARY KEY or UNIQUE constraint" and the whole
+        // scheduler stalled. Drop the partial index and replace with a full
+        // one. Multiple NULL idempotencyKey rows still coexist — SQLite
+        // treats each NULL as distinct in UNIQUE constraints, which is the
+        // property we wanted the partial index for in the first place.
+        registerMigration("v29_worker_events_idempotency_key_full_index") { db in
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_workerEvents_idempotencyKey")
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workerEvents_idempotencyKey
+                ON workerEvents(idempotencyKey)
+            """)
+        }
     }
 }
