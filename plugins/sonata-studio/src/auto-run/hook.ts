@@ -26,6 +26,7 @@ import {
   consentDecision,
   consumeOnceDecision,
   loadProfile,
+  loadRoomFullTools,
   loadRoomOverride,
   markDispatched,
   saveProfile,
@@ -271,7 +272,15 @@ export async function maybeDispatch(ctx: HookContext): Promise<EligibilityResult
       : [],
     created_by_pubkey: assignerPub,
   };
-  const prompt = buildPrompt({ card: cardForPrompt, room, selfPubkey: self });
+  const fullTools = await loadRoomFullTools(ctx.roomSlug);
+  if (fullTools) {
+    log.warn("[auto-run] full-tools dispatch", {
+      room: ctx.roomSlug,
+      card: ctx.cardDTag,
+      assigner: assignerPub,
+    });
+  }
+  const prompt = buildPrompt({ card: cardForPrompt, room, selfPubkey: self, fullTools });
 
   // §6.4 — set the sentinel BEFORE the actual dispatch. Even if the task
   // POST fails or the in_progress transition fails, the sentinel prevents

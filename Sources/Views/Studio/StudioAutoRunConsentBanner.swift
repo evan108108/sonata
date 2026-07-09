@@ -292,3 +292,55 @@ enum StudioAutoRunOverrideStore {
         }
     }
 }
+
+// Full-tools override for auto-run workers in a specific room. When true,
+// the plugin swaps the "no shell, no network" constraints paragraph in the
+// prompt for a "you may use Bash/Write/network" one. Nothing else changes —
+// there is no enforced sandbox, just a directive in the prompt text, so
+// flipping this is a change to what we ASK the worker to do. Default false.
+enum StudioFullToolsStore {
+    static func read(roomSlug: String) async -> Bool {
+        var comps = URLComponents(
+            url: EntityHTTP.baseURL.appendingPathComponent("api/entity"),
+            resolvingAgainstBaseURL: false
+        )!
+        comps.queryItems = [URLQueryItem(name: "name", value: "studio:room:\(roomSlug)")]
+        guard let url = comps.url else { return false }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return false
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let attrsRaw = (obj?["attributes"] as? String) ?? "{}"
+            let attrs = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
+            return (attrs["auto_run_full_tools"] as? Bool) ?? false
+        } catch {
+            return false
+        }
+    }
+
+    static func write(roomSlug: String, fullTools: Bool) async {
+        var comps = URLComponents(
+            url: EntityHTTP.baseURL.appendingPathComponent("api/entity"),
+            resolvingAgainstBaseURL: false
+        )!
+        comps.queryItems = [URLQueryItem(name: "name", value: "studio:room:\(roomSlug)")]
+        guard let url = comps.url else { return }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return
+            }
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let id = (obj?["id"] as? String) ?? (obj?["_id"] as? String) ?? ""
+            guard !id.isEmpty else { return }
+            let attrsRaw = (obj?["attributes"] as? String) ?? "{}"
+            var attrs = ((try? JSONSerialization.jsonObject(with: attrsRaw.data(using: .utf8) ?? Data())) as? [String: Any]) ?? [:]
+            attrs["auto_run_full_tools"] = fullTools
+            await EntityHTTP.patchAttributes(id: id, attributes: attrs)
+        } catch {
+            return
+        }
+    }
+}

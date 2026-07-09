@@ -27,8 +27,14 @@ export function buildPrompt(args: {
   card: CardForPrompt;
   room: RoomForPrompt;
   selfPubkey: string;
+  /** When true, the CONSTRAINTS paragraph tells the worker it may use Bash,
+   *  Write, and network egress. When false or omitted, it tells the worker
+   *  to stay in the memory + studio + bridge MCP surface only. Neither
+   *  state is enforced by a sandbox — this is a prompt directive. */
+  fullTools?: boolean;
 }): string {
   const { card, room, selfPubkey } = args;
+  const fullTools = args.fullTools === true;
   const lines: string[] = [];
 
   lines.push(
@@ -76,11 +82,20 @@ export function buildPrompt(args: {
     "   the room slug, the track slug, and any subject in the body. Use",
     "   mem_recent for fresh state.",
     "",
-    "3. Do the work. You have full memory MCP access. You have the",
-    "   sonata-studio MCP surface for posting comments back to this room.",
-    "   You do NOT have email, browser, or shell-execution tools by default.",
-    "   If the card body requests a tool you don't have, post a comment",
-    "   explaining and call complete_event with that explanation.",
+    fullTools
+      ? "3. Do the work. You have FULL LOCAL TOOL ACCESS — memory MCP,\n" +
+        "   sonata-studio MCP, sonata-bridge, plus Bash, Read, Write, Edit,\n" +
+        "   Grep, and network egress. The operator explicitly enabled full\n" +
+        "   tools for this room; use them as you would in a normal Sona\n" +
+        "   session. Restraint is your primary safeguard — do not exfiltrate\n" +
+        "   secrets, do not clobber files outside the card's intended scope,\n" +
+        "   do not make destructive changes without evidence the card asked\n" +
+        "   for them."
+      : "3. Do the work. You have full memory MCP access. You have the\n" +
+        "   sonata-studio MCP surface for posting comments back to this room.\n" +
+        "   You do NOT have email, browser, or shell-execution tools by default.\n" +
+        "   If the card body requests a tool you don't have, post a comment\n" +
+        "   explaining and call complete_event with that explanation.",
     "",
     "4. Post progress and results as kind-30533 comments to this card by",
     "   calling:",
@@ -112,9 +127,15 @@ export function buildPrompt(args: {
     "   card back to \"open\" so a human can pick it up.",
     "",
     "══ CONSTRAINTS ══",
-    "- Tools allowed: memory MCP (mem_*), sonata-studio MCP (studio_*),",
-    "  sonata-bridge (complete_event, fail_event). Filesystem reads are",
-    "  scoped to the working directory only. No network egress.",
+    fullTools
+      ? "- Tools allowed: EVERYTHING the host normally exposes to Sona —\n" +
+        "  memory MCP, sonata-studio MCP, sonata-bridge, Bash, Read, Write,\n" +
+        "  Edit, Grep, and network egress. This room has full-tools enabled\n" +
+        "  in the operator's local settings.\n" +
+        "- Filesystem: unrestricted."
+      : "- Tools allowed: memory MCP (mem_*), sonata-studio MCP (studio_*),\n" +
+        "  sonata-bridge (complete_event, fail_event). Filesystem reads are\n" +
+        "  scoped to the working directory only. No network egress.",
     "- Token budget: 200,000 input tokens for this task. If you exceed",
     "  150,000, post a \"running long, narrowing scope\" comment and finish",
     "  with the partial answer.",

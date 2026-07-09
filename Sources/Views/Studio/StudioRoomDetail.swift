@@ -24,6 +24,7 @@ struct StudioRoomDetail: View {
     @State private var showAdmitSheet: Bool = false
     @State private var showStorageSheet: Bool = false
     @State private var autoRunOverride: StudioAutoRunOverride = .defaultValue
+    @State private var fullTools: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -110,6 +111,10 @@ struct StudioRoomDetail: View {
             Task {
                 let v = await StudioAutoRunOverrideStore.read(roomSlug: room.slug)
                 await MainActor.run { autoRunOverride = v }
+            }
+            Task {
+                let v = await StudioFullToolsStore.read(roomSlug: room.slug)
+                await MainActor.run { fullTools = v }
             }
         }
         .onDisappear {
@@ -268,6 +273,10 @@ struct StudioRoomDetail: View {
                     }
                 }
             }
+            Divider()
+            Toggle(isOn: fullToolsBinding) {
+                Label("Auto-run: full local tools", systemImage: "wrench.and.screwdriver")
+            }
         } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 14, weight: .regular))
@@ -286,6 +295,17 @@ struct StudioRoomDetail: View {
     private func setAutoRunOverride(_ value: StudioAutoRunOverride) async {
         await StudioAutoRunOverrideStore.write(roomSlug: room.slug, override: value)
         await MainActor.run { autoRunOverride = value }
+    }
+
+    private var fullToolsBinding: Binding<Bool> {
+        Binding(
+            get: { fullTools },
+            set: { newValue in
+                fullTools = newValue
+                let slug = room.slug
+                Task { await StudioFullToolsStore.write(roomSlug: slug, fullTools: newValue) }
+            }
+        )
     }
 
     private var dispatchTraceBinding: Binding<Bool> {

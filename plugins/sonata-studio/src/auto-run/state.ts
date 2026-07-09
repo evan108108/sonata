@@ -245,6 +245,25 @@ export async function loadRoomOverride(roomSlug: string): Promise<RoomOverride> 
 }
 
 /**
+ * Per-room "full local tools" flag for auto-run workers. When true, the
+ * plugin swaps the CONSTRAINTS paragraph in the dispatch prompt from the
+ * default "no shell, no network" text to a "you may use Bash/Write/network"
+ * text. There is no enforced sandbox behind either state — the constraint
+ * is prompt-level only; this flag decides which paragraph the worker sees.
+ * Default false.
+ */
+export async function loadRoomFullTools(roomSlug: string): Promise<boolean> {
+  try {
+    const row = await entity.byNameOrNull(`studio:room:${roomSlug}`);
+    if (!row) return false;
+    const attrs = safeParse(row.attributes);
+    return attrs["auto_run_full_tools"] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether dispatch is allowed for a given (room, founder) pair according to
  * the room override + founder allow-list + per-founder decision settings.
  *
