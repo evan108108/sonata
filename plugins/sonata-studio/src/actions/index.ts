@@ -12,6 +12,7 @@ import { cardStatus } from "./cardStatus";
 import { comment } from "./comment";
 import { dispatch } from "./dispatch";
 import { fileAttach } from "./fileAttach";
+import { fileFetch } from "./fileFetch";
 import { imageAttach } from "./imageAttach";
 import { member } from "./member";
 import { qa } from "./qa";
@@ -289,6 +290,18 @@ const FILE_ATTACH_PARAMS: ActionParam[] = [
   },
 ];
 
+const FILE_FETCH_PARAMS: ActionParam[] = [
+  { name: "sha256", type: "string", required: true, description: "64-lowercase-hex sha256 of the ciphertext blob (the Blossom key + integrity check)." },
+  { name: "wrapped_key", type: "string", required: true, description: "Base64 NIP-44 ciphertext of (file_key || nonce), as emitted by studio_file_attach's decrypt_hint.wrapped_key." },
+  { name: "epoch_n", type: "integer", required: true, description: "Room audience epoch the wrap is bound to (from decrypt_hint.epoch_n). Prior epochs are supported when the receiver still has the priv locally." },
+  { name: "room_slug", type: "string", required: true, description: "Room slug — used to resolve the epoch_keys secret and confirm caller membership." },
+  { name: "mirror_url", type: "string", required: true, description: "http(s) URL of the ciphertext mirror (from mirrors[]). Must be reachable from the plugin host." },
+  { name: "author_pubkey", type: "string", required: true, description: "64-lowercase-hex plugin pubkey of the file's original author (the card event's sender). Required for NIP-44 ECDH." },
+  { name: "blake3", type: "string", description: "Optional 64-lowercase-hex blake3 of the ciphertext; when provided the fetch verifies it and returns blake3_verified=true." },
+  { name: "filename", type: "string", description: "Optional filename to use for the on-disk output (basename only; separators are stripped). Defaults to blob.bin." },
+  { name: "mime_type", type: "string", description: "Optional MIME override for the returned metadata; inferred from filename extension if absent." },
+];
+
 const STORAGE_CONFIG_SET_PARAMS: ActionParam[] = [
   { name: "room", type: "string", required: true, description: "Room slug." },
   {
@@ -509,6 +522,14 @@ export const ACTIONS: ActionDef[] = [
     params: FILE_ATTACH_PARAMS,
   },
   {
+    name: "studio_file_fetch",
+    description:
+      "Receive-side symmetric to studio_file_attach: given a file-block's fields (sha256, wrapped_key, epoch_n, mirror_url, author_pubkey), download the ciphertext, verify integrity, NIP-44-unwrap the file_key, ChaCha20-Poly1305 decrypt, and write plaintext to a scoped scratch dir. Returns {file_path, size_bytes, mime_type, sha256_verified, blake3_verified}. 256 MiB hard cap enforced on the download.",
+    method: "post",
+    path: "/api/file/fetch",
+    params: FILE_FETCH_PARAMS,
+  },
+  {
     name: "studio_identity",
     description:
       "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI (Delete/Edit) without waiting on optimistic-reconcile heuristics.",
@@ -663,6 +684,10 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "post",
     handler: async (body, _q, ctx) => fileAttach.attach(body, ctx),
   },
+  "/api/file/fetch": {
+    method: "post",
+    handler: async (body, _q, ctx) => fileFetch.fetch(body, ctx),
+  },
   "/api/identity": {
     method: "get",
     handler: async (_b, _q, ctx) => ({ pubkey: ctx.cfg.pluginPub.toLowerCase() }),
@@ -691,4 +716,4 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, cardStatus, comment, dispatch, fileAttach, imageAttach, member, qa, room, room_admit, storage, track };
+export { card, cardStatus, comment, dispatch, fileAttach, fileFetch, imageAttach, member, qa, room, room_admit, storage, track };
