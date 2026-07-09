@@ -9,7 +9,8 @@
 # Usage:
 #   ./scripts/deploy-scout.sh                # ship Sonata + rebuild drifted plugins on Scout
 #   ./scripts/deploy-scout.sh --skip-restart # ship files, don't restart Sonata on Scout
-#   ./scripts/deploy-scout.sh --skip-plugins # ship Sonata only, skip plugin drift check
+#   ./scripts/deploy-scout.sh --skip-plugins  # ship Sonata only, skip plugin drift check
+#   ./scripts/deploy-scout.sh --force-plugins # rebuild+ship ALL managed plugins on Scout (skip drift check)
 #
 # Managed-plugin drift: after Scout's Sonata is healthy, this script calls
 # scripts/deploy-plugin-scout.sh for each plugin whose source is ahead of
@@ -29,11 +30,13 @@ BRIDGE_STARTUP_TIMEOUT=25
 
 DO_RESTART=1
 SKIP_PLUGINS=0
+FORCE_PLUGINS=0
 for a in "$@"; do
   case "$a" in
-    --skip-restart) DO_RESTART=0 ;;
-    --skip-plugins) SKIP_PLUGINS=1 ;;
-    -h|--help)      sed -n '2,18p' "$0"; exit 0 ;;
+    --skip-restart)  DO_RESTART=0 ;;
+    --skip-plugins)  SKIP_PLUGINS=1 ;;
+    --force-plugins) FORCE_PLUGINS=1 ;;
+    -h|--help)       sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown flag: $a" >&2; exit 2 ;;
   esac
 done
@@ -149,21 +152,6 @@ if [ "$DO_RESTART" -eq 0 ]; then
   exit 0
 fi
 
-# Drift is measured LOCALLY (against local source). If the local plugin
-# tree has changes that Scout should also have, ship them. Local drift
-# is the right signal because Scout's installed .deployed-sha will lag
-# any local commit until we push.
-echo "==> checking managed plugin drift (local source vs local installed sha)"
-DRIFTED=$("$REPO/scripts/check-plugin-drift.sh" --names-only --quiet 2>/dev/null || true)
-if [ -z "$DRIFTED" ]; then
-  echo "==> managed plugins: clean locally — Scout inherits"
-  echo "==> deploy-scout done"
-  exit 0
-fi
-
-echo "==> local plugins with drift:"
-while IFS= read -r p; do [ -n "$p" ] && echo "     - $p"; done <<< "$DRIFTED"
-
 # Filter against what's ACTUALLY installed on Scout — never force-install a
 # plugin Scout doesn't already have. A plugin can be intentionally absent on
 # one host (e.g. prstar isn't on Scout, only on evan-mac).
@@ -171,26 +159,47 @@ SCOUT_INSTALLED="$(_ssh "sqlite3 -readonly ~/.sonata/sonata.db \"SELECT name FRO
 echo "==> Scout's installed managed plugins:"
 while IFS= read -r p; do [ -n "$p" ] && echo "     - $p"; done <<< "$SCOUT_INSTALLED"
 
-TO_SYNC=""
-SKIPPED=()
-while IFS= read -r p; do
-  [ -z "$p" ] && continue
-  if printf '%s\n' "$SCOUT_INSTALLED" | /usr/bin/grep -qxF "$p"; then
-    TO_SYNC="${TO_SYNC:+$TO_SYNC$'\n'}$p"
-  else
-    SKIPPED+=("$p")
+if [ "$FORCE_PLUGINS" -eq 1 ]; then
+  # --force-plugins: skip drift check entirely, ship every managed plugin on Scout.
+  echo "==> --force-plugins: rebuilding ALL managed plugins on Scout"
+  TO_SYNC="$SCOUT_INSTALLED"
+else
+  # Drift is measured LOCALLY (against local source). If the local plugin
+  # tree has changes that Scout should also have, ship them. Local drift
+  # is the right signal because Scout's installed .deployed-sha will lag
+  # any local commit until we push.
+  echo "==> checking managed plugin drift (local source vs local installed sha)"
+  DRIFTED=$("$REPO/scripts/check-plugin-drift.sh" --names-only --quiet 2>/dev/null || true)
+  if [ -z "$DRIFTED" ]; then
+    echo "==> managed plugins: clean locally — Scout inherits"
+    echo "==> deploy-scout done"
+    exit 0
   fi
-done <<< "$DRIFTED"
 
-if [ "${#SKIPPED[@]}" -gt 0 ]; then
-  echo "==> skipping plugins not installed on Scout:"
-  for p in "${SKIPPED[@]}"; do echo "     - $p (drifted locally, not present on Scout)"; done
-fi
+  echo "==> local plugins with drift:"
+  while IFS= read -r p; do [ -n "$p" ] && echo "     - $p"; done <<< "$DRIFTED"
 
-if [ -z "$TO_SYNC" ]; then
-  echo "==> nothing to sync to Scout"
-  echo "==> deploy-scout done"
-  exit 0
+  TO_SYNC=""
+  SKIPPED=()
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    if printf '%s\n' "$SCOUT_INSTALLED" | /usr/bin/grep -qxF "$p"; then
+      TO_SYNC="${TO_SYNC:+$TO_SYNC$'\n'}$p"
+    else
+      SKIPPED+=("$p")
+    fi
+  done <<< "$DRIFTED"
+
+  if [ "${#SKIPPED[@]}" -gt 0 ]; then
+    echo "==> skipping plugins not installed on Scout:"
+    for p in "${SKIPPED[@]}"; do echo "     - $p (drifted locally, not present on Scout)"; done
+  fi
+
+  if [ -z "$TO_SYNC" ]; then
+    echo "==> nothing to sync to Scout"
+    echo "==> deploy-scout done"
+    exit 0
+  fi
 fi
 
 echo "==> syncing drifted plugins to Scout:"
