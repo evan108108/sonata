@@ -593,7 +593,7 @@ let dmActions: [SonataAction] = [
                 }
             }
 
-            return await sendResolved(
+            let result = await sendResolved(
                 target: replyTargetName,
                 resolved: replyTarget,
                 body: body,
@@ -602,18 +602,56 @@ let dmActions: [SonataAction] = [
                 inReplyToMessageId: toMessageId,
                 dbPool: ctx.dbPool
             )
+
+            // Auto-complete safety net (2026-07-09): if this dm_reply is the
+            // caller replying to a sonar_dm workerEvent they were assigned,
+            // mark that event completed and free the worker. Guards against
+            // worker Claude sessions that skip step 5 of the SONAR_DM
+            // contract (call complete_event) after replying. Matches on
+            //   (a) the caller currently owns an ASSIGNED sonar_dm event
+            //   (b) that event's payload.message_id equals to_message_id
+            // If either fails, this is a no-op — normal complete_event flow
+            // still applies for callers who follow the contract correctly.
+            if result.status == "sent" {
+                try? await ctx.dbPool.write { db in
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT id, payload FROM workerEvents
+                        WHERE assignedTo = ? AND status = 'assigned' AND type = 'sonar_dm'
+                    """, arguments: [senderKey]) else { return }
+                    let eventId = row["id"] as? String ?? ""
+                    let payloadStr = row["payload"] as? String ?? "{}"
+                    guard let data = payloadStr.data(using: .utf8),
+                          let obj = try? JSONSerialization.jsonObject(with: data),
+                          let dict = obj as? [String: Any],
+                          let msgId = dict["message_id"] as? String,
+                          msgId == toMessageId,
+                          !eventId.isEmpty else { return }
+                    let now = nowMs()
+                    try db.execute(sql: """
+                        UPDATE workerEvents SET status = 'completed', completedAt = ?,
+                            result = 'auto-completed via dm_reply'
+                        WHERE id = ? AND status = 'assigned'
+                    """, arguments: [now, eventId])
+                    try db.execute(sql: """
+                        UPDATE workers SET status = 'idle', currentEventId = NULL
+                        WHERE workerId = ? AND currentEventId = ?
+                    """, arguments: [senderKey, eventId])
+                }
+            }
+
+            return result
         }
     ),
 
     // POST /api/dm/ack — receiver's ack of a DM they processed.
     SonataAction(
         name: "dm_ack",
-        description: "Acknowledge receipt of a DM. Called by the receiver after processing a sonar_dm notification. Sonata updates the audit row and forwards the ack to the sender's SSE stream so they know their message was received.",
+        description: "Acknowledge receipt of a DM. Called by the receiver as an early confirmation for a sonar_dm workerEvent (before dm_reply / complete_event). Sonata updates the audit row and forwards the ack to the sender's SSE stream so they know their message was received.",
         group: "/api/dm",
         path: "/ack",
         method: .post,
         params: [
-            ActionParam("messageId", .string, required: true, description: "The messageId from the sonar_dm notification."),
+            ActionParam("messageId", .string, required: true, description: "The messageId from the sonar_dm workerEvent payload."),
         ],
         handler: { ctx in
             let messageId = try ctx.params.require("messageId")

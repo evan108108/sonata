@@ -48,7 +48,17 @@ actor MCPEventPusher {
     /// new notification type here is a one-liner; do not forget to also
     /// exclude it from `assignPendingToIdleWorkers`'s pending pick query
     /// (matched via the same set).
-    private static let notificationTypes: Set<String> = ["sonar_dm"]
+    ///
+    /// NOTE (2026-07-09): sonar_dm was removed from this set. It was
+    /// causing initial peer DMs to fan out to every non-supervisor SSE
+    /// session and get consumed by whichever interactive session (e.g.
+    /// Adaptengine) reacted first, bypassing the worker pool entirely.
+    /// The MCPInstructionsBody SONAR_DM section already tells receivers
+    /// to call complete_event, so treating sonar_dm as a proper work
+    /// item (assigned to a specific worker, worker.status='busy',
+    /// eventually completed by the worker) matches the documented
+    /// contract and keeps peer DMs off arbitrary sessions.
+    private static let notificationTypes: Set<String> = []
 
     /// Find live workers with no assigned event and hand them pending work.
     /// "Live" = has an SSE stream in MCPConnections. "Idle" = DB says
@@ -246,7 +256,23 @@ actor MCPEventPusher {
 
         for evt in rows where !knownWorkerEventIds.contains(evt.id) {
             knownWorkerEventIds.insert(evt.id)
-            let content = renderWorkerEventContent(payload: evt.payload)
+            let baseContent = renderWorkerEventContent(payload: evt.payload)
+            // Inline the current handling contract for cache-busting event
+            // types. MCPInstructionsBody is only sent at MCP handshake; a
+            // worker session that was --resumed from before a semantic change
+            // (e.g. sonar_dm going from fire-and-forget notification to
+            // proper work item on 2026-07-09) still has prior-turn context
+            // baked in that overrides fresh handshake instructions. Inlining
+            // the rules per-event with the actual ids/values makes cached
+            // context unable to win.
+            let content: String = {
+                if let extra = inlineHandlingReminder(
+                    for: evt.type, eventId: evt.id, payloadJSON: evt.payload
+                ) {
+                    return baseContent + "\n\n" + extra
+                }
+                return baseContent
+            }()
             let delivered = await MCPNotificationDispatcher.shared.pushWorkerEvent(
                 sessionKey: evt.assignedTo,
                 eventId: evt.id,
@@ -260,6 +286,45 @@ actor MCPEventPusher {
             }
             // In-flight state lives only in the DB (workers.currentEventId) —
             // there is no in-memory shadow to update.
+        }
+    }
+
+    /// Per-event-type inline reminder that ships with the SSE content.
+    /// Overrides any cached rules the worker's --resume context may carry.
+    /// Only emitted for event types that changed semantics recently; return
+    /// nil for types whose contract is stable.
+    private func inlineHandlingReminder(
+        for eventType: String, eventId: String, payloadJSON: String
+    ) -> String? {
+        switch eventType {
+        case "sonar_dm":
+            let messageId: String = {
+                guard let data = payloadJSON.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data),
+                      let dict = obj as? [String: Any],
+                      let mid = dict["message_id"] as? String else { return "<see payload.message_id>" }
+                return mid
+            }()
+            return """
+                --- SONAR_DM HANDLING (2026-07-09 contract, authoritative) ---
+                THIS IS A WORKER EVENT. If any prior turn told you sonar_dm is a
+                fire-and-forget notification and no complete_event is needed —
+                that rule was RETIRED. It is now a proper work item just like
+                inbound email. Follow these steps exactly:
+
+                1. dm_ack(messageId="\(messageId)")
+                2. dm_reply(to_message_id="\(messageId)", body="<your reply>", fromSessionId="<your sessionKey>")
+                   — NEVER use sonar_send for a reply. dm_reply chains back to
+                   the original sender's session via the message chain;
+                   sonar_send opens a fresh thread on the peer that does not
+                   route back to the sender who is waiting for you.
+                3. complete_event(event_id="\(eventId)") — MANDATORY. Skipping
+                   this leaves you pinned busy until watchdog reap; the worker
+                   pool loses a slot until then.
+                ---
+                """
+        default:
+            return nil
         }
     }
 
