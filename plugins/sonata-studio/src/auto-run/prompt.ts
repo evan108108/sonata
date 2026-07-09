@@ -21,21 +21,14 @@ export interface RoomForPrompt {
   title: string;
   project: string | null;
   audience_address: string | null;
-  /** Current room members (pubkeys). Used by the trust resolver to detect
-   *  membership drift since the operator last acknowledged full trust. */
-  members: string[];
 }
-
-export type PromptTrustLevel = "sandbox" | "full";
 
 export function buildPrompt(args: {
   card: CardForPrompt;
   room: RoomForPrompt;
   selfPubkey: string;
-  trustLevel?: PromptTrustLevel;
 }): string {
   const { card, room, selfPubkey } = args;
-  const trustLevel: PromptTrustLevel = args.trustLevel ?? "sandbox";
   const lines: string[] = [];
 
   lines.push(
@@ -83,18 +76,11 @@ export function buildPrompt(args: {
     "   the room slug, the track slug, and any subject in the body. Use",
     "   mem_recent for fresh state.",
     "",
-    trustLevel === "full"
-      ? "3. Do the work. You have FULL LOCAL TOOL ACCESS in this trusted room —\n" +
-        "   Bash, Read, Write, Edit, Grep, all filesystem locations, network\n" +
-        "   egress. Use them as you would in a normal Sona session. The\n" +
-        "   trust decision was made by the local operator with the caveat\n" +
-        "   that every card here comes from a pubkey they explicitly\n" +
-        "   acknowledged; act accordingly.\n"
-      : "3. Do the work. You have full memory MCP access. You have the\n" +
-        "   sonata-studio MCP surface for posting comments back to this room.\n" +
-        "   You do NOT have email, browser, or shell-execution tools by default.\n" +
-        "   If the card body requests a tool you don't have, post a comment\n" +
-        "   explaining and call complete_event with that explanation.",
+    "3. Do the work. You have full memory MCP access. You have the",
+    "   sonata-studio MCP surface for posting comments back to this room.",
+    "   You do NOT have email, browser, or shell-execution tools by default.",
+    "   If the card body requests a tool you don't have, post a comment",
+    "   explaining and call complete_event with that explanation.",
     "",
     "4. Post progress and results as kind-30533 comments to this card by",
     "   calling:",
@@ -126,20 +112,9 @@ export function buildPrompt(args: {
     "   card back to \"open\" so a human can pick it up.",
     "",
     "══ CONSTRAINTS ══",
-    trustLevel === "full"
-      ? "- Tools allowed: EVERYTHING the host normally exposes to Sona — memory\n" +
-        "  MCP, sonata-studio MCP, sonata-bridge, Bash, Read, Write, Edit,\n" +
-        "  Grep, network egress. This room is on the local trusted list;\n" +
-        "  the operator has explicitly consented to full-tool grants for\n" +
-        "  cards posted here.\n" +
-        "- Trust boundary: your restraint is now the primary safeguard. Do\n" +
-        "  not exfiltrate secrets, do not clobber files outside the room's\n" +
-        "  intended scope, do not make destructive changes without evidence\n" +
-        "  the card explicitly requested them.\n" +
-        "- Filesystem: unrestricted."
-      : "- Tools allowed: memory MCP (mem_*), sonata-studio MCP (studio_*),\n" +
-        "  sonata-bridge (complete_event, fail_event). Filesystem reads are\n" +
-        "  scoped to the working directory only. No network egress.",
+    "- Tools allowed: memory MCP (mem_*), sonata-studio MCP (studio_*),",
+    "  sonata-bridge (complete_event, fail_event). Filesystem reads are",
+    "  scoped to the working directory only. No network egress.",
     "- Token budget: 200,000 input tokens for this task. If you exceed",
     "  150,000, post a \"running long, narrowing scope\" comment and finish",
     "  with the partial answer.",

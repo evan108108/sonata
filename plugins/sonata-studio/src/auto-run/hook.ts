@@ -22,7 +22,6 @@ import { entity } from "../memory-client";
 import { log } from "../logger";
 import { dispatchCard, postSkippedComment } from "./dispatcher";
 import { buildPrompt, type CardForPrompt, type RoomForPrompt } from "./prompt";
-import { resolveTrust } from "./trusted-rooms";
 import {
   consentDecision,
   consumeOnceDecision,
@@ -74,9 +73,6 @@ async function loadRoomForPrompt(roomSlug: string): Promise<RoomForPrompt> {
   try {
     const row = await entity.byNameOrNull(`studio:room:${roomSlug}`);
     const attrs = parseAttrs(row?.attributes);
-    const members = Array.isArray(attrs["members"])
-      ? (attrs["members"] as unknown[]).filter((x): x is string => typeof x === "string")
-      : [];
     return {
       slug: roomSlug,
       title: typeof attrs["title"] === "string" ? (attrs["title"] as string) : roomSlug,
@@ -87,10 +83,9 @@ async function loadRoomForPrompt(roomSlug: string): Promise<RoomForPrompt> {
           : typeof attrs["aud_id_pub"] === "string"
             ? (attrs["aud_id_pub"] as string)
             : null,
-      members,
     };
   } catch {
-    return { slug: roomSlug, title: roomSlug, project: null, audience_address: null, members: [] };
+    return { slug: roomSlug, title: roomSlug, project: null, audience_address: null };
   }
 }
 
@@ -276,27 +271,7 @@ export async function maybeDispatch(ctx: HookContext): Promise<EligibilityResult
       : [],
     created_by_pubkey: assignerPub,
   };
-  // Trust resolution — decides whether the worker gets the default sandbox
-  // prompt or the full-tool prompt. Default is sandbox unless the room is
-  // explicitly listed in `~/.sonata/plugins/sonata-studio/config/trusted-rooms.json`
-  // AND the current membership matches what was acknowledged. See
-  // trusted-rooms.ts.
-  const trust = resolveTrust(ctx.roomSlug, room.members);
-  if (trust.level === "full") {
-    log.warn("[auto-run] full-trust dispatch", {
-      room: ctx.roomSlug,
-      card: ctx.cardDTag,
-      assigner: assignerPub,
-      members: room.members.length,
-      reason: trust.reason,
-    });
-  } else if (trust.entry) {
-    log.warn("[auto-run] trusted-room fell back to sandbox", {
-      room: ctx.roomSlug,
-      reason: trust.reason,
-    });
-  }
-  const prompt = buildPrompt({ card: cardForPrompt, room, selfPubkey: self, trustLevel: trust.level });
+  const prompt = buildPrompt({ card: cardForPrompt, room, selfPubkey: self });
 
   // §6.4 — set the sentinel BEFORE the actual dispatch. Even if the task
   // POST fails or the in_progress transition fails, the sentinel prevents
