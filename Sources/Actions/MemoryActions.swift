@@ -201,7 +201,8 @@ let memoryActions: [SonataAction] = [
         path: "/",
         method: .post,
         params: [
-            ActionParam("content", .string, required: true, description: "Memory content"),
+            ActionParam("content", .string, description: "Memory content. For anything long or multi-line, prefer contentPath."),
+            ActionParam("contentPath", .string, description: "Absolute path to a UTF-8 file holding the content. Use this instead of 'content' for bodies over ~1KB or containing multi-line prose. Exactly one of content/contentPath is required."),
             ActionParam("type", .string, required: true, description: "Type: learning, observation, decision, preference, error_pattern, code_pattern, conversation_summary, reflection, feeling, fact"),
             ActionParam("tags", .stringArray, description: "Tags (comma-separated or array)"),
             ActionParam("source", .string, description: "Source project/context"),
@@ -215,7 +216,7 @@ let memoryActions: [SonataAction] = [
             ActionParam("l1", .string, description: "Pre-computed L1 (skips pith generation)"),
         ],
         handler: { ctx in
-            let content = try ctx.params.require("content")
+            let content = try ctx.params.requireTextBody("content", pathKey: "contentPath")
             let type = try ctx.params.require("type")
             guard validMemoryTypesForActions.contains(type) else {
                 throw ActionError.invalidParam("type", "Invalid memory type '\(type)'")
@@ -643,8 +644,10 @@ let memoryActions: [SonataAction] = [
         path: "/revise",
         method: .post,
         params: [
-            ActionParam("originalId", .string, required: true, description: "Existing memory ID"),
-            ActionParam("content", .string, required: true, description: "New content"),
+            ActionParam("originalId", .string, description: "Existing memory ID (alias: id). Required."),
+            ActionParam("id", .string, description: "Alias for originalId."),
+            ActionParam("content", .string, description: "New content. For anything long or multi-line, prefer contentPath."),
+            ActionParam("contentPath", .string, description: "Absolute path to a UTF-8 file holding the new content. Exactly one of content/contentPath is required."),
             ActionParam("type", .string, description: "New type (defaults to original)"),
             ActionParam("tags", .stringArray, description: "New tags (defaults to original)"),
             ActionParam("source", .string, description: "New source"),
@@ -654,8 +657,8 @@ let memoryActions: [SonataAction] = [
             ActionParam("topic", .string, description: "Topic namespace"),
         ],
         handler: { ctx in
-            let originalId = try ctx.params.require("originalId")
-            let content = try ctx.params.require("content")
+            let originalId = try ctx.params.requireAny(["originalId", "id"])
+            let content = try ctx.params.requireTextBody("content", pathKey: "contentPath")
 
             let original: MemoryRow?
             do {
@@ -798,25 +801,33 @@ let memoryActions: [SonataAction] = [
         handler: { ctx in
             let id = try ctx.params.require("id")
             let now = nowMs()
+            let row: MemoryRow?
             do {
                 // Fetch the memory before archiving so we can write it to disk
-                let row = try await ctx.dbPool.read { db in
+                row = try await ctx.dbPool.read { db in
                     try MemoryRow.fetchOne(db, sql: "SELECT * FROM memories WHERE id = ?", arguments: [id])
                 }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+            // An UPDATE matching no rows is not a success. Reporting one lets a
+            // typo'd id read as "archived" forever.
+            guard var archivedRow = row else {
+                throw ActionError.notFound("Memory '\(id)' not found")
+            }
+            do {
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: "UPDATE memories SET status = 'archived', updatedAt = ? WHERE id = ?",
                         arguments: [now, id]
                     )
                 }
-                if var archivedRow = row {
-                    archivedRow.status = "archived"
-                    writeMemoryToArchive(archivedRow)
-                    if let meili = ctx.search { await meili.indexArchivedMemory(archivedRow) }
-                }
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            archivedRow.status = "archived"
+            writeMemoryToArchive(archivedRow)
+            if let meili = ctx.search { await meili.indexArchivedMemory(archivedRow) }
             return SuccessResponse()
         }
     ),
@@ -835,12 +846,24 @@ let memoryActions: [SonataAction] = [
             let id = try ctx.params.require("id")
             let now = nowMs()
             do {
+                let exists = try await ctx.dbPool.read { db in
+                    try Bool.fetchOne(
+                        db,
+                        sql: "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?)",
+                        arguments: [id]
+                    ) ?? false
+                }
+                guard exists else {
+                    throw ActionError.notFound("Memory '\(id)' not found")
+                }
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: "UPDATE memories SET status = 'active', updatedAt = ? WHERE id = ?",
                         arguments: [now, id]
                     )
                 }
+            } catch let error as ActionError {
+                throw error
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }

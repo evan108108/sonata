@@ -306,10 +306,20 @@ final class ActionRegistry: @unchecked Sendable {
             case .query, .auto:
                 if let v = queryParams[Substring(p.name)] {
                     params[p.name] = coerce(String(v), to: p.type)
+                } else if let v = bodyDict[p.name] {
+                    // Declared query-side, but the caller sent a JSON body. Accept
+                    // it: a POST whose param happens to be declared .query would
+                    // otherwise reject a perfectly well-formed body (this is what
+                    // broke `mem archive` — the CLI POSTs {"id":…} to an endpoint
+                    // that only read ?id=).
+                    params[p.name] = coerceAny(v, to: p.type)
                 }
             case .body:
                 if let v = bodyDict[p.name] {
                     params[p.name] = coerceAny(v, to: p.type)
+                } else if let v = queryParams[Substring(p.name)] {
+                    // Same leniency in the other direction.
+                    params[p.name] = coerce(String(v), to: p.type)
                 }
             case .path:
                 // Path params extracted from URL segments. Overrides win so

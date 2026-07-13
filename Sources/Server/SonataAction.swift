@@ -128,7 +128,129 @@ struct ActionParams: @unchecked Sendable {
 
     /// Get all raw values (for passing through to SQL, etc.)
     var all: [String: Any] { values }
+
+    // MARK: Aliases
+
+    /// First non-empty value among several accepted spellings of one param.
+    /// Callers (and the `mem` CLI) disagree about names — `id` vs `originalId`
+    /// being the case that made revise a silent no-op — and a rejected spelling
+    /// costs far more than accepting both.
+    func stringAny(_ keys: [String]) -> String? {
+        for key in keys {
+            if let v = string(key), !v.isEmpty { return v }
+        }
+        return nil
+    }
+
+    /// Require a param under any of its accepted spellings, or throw naming the canonical one.
+    func requireAny(_ keys: [String]) throws -> String {
+        guard let v = stringAny(keys) else {
+            throw ActionError.missingParam(keys[0])
+        }
+        return v
+    }
+
+    // MARK: Text bodies
+
+    /// Resolve a prose body supplied either inline (`key`) or as the path to a
+    /// file holding it (`pathKey`). Exactly one of the two must be present.
+    ///
+    /// Long multi-line prose escaped into a JSON string field alongside a dozen
+    /// sibling params is the shape callers most reliably get wrong; a path is a
+    /// short flat scalar they get right. Both spellings land in the same column.
+    func requireTextBody(_ key: String, pathKey: String) throws -> String {
+        guard let body = try textBody(key, pathKey: pathKey) else {
+            throw ActionError.missingParam("\(key) or \(pathKey)")
+        }
+        return body
+    }
+
+    /// Optional-body form of `requireTextBody`: nil when neither param is given.
+    func textBody(_ key: String, pathKey: String) throws -> String? {
+        let inline = string(key).flatMap { $0.isEmpty ? nil : $0 }
+        let path = string(pathKey).flatMap { $0.isEmpty ? nil : $0 }
+
+        if inline != nil && path != nil {
+            throw ActionError.invalidParam(
+                pathKey,
+                "Pass either '\(key)' or '\(pathKey)', not both."
+            )
+        }
+        if let inline { return inline }
+        guard let path else { return nil }
+        return try Self.readTextBody(at: path, paramName: pathKey)
+    }
+
+    /// Read a file-supplied body, refusing anything we can't vouch for. Every
+    /// failure here throws — storing an empty memory because a path was wrong
+    /// is worse than refusing the write.
+    static func readTextBody(at rawPath: String, paramName: String) throws -> String {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw ActionError.invalidParam(paramName, "Path must be absolute: '\(rawPath)'")
+        }
+        let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
+
+        guard textBodyAllowedRoots.contains(where: {
+            resolved.path == $0 || resolved.path.hasPrefix($0 + "/")
+        }) else {
+            throw ActionError.invalidParam(
+                paramName,
+                "Path is outside the permitted directories (home or a temp dir): '\(rawPath)'"
+            )
+        }
+
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: resolved.path, isDirectory: &isDir), !isDir.boolValue else {
+            throw ActionError.invalidParam(paramName, "No readable file at '\(rawPath)'")
+        }
+
+        let size = (try? fm.attributesOfItem(atPath: resolved.path)[.size] as? Int) ?? nil
+        if let size, size > maxTextBodyBytes {
+            throw ActionError.invalidParam(
+                paramName,
+                "File is \(size) bytes; the limit is \(maxTextBodyBytes)."
+            )
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: resolved)
+        } catch {
+            throw ActionError.invalidParam(paramName, "Could not read '\(rawPath)': \(error.localizedDescription)")
+        }
+        guard data.count <= maxTextBodyBytes else {
+            throw ActionError.invalidParam(
+                paramName,
+                "File is \(data.count) bytes; the limit is \(maxTextBodyBytes)."
+            )
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw ActionError.invalidParam(paramName, "File at '\(rawPath)' is not valid UTF-8.")
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ActionError.invalidParam(paramName, "File at '\(rawPath)' is empty.")
+        }
+        return text
+    }
 }
+
+/// Ceiling on a file-supplied body: ample for any memory, reflection or task
+/// prompt, small enough that a mistyped path can't page a blob into the store.
+let maxTextBodyBytes = 1_048_576  // 1 MB
+
+/// A body file must live under the user's home or a temp dir. Roots are
+/// symlink-resolved so /tmp (→ /private/tmp on macOS) compares correctly
+/// against a resolved candidate path.
+let textBodyAllowedRoots: [String] = {
+    [
+        FileManager.default.homeDirectoryForCurrentUser.path,
+        "/tmp",
+        "/private/tmp",
+        "/var/folders",
+    ].map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+}()
 
 // MARK: - Action Context
 

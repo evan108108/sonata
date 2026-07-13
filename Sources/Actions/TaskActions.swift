@@ -78,7 +78,8 @@ let taskActions: [SonataAction] = [
             ActionParam("description", .string, description: "Task description"),
             ActionParam("status", .string, description: "Initial status (default 'pending')"),
             ActionParam("priority", .string, description: "Priority (default 'normal')"),
-            ActionParam("prompt", .string, description: "Prompt/instructions for the worker"),
+            ActionParam("prompt", .string, description: "Prompt/instructions for the worker. For anything long or multi-line, prefer promptPath."),
+            ActionParam("promptPath", .string, description: "Absolute path to a UTF-8 file holding the prompt. Use this instead of 'prompt' for bodies over ~1KB or containing multi-line prose. Pass at most one of prompt/promptPath."),
             ActionParam("workingDir", .string, description: "Working directory"),
             ActionParam("model", .string, description: "Model override"),
             ActionParam("maxTurns", .integer, description: "Max turns"),
@@ -113,7 +114,7 @@ let taskActions: [SonataAction] = [
             let toolsJSON = encodeJSONStringArray(ctx.params.stringArray("tools") ?? [])
 
             let description = ctx.params.string("description")
-            let prompt = ctx.params.string("prompt")
+            let prompt = try ctx.params.textBody("prompt", pathKey: "promptPath")
             let workingDir = ctx.params.string("workingDir")
             let model = ctx.params.string("model")
             let maxTurns = ctx.params.int("maxTurns")
