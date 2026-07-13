@@ -541,7 +541,6 @@ actor HealthMonitor {
         // --- Meili index drift vs source of truth ---
         // (index, sourceCount, healWhenShort)
         struct IndexCheck { let name: String; let source: Int; let heal: (@Sendable () async -> Void)? }
-        let home = NSHomeDirectory()
         let archiveCount = (try? await dbPool.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM memories WHERE status IN ('archived','superseded')") ?? 0
         }) ?? 0
@@ -565,9 +564,9 @@ actor HealthMonitor {
         // so they self-heal from their authoritative backfill.
         let checks: [IndexCheck] = [
             IndexCheck(name: "wiki", source: wikiPageCount, heal: nil),
-            IndexCheck(name: "docs", source: Self.countFiles(home + "/.sonata/documents", exts: ["md","txt"]),
+            IndexCheck(name: "docs", source: Self.countFiles(SonataInstance.dataDirectory + "/documents", exts: ["md","txt"]),
                        heal: { await search.backfillDocs() }),
-            IndexCheck(name: "private", source: Self.countFiles(home + "/.sonata/private", exts: ["md","txt"]), heal: nil),
+            IndexCheck(name: "private", source: Self.countFiles(SonataInstance.dataDirectory + "/private", exts: ["md","txt"]), heal: nil),
             IndexCheck(name: "emails", source: emailCount, heal: nil),
             IndexCheck(name: "sessions", source: sessionChunkCount, heal: nil),
             // archive heals BOTH directions: backfill adds missing, prune
@@ -736,7 +735,7 @@ actor HealthMonitor {
     /// single spuriously-low statfs read must not be able to wedge the verdict,
     /// so we cross-check it against `volumeAvailableCapacityForImportantUsage`.
     private func checkDiskSpace(at time: Date) -> CheckResult {
-        let dataDir = NSHomeDirectory() + "/.sonata"
+        let dataDir = SonataInstance.dataDirectory
         let viaAttrs = freeBytesViaAttributes(dataDir)
         let viaURL = freeBytesViaResourceValues(dataDir)
 

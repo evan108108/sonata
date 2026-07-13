@@ -37,8 +37,8 @@ private func ensureCheckpointTablesForAction(_ db: Database) throws {
 // MARK: - File System (backward compat)
 
 private let activeCheckpointPathForAction: String = {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    return home.appendingPathComponent(".sonata/scratch/active-checkpoint.md").path
+    return URL(fileURLWithPath: SonataInstance.dataDirectory)
+        .appendingPathComponent("scratch/active-checkpoint.md").path
 }()
 
 private func writeActiveCheckpointFileForAction(state: String, skills: String?, project: String?, createdAt: Int64) {

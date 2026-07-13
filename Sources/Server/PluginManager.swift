@@ -597,8 +597,7 @@ final class PluginManager: @unchecked Sendable {
     /// Install a plugin from a tarball at the given file path.
     /// Extracts to ~/.sonata/plugins/<name>/, reads manifest, inserts DB row.
     func install(tarballPath: String) async throws -> PluginManifest {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let tempDir = "\(home)/.sonata/plugins/_installing_\(UUID().uuidString)"
+        let tempDir = "\(SonataInstance.dataDirectory)/plugins/_installing_\(UUID().uuidString)"
 
         try FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
 
@@ -642,10 +641,10 @@ final class PluginManager: @unchecked Sendable {
             throw ActionError.custom("Plugin '\(manifest.name)' is currently \(status) — disable it first", .conflict)
         }
 
-        let finalDir = "\(home)/.sonata/plugins/\(manifest.name)"
+        let finalDir = "\(SonataInstance.dataDirectory)/plugins/\(manifest.name)"
         if FileManager.default.fileExists(atPath: finalDir) {
             // Preserve plugin data (DB files, data dir) across reinstalls
-            let dataBackup = "\(home)/.sonata/plugins/_data_backup_\(manifest.name)"
+            let dataBackup = "\(SonataInstance.dataDirectory)/plugins/_data_backup_\(manifest.name)"
             try? FileManager.default.removeItem(atPath: dataBackup)
             try? FileManager.default.createDirectory(atPath: dataBackup, withIntermediateDirectories: true)
             // Save all .db files and WAL/SHM files
@@ -661,7 +660,7 @@ final class PluginManager: @unchecked Sendable {
         }
         try FileManager.default.moveItem(atPath: sourceDir, toPath: finalDir)
         // Restore preserved data files
-        let dataBackup = "\(home)/.sonata/plugins/_data_backup_\(manifest.name)"
+        let dataBackup = "\(SonataInstance.dataDirectory)/plugins/_data_backup_\(manifest.name)"
         if FileManager.default.fileExists(atPath: dataBackup) {
             if let files = try? FileManager.default.contentsOfDirectory(atPath: dataBackup) {
                 for file in files {

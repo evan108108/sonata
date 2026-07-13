@@ -18,19 +18,19 @@ actor MeiliSearchManager: SearchService {
     private var baseURL: String { "http://127.0.0.1:\(port)" }
 
     private var dataDir: String {
-        NSHomeDirectory() + "/.sonata/meili-data"
+        SonataInstance.dataDirectory + "/meili-data"
     }
 
     private var keyFile: String {
-        NSHomeDirectory() + "/.sonata/meili-key"
+        SonataInstance.dataDirectory + "/meili-key"
     }
 
     private var docsDir: String {
-        NSHomeDirectory() + "/.sonata/documents"
+        SonataInstance.dataDirectory + "/documents"
     }
 
     private var privateDir: String {
-        NSHomeDirectory() + "/.sonata/private"
+        SonataInstance.dataDirectory + "/private"
     }
 
     init() {
@@ -391,7 +391,7 @@ actor MeiliSearchManager: SearchService {
     // MARK: - Backfill
 
     func backfillWiki(dbPool: DatabasePool) async {
-        let wikiDir = NSHomeDirectory() + "/.sonata/wiki"
+        let wikiDir = SonataInstance.dataDirectory + "/wiki"
         do {
             let rows = try await dbPool.read { db in
                 try WikiPageRow.fetchAll(db, sql: "SELECT * FROM wikiPages WHERE pageType IS NULL OR pageType != 'archived'")

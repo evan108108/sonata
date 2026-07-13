@@ -37,8 +37,7 @@ let fileActions: [SonataAction] = [
         handler: { ctx in
             let dir = try ctx.params.require("dir")
             let fm = FileManager.default
-            let sonataDir = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent(".sonata").path
+            let sonataDir = SonataInstance.dataDirectory
 
             guard let dirPath = resolveSecurePathForAction(relativePath: dir, sonataDir: sonataDir) else {
                 throw ActionError.custom("Invalid directory path", .forbidden)
@@ -86,8 +85,7 @@ let fileActions: [SonataAction] = [
         handler: { ctx in
             let path = try ctx.params.require("path")
             let fm = FileManager.default
-            let sonataDir = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent(".sonata").path
+            let sonataDir = SonataInstance.dataDirectory
 
             guard let filePath = resolveSecurePathForAction(relativePath: path, sonataDir: sonataDir) else {
                 throw ActionError.custom("Invalid file path", .forbidden)
@@ -126,8 +124,7 @@ let fileActions: [SonataAction] = [
         params: [],
         handler: { _ in
             let fm = FileManager.default
-            let sonataDir = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent(".sonata").path
+            let sonataDir = SonataInstance.dataDirectory
 
             var dirs: [FileEntry] = []
             if let items = try? fm.contentsOfDirectory(atPath: sonataDir) {

@@ -28,9 +28,8 @@ actor WikiFileWatcher {
     init(dbPool: DatabasePool, search: (any SearchService)? = nil, logger: Logger? = nil) {
         self.dbPool = dbPool
         self.search = search
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        self.wikiDir = "\(home)/.sonata/wiki"
-        self.privateDir = "\(home)/.sonata/private"
+        self.wikiDir = "\(SonataInstance.dataDirectory)/wiki"
+        self.privateDir = "\(SonataInstance.dataDirectory)/private"
         var log = logger ?? Logger(label: "sonata.wiki-file-watcher")
         log.logLevel = .info
         self.logger = log

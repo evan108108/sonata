@@ -22,7 +22,7 @@ extension EnvironmentValues {
 // MARK: - App Entry Point
 
 /// Port for the Sonata HTTP server, configurable via SONATA_PORT env var.
-let sonataPort: Int = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+let sonataPort: Int = SonataInstance.port
 
 /// Ensure sonata-bridge MCP server is registered in ~/.claude/mcp.json, and
 /// scrub any stale `memory` stdio entry (now redundant — sonata-bridge serves
@@ -228,8 +228,7 @@ func ensureSonaLauncher() {
 /// Copies defaults from the app bundle if not present. Does not overwrite existing files.
 func ensureRoleDirectories() {
     let fm = FileManager.default
-    let home = fm.homeDirectoryForCurrentUser
-    let sonataDir = home.appendingPathComponent(".sonata")
+    let sonataDir = URL(fileURLWithPath: SonataInstance.dataDirectory)
 
     for role in ["worker", "supervisor"] {
         let roleDir = sonataDir.appendingPathComponent(role)
@@ -393,21 +392,46 @@ struct SonataApp: App {
         // of init().
         installSonataStdoutRedirect()
 
-        // Singleton guard: if another Sonata is already running, activate it and exit
+        // Singleton guard, part 1: another *bundled* Sonata is already running.
+        // Bring it to front and stand down. This is the double-click case.
         let runningApps = NSRunningApplication.runningApplications(
             withBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.sona.Sonata"
         )
         if runningApps.count > 1 {
-            // Another instance is already running — bring it to front and terminate this one
             if let existing = runningApps.first(where: { $0 != NSRunningApplication.current }) {
                 existing.activate()
             }
             sonataFileLog("Sonata init: another instance already running, exiting")
-            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
-            // Still need to initialize dbPool to satisfy the compiler
-            self.dbPool = try! DatabaseManager.openDatabase()
-            return
+            exit(0)
         }
+
+        // Singleton guard, part 2 — the one that actually holds.
+        //
+        // The check above only sees apps macOS knows as bundles, so a binary run
+        // straight from `.build/debug/Sonata` sails past it: an unbundled process
+        // has no bundle identifier to match on. That is exactly how a dev build
+        // came up alongside the live app on 2026-07-13, republished the fleet's
+        // MCP config to its own port, and took the worker channel down with it
+        // when it died.
+        //
+        // The flock on <dataDir>/sonata.lock has no such blind spot — it is a
+        // property of the data directory, not of how the process was launched.
+        // The instance already holding it keeps running, untouched; the newcomer
+        // yields. To run a dev build alongside the app, give it its own data
+        // directory (see the message below), which is its own lock.
+        if !SonataInstance.acquireLock() {
+            let message = """
+                Sonata init: another Sonata already owns \(SonataInstance.dataDirectory) — exiting.
+                To run an isolated instance alongside it:
+                  SONATA_DATA_DIR=/tmp/sonata-dev SONATA_PORT=3299 .build/debug/Sonata
+                ($HOME does NOT isolate the data directory — it resolves via getpwuid.)
+                """
+            sonataFileLog(message)
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            exit(0)
+        }
+
+        sonataFileLog("Sonata init: \(SonataInstance.roleDescription)")
 
         // Make the app appear in dock and app switcher
         NSApplication.shared.setActivationPolicy(.regular)
@@ -432,23 +456,48 @@ struct SonataApp: App {
             forName: NSApplication.willTerminateNotification,
             object: nil, queue: nil
         ) { _ in
+            // The model servers sit on fixed ports (pith 7713, embedding 7712)
+            // and terminateOnQuit pkills those ports unconditionally — it cannot
+            // tell its own server from another instance's. From a secondary that
+            // means a quitting dev binary reaps the PRIMARY's live model servers.
+            // A secondary never started them, so it has nothing to clean up.
+            guard SonataInstance.isPrimary else {
+                sonataFileLog("App terminating — secondary instance, leaving shared model servers alone")
+                _exit(0)
+            }
             sonataFileLog("App terminating — shutting down internal model servers + releasing port")
             ChatServerManager.terminateOnQuit()
             EmbeddingServerManager.terminateOnQuit()
             _exit(0)
         }
 
-        // Ensure memory + sonata-bridge MCP servers are in global ~/.claude.json
-        ensureGlobalMCPServers()
+        // Machine-wide user config — only the primary instance may touch it.
+        //
+        // ~/.claude.json and ~/.claude/mcp.json are how EVERY Claude Code session
+        // on this machine finds Sonata. A secondary instance writing them
+        // repoints the entire fleet at itself, and the fleet loses its channel
+        // the moment that instance exits. This is not hypothetical: it is what
+        // happened on 2026-07-13, seconds after a debug binary came up on a
+        // spare port. A secondary is a guest — it reads this config, it does not
+        // publish it.
+        if SonataInstance.isPrimary {
+            // Ensure memory + sonata-bridge MCP servers are in global ~/.claude.json
+            ensureGlobalMCPServers()
 
-        // Install/refresh the `sona` shell launcher in ~/.zshrc
-        ensureSonaLauncher()
+            // Install/refresh the `sona` shell launcher in ~/.zshrc
+            ensureSonaLauncher()
 
-        // Ensure worker + supervisor role directories exist with CLAUDE.md
+            // Deploy bundled Claude Code skills (currently just /afk) to ~/.claude/skills/
+            ensureBundledSkills()
+        } else {
+            sonataFileLog(
+                "Sonata init: secondary instance — skipping global config writes "
+                + "(~/.claude.json, ~/.claude/mcp.json, ~/.zshrc, ~/.claude/skills)")
+        }
+
+        // Role directories live under this instance's data dir, so a secondary
+        // creates its own rather than writing the primary's.
         ensureRoleDirectories()
-
-        // Deploy bundled Claude Code skills (currently just /afk) to ~/.claude/skills/
-        ensureBundledSkills()
 
         let pool = self.dbPool
         SonataApp.sharedDbPool = pool
@@ -464,10 +513,19 @@ struct SonataApp: App {
                 sonataFileLog("HTTP task: entered detached task, about to build router")
 
                 // Create scheduler early so routes can reference it
-                // MeiliSearch full-text search subsystem
+                // MeiliSearch full-text search subsystem.
+                //
+                // Bound to a fixed port (7711) with its data under the primary's
+                // data dir, so a secondary instance starting it would fight the
+                // primary for both. A secondary runs without full-text search
+                // rather than trampling the running one.
                 let meili = MeiliSearchManager()
-                await meili.start(dbPool: pool)
-                await meili.ensureIndexes()
+                if SonataInstance.isPrimary {
+                    await meili.start(dbPool: pool)
+                    await meili.ensureIndexes()
+                } else {
+                    sonataFileLog("Sonata init: secondary instance — skipping MeiliSearch (shared port 7711)")
+                }
 
                 // Conversation-log search (Meili `emails` + `sessions`) — the
                 // subsystem's original purpose, restored 2026-06-12. First
@@ -666,8 +724,18 @@ struct SonataApp: App {
 
                 // Start all enabled plugins — blocks until all are running or failed.
                 // Must complete before workers spawn so plugin MCP tools are available.
-                await pluginManager.startEnabledPlugins()
-                sonataFileLog("Plugin system: initialization complete")
+                //
+                // Plugin daemons bind fixed ports (sonar on 4000, …) and Sonata
+                // kills whatever already holds those ports before spawning its
+                // own. From a secondary instance that means killing the primary's
+                // live daemons and adopting them — how the sonar bridge died on
+                // 2026-07-13. A secondary runs pluginless.
+                if SonataInstance.isPrimary {
+                    await pluginManager.startEnabledPlugins()
+                    sonataFileLog("Plugin system: initialization complete")
+                } else {
+                    sonataFileLog("Sonata init: secondary instance — skipping plugin daemons (shared fixed ports)")
+                }
 
                 // --- Phase 3: Initialize all scheduler services ---
 
@@ -1003,8 +1071,7 @@ struct SonataApp: App {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         Task.detached {
-            let sonataDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".sonata")
+            let sonataDir = URL(fileURLWithPath: SonataInstance.dataDirectory)
             let tempZip = FileManager.default.temporaryDirectory
                 .appendingPathComponent("sonata-export-\(UUID().uuidString).zip")
 
@@ -1062,8 +1129,7 @@ struct SonataApp: App {
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
 
         Task.detached {
-            let sonataDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".sonata")
+            let sonataDir = URL(fileURLWithPath: SonataInstance.dataDirectory)
 
             do {
                 // Clear existing data

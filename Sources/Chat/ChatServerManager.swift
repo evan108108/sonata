@@ -419,8 +419,8 @@ actor ChatServerManager {
     /// to a filesystem-safe form (the registry already enforces a strict
     /// charset, so this is paranoia, not real escaping).
     static func logURL(for modelName: String) -> URL {
-        let dir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".sonata/logs", isDirectory: true)
+        let dir = URL(fileURLWithPath: SonataInstance.dataDirectory)
+            .appendingPathComponent("logs", isDirectory: true)
         let safe = modelName.replacingOccurrences(of: "/", with: "_")
         return dir.appendingPathComponent("llama-\(safe).log")
     }

@@ -71,7 +71,7 @@ actor BinaryProvisioner {
     }
 
     private let logger: Logger
-    private var installDir: String { NSHomeDirectory() + "/.sonata/bin" }
+    private var installDir: String { SonataInstance.dataDirectory + "/bin" }
 
     init() {
         var log = Logger(label: "sonata.binaryprovisioner")

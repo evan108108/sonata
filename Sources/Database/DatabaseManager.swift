@@ -7,11 +7,10 @@ enum DatabaseManager {
 
     // MARK: - Path Configuration
 
-    /// Data directory: ~/.sonata/ (created automatically on first launch)
-    static let dataDirectory: String = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.sonata"
-    }()
+    /// Data directory: ~/.sonata/, or `$SONATA_DATA_DIR` when set.
+    /// Created automatically on first launch. See `SonataInstance.dataDirectory`
+    /// — setting `$HOME` does NOT redirect this.
+    static let dataDirectory: String = SonataInstance.dataDirectory
 
     /// Default database path: ~/.sonata/sonata.db
     static let defaultPath: String = {
