@@ -354,6 +354,56 @@ let workerActions: [SonataAction] = [
         }
     ),
 
+    // POST /api/worker/pool/reconcile — adopt DB workers the UI lost.
+    //
+    // Repairs the "DB has a worker the UI doesn't" drift class. Queries
+    // the workers table for pool slots (sessionLabel like sona-worker-*),
+    // then hands the list to WorkerManager.adoptOrphans on the MainActor.
+    // Anything whose claude process is still alive on the host gets a
+    // fresh local Worker instance appended so the UI sees it again.
+    // Anything without a live process is left alone — the pool
+    // maintainer's normal path handles those.
+    //
+    // Supervisor / operator flow: when the UI shows fewer workers than
+    // `worker_list` reports, call this once. Idempotent — Workers already
+    // in the local array are skipped.
+    SonataAction(
+        name: "worker_pool_reconcile",
+        description: "Adopt DB workers whose claude process is alive but whose local Worker instance was lost from the SwiftUI array (UI shows fewer rows than worker_list). Returns the workerIds actually adopted.",
+        group: "/api/worker",
+        path: "/pool/reconcile",
+        method: .post,
+        params: [],
+        handler: { ctx in
+            // sessionId is nullable in the workers table (schema
+            // predates the field being populated at register time), and
+            // GRDB's Decodable path throws on a NULL for a non-optional
+            // String — silently swallowing the whole fetchAll under a
+            // `try?`. Optional decode + empty-string fallback keeps the
+            // reconciliation working on rows that lack a sessionId, at
+            // the cost of a slightly less useful --resume story for
+            // adopted Workers (the recovery init only uses sessionId to
+            // pass through to Worker.sessionId, which the reconcile
+            // path doesn't hand to startProcess anyway).
+            struct Row: Decodable, FetchableRecord {
+                let workerId: String
+                let sessionLabel: String
+                let sessionId: String?
+            }
+            let rows: [Row] = (try? await ctx.dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT workerId, sessionLabel, sessionId FROM workers
+                    WHERE sessionLabel GLOB 'sona-worker-*'
+                """)
+            }) ?? []
+            let candidates = rows.map { ($0.workerId, $0.sessionLabel, $0.sessionId ?? "") }
+            let adopted = await MainActor.run {
+                WorkerManager.shared.adoptOrphans(candidates: candidates)
+            }
+            return ReconcileResponse(adopted: adopted, considered: candidates.count)
+        }
+    ),
+
     // POST /api/worker/spawn — top the pool up to defaultWorkerCount.
     // Gives the supervisor an MCP path to self-heal under-capacity pool
     // states. WorkerManager.maintainPoolSize() is the same routine the

@@ -118,3 +118,9 @@ struct SpawnResponse: Encodable {
     let spawned: [String]
     let success = true
 }
+
+struct ReconcileResponse: Encodable {
+    let adopted: [String]
+    let considered: Int
+    let success = true
+}

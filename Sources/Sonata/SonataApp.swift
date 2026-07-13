@@ -353,6 +353,94 @@ func sonataFileLog(_ line: String) {
     }
 }
 
+/// Scan for pool workers stuck offline past the resurrection cutoff and
+/// respawn a fresh worker into each abandoned slot. Called from the
+/// periodic ghost-reaper Task on the same 5-min cadence.
+///
+/// Row-level criteria (all must hold):
+///   - status = 'offline' (escalation ladder classified this as dead)
+///   - lastHeartbeat >= 90 min ago (well past any transient MCP reconnect
+///     and the 5-min escalation grace)
+///   - currentEventId IS NULL (no active work — the escalation ladder
+///     ALREADY reaped the ones with active events, so anything still
+///     sitting here is by definition "worker dead, nothing to reassign")
+///   - sessionLabel matches 'sona-worker-*' (pool slots only)
+///   - workerId is NOT in the pgrep live-worker set (belt against
+///     deleting a row whose process is somehow still alive)
+///
+/// For each survivor: DELETE the row, then on MainActor call
+/// `WorkerManager.attemptSlotResurrection(sessionLabel:)` which respects
+/// `userRemovedLabels` and appends a fresh Worker into the slot.
+///
+/// Why 90 min and not longer/shorter: 5-min escalation grace is the
+/// longest legitimate "transient offline" window we have. 90 min is
+/// well past that plus any conceivable MCP reconnect or heartbeat gap.
+/// Shorter would flake on legitimate briefly-offline workers; longer
+/// would leave the pool below configured size for longer than the
+/// operator wants.
+private func resurrectAbandonedPoolSlots(dbPool: DatabasePool, logger: Logger) async {
+    let cutoffMs = nowMs() - 90 * 60 * 1000
+    struct StaleRow {
+        let workerId: String
+        let sessionLabel: String
+    }
+    let candidates: [StaleRow]
+    do {
+        candidates = try await dbPool.read { db -> [StaleRow] in
+            try Row.fetchAll(db, sql: """
+                SELECT workerId, sessionLabel FROM workers
+                WHERE status = 'offline'
+                  AND lastHeartbeat < ?
+                  AND (currentEventId IS NULL OR currentEventId = '')
+                  AND sessionLabel GLOB 'sona-worker-*'
+            """, arguments: [cutoffMs]).compactMap { row in
+                guard let wid = row["workerId"] as? String,
+                      let label = row["sessionLabel"] as? String else { return nil }
+                return StaleRow(workerId: wid, sessionLabel: label)
+            }
+        }
+    } catch {
+        logger.warning("resurrectAbandonedPoolSlots: query failed: \(error.localizedDescription)")
+        return
+    }
+    guard !candidates.isEmpty else { return }
+
+    // Pgrep-based live-process guard. If a claude process is still up
+    // for this workerId, the row is a stale-status lie, not a dead
+    // worker — DO NOT delete or respawn. GhostWorkerReaper's periodic
+    // run on the same cadence handles unregistered live processes; this
+    // path is only for genuinely-dead workers.
+    let liveWorkerIds = Set(
+        GhostWorkerReaper.enumerateWorkerProcesses().map { $0.workerId }
+    )
+    for row in candidates {
+        if liveWorkerIds.contains(row.workerId) {
+            logger.info("resurrectAbandonedPoolSlots: skipping \(row.sessionLabel) workerId=\(row.workerId) — process still alive")
+            continue
+        }
+        // Delete the stale row THEN respawn. Order matters:
+        // addWorker(label:) registers a fresh Worker with a fresh
+        // workerId; the new registration's predecessor-cleanup would
+        // delete this row anyway, but deleting first keeps the DB
+        // clean during the ~5s spawn→register handshake.
+        do {
+            try await dbPool.write { db in
+                try db.execute(
+                    sql: "DELETE FROM workers WHERE workerId = ?",
+                    arguments: [row.workerId]
+                )
+            }
+        } catch {
+            logger.warning("resurrectAbandonedPoolSlots: delete failed for \(row.workerId): \(error.localizedDescription)")
+            continue
+        }
+        let spawned = await MainActor.run {
+            WorkerManager.shared.attemptSlotResurrection(sessionLabel: row.sessionLabel)
+        }
+        logger.info("resurrectAbandonedPoolSlots: \(row.sessionLabel) workerId=\(row.workerId) — deleted stale row, spawned=\(spawned)")
+    }
+}
+
 /// Poll the local HTTP server until it responds or the timeout expires.
 /// Blocks the current thread — intended to be called from init() so the
 /// server is listening before the SwiftUI window loads any webview.
@@ -857,6 +945,40 @@ struct SonataApp: App {
                 // fresh pool doesn't compete for the same slot indices with
                 // ghosts still holding MCP SSE streams. See GhostWorkerReaper.
                 _ = await GhostWorkerReaper.reap(dbPool: pool, logger: logger, source: "boot")
+
+                // 6a-cont. Periodic ghost reaper. The boot reap only catches
+                // ghosts left over from a prior run; new ghosts can appear
+                // during normal operation when a worker's parent process
+                // dies but its MCP subprocess survives (see memory
+                // 8146b6c7 — 2026-07-12 Scout eyebrowse orphan). AE II
+                // reported ghost workers on evan-mac at 2h+ uptime on
+                // 2026-07-13; the ghosts survived because reap() only
+                // ran at boot. Runs every 5 minutes with source="periodic".
+                Task.detached(priority: .background) {
+                    let interval: UInt64 = 5 * 60 * 1_000_000_000
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: interval)
+                        _ = await GhostWorkerReaper.reap(
+                            dbPool: pool, logger: logger, source: "periodic"
+                        )
+                        // Offline-resurrect: replace pool workers that have
+                        // been offline for >= 90 min with no active event
+                        // AND no live process. The escalation ladder
+                        // correctly declines to reap offline workers when
+                        // there's nothing to reassign, but that leaves the
+                        // slot dead — no maintainPoolSize refill fires
+                        // for slots beyond defaultWorkerCount (e.g. a user
+                        // clicked "Add" to expand to sona-worker-5 and
+                        // that worker later died). sona-worker-5 case,
+                        // 2026-07-15: stale offline row sat 4.8 days before
+                        // startup worker_purge cleared it. 90 min >> any
+                        // legitimate transient offline (MCP reconnect ~s,
+                        // escalation grace 5m), so a row still offline at
+                        // that mark is dead. Live-process pgrep is a
+                        // second guard against false positives.
+                        await resurrectAbandonedPoolSlots(dbPool: pool, logger: logger)
+                    }
+                }
 
                 // 6. Respawn recovery workers (sonata-restart-recovery-v0 §4) then top up
                 // the default pool. Both run on MainActor since they create terminal views.

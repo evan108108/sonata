@@ -134,6 +134,17 @@ class WorkerManager: ObservableObject {
     private var statusObservers: [String: AnyCancellable] = [:]  // worker.id → status sub
     private var workersArraySub: AnyCancellable?
 
+    /// Labels the user explicitly removed via the Remove menu. Read by
+    /// `computePoolMaintainPlan` to distinguish user-intended empty slots
+    /// (leave gone) from vanished workers (refill). Not persisted — after
+    /// an app restart the full pool comes back. Users who want a smaller
+    /// standing pool set `defaultWorkerCount` in Settings.
+    ///
+    /// Cycle (Restart) does NOT populate this — cycling wants a
+    /// replacement, so the slot is intentionally re-spawned right after
+    /// the old process exits. Only Remove writes here.
+    private var userRemovedLabels: Set<String> = []
+
     /// Default number of workers to spawn on launch — stored in UserDefaults.
     static var defaultWorkerCount: Int {
         get {
@@ -290,6 +301,94 @@ class WorkerManager: ObservableObject {
         }
     }
 
+    /// Try to respawn a worker into the given slot label. Respects
+    /// `userRemovedLabels` — if the user explicitly Removed this slot,
+    /// don't resurrect it. Callers (the periodic offline-resurrect task)
+    /// should DELETE the stale DB row first, THEN call this to spawn a
+    /// fresh replacement in the same slot.
+    ///
+    /// Returns true if a new Worker was spawned. Returns false when the
+    /// slot was intentionally removed or a Worker with the same label
+    /// somehow already exists in the local array (defense against the
+    /// resurrection racing with a natural addWorker path).
+    @MainActor
+    @discardableResult
+    func attemptSlotResurrection(sessionLabel: String) -> Bool {
+        if userRemovedLabels.contains(sessionLabel) {
+            print("[resurrect] skipped \(sessionLabel) — in userRemovedLabels")
+            return false
+        }
+        if workers.contains(where: { $0.label == sessionLabel }) {
+            print("[resurrect] skipped \(sessionLabel) — a Worker with that label already exists locally")
+            return false
+        }
+        print("[resurrect] spawning fresh worker into \(sessionLabel)")
+        addWorker(label: sessionLabel)
+        return true
+    }
+
+    /// On-demand repair for the "DB has a worker the UI doesn't" drift.
+    ///
+    /// Motivation: `pollHealth`'s reconciliation is one-way — it looks up
+    /// LOCAL Workers in the server's list and updates them; it never goes
+    /// the reverse direction. So if the local `workers` array loses a
+    /// Worker instance while the underlying claude process keeps running
+    /// and heartbeating (see the maintainPoolSize false-positive-displace
+    /// path, since fixed; or a cycle spawn whose new Worker never gets
+    /// appended; or any future drift path), there is no automatic route
+    /// back. The affected slot is invisible in the UI even though it's
+    /// doing real work.
+    ///
+    /// This method is the manual reconciliation counterpart. Callers pass
+    /// a list of DB workerId/label/sessionId triples that a query proved
+    /// are in the workers table but not in `self.workers`. For each
+    /// candidate whose claude process is still alive on the host (pgrep
+    /// via `GhostWorkerReaper.enumerateWorkerProcesses`), a fresh Worker
+    /// is constructed via the recovery init (which preserves the id) and
+    /// appended, with `spawnedPid` set from the pgrep result.
+    ///
+    /// Adoption limitation: no `WorkerCoordinator` is attached to the
+    /// process (the PTY that owns it belongs to a prior spawn path that
+    /// SwiftUI can't rebuild across boots). Consequences:
+    ///   • Visible in UI with correct status/heartbeat/currentEventId — YES.
+    ///   • Receives dispatched events via its own MCP SSE — YES.
+    ///   • GhostWorkerReaper reaps if the process truly dies — YES.
+    ///   • "Remove" menu still kills it via `worker.spawnedPid` pgrep
+    ///     fallback — YES.
+    ///   • Coordinator's auto-restart on process crash — NO, but the
+    ///     pool maintainer's next-tick refill covers that.
+    ///
+    /// Returns the workerIds actually adopted.
+    @MainActor
+    func adoptOrphans(
+        candidates: [(workerId: String, label: String, sessionId: String)]
+    ) -> [String] {
+        let knownIds = Set(workers.map { $0.id })
+        let livePidByWorkerId: [String: pid_t] = Dictionary(
+            uniqueKeysWithValues: GhostWorkerReaper.enumerateWorkerProcesses()
+                .map { ($0.workerId, $0.pid) }
+        )
+        var adopted: [String] = []
+        for c in candidates {
+            if knownIds.contains(c.workerId) { continue }
+            guard let pid = livePidByWorkerId[c.workerId] else { continue }
+            let worker = Worker(
+                label: c.label,
+                workerId: c.workerId,
+                sessionId: c.sessionId
+            )
+            worker.spawnedPid = pid
+            // No startProcess — the process is already running; a fresh
+            // startProcess would spawn a duplicate. Leave coordinator nil;
+            // pollHealth's forward loop will fill status/currentEventId
+            // from serverState on the next tick.
+            workers.append(worker)
+            adopted.append(c.workerId)
+            print("[reconcile] adopted \(c.label) workerId=\(c.workerId) pid=\(pid)")
+        }
+        return adopted
+    }
+
     /// Restart-recovery v0 (T4): on app boot, find workers whose `lastHeartbeat`
     /// is stale AND whose `currentEventId` points to a still-active task, then
     /// spawn replacement processes reusing the prior `workerId`/`sessionId`/
@@ -389,22 +488,37 @@ class WorkerManager: ObservableObject {
         let status: Worker.WorkerStatus
     }
 
-    /// Pure planning function for pool maintenance. Heals stale slots only —
-    /// an `.offline` worker is treated as not occupying its slot and is
-    /// reported in `toDisplace` so the caller can remove it before spawning
-    /// a replacement. A slot with NO occupants (the user removed the worker
-    /// via the menu) is NOT refilled — pool maintenance must respect explicit
-    /// removals or removed workers respawn on the next health tick.
+    /// Pure planning function for pool maintenance. Distinguishes three
+    /// slot states:
+    ///   • Slot has a live occupant  → nothing to do.
+    ///   • Slot has ONLY .offline occupants (stale) → toDisplace + toSpawn.
+    ///   • Slot has NO occupants → depends on whether the user removed it.
+    ///     If the label is in `userRemovedLabels` the slot stays empty;
+    ///     otherwise the worker vanished (crashed / process died / cycled
+    ///     without a replacement landing) and the slot gets refilled.
+    ///
     /// In-flight states (`.starting`, `.restarting`, `.draining`) still
-    /// occupy the slot so we don't double-spawn during a normal cycle.
+    /// occupy the slot so a normal cycle doesn't double-spawn.
     ///
     /// History:
     ///   2026-05-18: status-aware refill landed for the pool-stuck-at-1/2
     ///     incident — `.offline` was being treated as occupied.
-    ///   2026-06-10: refill restricted to stale slots only — empty slots
-    ///     are user-removed and must stay gone. The boot-time pool is
-    ///     spawned by `spawnDefaultWorkers`, not by this function.
-    static func computePoolMaintainPlan(target: Int, workers: [WorkerSlotInfo]) -> PoolMaintainPlan {
+    ///   2026-06-10 (63f7e71): refill restricted to stale slots only — the
+    ///     intent was to stop user-removed workers respawning on the next
+    ///     health tick. Correct intent, wrong signal: "empty slot" also
+    ///     matched the vanish path (worker completed a task and its
+    ///     process/row disappeared), so vanished slots stopped refilling
+    ///     too. AE II reported the regression 2026-07-13 after a healthy
+    ///     2-worker pool dropped to 1/2 and never healed.
+    ///   2026-07-13: added `userRemovedLabels` set as the explicit signal
+    ///     for "the user removed this slot." Menu-removal writes to it;
+    ///     addWorker clears the label from it (explicit re-add). Vanish
+    ///     paths never touch it, so vanished slots refill correctly.
+    static func computePoolMaintainPlan(
+        target: Int,
+        workers: [WorkerSlotInfo],
+        userRemovedLabels: Set<String> = []
+    ) -> PoolMaintainPlan {
         guard target > 0 else { return PoolMaintainPlan(toSpawn: [], toDisplace: []) }
         let prefix = "sona-worker-"
         var bySlot: [Int: [WorkerSlotInfo]] = [:]
@@ -416,15 +530,22 @@ class WorkerManager: ObservableObject {
         var toSpawn: [String] = []
         var toDisplace: [String] = []
         for idx in 1...target {
+            let label = "\(prefix)\(idx)"
             let occupants = bySlot[idx] ?? []
-            // No occupants at all → user removed this slot; leave it gone.
-            guard !occupants.isEmpty else { continue }
+            if occupants.isEmpty {
+                // Vanish vs user-removed. The user-removed set is the
+                // authoritative "leave this alone" signal; anything else
+                // gets refilled.
+                if userRemovedLabels.contains(label) { continue }
+                toSpawn.append(label)
+                continue
+            }
             let liveOccupants = occupants.filter { $0.status != .offline }
             if liveOccupants.isEmpty {
                 for stale in occupants where stale.status == .offline {
                     toDisplace.append(stale.id)
                 }
-                toSpawn.append("\(prefix)\(idx)")
+                toSpawn.append(label)
             }
         }
         return PoolMaintainPlan(toSpawn: toSpawn, toDisplace: toDisplace)
@@ -444,30 +565,84 @@ class WorkerManager: ObservableObject {
         let snapshot = workers.map {
             WorkerSlotInfo(id: $0.id, label: $0.label, status: $0.status)
         }
-        let plan = WorkerManager.computePoolMaintainPlan(target: target, workers: snapshot)
+        let plan = WorkerManager.computePoolMaintainPlan(
+            target: target,
+            workers: snapshot,
+            userRemovedLabels: userRemovedLabels
+        )
 
-        // Displace stale .offline workers first so addWorker's max-index search
-        // and pollHealth's later reconcile pass don't observe two entries for
-        // the same slot.
-        for displacedId in plan.toDisplace {
+        // Live-process guard against false-positive .offline displacement.
+        //
+        // `pollHealth` marks a Worker `.offline` when `/api/worker/list`
+        // doesn't include its workerId in a single tick — which happens
+        // routinely during MCP reconnect at task-pickup, brief heartbeat
+        // gaps under load, or when a fresh cycle-spawned Worker's
+        // registration lags its process. If maintainPoolSize acted on
+        // that transient state, it dropped the local Worker instance from
+        // the SwiftUI array WITHOUT killing the process or unregistering
+        // the DB row (the displace path was array-removeAll only). The
+        // actual claude process kept running, kept heartbeating, kept
+        // picking up dispatched events — but the UI could no longer show
+        // it because no local Worker instance held its id. Evan hit this
+        // 2026-07-13: the Workers tab showed only slots 2-3-4 while a
+        // prStar review ran to completion on the invisible sona-worker-1
+        // (worker-8454177961, pid 85207).
+        //
+        // Guard: before displacing a .offline Worker, cross-check whether
+        // the claude process for that slot is actually still alive. If
+        // yes, the .offline was noise — skip the displace and skip the
+        // matching refill. Symmetric with the supervisor rulebook stance
+        // (`Sources/Sonata/Resources/supervisor/CLAUDE.md`): offline is
+        // a NOISY liveness signal; process-dead is the real one.
+        var displacedSet = Set(plan.toDisplace)
+        var toSpawn = plan.toSpawn
+        if !displacedSet.isEmpty {
+            let liveWorkerIds: Set<String> = Set(
+                GhostWorkerReaper.enumerateWorkerProcesses().map { $0.workerId }
+            )
+            var kept: [String] = []
+            for staleId in plan.toDisplace {
+                guard let stale = workers.first(where: { $0.id == staleId }) else { continue }
+                // The Worker.id is the workerId the local instance registered
+                // under, so it's the exact key pgrep would surface in an
+                // mcp-cfg path. If the pgrep list contains it, the process
+                // is up.
+                if liveWorkerIds.contains(stale.id) {
+                    displacedSet.remove(staleId)
+                    // Also cancel the refill for that slot — a live process
+                    // occupies it, we don't want to double-spawn.
+                    if let idx = toSpawn.firstIndex(of: stale.label) {
+                        toSpawn.remove(at: idx)
+                    }
+                    kept.append(stale.label)
+                }
+            }
+            if !kept.isEmpty {
+                print("[pool] kept \(kept.count) offline worker(s) with live process — refill skipped: \(kept.joined(separator: ", "))")
+            }
+        }
+
+        // Displace remaining stale .offline workers (process really dead)
+        // so addWorker's max-index search and pollHealth's later reconcile
+        // pass don't observe two entries for the same slot.
+        for displacedId in displacedSet {
             if let stale = workers.first(where: { $0.id == displacedId }) {
                 print("[pool] displaced offline worker \(stale.label)")
                 alertSupervisor(message: "Replacing offline worker \(stale.label) — auto-spawn refilling slot")
             }
         }
-        if !plan.toDisplace.isEmpty {
-            let displacedSet = Set(plan.toDisplace)
+        if !displacedSet.isEmpty {
             workers.removeAll { displacedSet.contains($0.id) }
             if let selected = selectedWorkerId, displacedSet.contains(selected) {
                 selectedWorkerId = workers.first?.id
             }
         }
 
-        for label in plan.toSpawn {
+        for label in toSpawn {
             print("[pool] missing slot — spawning \(label)")
             addWorker(label: label)
         }
-        return plan.toSpawn
+        return toSpawn
     }
 
     func addWorker(label: String? = nil, engine: WorkerEngine = WorkerEngine.defaultEngine, model: String? = nil) {
@@ -478,6 +653,9 @@ class WorkerManager: ObservableObject {
         }
         let index = (usedIndices.max() ?? 0) + 1
         let workerLabel = label ?? "sona-worker-\(index)"
+        // Explicit re-add clears any prior user-removal for this label so
+        // maintainPoolSize resumes treating vanishes here as refill-worthy.
+        userRemovedLabels.remove(workerLabel)
         let worker = Worker(label: workerLabel, engine: engine, model: model)
         workers.append(worker)
         selectedWorkerId = worker.id
@@ -518,6 +696,13 @@ class WorkerManager: ObservableObject {
         let sigtermGrace = CycleSettings.shared.sigtermGrace
         let workerId = worker.id
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+
+        // Record the user intent BEFORE draining. Once the label is in this
+        // set, computePoolMaintainPlan will skip that slot; without it, the
+        // next pollHealth tick would treat the resulting empty slot as a
+        // vanish and immediately respawn — which is exactly the "silently
+        // respawn on tick" bug 63f7e71 tried to fix.
+        userRemovedLabels.insert(slotLabel)
 
         // Resolve the pid via three fallback sources in order of trust:
         //   1. Worker.spawnedPid — captured at startProcess time on the Worker
