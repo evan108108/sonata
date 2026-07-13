@@ -49,7 +49,56 @@ actor TaskDispatcher {
         }
     }
 
+    /// How long a scheduled (cron) task stays dispatchable after it was created.
+    ///
+    /// A cron run is only meaningful near its scheduled moment: its prompt carries a
+    /// work manifest snapshotted at fire time, so executing it hours later re-runs
+    /// stale work — and can clobber a peer's fresh output. Recurring jobs are
+    /// self-healing (the next firing does the work with a current manifest), so
+    /// dropping a late run is strictly better than running it against a moved world.
+    private static let scheduledTaskMaxStalenessMs: Int64 = 2 * 60 * 60 * 1000  // 2 hours
+
+    /// Retire scheduled tasks that sat undispatched past their useful life.
+    ///
+    /// The backend can be up with zero attached workers — `poll()` then returns early
+    /// on every cycle and pending tasks accumulate silently. Coalescing in
+    /// DefaultClaudeRunner keeps only the newest run per job, and this keeps even that
+    /// one from executing long after the fact.
+    private func expireStaleScheduledTasks() async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let cutoff = now - Self.scheduledTaskMaxStalenessMs
+        do {
+            try await dbPool.write { [logger] db in
+                let stale = try Row.fetchAll(db, sql: """
+                    SELECT id, title, createdAt FROM tasks
+                    WHERE status = 'pending' AND source = 'scheduler' AND createdAt < ?
+                """, arguments: [cutoff])
+
+                for row in stale {
+                    let taskId = row["id"] as! String
+                    let title = row["title"] as? String ?? taskId
+                    let ageMin = ((now - (row["createdAt"] as? Int64 ?? now)) / 60_000)
+                    try db.execute(sql: """
+                        UPDATE tasks SET status = 'cancelled', lastError = ?, updatedAt = ?
+                        WHERE id = ?
+                    """, arguments: ["expired: undispatched for \(ageMin)m, past the scheduled-task staleness window", now, taskId])
+                    logger.warning("Expired stale scheduled task \"\(title.prefix(60))\" (\(taskId)) — \(ageMin)m old, never dispatched")
+                }
+                if !stale.isEmpty {
+                    logger.warning("Expired \(stale.count) stale scheduled task(s) — a cron run that missed its window is dropped, not run late")
+                }
+            }
+        } catch {
+            logger.error("Stale scheduled-task expiry failed: \(error.localizedDescription)")
+        }
+    }
+
     private func poll() async throws {
+        // Drop cron runs that missed their window BEFORE looking for workers — this
+        // must run even when no worker is idle, since that is exactly the condition
+        // that lets the backlog build.
+        await expireStaleScheduledTasks()
+
         // Dynamic concurrency: match available idle workers
         let idleWorkerCount: Int = (try? await dbPool.read { db in
             try Int.fetchOne(db, sql: """

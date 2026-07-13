@@ -35,26 +35,55 @@ enum JobSource: Sendable {
 
 /// Protocol for the Claude process manager — implemented externally.
 /// Keeps the scheduler decoupled from the actual Claude SDK integration.
+///
+/// `jobId` is the id of the calendarEvent/scheduledJob that fired. It is persisted
+/// on the task as `sourceRef` so a recurring job's runs can be coalesced: see
+/// `DefaultClaudeRunner.run`.
 protocol ClaudeProcessRunner: Sendable {
-    func run(prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String?
+    func run(jobId: String, prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String?
 }
 
 /// Default runner that creates a task for the TaskDispatcher to dispatch via channel.
 struct DefaultClaudeRunner: ClaudeProcessRunner {
     let dbPool: DatabasePool
 
-    func run(prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String? {
+    func run(jobId: String, prompt: String, workingDir: String?, model: String?, maxTurns: Int?) async throws -> String? {
         let taskId = UUID().uuidString.lowercased()
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let title = String(prompt.prefix(80))
 
-        try await dbPool.write { db in
+        let superseded: Int = try await dbPool.write { db in
+            // Coalesce: a recurring job never needs more than its most recent run
+            // pending at once. If the previous run is still undispatched (no idle
+            // worker claimed it — the whole backend can be up with zero attached
+            // workers, in which case TaskDispatcher.poll() returns early and tasks
+            // accumulate), retire it in favour of this one.
+            //
+            // Without this, an outage that spans N firings leaves N pending tasks
+            // that all drain the moment a worker reappears — N full workers running
+            // the same job minutes apart, each against a work manifest snapshotted
+            // days earlier. Observed 2026-07-13: a 3-day worker gap (7/10-7/12)
+            // queued 4 toolWatch runs and 4 wiki compilations; on drain, a worker
+            // executed a 79-hour-old "12 pages" manifest against a wiki a peer had
+            // already recompiled.
             try db.execute(sql: """
-                INSERT INTO tasks (id, title, prompt, status, priority, assignedTo, source, workingDir, model, maxTurns, createdAt, updatedAt)
-                VALUES (?, ?, ?, 'pending', 'high', 'scheduler', 'scheduler', ?, ?, ?, ?, ?)
-            """, arguments: [taskId, title, prompt, workingDir, model, maxTurns, now, now])
+                UPDATE tasks
+                SET status = 'cancelled', lastError = ?, updatedAt = ?
+                WHERE source = 'scheduler' AND sourceRef = ? AND status = 'pending'
+            """, arguments: ["superseded by a newer run of the same scheduled job", now, jobId])
+            let count = db.changesCount
+
+            try db.execute(sql: """
+                INSERT INTO tasks (id, title, prompt, status, priority, assignedTo, source, sourceRef, workingDir, model, maxTurns, createdAt, updatedAt)
+                VALUES (?, ?, ?, 'pending', 'high', 'scheduler', 'scheduler', ?, ?, ?, ?, ?, ?)
+            """, arguments: [taskId, title, prompt, jobId, workingDir, model, maxTurns, now, now])
+
+            return count
         }
 
+        if superseded > 0 {
+            return "Task created: \(taskId) (superseded \(superseded) undispatched run(s) of job \(jobId))"
+        }
         return "Task created: \(taskId)"
     }
 }
@@ -445,6 +474,7 @@ public actor SchedulerActor {
                 case .claude(let prompt, let workingDir, let model, let maxTurns):
                     logger.info("Firing spawn-claude job \(entry.id)")
                     resultText = try await claudeRunner.run(
+                        jobId: entry.id,
                         prompt: prompt,
                         workingDir: workingDir,
                         model: model,

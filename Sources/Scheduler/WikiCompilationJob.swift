@@ -13,6 +13,14 @@ import Logging
 /// fired by a calendar event of taskType = `internal`.
 enum WikiCompilationJob {
 
+    /// Stable `tasks.sourceRef` for every run of this job.
+    ///
+    /// Unlike spawn-claude jobs (whose task carries the firing calendarEvent's id),
+    /// this internal job creates its own task row and has no jobId in hand — so it
+    /// tags runs with a fixed ref instead. That ref is what lets a new run coalesce
+    /// away an older undispatched one.
+    static let scheduledJobRef = "wiki-compilation"
+
     static let logger: Logger = {
         var l = Logger(label: "sonata.wiki-compilation")
         l.logLevel = .info
@@ -93,13 +101,31 @@ enum WikiCompilationJob {
         let now = nowMs()
 
         try await dbPool.write { db in
+            // Coalesce against any still-undispatched compilation. This job is the
+            // sharpest case for it: the dirty-page manifest is snapshotted into the
+            // PROMPT above, so a run that dispatches hours later rebuilds a page list
+            // that has since moved — and can overwrite a peer's fresh compilation.
+            // The manifest is only true at the moment it is built; if the previous
+            // run never reached a worker, it is not a queued unit of work, it is a
+            // stale photograph. Re-derive, don't replay.
             try db.execute(sql: """
-                INSERT INTO tasks (id, title, prompt, status, priority, assignedTo, source, workingDir, model, maxTurns, createdAt, updatedAt)
-                VALUES (?, ?, ?, 'pending', 'medium', 'scheduler', 'scheduler', ?, ?, ?, ?, ?)
+                UPDATE tasks
+                SET status = 'cancelled', lastError = ?, updatedAt = ?
+                WHERE source = 'scheduler' AND sourceRef = ? AND status = 'pending'
+            """, arguments: [
+                "superseded: its dirty-page manifest was stale before it ever dispatched",
+                now,
+                Self.scheduledJobRef,
+            ])
+
+            try db.execute(sql: """
+                INSERT INTO tasks (id, title, prompt, status, priority, assignedTo, source, sourceRef, workingDir, model, maxTurns, createdAt, updatedAt)
+                VALUES (?, ?, ?, 'pending', 'medium', 'scheduler', 'scheduler', ?, ?, ?, ?, ?, ?)
             """, arguments: [
                 taskId,
                 title,
                 prompt,
+                Self.scheduledJobRef,
                 "\(NSHomeDirectory())/memory",
                 "claude-sonnet-4-6",
                 50,
