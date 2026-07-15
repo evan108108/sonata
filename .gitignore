@@ -39,3 +39,4 @@ logs/
 
 # Personal / host-specific deploy scripts
 scripts/deploy-scout.sh
+scripts/deploy-plugin-scout.sh
