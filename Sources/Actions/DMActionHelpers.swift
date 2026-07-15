@@ -143,10 +143,7 @@ func sonarPushToPeer(
     fromSessionId: String,
     inReplyToMessageId: String? = nil
 ) async -> SonarForwardOutcome {
-    guard let url = URL(string: "http://127.0.0.1:4000/api/messages/send") else {
-        return .failed(reason: "invalid Sonar send URL")
-    }
-    var req = URLRequest(url: url)
+    var req = URLRequest(url: SonarPluginEndpoint.messagesSend)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.timeoutInterval = 10
@@ -205,10 +202,7 @@ func sonarPushAckToPeer(
     messageId: String,
     ackedAtMs: Int64
 ) async -> Bool {
-    guard let url = URL(string: "http://127.0.0.1:4000/api/messages/ack_forward") else {
-        return false
-    }
-    var req = URLRequest(url: url)
+    var req = URLRequest(url: SonarPluginEndpoint.messagesAckForward)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.timeoutInterval = 5

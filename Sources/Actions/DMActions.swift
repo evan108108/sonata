@@ -276,6 +276,26 @@ func enumerateDMTargets(dbPool: DatabasePool) async -> [DMTarget] {
     return out
 }
 
+/// Prepend `[from <peer_name>] ` to an outbound cross-peer DM body so the
+/// receiver's body-vs-`from_peer_name` comparison never mismatches. Skips
+/// the prepend if:
+///   - the caller already opened with `[from ` (whatever name — we trust the
+///     caller's chosen preamble rather than double-stamping)
+///   - self peer name is empty (sonar plugin unreachable — no silent change)
+///   - the body already contains the self peer name in its first 32 chars
+///     (caller signed by convention — no duplication)
+/// Only used for cross-peer sends; local DMs have unambiguous session-key
+/// routing and don't need a preamble.
+func bodyWithSelfPeerPreamble(body: String) async -> String {
+    let selfName = await SonarPeerLookup.selfName()
+    guard !selfName.isEmpty else { return body }
+    let trimmed = body.trimmingCharacters(in: .whitespaces)
+    if trimmed.hasPrefix("[from ") { return body }
+    let head = String(trimmed.prefix(32)).lowercased()
+    if head.contains(selfName.lowercased()) { return body }
+    return "[from \(selfName)] \(body)"
+}
+
 /// Execute the send pipeline against a resolved target. Handles peer vs
 /// local routing, audit persistence, and status/reason mapping. Used by
 /// dm_send and dm_broadcast.
@@ -318,10 +338,19 @@ func sendResolved(
             }
             return DMSendResponse(status: "not_live", messageId: messageId, reason: "peer_offline")
         }
+        // Auto-prepend `[from <peer_name>] ` so the body's identity claim
+        // always matches this Sonata's registered peer name on the receiver
+        // side. Without this the caller's free-form signature ("evan-mac
+        // checking in...") reads as identity-vs-peer-name mismatch to a
+        // careful reader and gets flagged. If the caller already opened with
+        // a preamble (starts with `[from `), we leave it alone. Blank
+        // selfName (sonar unreachable) also leaves the body untouched — no
+        // silent behavior change beyond what the caller wrote.
+        let bodyToSend = await bodyWithSelfPeerPreamble(body: body)
         let outcome = await sonarPushToPeer(
             peerId: peerId,
             messageId: messageId,
-            body: body,
+            body: bodyToSend,
             context: context,
             fromSessionId: senderKey,
             inReplyToMessageId: inReplyToMessageId

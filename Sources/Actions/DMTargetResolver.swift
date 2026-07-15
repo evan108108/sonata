@@ -86,6 +86,19 @@ enum DMTargetResolver {
     }
 }
 
+/// One source of truth for the sonar plugin's HTTP endpoints. If the plugin
+/// ever moves off port 4000 or gains a socket path, this is the only place
+/// to update. All sonar-plugin callers in this module (and DMActionHelpers)
+/// go through here rather than hardcoding the URL.
+enum SonarPluginEndpoint {
+    private static let base = "http://127.0.0.1:4000"
+
+    static let peers = URL(string: "\(base)/api/peers")!
+    static let cardJSON = URL(string: "\(base)/.well-known/sonar/card.json")!
+    static let messagesSend = URL(string: "\(base)/api/messages/send")!
+    static let messagesAckForward = URL(string: "\(base)/api/messages/ack_forward")!
+}
+
 enum SonarPeerLookup {
     struct PeerInfo: Sendable {
         let id: String
@@ -101,8 +114,7 @@ enum SonarPeerLookup {
 
     /// Returns all peers, or nil if the sonar plugin loopback is unreachable.
     static func allPeers() async -> [PeerInfo]? {
-        guard let url = URL(string: "http://127.0.0.1:4000/api/peers") else { return nil }
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: SonarPluginEndpoint.peers)
         req.timeoutInterval = 5
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
@@ -127,8 +139,7 @@ enum SonarPeerLookup {
     /// Fast probe: HEAD the peers endpoint to distinguish "no such peer"
     /// from "sonar offline". Used ONLY on the negative path in dm_send.
     static func pluginReachable() async -> Bool {
-        guard let url = URL(string: "http://127.0.0.1:4000/api/peers") else { return false }
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: SonarPluginEndpoint.peers)
         req.httpMethod = "HEAD"
         req.timeoutInterval = 2
         do {
@@ -143,11 +154,22 @@ enum SonarPeerLookup {
     }
 
     private static let selfCache = SelfInstanceIdCache()
+    private static let selfNameCache = SelfPeerNameCache()
 
     static func isSelf(_ instanceId: String) async -> Bool {
         guard !instanceId.isEmpty else { return false }
         let ourId = await selfCache.get()
         return !ourId.isEmpty && ourId == instanceId
+    }
+
+    /// This Sonata instance's own registered peer name (e.g. "sona" on
+    /// evan-mac, "scout" on the .17 host). Empty string if the sonar plugin
+    /// isn't reachable or the card doesn't carry a name field. Used by
+    /// dm_send to auto-prepend a matching `[from <name>]` preamble to
+    /// outbound peer DMs so receivers never see a body-vs-peer_id identity
+    /// mismatch to flag.
+    static func selfName() async -> String {
+        await selfNameCache.get()
     }
 }
 
@@ -161,10 +183,7 @@ actor SelfInstanceIdCache {
     }
 
     private func fetch() async -> String {
-        guard let url = URL(string: "http://127.0.0.1:4000/.well-known/sonar/card.json") else {
-            return ""
-        }
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: SonarPluginEndpoint.cardJSON)
         req.timeoutInterval = 5
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
@@ -174,6 +193,32 @@ actor SelfInstanceIdCache {
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let id = json["instance_id"] as? String else { return "" }
             return id
+        } catch {
+            return ""
+        }
+    }
+}
+
+actor SelfPeerNameCache {
+    private var cached: String = ""
+
+    func get() async -> String {
+        if !cached.isEmpty { return cached }
+        cached = await fetch()
+        return cached
+    }
+
+    private func fetch() async -> String {
+        var req = URLRequest(url: SonarPluginEndpoint.cardJSON)
+        req.timeoutInterval = 5
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return ""
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = json["name"] as? String else { return "" }
+            return name
         } catch {
             return ""
         }

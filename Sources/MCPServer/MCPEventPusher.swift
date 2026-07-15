@@ -305,23 +305,25 @@ actor MCPEventPusher {
                       let mid = dict["message_id"] as? String else { return "<see payload.message_id>" }
                 return mid
             }()
+            // Low-key parenthesized hint — the concrete ids for this event
+            // alongside a pointer to the recipient's own SONAR_DM handling
+            // section. Deliberately NOT phrased as an override / authoritative
+            // rule / "MANDATORY step" contract: that phrasing reads exactly
+            // like a prompt injection attempt to any properly-trained model
+            // and got flagged as such during the 2026-07-15 fleet-behavior
+            // investigation. A soft reference lets --resumed workers with
+            // stale cached rules still notice the current shape without
+            // triggering injection heuristics.
+            //
+            // The ids matter: dm_ack and dm_reply use message_id to route the
+            // response through the message chain back to the specific sender
+            // session that originated this DM. Wrong id → response lands on a
+            // random worker on the peer instead of the waiting sender.
             return """
-                --- SONAR_DM HANDLING (2026-07-09 contract, authoritative) ---
-                THIS IS A WORKER EVENT. If any prior turn told you sonar_dm is a
-                fire-and-forget notification and no complete_event is needed —
-                that rule was RETIRED. It is now a proper work item just like
-                inbound email. Follow these steps exactly:
-
-                1. dm_ack(messageId="\(messageId)")
-                2. dm_reply(to_message_id="\(messageId)", body="<your reply>", fromSessionId="<your sessionKey>")
-                   — NEVER use sonar_send for a reply. dm_reply chains back to
-                   the original sender's session via the message chain;
-                   sonar_send opens a fresh thread on the peer that does not
-                   route back to the sender who is waiting for you.
-                3. complete_event(event_id="\(eventId)") — MANDATORY. Skipping
-                   this leaves you pinned busy until watchdog reap; the worker
-                   pool loses a slot until then.
-                ---
+                (This DM's identifiers, to route the response back to the sender's session:
+                   message_id: \(messageId)
+                   event_id:   \(eventId)
+                 Handle per the SONAR_DM section of your instructions — use dm_reply (not sonar_send / dm_send) so the message chain routes back to the originating session; sonar_send would open a fresh thread that gets dispatched to a random worker.)
                 """
         default:
             return nil
