@@ -36,3 +36,6 @@ logs/
 
 # Claude Code session-local runtime state (CronCreate lockfile, etc.)
 .claude/
+
+# Personal / host-specific deploy scripts
+scripts/deploy-scout.sh
