@@ -685,19 +685,20 @@ struct SonataApp: App {
                 registry.mountHTTP(on: router, dbPool: pool)
                 registry.mountMetaRoutes(on: router, dbPool: pool)
 
-                // MCP WebSocket router (separate from HTTP router per HB docs)
-                let wsRouter = Router(context: BasicWebSocketRequestContext.self)
-                wsRouter.ws("/mcp", onUpgrade: { inbound, outbound, _ in
-                    let handler = SonataMCPHandler(registry: registry, dbPool: pool)
-                    for try await message in inbound.messages(maxSize: 1 << 20) {
-                        if case .text(let text) = message {
-                            if let response = await handler.handleMessage(text) {
-                                try await outbound.write(.text(response))
-                            }
-                        }
-                    }
-                })
-                logger.info("MCP WebSocket endpoint registered at ws://127.0.0.1:\(port)/mcp")
+                // NOTE (2026-07-16): The WebSocket MCP handler at ws://.../mcp
+                // — served by SonataMCPHandler in Sources/MCP/SonataMCPServer.swift
+                // — was removed here. That handler was the FIRST MCP surface
+                // (predating this file's MCPServer/ implementation) and was left
+                // in place when the HTTP+SSE server became canonical. Nothing
+                // wires to it any more: no `.mcp.json` uses the ws:// URL, no
+                // per-session config Sonata writes references it, and the
+                // dashboard bundle has zero refs. Keeping it meant two
+                // divergent tools/call handlers (the WS one lacked the
+                // empty-args server note and used the old omit-on-success
+                // isError shape), which is exactly the "one refactor updates
+                // half, the other rots" pattern we spent today closing out.
+                // If a WS transport is needed again, forward to
+                // MCPHandshake.handle rather than re-adding a parallel path.
 
                 // In-app MCP HTTP+SSE server — replaces sonata-bridge.ts.
                 // Registry was constructed and published to .shared above,
@@ -796,9 +797,14 @@ struct SonataApp: App {
                     try? await Task.sleep(for: .seconds(1))
                 }
 
+                // WebSocket upgrade removed with the SonataMCPHandler cleanup
+                // above (2026-07-16). Plain HTTP1 now — nothing this server
+                // exposes uses WS. If it comes back, use
+                // `.http1WebSocketUpgrade(webSocketRouter:)` with a real ws
+                // router again.
                 let app = Application(
                     router: router,
-                    server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
+                    server: .http1(),
                     configuration: .init(address: .hostname("127.0.0.1", port: port)),
                     logger: logger
                 )
