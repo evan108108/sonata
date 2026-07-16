@@ -18,25 +18,62 @@ private func recallEstimateTokens(_ text: String) -> Int {
 
 // MARK: - Scoring
 
-private func recallScoreMemory(_ mem: MemoryRow, searchRank: Int, now: Int64, vectorScore: Double? = nil) -> Double {
-    let importance = mem.importance
-    let ageHours = Double(now - mem.createdAt) / (1000 * 60 * 60)
-    let recencyScore = max(0.0, 1.0 - ageHours / (24 * 30))
-    let accessScore = min(1.0, Double(mem.accessCount ?? 0) / 20.0)
-    let searchRelevance = max(0.0, 1.0 - Double(searchRank) / 30.0)
+/// Per-component breakdown of a memory's rank score. Surfaced alongside the
+/// scalar rankScore in the recall response so retrieval is explainable —
+/// callers see WHY a memory bubbled up (structural / semantic / recency /
+/// access / importance / text-match), not just a black-box number.
+///
+/// Modeled after the "magnetic-pull" three-term breakdown in Astralchemist/rig
+/// but extended to Sonata's five real signals. `structural` is a placeholder
+/// (always 0.0) until graph-proximity scoring lands in a follow-up.
+struct RankComponents: Encodable, Sendable {
+    let textRank: Double     // FTS/lexical hit strength
+    let semantic: Double     // vector similarity (0 when no vector hit)
+    let structural: Double   // graph proximity — placeholder for now
+    let importance: Double   // author-declared importance / 10
+    let recency: Double      // decay over max(createdAt, lastAccessedAt)
+    let access: Double       // accessCount fold-in (touch frequency)
+}
 
-    if let vs = vectorScore {
-        return searchRelevance * 0.25
-            + vs * 0.25
-            + (importance / 10.0) * 0.20
-            + recencyScore * 0.15
-            + accessScore * 0.05
+/// Recency now anchors on `max(createdAt, lastAccessedAt)` — the true
+/// "recent activity" signal. Previously used createdAt only, which meant a
+/// month-old memory touched yesterday scored identical to one untouched for
+/// a month, so "what I was just working on" got buried under stale hits.
+private func recallScoreMemory(
+    _ mem: MemoryRow, searchRank: Int, now: Int64, vectorScore: Double? = nil
+) -> (score: Double, components: RankComponents) {
+    let importanceNorm = mem.importance / 10.0
+    let lastActivityMs = max(mem.createdAt, mem.lastAccessedAt ?? 0)
+    let ageHours = Double(now - lastActivityMs) / (1000 * 60 * 60)
+    let recency = max(0.0, 1.0 - ageHours / (24 * 30))
+    let access = min(1.0, Double(mem.accessCount ?? 0) / 20.0)
+    let textRank = max(0.0, 1.0 - Double(searchRank) / 30.0)
+    let semantic = vectorScore ?? 0.0
+    let structural = 0.0  // TODO: graph-proximity term (rig magnetic-pull #3)
+
+    let score: Double
+    if vectorScore != nil {
+        score = textRank * 0.25
+            + semantic * 0.25
+            + importanceNorm * 0.20
+            + recency * 0.15
+            + access * 0.05
     } else {
-        return searchRelevance * 0.40
-            + (importance / 10.0) * 0.20
-            + recencyScore * 0.15
-            + accessScore * 0.05
+        score = textRank * 0.40
+            + importanceNorm * 0.20
+            + recency * 0.15
+            + access * 0.05
     }
+
+    let components = RankComponents(
+        textRank: textRank,
+        semantic: semantic,
+        structural: structural,
+        importance: importanceNorm,
+        recency: recency,
+        access: access
+    )
+    return (score, components)
 }
 
 // MARK: - Response Types
@@ -65,6 +102,7 @@ private struct RecallMemoryAction: Encodable {
     let updatedAt: Int64
     let _searchRank: Int
     let _rankScore: Double
+    let _scoreComponents: RankComponents?
     let _tier: String
 
     func encode(to encoder: Encoder) throws {
@@ -92,6 +130,7 @@ private struct RecallMemoryAction: Encodable {
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encode(_searchRank, forKey: ._searchRank)
         try c.encode(_rankScore, forKey: ._rankScore)
+        try c.encodeIfPresent(_scoreComponents, forKey: ._scoreComponents)
         try c.encode(_tier, forKey: ._tier)
     }
 
@@ -103,7 +142,7 @@ private struct RecallMemoryAction: Encodable {
         case status, supersededBy, revisionOf, revisionNote
         case validFrom, validUntil, project, topic
         case createdAt, updatedAt
-        case _searchRank, _rankScore, _tier
+        case _searchRank, _rankScore, _scoreComponents, _tier
     }
 }
 
@@ -213,6 +252,7 @@ private struct ScoredMemoryAction {
     let row: MemoryRow
     let searchRank: Int
     let rankScore: Double
+    let components: RankComponents
 }
 
 private struct Phase1ResultAction {
@@ -345,6 +385,7 @@ private func recallMakeRecallMemory(
     tags: [String],
     searchRank: Int,
     rankScore: Double,
+    components: RankComponents? = nil,
     tier: String,
     includeContent: Bool,
     overrideL0: String? = nil,
@@ -374,6 +415,7 @@ private func recallMakeRecallMemory(
         updatedAt: mem.updatedAt,
         _searchRank: searchRank,
         _rankScore: rankScore,
+        _scoreComponents: components,
         _tier: tier
     )
 }
@@ -842,25 +884,25 @@ let recallActions: [SonataAction] = [
                 var allScoredMemories: [ScoredMemoryAction] = []
 
                 for (i, mem) in phase1Result.memories.enumerated() {
+                    let (score, comp) = recallScoreMemory(mem, searchRank: i, now: now, vectorScore: vectorScores[mem.id])
                     allScoredMemories.append(ScoredMemoryAction(
-                        row: mem, searchRank: i,
-                        rankScore: recallScoreMemory(mem, searchRank: i, now: now, vectorScore: vectorScores[mem.id])
+                        row: mem, searchRank: i, rankScore: score, components: comp
                     ))
                 }
 
                 for (i, mem) in additionalMemories.enumerated() {
                     guard !existingIds.contains(mem.id) else { continue }
                     let rank = phase1Result.memories.count + i
+                    let (score, comp) = recallScoreMemory(mem, searchRank: rank, now: now, vectorScore: vectorScores[mem.id])
                     allScoredMemories.append(ScoredMemoryAction(
-                        row: mem, searchRank: rank,
-                        rankScore: recallScoreMemory(mem, searchRank: rank, now: now, vectorScore: vectorScores[mem.id])
+                        row: mem, searchRank: rank, rankScore: score, components: comp
                     ))
                 }
 
                 for mem in vectorOnlyMemories {
+                    let (score, comp) = recallScoreMemory(mem, searchRank: 999, now: now, vectorScore: vectorScores[mem.id])
                     allScoredMemories.append(ScoredMemoryAction(
-                        row: mem, searchRank: 999,
-                        rankScore: recallScoreMemory(mem, searchRank: 999, now: now, vectorScore: vectorScores[mem.id])
+                        row: mem, searchRank: 999, rankScore: score, components: comp
                     ))
                 }
 
@@ -920,7 +962,8 @@ let recallActions: [SonataAction] = [
                         if used + l0Tokens > memoryBudget { break }
                         included.append(recallMakeRecallMemory(
                             mem, tags: tags, searchRank: scored.searchRank,
-                            rankScore: scored.rankScore, tier: "l0", includeContent: false,
+                            rankScore: scored.rankScore, components: scored.components,
+                            tier: "l0", includeContent: false,
                             overrideL0: l0Text
                         ))
                         used += l0Tokens
@@ -942,7 +985,8 @@ let recallActions: [SonataAction] = [
                         if used + fullTokens <= memoryBudget {
                             included.append(recallMakeRecallMemory(
                                 mem, tags: tags, searchRank: scored.searchRank,
-                                rankScore: scored.rankScore, tier: "full", includeContent: true
+                                rankScore: scored.rankScore, components: scored.components,
+                                tier: "full", includeContent: true
                             ))
                             used += fullTokens
                             continue
@@ -955,7 +999,8 @@ let recallActions: [SonataAction] = [
                         if used + l1Tokens <= memoryBudget {
                             included.append(recallMakeRecallMemory(
                                 mem, tags: tags, searchRank: scored.searchRank,
-                                rankScore: scored.rankScore, tier: "l1", includeContent: false,
+                                rankScore: scored.rankScore, components: scored.components,
+                                tier: "l1", includeContent: false,
                                 overrideL0: l0Text, overrideL1: l1Text
                             ))
                             used += l1Tokens
@@ -964,7 +1009,8 @@ let recallActions: [SonataAction] = [
 
                         included.append(recallMakeRecallMemory(
                             mem, tags: tags, searchRank: scored.searchRank,
-                            rankScore: scored.rankScore, tier: "l0", includeContent: false,
+                            rankScore: scored.rankScore, components: scored.components,
+                            tier: "l0", includeContent: false,
                             overrideL0: l0Text
                         ))
                         used += l0Tokens
