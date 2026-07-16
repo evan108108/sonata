@@ -69,44 +69,13 @@ final class DMActionsTests: XCTestCase {
         }
     }
 
-    // MARK: routeInbound
-
-    func testRouteInboundPersistsRowForBackfill() async throws {
-        let pool = try makeInMemoryDbPool()
-        let payload: [String: Any] = [
-            "message_id": "abc123",
-            "target_session_id": "session-x",
-            "from_session_id": "sender-1",
-            "from_peer": "peer-pub-hex",
-            "question": "hello",
-            "context": "ctx",
-        ]
-        await DMActions.routeInbound(payload: payload, dbPool: pool, nowFn: { 5_000 })
-
-        // Persisted regardless of whether anyone is SSE-attached.
-        XCTAssertEqual(try dmMessagesCount(pool, target: "session-x"), 1)
-    }
-
-    func testRouteInboundShortCircuitsWhenTargetMissing() async throws {
-        let pool = try makeInMemoryDbPool()
-        await DMActions.routeInbound(payload: ["question": "hello"], dbPool: pool)
-        XCTAssertEqual(try dmMessagesCount(pool), 0)
-    }
-
-    func testRouteInboundIsIdempotentOnMessageId() async throws {
-        let pool = try makeInMemoryDbPool()
-        let payload: [String: Any] = [
-            "message_id": "same",
-            "target_session_id": "session-x",
-            "from_peer": "p",
-            "question": "h",
-        ]
-        await DMActions.routeInbound(payload: payload, dbPool: pool)
-        await DMActions.routeInbound(payload: payload, dbPool: pool)
-
-        // dm_messages INSERT OR IGNORE keeps a single row.
-        XCTAssertEqual(try dmMessagesCount(pool, target: "session-x"), 1)
-    }
+    // The three routeInbound tests that used to live here targeted the
+    // static `DMActions.routeInbound` API which was removed. The equivalent
+    // inbound routing now lives at `DMActionsInbound.routePeerInbound` and
+    // takes a different payload shape and no nowFn injection. If we want
+    // to reinstate coverage there, port the tests against the new API
+    // rather than resurrecting the old one. Left as a deliberate gap
+    // rather than a stale test that lies about what it exercises.
 
     // MARK: dm_send handler — error matrix
 
@@ -162,7 +131,9 @@ final class DMActionsTests: XCTestCase {
     func testDmSendBodyTooLargeReturns422() async throws {
         let pool = try makeInMemoryDbPool()
         let action = dmActions.first { $0.name == "dm_send" }!
-        let bigBody = String(repeating: "x", count: DMLimits.bodyMaxBytes + 1)
+        // DMLimits was removed; the current cap is inlined in DMActions
+        // as 256 KB (see the ≤ 256 KB checks in dm_send/dm_reply/dm_broadcast).
+        let bigBody = String(repeating: "x", count: 256 * 1024 + 1)
         let ctx = ActionContext(
             params: ActionParams([
                 "targetSessionId": "x",

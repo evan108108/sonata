@@ -4,34 +4,26 @@ import Logging
 import NIOCore
 @testable import Sonata
 
-// MCP in-app server test harness. Plan §9.
+// MCP in-app server test harness. Stateless-JSON-RPC edition.
 //
-// Boots:
-// - GRDB DatabasePool against a per-test temp sqlite file (the DM tests use
-//   the same pattern; :memory: refuses WAL).
-// - Full Sonata schema via DatabaseMigrator.registerSonataSchema (G2 gate —
-//   plan called this Schema.applyMigrations(pool); the real entrypoint is
-//   the DatabaseMigrator extension).
-// - ActionRegistry with the modules MCPToolHandlers can dispatch into
-//   (workerEvents, supervisor, AFK, DM) so executeMCPTool resolves them.
-//   Plan §9 called this ActionRegistry.registerAll(into:); the real surface
-//   is registry.register([...]) per module, mirroring SonataApp.swift.
-// - MCPSessionRegistry wired to the pool + ActionRegistry.
+// Since ecfb094 ("eradicate MCPSessionRegistry/MCPSessionState — DB is the
+// sole identity source"), there's no per-session actor to hand tests. The
+// current server model is `MCPHandshake.handle(...)` — a static function
+// that takes sessionKey/role as parameters and reads any per-session state
+// from the shared DB. This harness mirrors that: it provisions the DB and
+// action registry once, then exposes a `handle(...)` shim that calls the
+// production entry point with the parameters spelled out.
 //
 // Each instance is fully isolated — separate DB file, separate registries,
 // fresh MCPNotificationDispatcher (not .shared) so tests don't fight over
 // the global singleton's one-shot bind.
 //
-// No Hummingbird HTTP server. Tests exercise MCPSessionState / registry /
-// SSE writer / dispatcher directly via their actor APIs — the HTTP router
-// is a thin shim over those, and isolating from the network removes the
-// flake surface that random-port HTTP harnesses bring (Hummingbird 2's
-// resolvedPort accessor varies across patch versions, and tests that bind
-// real ports race the OS allocator under parallel test execution).
+// No Hummingbird HTTP server. Tests hit `MCPHandshake.handle` directly —
+// the HTTP router is a thin shim over it, and isolating from the network
+// removes the flake surface random-port harnesses bring.
 struct MCPTestHarness {
     let dbPool: DatabasePool
     let actionRegistry: ActionRegistry
-    let mcpRegistry: MCPSessionRegistry
     let dispatcher: MCPNotificationDispatcher
     private let dbPath: String
 
@@ -51,13 +43,11 @@ struct MCPTestHarness {
         actions.register(taskActions)
         actions.register(taskWatcherActions)
 
-        let mcpRegistry = MCPSessionRegistry(dbPool: pool, actionRegistry: actions)
         let dispatcher = MCPNotificationDispatcher()
 
         return MCPTestHarness(
             dbPool: pool,
             actionRegistry: actions,
-            mcpRegistry: mcpRegistry,
             dispatcher: dispatcher,
             dbPath: dbPath
         )
@@ -67,18 +57,27 @@ struct MCPTestHarness {
         try? FileManager.default.removeItem(atPath: dbPath)
     }
 
-    // Convenience: register a fresh session with a known bearer token and
-    // return the state actor. Mirrors what MCPClaudeConfigWriter.writeAndRegister
-    // does internally without touching ~/.sonata/mcp-cfg on disk.
-    @discardableResult
-    func registerSession(
-        sessionKey: String, role: SessionRole = .worker
-    ) async -> (token: String, state: MCPSessionState) {
-        let token = MCPTokenGenerator.newToken()
-        await mcpRegistry.registerToken(
-            sessionKey: sessionKey, token: token, role: role)
-        let state = await mcpRegistry.getOrCreate(sessionKey) { role }
-        return (token, state)
+    /// Dispatch a single JSON-RPC method through the production
+    /// `MCPHandshake.handle` entrypoint. Returns the raw JSON response
+    /// string (or nil for notifications). Sessions are represented by
+    /// sessionKey + role — the current stateless model doesn't require
+    /// pre-registration for handshake or tools/call to work.
+    func handle(
+        sessionKey: String,
+        role: SessionRole = .worker,
+        method: String,
+        id: Any?,
+        params: [String: Any]
+    ) async -> String? {
+        return await MCPHandshake.handle(
+            method: method,
+            id: id,
+            params: params,
+            sessionKey: sessionKey,
+            role: role,
+            actionRegistry: actionRegistry,
+            dbPool: dbPool
+        )
     }
 }
 

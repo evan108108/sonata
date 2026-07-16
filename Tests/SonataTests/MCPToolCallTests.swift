@@ -24,15 +24,13 @@ final class MCPToolCallTests: XCTestCase {
         try await seedWorkerAndEvent(
             pool: h.dbPool, workerId: "worker-tc1", eventId: "evt-tc1")
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-tc1", role: .worker)
-        let raw = await state.handle(
-            method: "tools/call",
-            id: 10,
+        let raw = await h.handle(
+            sessionKey: "worker-tc1", role: .worker,
+            method: "tools/call", id: 10,
             params: [
                 "name": "complete_event",
                 "arguments": ["event_id": "evt-tc1", "result": "ok"],
-            ]
-        )
+            ])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertNil(result["isError"], "tool call should succeed; got \(result)")
@@ -54,15 +52,13 @@ final class MCPToolCallTests: XCTestCase {
         try await seedWorkerAndEvent(
             pool: h.dbPool, workerId: "worker-tc2", eventId: "evt-tc2")
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-tc2", role: .worker)
-        let raw = await state.handle(
-            method: "tools/call",
-            id: 11,
+        let raw = await h.handle(
+            sessionKey: "worker-tc2", role: .worker,
+            method: "tools/call", id: 11,
             params: [
                 "name": "fail_event",
                 "arguments": ["event_id": "evt-tc2", "error": "test failure"],
-            ]
-        )
+            ])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertNil(result["isError"], "tool call should succeed; got \(result)")
@@ -85,10 +81,10 @@ final class MCPToolCallTests: XCTestCase {
 
         try await seedWorkerAndEvent(
             pool: h.dbPool, workerId: "worker-g1a", eventId: "evt-g1a")
-        let (_, state) = await h.registerSession(sessionKey: "worker-g1a", role: .worker)
 
         // First call — flips status to completed.
-        _ = await state.handle(
+        _ = await h.handle(
+            sessionKey: "worker-g1a", role: .worker,
             method: "tools/call", id: 100,
             params: [
                 "name": "complete_event",
@@ -96,7 +92,8 @@ final class MCPToolCallTests: XCTestCase {
             ])
 
         // Second call — same event_id, must succeed (no isError).
-        let raw2 = await state.handle(
+        let raw2 = await h.handle(
+            sessionKey: "worker-g1a", role: .worker,
             method: "tools/call", id: 101,
             params: [
                 "name": "complete_event",
@@ -125,15 +122,16 @@ final class MCPToolCallTests: XCTestCase {
 
         try await seedWorkerAndEvent(
             pool: h.dbPool, workerId: "worker-g1b", eventId: "evt-g1b")
-        let (_, state) = await h.registerSession(sessionKey: "worker-g1b", role: .worker)
 
-        _ = await state.handle(
+        _ = await h.handle(
+            sessionKey: "worker-g1b", role: .worker,
             method: "tools/call", id: 110,
             params: [
                 "name": "fail_event",
                 "arguments": ["event_id": "evt-g1b", "error": "boom"],
             ])
-        let raw2 = await state.handle(
+        let raw2 = await h.handle(
+            sessionKey: "worker-g1b", role: .worker,
             method: "tools/call", id: 111,
             params: [
                 "name": "fail_event",
@@ -181,8 +179,8 @@ final class MCPToolCallTests: XCTestCase {
             """, arguments: ["task-list-1", "seeded", "test", now, now])
         }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-mtl", role: .worker)
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-mtl", role: .worker,
             method: "tools/call", id: 200,
             params: ["name": "mem_task_list", "arguments": ["limit": 10]])
         let response = try parseJSON(raw)
@@ -201,8 +199,8 @@ final class MCPToolCallTests: XCTestCase {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-mtc1", role: .worker)
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-mtc1", role: .worker,
             method: "tools/call", id: 201,
             params: [
                 "name": "mem_task_create",
@@ -229,8 +227,8 @@ final class MCPToolCallTests: XCTestCase {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-mtc2", role: .worker)
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-mtc2", role: .worker,
             method: "tools/call", id: 202,
             params: [
                 "name": "mem_task_create",
@@ -280,8 +278,8 @@ final class MCPToolCallTests: XCTestCase {
             """, arguments: ["task-get-1", "fetchable", "test", now, now])
         }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-mtg", role: .worker)
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-mtg", role: .worker,
             method: "tools/call", id: 203,
             params: ["name": "mem_task_get", "arguments": ["id": "task-get-1"]])
         let response = try parseJSON(raw)
@@ -297,8 +295,8 @@ final class MCPToolCallTests: XCTestCase {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-unk", role: .worker)
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-unk", role: .worker,
             method: "tools/call", id: 12,
             params: ["name": "definitely_not_a_real_tool", "arguments": [:]])
         let response = try parseJSON(raw)
@@ -310,8 +308,9 @@ final class MCPToolCallTests: XCTestCase {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-mth", role: .worker)
-        let raw = await state.handle(method: "does/not/exist", id: 13, params: [:])
+        let raw = await h.handle(
+            sessionKey: "worker-mth", role: .worker,
+            method: "does/not/exist", id: 13, params: [:])
         let response = try parseJSON(raw)
         let error = try XCTUnwrap(response["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? Int, -32601)
@@ -322,15 +321,21 @@ final class MCPToolCallTests: XCTestCase {
     // collateral damage in the MCPSessionState eradication refactor;
     // nothing caught it for weeks. These two tests exist so the next
     // refactor that quietly removes the note will fail loudly instead.
+    // Use `mem_task_create` for the server-note tests because it's a
+    // dispatcher-registered tool in the test harness (see
+    // MCPTestHarness.make → taskActions) with a required `title` param.
+    // The behavior we're testing is the note-appending machinery, which
+    // fires on ANY tool whose action produces "Missing required parameter"
+    // — the specific tool name is irrelevant to that machinery.
     func testEmptyArgsServerNoteWarnsAgainstRESTShim() async throws {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-svcnote1", role: .worker)
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-svcnote1", role: .worker,
             method: "tools/call", id: 900,
             params: [
-                "name": "mem_store",
+                "name": "mem_task_create",
                 "arguments": [String: Any](),
             ])
         let response = try parseJSON(raw)
@@ -350,11 +355,11 @@ final class MCPToolCallTests: XCTestCase {
         let h = try MCPTestHarness.make()
         defer { h.teardown() }
 
-        let (_, state) = await h.registerSession(sessionKey: "worker-svcnote2", role: .worker)
         // No "arguments" key at all — different failure mode from empty-object.
-        let raw = await state.handle(
+        let raw = await h.handle(
+            sessionKey: "worker-svcnote2", role: .worker,
             method: "tools/call", id: 901,
-            params: ["name": "mem_store"])
+            params: ["name": "mem_task_create"])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertEqual(result["isError"] as? Bool, true)
