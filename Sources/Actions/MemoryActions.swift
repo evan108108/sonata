@@ -296,7 +296,17 @@ let memoryActions: [SonataAction] = [
     // POST /api/memory — store a new memory
     SonataAction(
         name: "mem_store",
-        description: "Store a new memory with type, tags, source, and importance.",
+        description: """
+            Store a new memory with type, tags, source, and importance.
+
+            For durable memories (importance ≥ 7, hard rules, feedback, decisions, learnings, references), annotate entities inline in the SAME call — one atomic operation instead of three:
+              entities='[{"name":"Scout","type":"project"}]'
+              relations='[{"entity":"Scout","relation":"about"}]'
+
+            The server upserts entities case-insensitively by (name, type) — reuses existing rows so repeated stores against the same entity don't fork it into "Scout"/"scout"/"Scout Leader". Memories with entity edges get a `structural` boost in mem_recall's ranking blend, so annotated memories are discoverable via graph proximity beyond lexical match.
+
+            Skip annotation for ephemeral content: status updates, chat snapshots, subagent-stop-hook notes with importance < 7.
+            """,
         group: "/api/memory",
         path: "/",
         method: .post,

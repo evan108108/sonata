@@ -728,7 +728,16 @@ let recallActions: [SonataAction] = [
     // GET /api/recall — budget-aware multi-strategy recall
     SonataAction(
         name: "mem_recall",
-        description: "Multi-strategy memory recall — text search + entity + vector + graph + wiki pages. Primary way to retrieve context about any topic.",
+        description: """
+            Multi-strategy memory recall — text search + entity + vector + graph proximity + wiki pages. Primary way to retrieve context about any topic.
+
+            Response returns memories with `_scoreComponents: {textRank, semantic, structural, structuralDirect, structuralNeighbor, importance, recency, access}` alongside the scalar `_rankScore` so ranking is explainable, not a black-box number.
+
+            Three knobs when you want to override the defaults:
+              * `structuralMode: off | direct | expanded` — graph-proximity blend. Default `direct` boosts memories with a direct entity edge to a query anchor. `expanded` also promotes 1-hop neighbors at half strength.
+              * `recencyMode: linear | recent` — `linear` (default) uses activity age (max(createdAt, lastAccessedAt)); `recent` uses creation age with a 48h exponential half-life for "made recently" queries.
+              * `after` / `before` — hard-filter by createdAt. Accept unix ms or ISO date. Use these over `recencyMode=recent` when you know the range — they're exact.
+            """,
         group: "/api/recall",
         path: "",
         method: .get,
