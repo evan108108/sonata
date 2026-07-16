@@ -151,6 +151,106 @@ private func flagDirtyFromMemory(
     }
 }
 
+/// Parse the inline `entities` and `relations` JSON params on `mem_store`
+/// and persist them alongside the just-created memory. Best-effort — errors
+/// here don't roll back the memory row; annotation is additive polish.
+///
+/// `entities` JSON: `[{"name": "Scout", "type": "project", "description": "..."}]`
+///   Existing entities matching (name, type) are reused (dedup'd).
+///
+/// `relations` JSON: `[{"entity": "Scout", "relation": "about"}]`
+///   `entity` matches by NAME against the just-upserted set OR pre-existing
+///   entities. Skips silently if the name can't be resolved — makes calls
+///   idempotent when an entity was already annotated via a prior store.
+private func storeInlineEntitiesAndRelations(
+    memoryId: String,
+    entitiesJSON: String?,
+    relationsJSON: String?,
+    now: Int64,
+    dbPool: DatabasePool
+) async throws {
+    // Parse loosely — malformed JSON just skips annotation.
+    let entityDefs: [(name: String, type: String, description: String)] = {
+        guard let data = entitiesJSON?.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return arr.compactMap { row in
+            guard let name = (row["name"] as? String)?.trimmingCharacters(in: .whitespaces), !name.isEmpty,
+                  let type = (row["type"] as? String)?.trimmingCharacters(in: .whitespaces), !type.isEmpty
+            else { return nil }
+            let desc = (row["description"] as? String) ?? ""
+            return (name, type, desc)
+        }
+    }()
+
+    let relationDefs: [(entity: String, relation: String)] = {
+        guard let data = relationsJSON?.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return arr.compactMap { row in
+            guard let entity = (row["entity"] as? String)?.trimmingCharacters(in: .whitespaces), !entity.isEmpty,
+                  let relation = (row["relation"] as? String)?.trimmingCharacters(in: .whitespaces), !relation.isEmpty
+            else { return nil }
+            return (entity, relation)
+        }
+    }()
+
+    guard !entityDefs.isEmpty || !relationDefs.isEmpty else { return }
+
+    try await dbPool.write { db in
+        // (1) Upsert entities. Look up existing by (name, type) case-insensitively.
+        //     entityIdByName is used by (2) below to resolve relation targets by name.
+        var entityIdByName: [String: String] = [:]  // key = lowercased name
+        for def in entityDefs {
+            let existing = try Row.fetchOne(
+                db,
+                sql: "SELECT id FROM entities WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?) LIMIT 1",
+                arguments: [def.name, def.type]
+            )
+            if let existing, let id = existing["id"] as? String {
+                entityIdByName[def.name.lowercased()] = id
+            } else {
+                let newId = newUUID()
+                try db.execute(
+                    sql: """
+                    INSERT INTO entities
+                        (id, name, type, description, attributes, referenceCount, createdAt, updatedAt)
+                    VALUES (?, ?, ?, ?, NULL, 0, ?, ?)
+                    """,
+                    arguments: [newId, def.name, def.type, def.description, now, now]
+                )
+                entityIdByName[def.name.lowercased()] = newId
+            }
+        }
+
+        // (2) Create relations. Resolve entity by name — first the just-upserted
+        //     set, then fall back to any pre-existing entity with that name.
+        for def in relationDefs {
+            let key = def.entity.lowercased()
+            let entityId: String
+            if let id = entityIdByName[key] {
+                entityId = id
+            } else {
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: "SELECT id FROM entities WHERE LOWER(name) = LOWER(?) LIMIT 1",
+                    arguments: [def.entity]
+                ), let id = row["id"] as? String else {
+                    continue  // No entity to link — skip this relation silently.
+                }
+                entityId = id
+            }
+            let relId = newUUID()
+            try db.execute(
+                sql: """
+                INSERT INTO relations
+                    (id, sourceId, sourceType, targetId, targetType, relation, createdAt)
+                VALUES (?, ?, 'memory', ?, 'entity', ?, ?)
+                """,
+                arguments: [relId, memoryId, entityId, def.relation, now]
+            )
+        }
+    }
+}
+
 func memRowToResponse(_ row: MemoryRow) -> MemoryResponse {
     MemoryResponse(
         _id: row.id,
@@ -214,6 +314,12 @@ let memoryActions: [SonataAction] = [
             ActionParam("createdAt", .integer, description: "Override createdAt (epoch ms)"),
             ActionParam("l0", .string, description: "Pre-computed L0 (skips pith generation)"),
             ActionParam("l1", .string, description: "Pre-computed L1 (skips pith generation)"),
+            ActionParam("entities", .string, description: """
+                Optional JSON array of entities to upsert alongside this memory: `[{"name": "Scout", "type": "project", "description": "..."}]`. Existing entities matching by (name, type) are reused. Use this on durable memories (importance ≥ 7, hard rules, decisions, learnings) so future recall can surface them via graph proximity — a single mem_store call is preferable to a follow-up mem_entity_upsert.
+                """),
+            ActionParam("relations", .string, description: """
+                Optional JSON array of relations linking this memory to entities: `[{"entity": "Scout", "relation": "about"}]`. The `entity` field is the name (matched against the just-upserted set OR existing entities). Common relation types: `about`, `mentions`, `learned_from`, `part_of`, `related_to`. Pair with `entities` on the same call for one-shot annotation.
+                """),
         ],
         handler: { ctx in
             let content = try ctx.params.requireTextBody("content", pathKey: "contentPath")
@@ -279,6 +385,21 @@ let memoryActions: [SonataAction] = [
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+
+            // Inline entity + relation annotation. Parsed from JSON strings
+            // (MCP's structured-arg types can't express arrays-of-objects
+            // natively). Upserts entities dedup'd by (name, type), then
+            // creates memory→entity relations against the resolved ids.
+            // Failures here are best-effort — the memory row is already
+            // persisted, we don't want annotation errors to lose content.
+            let entitiesJSON = ctx.params.string("entities")
+            let relationsJSON = ctx.params.string("relations")
+            if entitiesJSON != nil || relationsJSON != nil {
+                try? await storeInlineEntitiesAndRelations(
+                    memoryId: id, entitiesJSON: entitiesJSON,
+                    relationsJSON: relationsJSON, now: now, dbPool: ctx.dbPool
+                )
             }
 
             // Embed on insert — local model, zero marginal cost. Detached so

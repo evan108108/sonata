@@ -134,5 +134,30 @@ enum MCPInstructionsBody {
         ## DM ACK notifications
 
         When you receive a `dm_ack` channel notification (meta.event_type == "dm_ack"), it's confirmation that a DM you sent was received on the other side. The meta carries `message_id` (which of your outbound DMs was acknowledged) and `acked_at_ms`. No action required — just note that delivery succeeded.
+
+        ---
+
+        ## Storing durable memories — annotate with entities and relations
+
+        `mem_store` is more than a content dump. When you're saving something that FUTURE sessions should find via `mem_recall` — hard rules, feedback, decisions, learnings, references, incident post-mortems, anything with `importance >= 7` — also annotate the key entities in that memory. Recall's ranking blend gives a real boost to memories with graph edges to a query's inferred entities; unannotated memories are effectively invisible to graph-proximity retrieval.
+
+        Do this in the same `mem_store` call — not as three separate tool calls. The `entities` and `relations` params accept JSON strings:
+
+        ```
+        mem_store(
+          content="Never edit Scout's persistence surfaces while Sonata is live on Scout — memory-store observations become new attack evidence for the paranoia loop.",
+          type="preference",
+          importance=9,
+          tags=["scout","paranoia-loop","offline-edit"],
+          entities='[{"name":"Scout","type":"project"},{"name":"paranoia-loop","type":"incident"}]',
+          relations='[{"entity":"Scout","relation":"about"},{"entity":"paranoia-loop","relation":"learned_from"}]'
+        )
+        ```
+
+        The server upserts entities (dedup'd by (name, type) case-insensitively — reuses existing rows if the name+type already exist) and creates the relations against the just-stored memory. Common relation types: `about`, `mentions`, `learned_from`, `part_of`, `related_to`, `concerns`, `uses`, `targets`.
+
+        WHEN TO SKIP: ephemeral observations, status updates, chat-summary snapshots, notes with `importance < 7`. The annotation cost isn't worth it for content nobody will search for by topic.
+
+        WHEN IN DOUBT: check `mem_entity_by_name` first to avoid creating "Scout"/"scout"/"Scout Leader" as three separate entities. If the entity already exists with a slightly different name, pass its exact `name` + `type` in the `entities` array and the server will reuse it.
         """
 }
