@@ -317,6 +317,55 @@ final class MCPToolCallTests: XCTestCase {
         XCTAssertEqual(error["code"] as? Int, -32601)
     }
 
+    // Fix-at-root for the 616305e → ecfb094 silent regression. The server
+    // note that steered workers away from the (banned) REST shim was
+    // collateral damage in the MCPSessionState eradication refactor;
+    // nothing caught it for weeks. These two tests exist so the next
+    // refactor that quietly removes the note will fail loudly instead.
+    func testEmptyArgsServerNoteWarnsAgainstRESTShim() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        let (_, state) = await h.registerSession(sessionKey: "worker-svcnote1", role: .worker)
+        let raw = await state.handle(
+            method: "tools/call", id: 900,
+            params: [
+                "name": "mem_store",
+                "arguments": [String: Any](),
+            ])
+        let response = try parseJSON(raw)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        XCTAssertTrue(text.contains("Missing required parameter"),
+            "expected the underlying error to still be present, got: \(text)")
+        XCTAssertTrue(text.contains("Do NOT fall back to a REST shim"),
+            "empty-args server note must steer away from the REST shim; got: \(text)")
+        XCTAssertTrue(text.contains("model-output issue"),
+            "empty-args server note must attribute the failure to model output; got: \(text)")
+    }
+
+    func testAbsentArgsServerNoteFlagsMalformedEnvelope() async throws {
+        let h = try MCPTestHarness.make()
+        defer { h.teardown() }
+
+        let (_, state) = await h.registerSession(sessionKey: "worker-svcnote2", role: .worker)
+        // No "arguments" key at all — different failure mode from empty-object.
+        let raw = await state.handle(
+            method: "tools/call", id: 901,
+            params: ["name": "mem_store"])
+        let response = try parseJSON(raw)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        XCTAssertTrue(text.contains("was absent"),
+            "absent-arguments server note must call out the shape; got: \(text)")
+        XCTAssertTrue(text.contains("malformed envelope") || text.contains("MCP client is dropping"),
+            "absent-arguments note must point at envelope/client, not model; got: \(text)")
+    }
+
     // MARK: - shared helpers
 
     private func seedWorkerAndEvent(

@@ -131,7 +131,23 @@ enum MCPHandshake {
         guard let toolName = params["name"] as? String else {
             return jsonRPCErrorResult(id: id, code: -32602, message: "Missing tool name")
         }
-        let args = params["arguments"] as? [String: Any] ?? [:]
+
+        // Distinguish absent / null / empty-object / populated for the
+        // server-note diagnostic below. `args` (coerced to `[:]`) collapses
+        // those cases, so we compute this from the RAW value before coercion.
+        let rawArguments = params["arguments"]
+        let argsShape: String
+        switch rawArguments {
+        case nil:
+            argsShape = "absent"
+        case is NSNull:
+            argsShape = "null"
+        case let dict as [String: Any]:
+            argsShape = dict.isEmpty ? "empty-object" : "populated"
+        default:
+            argsShape = "wrong-type"
+        }
+        let args = rawArguments as? [String: Any] ?? [:]
 
         // Worker tool-denial check. Only enforced
         // for worker sessions; supervisor/interactive can use any registered
@@ -153,7 +169,40 @@ enum MCPHandshake {
             role: role, sessionKey: sessionKey,
             actionRegistry: actionRegistry, dbPool: dbPool
         )
-        let content: [[String: Any]] = [["type": "text", "text": output]]
+
+        // Server note on missing-required-parameter failures. Ported forward
+        // from the pre-ecfb094 MCPSessionState.handleToolsCall (originally
+        // corrected in 616305e "flip empty-args server note (was nudging
+        // workers into REST shim)"). The correct diagnosis was collateral
+        // damage when MCPSessionState was eradicated; workers spent weeks
+        // seeing the bare "Missing required parameter" error with no
+        // steering, which sent them chasing whichever contradictory memory
+        // they recalled first. Do NOT delete this without also updating
+        // MCPToolCallTests.testEmptyArgsServerNote* — those tests exist so
+        // the next type-eradication refactor can't silently remove it again.
+        var finalOutput = output
+        if !success, output.contains("Missing required parameter") {
+            switch argsShape {
+            case "empty-object":
+                finalOutput += "\n\n[server note] You sent `params.arguments = {}` "
+                    + "for tool '\(toolName)' — an empty object. The arguments "
+                    + "were NOT dropped in transit; they were never in your "
+                    + "request. This is a model-output issue. Re-emit the "
+                    + "tool call with a populated arguments object. Do NOT "
+                    + "fall back to a REST shim — the MCP transport is fine."
+            case "absent", "null":
+                finalOutput += "\n\n[server note] `params.arguments` was "
+                    + "\(argsShape) in your tools/call for '\(toolName)'. "
+                    + "The field is required by the JSON-RPC envelope; "
+                    + "either your client stripped it or you emitted a "
+                    + "malformed envelope. Retry the call; if it persists, "
+                    + "the MCP client is dropping arguments."
+            default:
+                break
+            }
+        }
+
+        let content: [[String: Any]] = [["type": "text", "text": finalOutput]]
         let result: [String: Any] = [
             "content": content,
             "isError": !success,
