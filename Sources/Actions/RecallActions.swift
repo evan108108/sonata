@@ -63,6 +63,50 @@ enum StructuralMode: String {
     }
 }
 
+/// How the recency term decays with age of most-recent-activity.
+///  * `.linear` — 1.0 at age 0, 0.0 at age 30 days. Current default; every
+///    memory in the last week sits near 0.97-1.00 so the term rarely
+///    separates them.
+///  * `.recent` — exponential half-life 48 h. Age 24 h → 0.71, 48 h → 0.50,
+///    5 days → 0.18. Much sharper "today > yesterday > last week" ordering.
+enum RecencyMode: String {
+    case linear, recent
+
+    static func parse(_ raw: String?) -> RecencyMode {
+        switch raw?.lowercased() {
+        case "recent": return .recent
+        case "linear": return .linear
+        default:
+            let defaultRaw = UserDefaults.standard.string(forKey: "recallRecencyMode")?.lowercased()
+            return defaultRaw == "recent" ? .recent : .linear
+        }
+    }
+}
+
+/// Parse `after`/`before` params. Accepts either a numeric unix-ms string
+/// or an ISO-8601 date/datetime. Returns nil if empty, throws on unparseable.
+private func parseTimeParam(_ raw: String?, endOfDay: Bool) -> Int64? {
+    guard let raw, !raw.isEmpty else { return nil }
+    if let ms = Int64(raw) { return ms }
+    let formatters: [DateFormatter] = {
+        let f1 = DateFormatter(); f1.dateFormat = "yyyy-MM-dd"; f1.timeZone = TimeZone(identifier: "UTC")
+        let f2 = DateFormatter(); f2.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"; f2.timeZone = TimeZone(identifier: "UTC")
+        let f3 = DateFormatter(); f3.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXX"
+        return [f1, f2, f3]
+    }()
+    for f in formatters {
+        if var d = f.date(from: raw) {
+            // "yyyy-MM-dd" is a day; if this is the `before` bound, roll
+            // forward to end-of-day so `before="2026-07-15"` is inclusive.
+            if endOfDay && f.dateFormat == "yyyy-MM-dd" {
+                d = d.addingTimeInterval(24 * 60 * 60 - 1)
+            }
+            return Int64(d.timeIntervalSince1970 * 1000)
+        }
+    }
+    return nil
+}
+
 /// Recency anchors on `max(createdAt, lastAccessedAt)` — the true "recent
 /// activity" signal (createdAt alone buried recently-touched memories under
 /// stale hits).
@@ -81,12 +125,20 @@ private func recallScoreMemory(
     vectorScore: Double? = nil,
     structuralScore: Double = 0.0,
     structuralDirect: Bool = false,
-    structuralNeighbor: Bool = false
+    structuralNeighbor: Bool = false,
+    recencyMode: RecencyMode = .linear
 ) -> (score: Double, components: RankComponents) {
     let importanceNorm = mem.importance / 10.0
     let lastActivityMs = max(mem.createdAt, mem.lastAccessedAt ?? 0)
     let ageHours = Double(now - lastActivityMs) / (1000 * 60 * 60)
-    let recency = max(0.0, 1.0 - ageHours / (24 * 30))
+    let recency: Double = {
+        switch recencyMode {
+        case .linear: return max(0.0, 1.0 - ageHours / (24 * 30))
+        case .recent:
+            // Half-life 48 h — sharp separation between "today" and older.
+            return max(0.0, pow(0.5, ageHours / 48.0))
+        }
+    }()
     let access = min(1.0, Double(mem.accessCount ?? 0) / 20.0)
     let textRank = max(0.0, 1.0 - Double(searchRank) / 30.0)
     let semantic = vectorScore ?? 0.0
@@ -673,6 +725,9 @@ let recallActions: [SonataAction] = [
             ActionParam("wander", .string, description: "'false' to disable wander (default enabled)"),
             ActionParam("tier", .string, description: "Response tier: 'l0' (id+abstract only, ~10x smaller) or 'full' (LOD-packed bodies). HTTP default: full. MCP default: l0."),
             ActionParam("structuralMode", .string, description: "Graph-proximity mode: 'off' | 'direct' (default; 1.0 for direct edge) | 'expanded' (1.0 direct, 0.5 for 1-hop neighbors of a query entity). Overridable per-request; persistent default is UserDefaults `recallStructuralMode`."),
+            ActionParam("recencyMode", .string, description: "Recency curve: 'linear' (default; linear decay over 30 d) | 'recent' (exponential half-life 48 h — sharp today>yesterday>last-week ordering). Persistent default in UserDefaults `recallRecencyMode`."),
+            ActionParam("after", .string, description: "Only include memories created on/after this time. Accepts unix ms (`1721001600000`) or ISO date (`2026-07-15` / `2026-07-15T14:30:00Z`)."),
+            ActionParam("before", .string, description: "Only include memories created on/before this time. Accepts unix ms or ISO date; `2026-07-15` is inclusive of the whole day (rolled to end-of-day UTC)."),
         ],
         handler: { ctx in
             let rawTopic = try ctx.params.require("topic")
@@ -685,6 +740,9 @@ let recallActions: [SonataAction] = [
             let tierParam = (ctx.params.string("tier") ?? "full").lowercased()
             let tier = (tierParam == "l0") ? "l0" : "full"
             let structuralMode = StructuralMode.parse(ctx.params.string("structuralMode"))
+            let recencyMode = RecencyMode.parse(ctx.params.string("recencyMode"))
+            let afterMs = parseTimeParam(ctx.params.string("after"), endOfDay: false)
+            let beforeMs = parseTimeParam(ctx.params.string("before"), endOfDay: true)
 
             let dbPool = ctx.dbPool
             let t0 = DispatchTime.now()
@@ -1031,13 +1089,25 @@ let recallActions: [SonataAction] = [
                     }
                 }
 
+                // Time-window post-filter. Applied uniformly across all three
+                // candidate lists (FTS, additional, vector-only) so callers
+                // don't have to know which path a match came from. Empty
+                // bounds pass everything through.
+                func inTimeWindow(_ mem: MemoryRow) -> Bool {
+                    if let a = afterMs, mem.createdAt < a { return false }
+                    if let b = beforeMs, mem.createdAt > b { return false }
+                    return true
+                }
+
                 for (i, mem) in phase1Result.memories.enumerated() {
+                    guard inTimeWindow(mem) else { continue }
                     let (score, comp) = recallScoreMemory(
                         mem, searchRank: i, now: now,
                         vectorScore: vectorScores[mem.id],
                         structuralScore: structuralFor(mem.id),
                         structuralDirect: directGraphHits.contains(mem.id),
-                        structuralNeighbor: neighborGraphHits.contains(mem.id)
+                        structuralNeighbor: neighborGraphHits.contains(mem.id),
+                        recencyMode: recencyMode
                     )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: i, rankScore: score, components: comp
@@ -1046,13 +1116,15 @@ let recallActions: [SonataAction] = [
 
                 for (i, mem) in additionalMemories.enumerated() {
                     guard !existingIds.contains(mem.id) else { continue }
+                    guard inTimeWindow(mem) else { continue }
                     let rank = phase1Result.memories.count + i
                     let (score, comp) = recallScoreMemory(
                         mem, searchRank: rank, now: now,
                         vectorScore: vectorScores[mem.id],
                         structuralScore: structuralFor(mem.id),
                         structuralDirect: directGraphHits.contains(mem.id),
-                        structuralNeighbor: neighborGraphHits.contains(mem.id)
+                        structuralNeighbor: neighborGraphHits.contains(mem.id),
+                        recencyMode: recencyMode
                     )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: rank, rankScore: score, components: comp
@@ -1060,17 +1132,21 @@ let recallActions: [SonataAction] = [
                 }
 
                 for mem in vectorOnlyMemories {
+                    guard inTimeWindow(mem) else { continue }
                     let (score, comp) = recallScoreMemory(
                         mem, searchRank: 999, now: now,
                         vectorScore: vectorScores[mem.id],
                         structuralScore: structuralFor(mem.id),
                         structuralDirect: directGraphHits.contains(mem.id),
-                        structuralNeighbor: neighborGraphHits.contains(mem.id)
+                        structuralNeighbor: neighborGraphHits.contains(mem.id),
+                        recencyMode: recencyMode
                     )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: 999, rankScore: score, components: comp
                     ))
                 }
+                timings["recencyMode"] = recencyMode == .linear ? 0 : 1
+                if afterMs != nil || beforeMs != nil { timings["timeFilterActive"] = 1 }
 
                 let filtered = allScoredMemories.filter { scored in
                     let m = scored.row
