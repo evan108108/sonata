@@ -63,12 +63,15 @@ enum StructuralMode: String {
     }
 }
 
-/// How the recency term decays with age of most-recent-activity.
-///  * `.linear` — 1.0 at age 0, 0.0 at age 30 days. Current default; every
-///    memory in the last week sits near 0.97-1.00 so the term rarely
-///    separates them.
-///  * `.recent` — exponential half-life 48 h. Age 24 h → 0.71, 48 h → 0.50,
-///    5 days → 0.18. Much sharper "today > yesterday > last week" ordering.
+/// How the recency term computes.
+///  * `.linear` — anchors on `max(createdAt, lastAccessedAt)` (activity
+///    age), linear decay over 30 days. "What I was just working on"
+///    even if the memory is months old — recent touches bump it up.
+///  * `.recent` — anchors on `createdAt` (creation age), exponential
+///    half-life 48 h. Age 24 h → 0.71, 48 h → 0.50, 5 days → 0.18.
+///    Sharp "today > yesterday > last week" ordering. Uses createdAt
+///    NOT lastAccessedAt because otherwise a prior mem_recall's touch
+///    pins ageHours ≈ 0 and old memories mimic fresh ones.
 enum RecencyMode: String {
     case linear, recent
 
@@ -129,8 +132,21 @@ private func recallScoreMemory(
     recencyMode: RecencyMode = .linear
 ) -> (score: Double, components: RankComponents) {
     let importanceNorm = mem.importance / 10.0
-    let lastActivityMs = max(mem.createdAt, mem.lastAccessedAt ?? 0)
-    let ageHours = Double(now - lastActivityMs) / (1000 * 60 * 60)
+    // Recency anchors differ by mode intentionally:
+    //   * linear mode = activity age → max(createdAt, lastAccessedAt).
+    //     Surfaces "what I was just working on" even for old memories.
+    //   * recent mode = creation age → createdAt only.
+    //     Surfaces "what I MADE recently". Prevents mem_recall's own
+    //     lastAccessedAt bumps from making 4-month-old memories look
+    //     as fresh as brand-new ones (they never separate otherwise
+    //     because touching them via a prior recall pins ageHours ≈ 0).
+    let anchorMs: Int64 = {
+        switch recencyMode {
+        case .linear: return max(mem.createdAt, mem.lastAccessedAt ?? 0)
+        case .recent: return mem.createdAt
+        }
+    }()
+    let ageHours = Double(now - anchorMs) / (1000 * 60 * 60)
     let recency: Double = {
         switch recencyMode {
         case .linear: return max(0.0, 1.0 - ageHours / (24 * 30))
