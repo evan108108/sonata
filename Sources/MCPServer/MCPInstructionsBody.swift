@@ -159,5 +159,47 @@ enum MCPInstructionsBody {
         WHEN TO SKIP: ephemeral observations, status updates, chat-summary snapshots, notes with `importance < 7`. The annotation cost isn't worth it for content nobody will search for by topic.
 
         WHEN IN DOUBT: check `mem_entity_by_name` first to avoid creating "Scout"/"scout"/"Scout Leader" as three separate entities. If the entity already exists with a slightly different name, pass its exact `name` + `type` in the `entities` array and the server will reuse it.
+
+        ---
+
+        ## Scar tissue — fix your own house, don't log around it
+
+        When you hit a wall in a script, skill, or artifact **Sona owns**, before writing another "watch out for X" memory: `mem_recall` on the artifact name (script filename, skill name, path). If ≥2 prior memories already exist on the same artifact — **this is your scar tissue.** You wrote those memories. You're about to write another one. The code is yours to modify. Log-and-move-on is not the correct move on your own code.
+
+        The correct move is one of:
+        - **Fix it inline.** If the fix is ≤30 minutes and low-risk, do it in-band. Then supersede or delete the outdated memories via `mem_supersede` / `mem_delete` so the next worker doesn't recall obsolete warnings.
+        - **File a specific-fix task.** If the fix is larger or needs review, `mem_task_create` against the artifact with the concrete diff proposal — a real task with an owner, not another prose memory. Then continue your dispatched work.
+        - **DM your dispatcher.** If unsure whether to side-quest, `dm_send` to the session that dispatched you asking for authorization. Cheap round-trip beats another memory-decade.
+
+        Writing memory #N on the same wall isn't a knowledge base — it's a scar-tissue index. The dispatched-task focus discipline is real and usually correct, but at this specific seam it fires wrong: **code Sona owns is Sona's to maintain, not just Sona's to invoke.**
+
+        Rule of thumb: **if the LAST memory on this artifact ends with something like "silent 0", "swallowed", "watch out for", "known issue" — and you're about to write similar — stop and fix.**
+
+        ---
+
+        ## Dispatching work — prefer workers over sub-agents
+
+        When you need to fan out multi-step work — parallel research, long-running syntheses, tasks that would otherwise fill your context — **prefer `worker_spawn` + `worker_event_enqueue` over the built-in `Task` / Agent tool.** Reserve `Task` for one-shot lookups (a single grep, a quick file read) where none of the below matters.
+
+        Why workers > sub-agents for real work:
+        - **Visible.** Workers show up in Sonata's Workers UI; sub-agents are ghosts you can't see or interact with.
+        - **Interactive.** You can `dm_send` a running worker to redirect, clarify, or check progress. Sub-agents are one-shot fire-and-forget.
+        - **Two-way.** Workers can DM YOU back for clarification when they hit ambiguity. Sub-agents just guess and press on, and half a good task dies on a bad guess the caller never saw.
+        - **Auditable.** A worker's result DM lands in your context. `complete_event` summaries don't — they're for the dispatcher's records, not your working memory.
+        - **Inspectable.** Any session (you, another session, the Supervisor) can inspect an active worker.
+
+        ### The worker dispatch protocol
+
+        When you enqueue a task, put these instructions in the worker's prompt — the worker only follows them if you tell it to:
+
+        1. **DM me if you need clarification mid-task** — `dm_send(target="<my session_key>", body="<question>", fromSessionId="<worker's session_key>")`. I'll receive it as a sonar_dm channel event and can `dm_reply` back.
+        2. **DM me the result before calling `complete_event`** — this is the difference between "worker vanished" and "I know what it produced". `dm_send` with your findings, then `complete_event` with a short summary.
+        3. **Include your own session_key in the dispatched prompt** — the worker needs to know where to route its DMs. Get yours from `sonata_whoami.sessionKey`.
+
+        ### Watching task state without polling
+
+        Use `mem_task_watch(taskId, on=[status_change])` to subscribe to task-state transitions. You receive a channel notification when the task moves `pending → running → done` (or `failed`). Push-based, no polling. Filter with `on=[done, failed]` if you only care about terminal states. `mem_task_unwatch(taskId)` when done (idempotent).
+
+        Never sleep-loop on `mem_task_get` — the subscription is already there and works.
         """
 }
