@@ -35,12 +35,23 @@ struct RankComponents: Encodable, Sendable {
     let access: Double       // accessCount fold-in (touch frequency)
 }
 
-/// Recency now anchors on `max(createdAt, lastAccessedAt)` — the true
-/// "recent activity" signal. Previously used createdAt only, which meant a
-/// month-old memory touched yesterday scored identical to one untouched for
-/// a month, so "what I was just working on" got buried under stale hits.
+/// Recency anchors on `max(createdAt, lastAccessedAt)` — the true "recent
+/// activity" signal (createdAt alone buried recently-touched memories under
+/// stale hits).
+///
+/// `structuralScore` folds in the graph-proximity term (rig magnetic-pull #3):
+/// 1.0 when this memory has a `relations` edge directly to any of the query's
+/// FTS-matched entities, 0.0 otherwise. Callers that have no entity context
+/// (mem_fetch_full) leave it as the default 0.0 — the weight then falls out
+/// of the blend for those paths, leaving the other four terms untouched.
+///
+/// Weights (with-vector path): text/semantic/structural share 0.55 across
+/// three query-derived signals; importance/recency stay at 0.20/0.15 as
+/// stable priors; access at 0.05.
 private func recallScoreMemory(
-    _ mem: MemoryRow, searchRank: Int, now: Int64, vectorScore: Double? = nil
+    _ mem: MemoryRow, searchRank: Int, now: Int64,
+    vectorScore: Double? = nil,
+    structuralScore: Double = 0.0
 ) -> (score: Double, components: RankComponents) {
     let importanceNorm = mem.importance / 10.0
     let lastActivityMs = max(mem.createdAt, mem.lastAccessedAt ?? 0)
@@ -49,17 +60,20 @@ private func recallScoreMemory(
     let access = min(1.0, Double(mem.accessCount ?? 0) / 20.0)
     let textRank = max(0.0, 1.0 - Double(searchRank) / 30.0)
     let semantic = vectorScore ?? 0.0
-    let structural = 0.0  // TODO: graph-proximity term (rig magnetic-pull #3)
+    let structural = max(0.0, min(1.0, structuralScore))
 
     let score: Double
     if vectorScore != nil {
-        score = textRank * 0.25
-            + semantic * 0.25
+        score = textRank * 0.20
+            + semantic * 0.20
+            + structural * 0.15
             + importanceNorm * 0.20
             + recency * 0.15
             + access * 0.05
     } else {
-        score = textRank * 0.40
+        // No vector hit: redistribute its share to text and structural.
+        score = textRank * 0.30
+            + structural * 0.15
             + importanceNorm * 0.20
             + recency * 0.15
             + access * 0.05
@@ -883,8 +897,53 @@ let recallActions: [SonataAction] = [
                 let now = nowMs()
                 var allScoredMemories: [ScoredMemoryAction] = []
 
+                // Graph-proximity anchors: the query's FTS-matched entities
+                // (plus any exact-name entities). If a candidate memory has a
+                // `relations` edge to any of these, structural gets 1.0.
+                let queryEntityIds: Set<String> = {
+                    var s = Set(phase1Result.entitySearch.map(\.id))
+                    if let e = phase1Result.exactEntity { s.insert(e.id) }
+                    s.formUnion(phase1Result.exactEntities.map(\.id))
+                    return s
+                }()
+
+                let candidateMemoryIds: Set<String> = Set(
+                    phase1Result.memories.map(\.id)
+                    + additionalMemories.map(\.id)
+                    + vectorOnlyMemories.map(\.id)
+                )
+
+                let directGraphHits: Set<String> = try await dbPool.read { db in
+                    guard !queryEntityIds.isEmpty, !candidateMemoryIds.isEmpty else { return [] }
+                    let mIn = candidateMemoryIds.map { _ in "?" }.joined(separator: ",")
+                    let eIn = queryEntityIds.map { _ in "?" }.joined(separator: ",")
+                    let mArr = Array(candidateMemoryIds)
+                    let eArr = Array(queryEntityIds)
+                    // memory→entity OR entity→memory edges — either direction
+                    // links the pair via the polymorphic relations table.
+                    let rows = try Row.fetchAll(db, sql: """
+                        SELECT sourceId AS memId FROM relations
+                         WHERE sourceType='memory' AND targetType='entity'
+                           AND sourceId IN (\(mIn)) AND targetId IN (\(eIn))
+                        UNION
+                        SELECT targetId AS memId FROM relations
+                         WHERE targetType='memory' AND sourceType='entity'
+                           AND targetId IN (\(mIn)) AND sourceId IN (\(eIn))
+                    """, arguments: StatementArguments(mArr + eArr + mArr + eArr))
+                    return Set(rows.compactMap { $0["memId"] as String? })
+                }
+                timings["graphHits"] = directGraphHits.count
+
+                func structuralFor(_ id: String) -> Double {
+                    directGraphHits.contains(id) ? 1.0 : 0.0
+                }
+
                 for (i, mem) in phase1Result.memories.enumerated() {
-                    let (score, comp) = recallScoreMemory(mem, searchRank: i, now: now, vectorScore: vectorScores[mem.id])
+                    let (score, comp) = recallScoreMemory(
+                        mem, searchRank: i, now: now,
+                        vectorScore: vectorScores[mem.id],
+                        structuralScore: structuralFor(mem.id)
+                    )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: i, rankScore: score, components: comp
                     ))
@@ -893,14 +952,22 @@ let recallActions: [SonataAction] = [
                 for (i, mem) in additionalMemories.enumerated() {
                     guard !existingIds.contains(mem.id) else { continue }
                     let rank = phase1Result.memories.count + i
-                    let (score, comp) = recallScoreMemory(mem, searchRank: rank, now: now, vectorScore: vectorScores[mem.id])
+                    let (score, comp) = recallScoreMemory(
+                        mem, searchRank: rank, now: now,
+                        vectorScore: vectorScores[mem.id],
+                        structuralScore: structuralFor(mem.id)
+                    )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: rank, rankScore: score, components: comp
                     ))
                 }
 
                 for mem in vectorOnlyMemories {
-                    let (score, comp) = recallScoreMemory(mem, searchRank: 999, now: now, vectorScore: vectorScores[mem.id])
+                    let (score, comp) = recallScoreMemory(
+                        mem, searchRank: 999, now: now,
+                        vectorScore: vectorScores[mem.id],
+                        structuralScore: structuralFor(mem.id)
+                    )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: 999, rankScore: score, components: comp
                     ))
