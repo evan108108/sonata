@@ -19,27 +19,36 @@ final class WorkerAutoSpawnTests: XCTestCase {
 
     // MARK: - Fix 1: computePoolMaintainPlan is status-aware
 
-    /// 2026-06-10 semantics: an empty slot is treated as user-removed, not
-    /// as a hole to refill. Boot-time population is `spawnDefaultWorkers`'s
-    /// job; `maintainPoolSize` only heals stale `.offline` workers.
-    func test_maintainPlan_emptyPool_noOp() {
+    /// Post-userRemovedLabels semantics: user-removed is an EXPLICIT signal
+    /// (a set of labels the caller passes in), not "any missing slot".
+    /// An empty pool with no user-removed labels means "fresh boot / vanish"
+    /// and every slot fills. This inverts the earlier 2026-06-10 rule so
+    /// that a legitimately-empty state at boot fills correctly instead of
+    /// being frozen out; user-intent removals now live in a dedicated set
+    /// on the WorkerManager (see `computePoolMaintainPlan(_:workers:userRemovedLabels:)`).
+    func test_maintainPlan_emptyPool_fillsToTarget() {
         let plan = WorkerManager.computePoolMaintainPlan(target: 2, workers: [])
-        XCTAssertTrue(plan.toSpawn.isEmpty,
-            "empty pool must not auto-spawn — refilling stomps explicit user removals")
+        XCTAssertEqual(Set(plan.toSpawn), ["sona-worker-1", "sona-worker-2"],
+            "empty pool at boot / after vanish must fill every slot 1..target — user removals are tracked separately via userRemovedLabels")
         XCTAssertTrue(plan.toDisplace.isEmpty)
     }
 
-    /// User-removal regression: removing a slot via the Workers UI deletes
-    /// the Worker from the array entirely. The next pollHealth tick must
-    /// leave the gap alone instead of respawning it.
+    /// User-removal regression: removing a slot via the Workers UI adds
+    /// its label to the userRemovedLabels set. That set is the authoritative
+    /// "leave this alone" signal — computePoolMaintainPlan respects it and
+    /// only refills slots whose labels are NOT in the removed set.
     func test_maintainPlan_userRemovedSlot_staysGone() {
         let workers = [
             WorkerManager.WorkerSlotInfo(id: "w3", label: "sona-worker-3", status: .idle),
             // slots 1 and 2 absent — user clicked Remove on both
         ]
-        let plan = WorkerManager.computePoolMaintainPlan(target: 3, workers: workers)
+        let plan = WorkerManager.computePoolMaintainPlan(
+            target: 3,
+            workers: workers,
+            userRemovedLabels: ["sona-worker-1", "sona-worker-2"]
+        )
         XCTAssertTrue(plan.toSpawn.isEmpty,
-            "removed slots must NOT come back from maintainPoolSize")
+            "user-removed slots must NOT come back from maintainPoolSize when their labels are in userRemovedLabels")
         XCTAssertTrue(plan.toDisplace.isEmpty)
     }
 

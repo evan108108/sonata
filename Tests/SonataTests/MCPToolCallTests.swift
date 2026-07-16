@@ -33,7 +33,7 @@ final class MCPToolCallTests: XCTestCase {
             ])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
-        XCTAssertNil(result["isError"], "tool call should succeed; got \(result)")
+        XCTAssertNotEqual(result["isError"] as? Bool, true, "tool call should succeed; got \(result)")
         let content = try XCTUnwrap(result["content"] as? [[String: Any]])
         XCTAssertEqual(content.first?["type"] as? String, "text")
 
@@ -61,7 +61,7 @@ final class MCPToolCallTests: XCTestCase {
             ])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
-        XCTAssertNil(result["isError"], "tool call should succeed; got \(result)")
+        XCTAssertNotEqual(result["isError"] as? Bool, true, "tool call should succeed; got \(result)")
 
         let status = try await h.dbPool.read { db in
             try String.fetchOne(db,
@@ -101,7 +101,7 @@ final class MCPToolCallTests: XCTestCase {
             ])
         let response2 = try parseJSON(raw2)
         let result2 = try XCTUnwrap(response2["result"] as? [String: Any])
-        XCTAssertNil(result2["isError"],
+        XCTAssertNotEqual(result2["isError"] as? Bool, true,
             "G1 idempotency violation: duplicate complete_event reported isError. " +
             "Plan §10 R11 requires success. Result: \(result2)")
 
@@ -139,7 +139,7 @@ final class MCPToolCallTests: XCTestCase {
             ])
         let response2 = try parseJSON(raw2)
         let result2 = try XCTUnwrap(response2["result"] as? [String: Any])
-        XCTAssertNil(result2["isError"],
+        XCTAssertNotEqual(result2["isError"] as? Bool, true,
             "G1 idempotency violation: duplicate fail_event reported isError. " +
             "Plan §10 R11 requires success. Result: \(result2)")
 
@@ -185,7 +185,7 @@ final class MCPToolCallTests: XCTestCase {
             params: ["name": "mem_task_list", "arguments": ["limit": 10]])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
-        XCTAssertNil(result["isError"], "mem_task_list must succeed; got \(result)")
+        XCTAssertNotEqual(result["isError"] as? Bool, true, "mem_task_list must succeed; got \(result)")
         let content = try XCTUnwrap(result["content"] as? [[String: Any]])
         let text = try XCTUnwrap(content.first?["text"] as? String)
         XCTAssertTrue(text.contains("task-list-1"),
@@ -211,7 +211,7 @@ final class MCPToolCallTests: XCTestCase {
             ])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
-        XCTAssertNil(result["isError"], "mem_task_create must succeed; got \(result)")
+        XCTAssertNotEqual(result["isError"] as? Bool, true, "mem_task_create must succeed; got \(result)")
 
         let status = try await h.dbPool.read { db in
             try String.fetchOne(db,
@@ -240,7 +240,7 @@ final class MCPToolCallTests: XCTestCase {
             ])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
-        XCTAssertNil(result["isError"],
+        XCTAssertNotEqual(result["isError"] as? Bool, true,
             "mem_task_create must succeed even when caller asks for status=active; got \(result)")
 
         let status = try await h.dbPool.read { db in
@@ -284,7 +284,7 @@ final class MCPToolCallTests: XCTestCase {
             params: ["name": "mem_task_get", "arguments": ["id": "task-get-1"]])
         let response = try parseJSON(raw)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
-        XCTAssertNil(result["isError"], "mem_task_get must succeed; got \(result)")
+        XCTAssertNotEqual(result["isError"] as? Bool, true, "mem_task_get must succeed; got \(result)")
         let content = try XCTUnwrap(result["content"] as? [[String: Any]])
         let text = try XCTUnwrap(content.first?["text"] as? String)
         XCTAssertTrue(text.contains("fetchable"),

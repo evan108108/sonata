@@ -78,25 +78,28 @@ final class DMActionsTests: XCTestCase {
     // rather than a stale test that lies about what it exercises.
 
     // MARK: dm_send handler — error matrix
+    //
+    // The dm_send response shape changed with ecfb094 to fire-and-observe:
+    // { status: "sent" | "not_live" | "not_found", messageId, reason }.
+    // The old "queued" status and the "appends to inbox" test are gone —
+    // there's no inbox to append to and no queue to observe.
 
-    func testDmSendUnknownLocalTargetQueuesNotFails() async throws {
+    func testDmSendUnknownTargetReturnsNotFound() async throws {
         let pool = try makeInMemoryDbPool()
         let action = dmActions.first { $0.name == "dm_send" }!
         let ctx = ActionContext(
             params: ActionParams([
-                "targetSessionId": "nobody",
+                "target": "nobody",
                 "fromSessionId": "alice",
                 "body": "hello",
             ]),
             dbPool: pool
         )
-        // No SSE attached and no prior inbox history → must still queue, not 404.
         let response = try await action.handler(ctx)
         let data = try JSONEncoder().encode(EncodableShim(value: response))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(json?["deliveryStatus"] as? String, "queued")
-        // Persisted so the target can backfill via dm_inbox.
-        XCTAssertEqual(try dmMessagesCount(pool, target: "nobody"), 1)
+        XCTAssertEqual(json?["status"] as? String, "not_found",
+            "unknown-target sends must resolve to status=not_found, not throw or queue; got \(json ?? [:])")
     }
 
     func testDmSendEmptyBodyReturns422() async throws {
@@ -104,7 +107,7 @@ final class DMActionsTests: XCTestCase {
         let action = dmActions.first { $0.name == "dm_send" }!
         let ctx = ActionContext(
             params: ActionParams([
-                "targetSessionId": "x",
+                "target": "x",
                 "fromSessionId": "alice",
                 "body": "",
             ]),
@@ -136,7 +139,7 @@ final class DMActionsTests: XCTestCase {
         let bigBody = String(repeating: "x", count: 256 * 1024 + 1)
         let ctx = ActionContext(
             params: ActionParams([
-                "targetSessionId": "x",
+                "target": "x",
                 "fromSessionId": "alice",
                 "body": bigBody,
             ]),
@@ -155,69 +158,17 @@ final class DMActionsTests: XCTestCase {
         }
     }
 
-    func testDmSendAppendsToExistingInbox() async throws {
-        let pool = try makeInMemoryDbPool()
-        // Seed a prior dm_messages row for target-y.
-        try await pool.write { db in
-            try db.execute(
-                sql: """
-                    INSERT INTO dm_messages (
-                        messageId, targetSessionId, fromSessionId, fromPubkey, fromPeerId,
-                        body, context, metaJson, sentAtMs, receivedAtMs, deliveryStatus
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                arguments: [
-                    "seed-1", "target-y", nil, nil, nil,
-                    "earlier", nil, nil, nowMs(), nowMs(), "queued",
-                ]
-            )
-        }
-        let action = dmActions.first { $0.name == "dm_send" }!
-        let ctx = ActionContext(
-            params: ActionParams([
-                "targetSessionId": "target-y",
-                "fromSessionId": "alice",
-                "body": "follow-up",
-            ]),
-            dbPool: pool
-        )
-        let response = try await action.handler(ctx)
-        let data = try JSONEncoder().encode(EncodableShim(value: response))
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        // No SSE attached in this test harness → always queued, never delivered.
-        XCTAssertEqual(json?["deliveryStatus"] as? String, "queued")
-        // Persisted as second row.
-        XCTAssertEqual(try dmMessagesCount(pool, target: "target-y"), 2)
-    }
+    // testDmSendAppendsToExistingInbox was removed with the fire-and-observe
+    // model — there is no inbox to append to, and outbound sends now flow
+    // through DMAudit rather than dm_messages when the target is unresolved.
+    // The "did this send get persisted for backfill" concept doesn't exist
+    // in the new model, so there's no equivalent test to port to.
 
-    // MARK: dm_inbox handler
-
-    func testDmInboxReturnsRowsOrderedAsc() async throws {
-        let pool = try makeInMemoryDbPool()
-        try await pool.write { db in
-            for i in 0..<3 {
-                try db.execute(
-                    sql: """
-                        INSERT INTO dm_messages (messageId, targetSessionId, body, sentAtMs, receivedAtMs, deliveryStatus)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    arguments: ["m\(i)", "t1", "body-\(i)", 100 + i, 1000 + i, "queued"]
-                )
-            }
-        }
-        let action = dmActions.first { $0.name == "dm_inbox" }!
-        let ctx = ActionContext(
-            params: ActionParams(["sessionId": "t1", "since": 0, "limit": 50]),
-            dbPool: pool
-        )
-        let response = try await action.handler(ctx)
-        let data = try JSONEncoder().encode(EncodableShim(value: response))
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let messages = json?["messages"] as? [[String: Any]] ?? []
-        XCTAssertEqual(messages.count, 3)
-        XCTAssertEqual(messages[0]["messageId"] as? String, "m0")
-        XCTAssertEqual(messages[2]["messageId"] as? String, "m2")
-    }
+    // dm_inbox handler was deleted with ecfb094 as part of the shift to a
+    // fire-and-observe DM model (dm_registry/dm_inbox/dm_poll endpoints
+    // removed together — 404 by absence, per that commit message).
+    // No replacement to port to: the current DM surface is dm_send,
+    // dm_reply, dm_ack, dm_targets, dm_broadcast.
 
 }
 

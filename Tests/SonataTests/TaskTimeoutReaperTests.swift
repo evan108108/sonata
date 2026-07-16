@@ -64,8 +64,18 @@ final class TaskTimeoutReaperTests: XCTestCase {
             let row = try Row.fetchOne(db, sql: "SELECT status, currentEventId FROM workers WHERE workerId = ?", arguments: [workerId])
             return (row?["status"], row?["currentEventId"])
         }
-        XCTAssertEqual(wStatus, "idle", "the pool worker must be freed so the slot recovers")
-        XCTAssertNil(wEvent, "the freed worker must no longer hold the event")
+        // The reaper intentionally does NOT touch the workers table — see the
+        // comment in HealthMonitor.reapOverdueTasks: idling a wedged worker
+        // would let the dispatcher hand it a fresh event while its claude
+        // PTY is still stuck. Worker recovery happens via cycleStuckWorkers
+        // (drain → SIGTERM → respawn), which is invoked separately. So the
+        // row here stays as we left it — busy with the same currentEventId
+        // — and it's the cycler's job to move it through
+        // draining → starting → idle.
+        XCTAssertEqual(wStatus, "busy",
+            "reaper must NOT idle the worker directly — cycleStuckWorkers handles the state transitions via drain+respawn")
+        XCTAssertEqual(wEvent, eventId,
+            "reaper must NOT clear currentEventId directly — cycleStuckWorkers clears it after the PTY is safely torn down")
     }
 
     /// A task still within its deadline is left running untouched.

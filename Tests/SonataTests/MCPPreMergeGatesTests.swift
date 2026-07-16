@@ -41,7 +41,9 @@ final class MCPPreMergeGatesTests: XCTestCase {
         XCTAssertNotNil(h.actionRegistry.action(named: "worker_event_fail"))
         XCTAssertNotNil(h.actionRegistry.action(named: "supervisor_heartbeat"))
         XCTAssertNotNil(h.actionRegistry.action(named: "dm_send"))
-        XCTAssertNotNil(h.actionRegistry.action(named: "dm_inbox"))
+        // dm_inbox was removed with ecfb094 (fire-and-observe DM model);
+        // dm_ack is the replacement observability surface for delivery.
+        XCTAssertNotNil(h.actionRegistry.action(named: "dm_ack"))
     }
 
     /// G5 (Phase A backstop). The Phase A smoke (Tools/MCPHTTPSmokeTest)

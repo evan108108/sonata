@@ -60,7 +60,7 @@ final class MCPHandshakeTests: XCTestCase {
         // the core transport/identity tools must be present...
         let required: Set<String> = [
             "complete_event", "fail_event",
-            "sonar_dm_send", "sonar_dm_inbox", "sonar_dm_broadcast",
+            "sonar_dm_send", "sonar_dm_broadcast",
             "sonata_identify",
             "mem_task_list", "mem_task_get", "mem_task_create",
             "mem_task_watch", "mem_task_unwatch",
@@ -69,13 +69,15 @@ final class MCPHandshakeTests: XCTestCase {
             "worker tool surface is missing required tools: "
                 + "\(required.subtracting(names).sorted())")
 
-        // ...and the dead DM registry surface must stay gone. dm_send always
-        // queues durably; targets receive via live SSE push or dm_inbox poll.
-        // No registration step exists; if a regression reintroduces any of
-        // these, workers will hallucinate a registration model again.
+        // ...and the removed DM surface must stay gone. Post-ecfb094 the DM
+        // model is fire-and-observe: dm_send / dm_reply / dm_ack /
+        // dm_targets / dm_broadcast. There is no inbox poll, no registration
+        // step. If a regression reintroduces any of these, workers will
+        // hallucinate a lost registration/poll model.
         let removed: Set<String> = [
             "sonar_dm_register", "sonar_dm_unregister",
-            "dm_register", "dm_unregister", "dm_poll",
+            "sonar_dm_inbox",
+            "dm_register", "dm_unregister", "dm_poll", "dm_inbox",
         ]
         XCTAssertTrue(removed.isDisjoint(with: names),
             "removed DM-registry tools reappeared: "
