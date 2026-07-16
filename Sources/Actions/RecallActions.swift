@@ -88,7 +88,10 @@ enum RecencyMode: String {
 
 /// Parse `after`/`before` params. Accepts either a numeric unix-ms string
 /// or an ISO-8601 date/datetime. Returns nil if empty, throws on unparseable.
-private func parseTimeParam(_ raw: String?, endOfDay: Bool) -> Int64? {
+/// Shared by mem_recall, mem_search, mem_recent, and the Memory UI's
+/// date-range filter — keeps the accepted formats consistent across all
+/// callers.
+func parseTimeParam(_ raw: String?, endOfDay: Bool) -> Int64? {
     guard let raw, !raw.isEmpty else { return nil }
     if let ms = Int64(raw) { return ms }
     let formatters: [DateFormatter] = {

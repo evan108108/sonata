@@ -98,6 +98,13 @@ struct MemoryView: View {
     @State private var minImportance: Double = 0
     @State private var projectFilter: String = ""
 
+    // Date-range filter (post-2026-07-16). Both bounds are optional. Toggling
+    // `dateRangeActive` reveals two DatePickers; server-side maps them to the
+    // `after`/`before` params on /api/memory/search + /recent.
+    @State private var dateRangeActive: Bool = false
+    @State private var afterDate: Date = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
+    @State private var beforeDate: Date = .now
+
     // Stats
     @State private var totalCount: Int = 0
     @State private var avgImportance: Double = 0
@@ -156,6 +163,18 @@ struct MemoryView: View {
 
                     Spacer(minLength: 0)
 
+                    // Date-range toggle. Off by default so the row stays clean;
+                    // clicking reveals two compact DatePickers below the row.
+                    Button {
+                        dateRangeActive.toggle()
+                        triggerSearch()
+                    } label: {
+                        Image(systemName: dateRangeActive ? "calendar.badge.checkmark" : "calendar")
+                            .foregroundStyle(dateRangeActive ? Color.accentColor : Color.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Filter by createdAt date range")
+
                     HStack(spacing: 4) {
                         Text("Min")
                             .font(.caption)
@@ -172,6 +191,28 @@ struct MemoryView: View {
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
+
+                // Date-range pickers appear only when active. Compact styling
+                // so the sidebar width still fits; `graphical` would be too big.
+                if dateRangeActive {
+                    HStack(spacing: 8) {
+                        Text("From").font(.caption).foregroundStyle(.secondary)
+                        DatePicker("", selection: $afterDate, displayedComponents: .date)
+                            .labelsHidden()
+                            .fixedSize()
+                            .onChange(of: afterDate) { _, _ in triggerSearch() }
+
+                        Text("to").font(.caption).foregroundStyle(.secondary)
+                        DatePicker("", selection: $beforeDate, displayedComponents: .date)
+                            .labelsHidden()
+                            .fixedSize()
+                            .onChange(of: beforeDate) { _, _ in triggerSearch() }
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                }
 
                 Divider()
                     .padding(.top, 8)
@@ -271,6 +312,16 @@ struct MemoryView: View {
         }
     }
 
+    /// Serializes the active date-range picker to `&after=YYYY-MM-DD&before=YYYY-MM-DD`.
+    /// The server accepts unix ms too but ISO is easier to debug in the URL.
+    private func dateRangeQuery() -> String {
+        guard dateRangeActive else { return "" }
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return "&after=\(f.string(from: afterDate))&before=\(f.string(from: beforeDate))"
+    }
+
     private func search(_ query: String) async {
         isLoading = true
         error = nil
@@ -279,6 +330,7 @@ struct MemoryView: View {
         var urlStr = "http://127.0.0.1:\(sonataPort)/api/memory/search?q=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)&limit=50"
         if typeFilter != "all" { urlStr += "&type=\(typeFilter)" }
         if !projectFilter.isEmpty { urlStr += "&project=\(projectFilter.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? projectFilter)" }
+        urlStr += dateRangeQuery()
 
         guard let url = URL(string: urlStr) else { return }
         do {
@@ -297,6 +349,7 @@ struct MemoryView: View {
 
         var urlStr = "http://127.0.0.1:\(sonataPort)/api/memory/recent?limit=50"
         if typeFilter != "all" { urlStr += "&type=\(typeFilter)" }
+        urlStr += dateRangeQuery()
 
         guard let url = URL(string: urlStr) else { return }
         do {

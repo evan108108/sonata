@@ -439,6 +439,8 @@ let memoryActions: [SonataAction] = [
             ActionParam("excludeSource", .stringArray, description: "Exclude these sources (comma-separated or array). Defaults to ['subagent-stop-hook'] unless source or includeAll is given."),
             ActionParam("excludeTags", .stringArray, description: "Exclude memories carrying any of these tags."),
             ActionParam("includeAll", .boolean, description: "Include normally-excluded noise sources (e.g. subagent-stop-hook)."),
+            ActionParam("after", .string, description: "Only include memories with createdAt on/after this time. Accepts unix ms or ISO date (`2026-07-15`)."),
+            ActionParam("before", .string, description: "Only include memories with createdAt on/before this time. Accepts unix ms or ISO date; bare `YYYY-MM-DD` rolls to end-of-day inclusive."),
         ],
         handler: { ctx in
             let limit = ctx.params.int("limit") ?? 20
@@ -447,6 +449,8 @@ let memoryActions: [SonataAction] = [
             let includeAll = ctx.params.bool("includeAll") ?? false
             var excludeSources = ctx.params.stringArray("excludeSource") ?? []
             let excludeTags = ctx.params.stringArray("excludeTags") ?? []
+            let afterMs = parseTimeParam(ctx.params.string("after"), endOfDay: false)
+            let beforeMs = parseTimeParam(ctx.params.string("before"), endOfDay: true)
 
             // Default: hide high-volume subagent-stop-hook noise that otherwise
             // drowns genuine recent work in mem_recent. Opt back in via includeAll,
@@ -477,6 +481,14 @@ let memoryActions: [SonataAction] = [
                 sql += " AND NOT EXISTS (SELECT 1 FROM json_each(m.tags) je WHERE je.value IN (\(placeholders)))"
                 for t in excludeTags { args.append(t) }
             }
+            if let a = afterMs {
+                sql += " AND m.createdAt >= ?"
+                args.append(a)
+            }
+            if let b = beforeMs {
+                sql += " AND m.createdAt <= ?"
+                args.append(b)
+            }
             sql += " ORDER BY m.createdAt DESC LIMIT ?"
             args.append(limit)
 
@@ -503,12 +515,16 @@ let memoryActions: [SonataAction] = [
             ActionParam("limit", .integer, description: "Max results (default 10)"),
             ActionParam("type", .string, description: "Filter by memory type"),
             ActionParam("project", .string, description: "Filter by project"),
+            ActionParam("after", .string, description: "Only include memories with createdAt on/after this time. Accepts unix ms or ISO date (`2026-07-15`)."),
+            ActionParam("before", .string, description: "Only include memories with createdAt on/before this time. Accepts unix ms or ISO date; bare `YYYY-MM-DD` rolls to end-of-day inclusive."),
         ],
         handler: { ctx in
             let q = try ctx.params.require("q")
             let limit = ctx.params.int("limit") ?? 10
             let type = ctx.params.string("type")
             let project = ctx.params.string("project")
+            let afterMs = parseTimeParam(ctx.params.string("after"), endOfDay: false)
+            let beforeMs = parseTimeParam(ctx.params.string("before"), endOfDay: true)
 
             let ftsQuery = ftsEscape(q)
             guard !ftsQuery.isEmpty else { return [MemoryResponse]() }
@@ -527,6 +543,14 @@ let memoryActions: [SonataAction] = [
             if let p = project {
                 sql += " AND m.project = ?"
                 args.append(p)
+            }
+            if let a = afterMs {
+                sql += " AND m.createdAt >= ?"
+                args.append(a)
+            }
+            if let b = beforeMs {
+                sql += " AND m.createdAt <= ?"
+                args.append(b)
             }
             sql += " ORDER BY m.createdAt DESC LIMIT ?"
             args.append(limit)
