@@ -24,15 +24,43 @@ private func recallEstimateTokens(_ text: String) -> Int {
 /// access / importance / text-match), not just a black-box number.
 ///
 /// Modeled after the "magnetic-pull" three-term breakdown in Astralchemist/rig
-/// but extended to Sonata's five real signals. `structural` is a placeholder
-/// (always 0.0) until graph-proximity scoring lands in a follow-up.
+/// but extended to Sonata's five real signals. `structural` is the value
+/// actually fed into the blend for THIS request's mode; `structuralDirect`
+/// and `structuralNeighbor` always expose the raw graph-hit bits so callers
+/// can post-hoc compare "what would this have scored under a different
+/// structural_mode?" without re-querying.
 struct RankComponents: Encodable, Sendable {
-    let textRank: Double     // FTS/lexical hit strength
-    let semantic: Double     // vector similarity (0 when no vector hit)
-    let structural: Double   // graph proximity — placeholder for now
-    let importance: Double   // author-declared importance / 10
-    let recency: Double      // decay over max(createdAt, lastAccessedAt)
-    let access: Double       // accessCount fold-in (touch frequency)
+    let textRank: Double            // FTS/lexical hit strength
+    let semantic: Double            // vector similarity (0 when no vector hit)
+    let structural: Double          // graph-proximity value fed into the blend
+    let structuralDirect: Double    // 1.0 iff a direct edge to any query entity
+    let structuralNeighbor: Double  // 1.0 iff a 1-hop-neighbor edge (only, not direct)
+    let importance: Double          // author-declared importance / 10
+    let recency: Double             // decay over max(createdAt, lastAccessedAt)
+    let access: Double              // accessCount fold-in (touch frequency)
+}
+
+/// How graph-proximity feeds the blend.
+///  * `.off` — structural always 0, blend runs on lexical+vector+priors.
+///  * `.direct` — 1.0 iff a direct memory↔entity edge to a query entity.
+///  * `.expanded` — 1.0 direct, 0.5 for 1-hop neighbors of a query entity.
+enum StructuralMode: String {
+    case off, direct, expanded
+
+    static func parse(_ raw: String?) -> StructuralMode {
+        switch raw?.lowercased() {
+        case "off":      return .off
+        case "expanded": return .expanded
+        case "direct":   return .direct
+        default:
+            // Fall back to the persistent default; keep "direct" as the
+            // shipped baseline so existing callers see no behavior change.
+            let defaultRaw = UserDefaults.standard.string(forKey: "recallStructuralMode")?.lowercased()
+            if defaultRaw == "off" { return .off }
+            if defaultRaw == "expanded" { return .expanded }
+            return .direct
+        }
+    }
 }
 
 /// Recency anchors on `max(createdAt, lastAccessedAt)` — the true "recent
@@ -51,7 +79,9 @@ struct RankComponents: Encodable, Sendable {
 private func recallScoreMemory(
     _ mem: MemoryRow, searchRank: Int, now: Int64,
     vectorScore: Double? = nil,
-    structuralScore: Double = 0.0
+    structuralScore: Double = 0.0,
+    structuralDirect: Bool = false,
+    structuralNeighbor: Bool = false
 ) -> (score: Double, components: RankComponents) {
     let importanceNorm = mem.importance / 10.0
     let lastActivityMs = max(mem.createdAt, mem.lastAccessedAt ?? 0)
@@ -83,6 +113,8 @@ private func recallScoreMemory(
         textRank: textRank,
         semantic: semantic,
         structural: structural,
+        structuralDirect: structuralDirect ? 1.0 : 0.0,
+        structuralNeighbor: structuralNeighbor ? 1.0 : 0.0,
         importance: importanceNorm,
         recency: recency,
         access: access
@@ -640,6 +672,7 @@ let recallActions: [SonataAction] = [
             ActionParam("filterTopic", .string, description: "Filter by topic namespace"),
             ActionParam("wander", .string, description: "'false' to disable wander (default enabled)"),
             ActionParam("tier", .string, description: "Response tier: 'l0' (id+abstract only, ~10x smaller) or 'full' (LOD-packed bodies). HTTP default: full. MCP default: l0."),
+            ActionParam("structuralMode", .string, description: "Graph-proximity mode: 'off' | 'direct' (default; 1.0 for direct edge) | 'expanded' (1.0 direct, 0.5 for 1-hop neighbors of a query entity). Overridable per-request; persistent default is UserDefaults `recallStructuralMode`."),
         ],
         handler: { ctx in
             let rawTopic = try ctx.params.require("topic")
@@ -651,6 +684,7 @@ let recallActions: [SonataAction] = [
             let wanderEnabled = (ctx.params.string("wander") ?? "true") != "false"
             let tierParam = (ctx.params.string("tier") ?? "full").lowercased()
             let tier = (tierParam == "l0") ? "l0" : "full"
+            let structuralMode = StructuralMode.parse(ctx.params.string("structuralMode"))
 
             let dbPool = ctx.dbPool
             let t0 = DispatchTime.now()
@@ -913,14 +947,13 @@ let recallActions: [SonataAction] = [
                     + vectorOnlyMemories.map(\.id)
                 )
 
+                // (1) Direct memory↔entity hits against query entities.
                 let directGraphHits: Set<String> = try await dbPool.read { db in
                     guard !queryEntityIds.isEmpty, !candidateMemoryIds.isEmpty else { return [] }
                     let mIn = candidateMemoryIds.map { _ in "?" }.joined(separator: ",")
                     let eIn = queryEntityIds.map { _ in "?" }.joined(separator: ",")
                     let mArr = Array(candidateMemoryIds)
                     let eArr = Array(queryEntityIds)
-                    // memory→entity OR entity→memory edges — either direction
-                    // links the pair via the polymorphic relations table.
                     let rows = try Row.fetchAll(db, sql: """
                         SELECT sourceId AS memId FROM relations
                          WHERE sourceType='memory' AND targetType='entity'
@@ -934,15 +967,77 @@ let recallActions: [SonataAction] = [
                 }
                 timings["graphHits"] = directGraphHits.count
 
+                // (2) 1-hop neighbor entities of the query anchors. Only needed
+                //     when the mode actually uses them — skip the two extra
+                //     queries in `direct` and `off` modes so the fast path
+                //     stays fast.
+                let neighborGraphHits: Set<String>
+                if structuralMode == .expanded, !queryEntityIds.isEmpty {
+                    let expandedEntityIds: Set<String> = try await dbPool.read { db in
+                        let eIn = queryEntityIds.map { _ in "?" }.joined(separator: ",")
+                        let eArr = Array(queryEntityIds)
+                        let rows = try Row.fetchAll(db, sql: """
+                            SELECT targetId AS entId FROM relations
+                             WHERE sourceType='entity' AND targetType='entity'
+                               AND sourceId IN (\(eIn))
+                            UNION
+                            SELECT sourceId AS entId FROM relations
+                             WHERE sourceType='entity' AND targetType='entity'
+                               AND targetId IN (\(eIn))
+                        """, arguments: StatementArguments(eArr + eArr))
+                        // Exclude the original query anchors — those are the
+                        // "direct" tier, not neighbors.
+                        return Set(rows.compactMap { $0["entId"] as String? })
+                            .subtracting(queryEntityIds)
+                    }
+                    // Same shape as (1), but against the expanded entity set,
+                    // and MINUS the memories already counted as direct hits.
+                    let rawNeighborHits: Set<String> = try await dbPool.read { db in
+                        guard !expandedEntityIds.isEmpty, !candidateMemoryIds.isEmpty else { return [] }
+                        let mIn = candidateMemoryIds.map { _ in "?" }.joined(separator: ",")
+                        let eIn = expandedEntityIds.map { _ in "?" }.joined(separator: ",")
+                        let mArr = Array(candidateMemoryIds)
+                        let eArr = Array(expandedEntityIds)
+                        let rows = try Row.fetchAll(db, sql: """
+                            SELECT sourceId AS memId FROM relations
+                             WHERE sourceType='memory' AND targetType='entity'
+                               AND sourceId IN (\(mIn)) AND targetId IN (\(eIn))
+                            UNION
+                            SELECT targetId AS memId FROM relations
+                             WHERE targetType='memory' AND sourceType='entity'
+                               AND targetId IN (\(mIn)) AND sourceId IN (\(eIn))
+                        """, arguments: StatementArguments(mArr + eArr + mArr + eArr))
+                        return Set(rows.compactMap { $0["memId"] as String? })
+                    }
+                    neighborGraphHits = rawNeighborHits.subtracting(directGraphHits)
+                } else {
+                    neighborGraphHits = []
+                }
+                timings["graphNeighborHits"] = neighborGraphHits.count
+                timings["structuralMode"] = structuralMode == .off ? 0 : (structuralMode == .direct ? 1 : 2)
+
+                // Mode-aware value fed into the blend. Raw direct/neighbor
+                // bits are always populated in components so downstream
+                // tooling can compare "what would this have scored under
+                // mode X" without re-querying.
                 func structuralFor(_ id: String) -> Double {
-                    directGraphHits.contains(id) ? 1.0 : 0.0
+                    switch structuralMode {
+                    case .off:      return 0.0
+                    case .direct:   return directGraphHits.contains(id) ? 1.0 : 0.0
+                    case .expanded:
+                        if directGraphHits.contains(id) { return 1.0 }
+                        if neighborGraphHits.contains(id) { return 0.5 }
+                        return 0.0
+                    }
                 }
 
                 for (i, mem) in phase1Result.memories.enumerated() {
                     let (score, comp) = recallScoreMemory(
                         mem, searchRank: i, now: now,
                         vectorScore: vectorScores[mem.id],
-                        structuralScore: structuralFor(mem.id)
+                        structuralScore: structuralFor(mem.id),
+                        structuralDirect: directGraphHits.contains(mem.id),
+                        structuralNeighbor: neighborGraphHits.contains(mem.id)
                     )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: i, rankScore: score, components: comp
@@ -955,7 +1050,9 @@ let recallActions: [SonataAction] = [
                     let (score, comp) = recallScoreMemory(
                         mem, searchRank: rank, now: now,
                         vectorScore: vectorScores[mem.id],
-                        structuralScore: structuralFor(mem.id)
+                        structuralScore: structuralFor(mem.id),
+                        structuralDirect: directGraphHits.contains(mem.id),
+                        structuralNeighbor: neighborGraphHits.contains(mem.id)
                     )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: rank, rankScore: score, components: comp
@@ -966,7 +1063,9 @@ let recallActions: [SonataAction] = [
                     let (score, comp) = recallScoreMemory(
                         mem, searchRank: 999, now: now,
                         vectorScore: vectorScores[mem.id],
-                        structuralScore: structuralFor(mem.id)
+                        structuralScore: structuralFor(mem.id),
+                        structuralDirect: directGraphHits.contains(mem.id),
+                        structuralNeighbor: neighborGraphHits.contains(mem.id)
                     )
                     allScoredMemories.append(ScoredMemoryAction(
                         row: mem, searchRank: 999, rankScore: score, components: comp
