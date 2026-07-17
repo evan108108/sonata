@@ -198,6 +198,13 @@ private func storeInlineEntitiesAndRelations(
     try await dbPool.write { db in
         // (1) Upsert entities. Look up existing by (name, type) case-insensitively.
         //     entityIdByName is used by (2) below to resolve relation targets by name.
+        //
+        //     HAZARD — this key is STRICTER than (2)'s. A caller passing a `type` that
+        //     doesn't match the stored row misses here, inserts a fork, and (because the
+        //     fork lands in entityIdByName first) that fork also captures (2)'s relation,
+        //     which name-only resolution would have put on the original. Create and
+        //     resolve must agree on one key; today they don't. Changing which key wins is
+        //     a data-model call (is identity `name`, or `name`+`type`?), not a local fix.
         var entityIdByName: [String: String] = [:]  // key = lowercased name
         for def in entityDefs {
             let existing = try Row.fetchOne(
@@ -303,7 +310,11 @@ let memoryActions: [SonataAction] = [
               entities='[{"name":"Scout","type":"project"}]'
               relations='[{"entity":"Scout","relation":"about"}]'
 
-            The server upserts entities case-insensitively by (name, type) — reuses existing rows so repeated stores against the same entity don't fork it into "Scout"/"scout"/"Scout Leader". Memories with entity edges get a `structural` boost in mem_recall's ranking blend, so annotated memories are discoverable via graph proximity beyond lexical match.
+            The server reuses an existing entity ONLY on an exact case-insensitive match of BOTH name and type ("Scout"/"scout" merge; "Scout Leader" does not). Any other input INSERTs a new row.
+
+            GET THE `type` RIGHT — a wrong type silently forks the entity. Passing type "failure_mode" for an entity stored as "principle" does not update it and does not error: it creates a second empty-description row under the same name, and because relations resolve by NAME against the just-upserted set first, the new fork also STEALS the relation that belonged on the original. The call still returns success. If you are not certain of an entity's existing type, look it up (mem_entity_search) before annotating; a fork is worse than no annotation.
+
+            Memories with entity edges get a `structural` boost in mem_recall's ranking blend, so annotated memories are discoverable via graph proximity beyond lexical match.
 
             Skip annotation for ephemeral content: status updates, chat snapshots, subagent-stop-hook notes with importance < 7.
             """,
