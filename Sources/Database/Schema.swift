@@ -1178,6 +1178,26 @@ extension DatabaseMigrator {
             """)
         }
 
+        // v31: session-scope checkpoints. Before this, the `checkpoints`
+        // table had no session identity — every session's mem_checkpoint_save
+        // wrote into a single global bucket and mem_checkpoint_restore
+        // returned `ORDER BY createdAt DESC LIMIT 1`, so whoever wrote last
+        // won. Concurrent Claude Code sessions cross-contaminated: this
+        // session repeatedly received both AE II's (bdfb8bc2) and AE IV's
+        // (b929598e) auto-captures as if they were its own state.
+        //
+        // Adds an optional `sessionId TEXT` column. Save stamps caller's
+        // session id (from Claude Code hook input or MCP caller). Restore
+        // filters by sessionId when provided; NULL matches the legacy
+        // global slot so pre-migration checkpoints stay reachable.
+        registerMigration("v31_checkpoints_session_scope") { db in
+            do { try db.execute(sql: "ALTER TABLE checkpoints ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_checkpoints_session_createdAt
+                ON checkpoints(sessionId, createdAt DESC)
+            """)
+        }
+
         // v32: plugin_whathappened gets an explicit `domain` column.
         //
         // Before this, the plugin's `name` was reused as the domain slug —
