@@ -47,11 +47,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     body: JSON.stringify({ name, arguments: finalArgs }),
   });
 
+  // Sonata's `/api/mcp/call` used to always emit `result` as a JSON-encoded
+  // string (double-encoded — nested payloads wrapped in a string). After the
+  // MCPCallResponse fix on 2026-07-17, successful JSON payloads emit as
+  // nested objects and only bare error strings stay as strings. MCP text
+  // content must be a string, so serialize back when we got an object.
+  const asText = (v: unknown): string =>
+    typeof v === "string" ? v : JSON.stringify(v);
+
   return {
     content: [
       {
         type: "text" as const,
-        text: result.error ? `Error: ${result.result}` : result.result,
+        text: result.error ? `Error: ${asText(result.result)}` : asText(result.result),
       },
     ],
     isError: result.error || false,

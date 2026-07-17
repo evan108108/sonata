@@ -118,6 +118,29 @@ func makePluginActions(pluginManager: PluginManager) -> [SonataAction] {
             }
         ),
 
+        // GET /api/plugins/:name/config — read config
+        // Used by plugin processes to fetch their own config on boot via the
+        // MCP surface (POST /api/mcp/call with name="plugin_config_get") —
+        // Sonata stores config centrally and plugins pull it, so the plugin's
+        // env-var-naming conventions stay owned by the plugin rather than
+        // baked into PluginManager's spawn code. See wiki
+        // sonata/patterns/plugin-config.md.
+        SonataAction(
+            name: "plugin_config_get",
+            description: "Read a plugin's configuration. Plugins call this from their own process on boot to fetch config that plugin_config wrote centrally.",
+            group: "/api/plugins",
+            path: "/:name/config",
+            method: .get,
+            params: [
+                ActionParam("name", .string, required: true, description: "Plugin name", source: .path),
+            ],
+            handler: { ctx in
+                let name = try ctx.params.require("name")
+                let config = try await pluginManager.getConfig(name: name)
+                return AnyEncodable(JSONPassthrough(["name": name, "config": config] as [String: Any]))
+            }
+        ),
+
         // DELETE /api/plugins/:name — uninstall
         SonataAction(
             name: "plugin_uninstall",

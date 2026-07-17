@@ -666,6 +666,8 @@ struct SonataApp: App {
                 registry.register(pithActions)
                 registry.register(statsActions)
                 registry.register(compositeActions)
+                registry.register(whatHappenedActions)
+                registerInternalWhatHappenedDomains(dbPool: pool)
 
                 // No registry to publish. MCPConnections.shared and MCPAuth.shared are
                 // process-init singletons — no explicit wiring needed. Callers that used

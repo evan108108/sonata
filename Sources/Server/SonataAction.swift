@@ -335,6 +335,13 @@ struct SonataAction: Sendable {
     let mcpFormatter: MCPFormatter?  // Optional MCP-specific text formatter
     let httpOnly: Bool             // If true, no MCP tool generated (internal endpoints)
     let mcpOnly: Bool              // If true, no HTTP route generated (composite tools)
+    /// When true, the tool's MCP JSON schema emits `additionalProperties: true`
+    /// so client-side validators (like Claude Code's) forward extra keys not
+    /// declared in `params` instead of stripping them. Needed for router-shaped
+    /// tools like `whathappened` where the accepted arg set depends on a
+    /// domain the tool discovers at dispatch time. Default false keeps
+    /// existing tools strict.
+    let mcpAllowAdditionalArgs: Bool
 
     init(
         name: String,
@@ -345,6 +352,7 @@ struct SonataAction: Sendable {
         params: [ActionParam],
         httpOnly: Bool = false,
         mcpOnly: Bool = false,
+        mcpAllowAdditionalArgs: Bool = false,
         formatter: MCPFormatter? = nil,
         handler: @escaping @Sendable (ActionContext) async throws -> any Encodable
     ) {
@@ -358,6 +366,7 @@ struct SonataAction: Sendable {
         self.mcpFormatter = formatter
         self.httpOnly = httpOnly
         self.mcpOnly = mcpOnly
+        self.mcpAllowAdditionalArgs = mcpAllowAdditionalArgs
     }
 
     /// Full HTTP path: group + path
@@ -384,15 +393,21 @@ struct SonataAction: Sendable {
             if p.required { required.append(p.name) }
         }
 
-        let schema: [String: Any] = [
+        var inputSchema: [String: Any] = [
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        ]
+        // Router-shaped tools accept args they can't enumerate at registration
+        // time (see `mcpAllowAdditionalArgs` doc). Emit `additionalProperties:
+        // true` explicitly so client validators forward the extras verbatim.
+        if mcpAllowAdditionalArgs {
+            inputSchema["additionalProperties"] = true
+        }
+        return [
             "name": name,
             "description": description,
-            "inputSchema": [
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            ] as [String: Any],
+            "inputSchema": inputSchema,
         ]
-        return schema
     }
 }

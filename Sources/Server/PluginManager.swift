@@ -16,6 +16,7 @@ struct PluginManifest: Codable {
     let eventsTopic: String?       // Channel topic, e.g. "messages:events"
     let configSchema: [String: ConfigSchemaEntry]?
     let actions: [ManifestAction]?
+    let capabilities: PluginCapabilities?
 
     enum CodingKeys: String, CodingKey {
         case name, version, description, author, port, arch, actions
@@ -24,7 +25,28 @@ struct PluginManifest: Codable {
         case eventsChannel = "events_channel"
         case eventsTopic = "events_topic"
         case configSchema = "config_schema"
+        case capabilities
     }
+}
+
+/// Optional capability block plugins declare in their manifest. See
+/// ~/.sonata/wiki/sonata/patterns/whathappened.md for the whathappened
+/// convention. New capabilities added here MUST be optional so older
+/// manifests still parse.
+struct PluginCapabilities: Codable {
+    let whathappened: PluginWhatHappenedCapability?
+}
+
+struct PluginWhatHappenedCapability: Codable {
+    let url: String
+    let method: String?           // Defaults to "get"
+    let args: [ManifestParam]?
+    /// Optional domain slug. When present, overrides the plugin's `name`
+    /// as the whathappened routing key. Lets a plugin serve a domain whose
+    /// slug differs from its own name (e.g. plugin `lead-tracker` serves
+    /// domain `lead`; a hypothetical `firm-tracker` could serve `firm` or
+    /// even multiple domains in future versions of the manifest).
+    let domain: String?
 }
 
 struct ConfigSchemaEntry: Codable {
@@ -744,7 +766,7 @@ final class PluginManager: @unchecked Sendable {
                 name: name, version: version, description: description, author: nil,
                 sonataVersion: nil, port: port, arch: nil, startCommand: "",
                 eventsChannel: nil, eventsTopic: nil,
-                configSchema: nil, actions: nil
+                configSchema: nil, actions: nil, capabilities: nil
             ),
             mode: "external",
             baseURL: url,
@@ -756,6 +778,7 @@ final class PluginManager: @unchecked Sendable {
         let healthy = await waitForHealthy(runtime)
         if healthy {
             await discoverAndRegisterActions(runtime)
+            await registerWhatHappenedCapability(runtime)
             runtime.status = "running"
             await updateStatus(name: name, status: "running")
             sonataFileLog("Plugin \(name): connected to \(url), \(runtime.discoveredActions.count) actions registered")
@@ -763,6 +786,67 @@ final class PluginManager: @unchecked Sendable {
             runtime.status = "failed"
             await updateStatus(name: name, status: "failed")
             throw ActionError.custom("Plugin at \(url) is not responding", .serviceUnavailable)
+        }
+    }
+
+    // MARK: - whathappened capability plumbing
+    //
+    // Plugins may declare a top-level `capabilities.whathappened` block in
+    // their manifest. On plugin_enable / plugin_connect, upsert the row into
+    // `plugin_whathappened`. On plugin_disable / plugin_uninstall, delete it.
+    // The whathappened MCP action reads this table when routing a domain
+    // that isn't in the internal WhatHappenedRegistry.
+    //
+    // See ~/.sonata/wiki/sonata/patterns/whathappened.md for the schema.
+
+    private func registerWhatHappenedCapability(_ runtime: PluginRuntime) async {
+        guard let cap = runtime.manifest.capabilities?.whathappened else { return }
+        let args = cap.args ?? []
+        let argsData = (try? JSONEncoder().encode(args)) ?? Data("[]".utf8)
+        let argsJSON = String(data: argsData, encoding: .utf8) ?? "[]"
+        let method = (cap.method?.isEmpty == false ? cap.method! : "get").lowercased()
+        let port = runtime.manifest.port
+        let name = runtime.name
+        // Domain slug — manifest override wins, plugin name is the fallback.
+        // Trim + non-empty guard so a whitespace-only override doesn't create
+        // an unroutable "" domain.
+        let declared = cap.domain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let domain = (declared?.isEmpty == false ? declared! : name)
+        do {
+            try await dbPool.write { db in
+                // Row is keyed by plugin_name (unique per plugin) so a
+                // re-enable replaces its own row. If ANOTHER plugin already
+                // claims this domain, defer to it and log — the convention
+                // is one domain per owner. (Downstream: consider making this
+                // a hard error once we see whether it happens in practice.)
+                if let existingOwner = try String.fetchOne(db,
+                    sql: "SELECT plugin_name FROM plugin_whathappened WHERE domain = ? AND plugin_name != ?",
+                    arguments: [domain, name]) {
+                    sonataFileLog("Plugin \(name): domain '\(domain)' already claimed by plugin '\(existingOwner)' — capability NOT registered")
+                    return
+                }
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO plugin_whathappened
+                    (plugin_name, domain, url, method, args_json, port, registered_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [name, domain, cap.url, method, argsJSON, port, nowMs()])
+            }
+            sonataFileLog("Plugin \(name): registered whathappened domain '\(domain)' at \(cap.url)")
+        } catch {
+            sonataFileLog("Plugin \(name): failed to register whathappened capability: \(error.localizedDescription)")
+        }
+    }
+
+    private func unregisterWhatHappenedCapability(name: String) async {
+        do {
+            try await dbPool.write { db in
+                try db.execute(
+                    sql: "DELETE FROM plugin_whathappened WHERE plugin_name = ?",
+                    arguments: [name]
+                )
+            }
+        } catch {
+            sonataFileLog("Plugin \(name): failed to remove whathappened capability: \(error.localizedDescription)")
         }
     }
 
@@ -792,7 +876,7 @@ final class PluginManager: @unchecked Sendable {
                 name: name, version: "0.0.0", description: nil, author: nil,
                 sonataVersion: nil, port: row.port, arch: nil, startCommand: "",
                 eventsChannel: nil, eventsTopic: nil,
-                configSchema: nil, actions: nil
+                configSchema: nil, actions: nil, capabilities: nil
             ),
             mode: row.mode,
             baseURL: baseURL,
@@ -811,6 +895,7 @@ final class PluginManager: @unchecked Sendable {
         if healthy {
             await discoverAndRegisterActions(runtime)
             subscribeToEventsChannel(runtime)
+            await registerWhatHappenedCapability(runtime)
             runtime.status = "running"
             runtime.crashCount = 0
             await updateStatus(name: name, status: "running", pid: runtime.process.map { Int($0.processIdentifier) })
@@ -832,6 +917,7 @@ final class PluginManager: @unchecked Sendable {
             let actionNames = runtime.discoveredActions.map { "\(name)_\($0.name)" }
             registry.unregister(actionNames)
             runtime.discoveredActions = []
+            await unregisterWhatHappenedCapability(name: name)
             Task { await MCPNotificationDispatcher.shared.broadcastToolsListChanged() }
 
             if runtime.mode == "managed" {
@@ -970,6 +1056,31 @@ final class PluginManager: @unchecked Sendable {
                 UPDATE plugins SET config_json = ?, updatedAt = ? WHERE name = ?
             """, arguments: [configJson, now, name])
         }
+    }
+
+    /// Read a plugin's stored config as a parsed object. Used by plugins that
+    /// fetch their own config on boot via the plugin_config_get MCP action —
+    /// see wiki `sonata/patterns/plugin-config.md`.
+    ///
+    /// Returns an empty dict if the plugin has no config set yet. Throws if
+    /// the plugin row doesn't exist or the stored JSON is malformed (a
+    /// malformed row would silently mask a corrupt install; loud failure
+    /// makes it visible).
+    func getConfig(name: String) async throws -> [String: Any] {
+        let jsonStr: String? = try await dbPool.read { db in
+            try String.fetchOne(db, sql: "SELECT config_json FROM plugins WHERE name = ?", arguments: [name])
+        }
+        guard let jsonStr else {
+            throw ActionError.notFound("plugin \(name) not installed")
+        }
+        if jsonStr.isEmpty || jsonStr == "{}" {
+            return [:]
+        }
+        guard let data = jsonStr.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ActionError.invalidParam("config_json", "plugin \(name) has malformed stored config_json")
+        }
+        return obj
     }
 
     /// List all plugins with their current status.

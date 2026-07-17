@@ -1156,5 +1156,53 @@ extension DatabaseMigrator {
                 ON workerEvents(idempotencyKey)
             """)
         }
+
+        // v30: plugin_whathappened lookup table. See
+        // ~/.sonata/wiki/sonata/patterns/whathappened.md for the convention.
+        //
+        // One row per plugin that declares a `capabilities.whathappened`
+        // block in its manifest. Written on plugin_enable, deleted on
+        // plugin_disable / plugin_uninstall. The whathappened action
+        // consults this table for domain routing when no internal handler
+        // matches; args are validated against `args_json` before forward.
+        registerMigration("v30_plugin_whathappened") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS plugin_whathappened (
+                    plugin_name   TEXT PRIMARY KEY,
+                    url           TEXT NOT NULL,
+                    method        TEXT NOT NULL DEFAULT 'get',
+                    args_json     TEXT NOT NULL DEFAULT '[]',
+                    port          INTEGER NOT NULL,
+                    registered_at INTEGER NOT NULL
+                )
+            """)
+        }
+
+        // v32: plugin_whathappened gets an explicit `domain` column.
+        //
+        // Before this, the plugin's `name` was reused as the domain slug —
+        // collapsing plugin identity and domain identity. This forced the
+        // `lead-tracker` plugin to be listed under domain `lead-tracker`
+        // even though its manifest + response body correctly say `lead`.
+        //
+        // Adds `domain TEXT` (NULL-tolerant during migration, populated by
+        // the enable/connect path afterwards). PluginManager writes the
+        // resolved slug (manifest override OR plugin name fallback) on
+        // enable. Routing looks up by `domain`.
+        //
+        // Backfill: existing rows get their `plugin_name` copied into
+        // `domain` so nothing goes dark between migration and the next
+        // enable cycle.
+        registerMigration("v32_plugin_whathappened_domain") { db in
+            do { try db.execute(sql: "ALTER TABLE plugin_whathappened ADD COLUMN domain TEXT") } catch { /* column exists */ }
+            // Backfill NULL domain rows with plugin_name to preserve current
+            // routing behavior; the next plugin_enable will overwrite with
+            // the manifest-declared slug when present.
+            try db.execute(sql: "UPDATE plugin_whathappened SET domain = plugin_name WHERE domain IS NULL")
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_whathappened_domain
+                ON plugin_whathappened(domain)
+            """)
+        }
     }
 }

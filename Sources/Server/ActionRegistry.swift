@@ -531,9 +531,45 @@ struct MCPCallRequest: Decodable, @unchecked Sendable {
     }
 }
 
+/// Response envelope for `POST /api/mcp/call`.
+///
+/// `result` arrives here as a JSON-encoded string (executeMCPTool returned it
+/// from JSONEncoder). Prior versions emitted this string verbatim, which meant
+/// every raw HTTP consumer received `{"result": "{\"...\": ...}"}` — a nested
+/// JSON payload wrapped inside a JSON-encoded string. Callers had to
+/// `JSON.parse` twice.
+///
+/// This custom encode fixes that: when the string parses as JSON, `result`
+/// is emitted as the nested value (object / array / number / etc.). When it
+/// doesn't parse (bare error strings from executeMCPTool on failure), the
+/// string is emitted as-is so error messages still read cleanly.
+///
+/// Consumers all had defensive `typeof result === "string"` parsing so this
+/// change is backward-safe for them. The one consumer that needs an update
+/// alongside this change is `Sources/Sonata/Resources/mcp/mem-server.ts`,
+/// which was passing `result.result` straight through as MCP text content —
+/// that surface now needs to JSON.stringify when the payload isn't already
+/// a string.
 struct MCPCallResponse: Encodable {
     let result: String
     var error: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case result, error
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(error, forKey: .error)
+        // Try to unwrap the pre-serialized JSON. On success emit as nested;
+        // on failure (bare error text) emit as the raw string.
+        if let data = result.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) {
+            try c.encode(AnyJSONEncodable(parsed), forKey: .result)
+        } else {
+            try c.encode(result, forKey: .result)
+        }
+    }
 }
 
 /// Type-erased Encodable wrapper
