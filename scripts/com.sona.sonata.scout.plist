@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sona.sonata</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Sonata.app/Contents/MacOS/Sonata</string>
+    </array>
+
+    <!-- Start at login so a reboot does not leave Scout down. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart ONLY on abnormal exit.
+         Rationale, and the reason this is not plain `true`:
+           * A crash/trap (2026-07-18: 10h49m outage) exits via signal ->
+             launchd restarts it. This is the blast-radius cap.
+           * A deliberate Quit exits 0 -> stays quit. Otherwise the app
+             could never be closed on this machine.
+           * The singleton guard (SonataApp.swift:633) also exit(0)s when
+             another instance owns the data dir, so a redundant spawn goes
+             dormant instead of hot-looping. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Bound a crash-at-startup loop to 2 attempts/minute. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Sonata is a GUI app; it must load in the Aqua session, not a
+         background/system context. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <!-- launchd would otherwise hand the process a minimal PATH
+         (/usr/bin:/bin:/usr/sbin:/sbin). Scheduled jobs on this host shell
+         out to bare `node` (nvm) and homebrew tools, so the PATH the app
+         was observed running with is pinned here verbatim. Dropping this
+         key silently breaks every node-based scout job. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/scout/.bun/bin:/Users/scout/.nvm/versions/node/v25.8.1/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/scout</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- Belt-and-suspenders: the app raises RLIMIT_NOFILE 256 -> 10240
+         itself at init, but this makes the ceiling true before any Swift
+         code runs. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>10240</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/scout/Library/Logs/sonata-launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/scout/Library/Logs/sonata-launchd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

@@ -93,7 +93,31 @@ enum SonataInstance {
     /// Held for the life of the process. Never closed: the kernel releases the
     /// flock when the process exits, which is what makes a crashed instance
     /// leave no stale lock behind.
+    ///
+    /// That guarantee holds *only* because the descriptor is opened
+    /// `O_CLOEXEC`. flock is per open-file-description, not per process, so a
+    /// child that inherits this descriptor across fork+exec keeps the lock
+    /// alive after the parent dies. Sonata forks workers (forkpty) and plugins
+    /// constantly, so without the flag a crash leaves the data dir locked by
+    /// orphans and every relaunch attempt hits the singleton guard and
+    /// exit(0)s — observed on 2026-07-19 defeating the LaunchAgent's KeepAlive.
     private nonisolated(unsafe) static var lockDescriptor: Int32 = -1
+
+    /// Test hook: is the held lock descriptor marked close-on-exec?
+    /// `nil` when no lock is currently held.
+    static var lockDescriptorIsCloseOnExec: Bool? {
+        guard lockDescriptor >= 0 else { return nil }
+        let flags = fcntl(lockDescriptor, F_GETFD)
+        return flags >= 0 && (flags & FD_CLOEXEC) != 0
+    }
+
+    /// Test hook: release the held lock so a test can simulate process exit
+    /// without tearing down the test runner.
+    static func releaseLockForTesting() {
+        guard lockDescriptor >= 0 else { return }
+        close(lockDescriptor)
+        lockDescriptor = -1
+    }
 
     /// Take the exclusive lock on this data directory.
     ///
@@ -116,7 +140,8 @@ enum SonataInstance {
             atPath: directory, withIntermediateDirectories: true)
 
         let path = "\(directory)/sonata.lock"
-        let descriptor = open(path, O_CREAT | O_RDWR, 0o644)
+        // O_CLOEXEC is load-bearing, not hygiene — see `lockDescriptor`.
+        let descriptor = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
 
         // Can't open the lock file at all (read-only volume, exotic perms).
         // Refusing to boot over an unlockable path would be worse than the race

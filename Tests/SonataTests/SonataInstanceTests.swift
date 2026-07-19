@@ -100,4 +100,62 @@ final class SonataInstanceTests: XCTestCase {
         XCTAssertTrue(SonataInstance.acquireLock(at: dir))
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(dir)/sonata.lock"))
     }
+
+    // MARK: - Lock must not outlive the process via inherited descriptors
+    //
+    // 2026-07-19: installing a LaunchAgent with KeepAlive on Scout appeared to
+    // work, then failed its own falsification test. SIGKILLing Sonata did
+    // restart it (runs 1 -> 2), but the replacement logged "another Sonata
+    // already owns /Users/scout/.sonata" and exit(0)d, which KeepAlive
+    // {SuccessfulExit: false} correctly reads as "do not restart" — leaving the
+    // host down with supervision installed and dormant.
+    //
+    // Cause: the lock descriptor was opened without O_CLOEXEC, so every forked
+    // worker/plugin inherited it. flock is per open-file-description, so those
+    // orphans held the data dir locked after their parent died. Same bug class
+    // as the :3211 listen socket on 2026-07-17, which got FD_CLOEXEC while the
+    // lock file was missed.
+
+    func testLockDescriptorIsCloseOnExec() {
+        XCTAssertTrue(SonataInstance.acquireLock(at: makeTempDir()))
+        XCTAssertEqual(SonataInstance.lockDescriptorIsCloseOnExec, true,
+                       "lock fd must be O_CLOEXEC or forked children keep the lock alive past a crash")
+    }
+
+    /// The behavioural form, and the one that actually reproduces the outage:
+    /// a live child must not keep the data directory locked once the parent's
+    /// descriptor is gone.
+    ///
+    /// This deliberately does NOT use Foundation's `Process`. On Darwin that
+    /// spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`, which closes every descriptor
+    /// regardless of its FD_CLOEXEC flag — so a `Process`-based version of this
+    /// test passes even against the unfixed code and certifies nothing (checked:
+    /// it did). Sonata's workers come up through SwiftTerm's forkpty, a plain
+    /// fork+exec that inherits by default. Raw posix_spawn without that flag is
+    /// the faithful model.
+    func testChildProcessDoesNotInheritTheLock() throws {
+        let dir = makeTempDir()
+        XCTAssertTrue(SonataInstance.acquireLock(at: dir), "parent takes the lock")
+
+        var pid: pid_t = 0
+        let argv: [UnsafeMutablePointer<CChar>?] = [
+            strdup("/bin/sleep"), strdup("30"), nil,
+        ]
+        defer { argv.forEach { free($0) } }
+
+        let rc = posix_spawn(&pid, "/bin/sleep", nil, nil, argv, environ)
+        XCTAssertEqual(rc, 0, "failed to spawn the inheriting child")
+        addTeardownBlock {
+            kill(pid, SIGTERM)
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+        }
+
+        // Simulate the parent dying. The kernel drops the parent's flock here;
+        // any surviving hold can only come from an inherited descriptor.
+        SonataInstance.releaseLockForTesting()
+
+        XCTAssertTrue(SonataInstance.acquireLock(at: dir),
+                      "a relaunch must be able to take the lock while an orphaned child is alive")
+    }
 }
