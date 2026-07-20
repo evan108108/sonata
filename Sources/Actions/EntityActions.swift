@@ -6,7 +6,10 @@ import Hummingbird
 // Handler logic is duplicated from EntityRoutes.swift.
 
 private func encodeAnyJSON(_ value: Any) -> String? {
-    guard let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+    // SafeJSON guards against a scalar top-level, which would otherwise raise
+    // an uncatchable NSException and crash the process. Callers currently pass
+    // `.object(...)` dicts, but the `Any` signature must not be a landmine.
+    guard let data = SafeJSON.data(withJSONObject: value, options: []),
           let str = String(data: data, encoding: .utf8) else {
         return nil
     }

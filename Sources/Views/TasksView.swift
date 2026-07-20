@@ -37,9 +37,15 @@ private struct TaskItem: Identifiable, Hashable {
             guard let id = (dict["_id"] as? String) ?? (dict["id"] as? String) else { return nil }
             let resultStr: String? = {
                 if let s = dict["result"] as? String { return s }
-                if let obj = dict["result"], !(obj is NSNull),
-                   let d = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
-                    return String(decoding: d, as: UTF8.self)
+                if let obj = dict["result"], !(obj is NSNull) {
+                    // A container result → pretty JSON. A *scalar* number/bool
+                    // result would crash JSONSerialization.data (top-level
+                    // scalar → uncatchable NSException), so SafeJSON returns nil
+                    // for it and we stringify the scalar directly.
+                    if let d = SafeJSON.data(withJSONObject: obj, options: [.prettyPrinted]) {
+                        return String(decoding: d, as: UTF8.self)
+                    }
+                    return String(describing: obj)
                 }
                 return nil
             }()

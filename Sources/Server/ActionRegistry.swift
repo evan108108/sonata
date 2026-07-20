@@ -608,7 +608,10 @@ private func anyJSONResponse(
     _ value: Any,
     status: HTTPResponse.Status = .ok
 ) -> Response {
-    let data = (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]))
+    // SafeJSON guards against a scalar top-level (uncatchable NSException →
+    // process crash). Callers pass containers today; the `Any` signature must
+    // not be a landmine for a future caller.
+    let data = SafeJSON.data(withJSONObject: value, options: [.sortedKeys])
         ?? Data("{\"error\":\"encoding failed\"}".utf8)
     var headers = HTTPFields()
     headers[.contentType] = "application/json"
