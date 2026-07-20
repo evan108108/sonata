@@ -1,9 +1,84 @@
 import Foundation
 import GRDB
 import Hummingbird
+import Logging
 
 // Phase 2 migration: action definitions for /api/worker routes.
 // Handler logic is duplicated from WorkerRoutes.swift.
+
+let workerLogger = Logging.Logger(label: "sonata.worker")
+
+/// Returned when worker_set_status refuses a clearCurrentEvent because the slot
+/// does not hold what the caller expected. Carries the id actually held so the
+/// caller can tell "someone else already cleared it" from "I was about to eat a
+/// freshly dispatched event."
+struct ClearRefusedResponse: Encodable {
+    let success = false
+    let cleared = false
+    let currentEventId: String?
+    let reason = "currentEventId does not match expectedEventId"
+}
+
+/// Compare-and-swap predicate for worker_set_status(clearCurrentEvent).
+///
+/// Pulled out of the handler so the 2026-07-20 race is pinned by a test rather
+/// than by reading the SQL. `held` is what the worker row currently points at
+/// (nil when empty); `expected` is what the caller believes it holds.
+///
+/// The unguarded case (`force`) is retained deliberately: clearing a genuinely
+/// mismatched slot is what this endpoint was built for. It is opt-in and logged,
+/// so the dangerous shape stays reachable but never accidental.
+func clearCurrentEventShouldProceed(held: String?, expected: String?, force: Bool) -> Bool {
+    if force { return true }
+    guard let expected else { return false }
+    return held == expected
+}
+
+// MARK: - Stuck-busy reconcile (Path #1 root fix)
+
+/// Free any worker still pinned (currentEventId == eventId) to an event that is
+/// NOT live — i.e. already terminal (completed/failed/cancelled) or whose row is
+/// gone. Called from the owner-guard reject branch of worker_event_complete /
+/// worker_event_fail.
+///
+/// Why this is the recurring "stuck busy" root cause (2026-07-17): the F4
+/// owner-guard intentionally skips the event/task side effects when a completion
+/// arrives from a caller that no longer owns the event (stale zombie, or the
+/// event was reaped/re-dispatched). But it also skipped freeing the CALLER's own
+/// worker row, leaving `currentEventId` pinned and the worker `busy` forever.
+/// Nothing else recovered it: reclaimStrandedEvents only fires while the event is
+/// still `assigned`, and sweepOrphanedEvents only when the worker no longer
+/// exists — a live, fresh-heartbeat worker pinned to a *terminal* event fell
+/// through both. This was hand-unstuck per-incident with worker_set_status.
+///
+/// Safety: the normal completion path flips the event terminal AND frees the
+/// worker in the SAME transaction, so no worker is ever legitimately pinned to a
+/// non-live event. If instead the event is still live ('assigned'/'pending' to a
+/// genuine re-dispatch), we leave every worker alone — the F4 owner-guard owns
+/// that case. Returns the number of workers reconciled.
+@discardableResult
+func reconcilePinnedWorkers(eventId: String, in db: Database) throws -> Int {
+    let liveStatus = try String.fetchOne(db,
+        sql: "SELECT status FROM workerEvents WHERE id = ?",
+        arguments: [eventId])
+    // 'assigned'/'pending' = a live re-dispatch owns it → don't touch.
+    // terminal ('completed'/'failed'/'cancelled') or nil (row gone) → reconcile.
+    if liveStatus == "assigned" || liveStatus == "pending" { return 0 }
+    try db.execute(sql: """
+        UPDATE workers SET
+            status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'idle' END,
+            currentEventId = NULL,
+            currentEventTokens = NULL,
+            currentSlug = NULL,
+            currentCacheReadTokens = NULL,
+            currentInputTokens = NULL,
+            currentPromptHash = NULL,
+            currentSessionLabel = NULL,
+            currentCwdBasename = NULL
+        WHERE currentEventId = ?
+    """, arguments: [eventId])
+    return db.changesCount
+}
 
 // MARK: - Response shapes specific to actions
 
@@ -600,18 +675,60 @@ let workerActions: [SonataAction] = [
             ActionParam("workerId", .string, required: true, description: "Worker identifier"),
             ActionParam("status", .string, required: true, description: "Target status: idle, busy, draining, offline"),
             ActionParam("clearCurrentEvent", .boolean, description: "If true, also NULL out currentEventId and live-monitoring fields"),
+            ActionParam("expectedEventId", .string, description: "Required when clearCurrentEvent is true: the event id the caller believes the worker holds (worker_inspect reports it). The clear no-ops (success:false) if currentEventId has moved on."),
+            ActionParam("force", .boolean, description: "Clear currentEventId without an expectedEventId match. Logged at warning level — genuine mismatched-state repair only."),
         ],
         handler: { ctx in
             let workerId = try ctx.params.require("workerId")
             let status = try ctx.params.require("status")
             let clearCurrent = ctx.params.bool("clearCurrentEvent") ?? false
+            let expectedEventId = ctx.params.string("expectedEventId")
+            let force = ctx.params.bool("force") ?? false
             let allowed: Set<String> = ["idle", "busy", "draining", "offline"]
             guard allowed.contains(status) else {
                 throw ActionError.invalidParam("status", "must be one of: idle, busy, draining, offline")
             }
+            // 2026-07-20: a blind clear can eat a task the dispatcher landed
+            // microseconds ago. Worker 8368256472 called complete_event, the
+            // dispatcher assigned BKSK 1.3s later, and the worker's habitual
+            // clearCurrentEvent nulled an event it had never seen — closing it
+            // with the task still `pending`, whose day-scoped idempotency key
+            // then blocked redispatch until midnight and starved five tasks
+            // chained behind it. Requiring expectedEventId makes the caller
+            // observe the state it is about to mutate. Absent is REJECTED
+            // rather than defaulted to the old behavior: an optional guard that
+            // falls back to "clear whatever's there" protects nobody, because
+            // every existing caller keeps sailing past it.
+            if clearCurrent && expectedEventId == nil && !force {
+                throw ActionError.invalidParam(
+                    "expectedEventId",
+                    "required when clearCurrentEvent is true — pass the event id you believe the worker holds (worker_inspect reports it). If you do not know which event you hold, you should not be clearing it: after complete_event or fail_event the slot is already released, so this call is unnecessary."
+                )
+            }
             do {
-                try await ctx.dbPool.write { db in
+                let outcome = try await ctx.dbPool.write { db -> (cleared: Bool, held: String?) in
                     if clearCurrent {
+                        // Capture the event this worker points at BEFORE nulling
+                        // it, then close that dangling workerEvent too. Otherwise
+                        // the worker frees but its event stays `assigned` forever
+                        // — a leak that (for sonar_dm) shadows the dm_reply
+                        // auto-complete and re-strands the next DM (2026-07-17).
+                        // Only close an event still `assigned` to THIS worker.
+                        let heldEventId = try String.fetchOne(db,
+                            sql: "SELECT currentEventId FROM workers WHERE workerId = ?",
+                            arguments: [workerId])
+                        let held = (heldEventId?.isEmpty == false) ? heldEventId : nil
+
+                        // Compare-and-swap. Refuse when the slot holds something
+                        // other than what the caller expected — including when it
+                        // is already empty, which means someone else got here
+                        // first and whatever we would clear next is not ours.
+                        guard clearCurrentEventShouldProceed(
+                            held: held, expected: expectedEventId, force: force
+                        ) else {
+                            return (cleared: false, held: held)
+                        }
+
                         try db.execute(sql: """
                             UPDATE workers SET
                                 status = ?,
@@ -625,12 +742,37 @@ let workerActions: [SonataAction] = [
                                 currentCwdBasename = NULL
                             WHERE workerId = ?
                         """, arguments: [status, workerId])
+                        if let held {
+                            try db.execute(sql: """
+                                UPDATE workerEvents SET status = 'completed', completedAt = ?,
+                                    result = 'closed via worker_set_status(clearCurrentEvent)',
+                                    idempotencyKey = NULL
+                                WHERE id = ? AND status = 'assigned' AND assignedTo = ?
+                            """, arguments: [nowMs(), held, workerId])
+                        }
+                        return (cleared: true, held: held)
                     } else {
                         try db.execute(
                             sql: "UPDATE workers SET status = ? WHERE workerId = ?",
                             arguments: [status, workerId]
                         )
+                        return (cleared: true, held: nil)
                     }
+                }
+                if clearCurrent && !outcome.cleared {
+                    // Visible refusal, not a silent no-op. A caller that believes
+                    // it released a genuinely stuck event and walks away is the
+                    // same bug this guard exists to prevent, wearing a different
+                    // hat — so report what the slot actually holds.
+                    workerLogger.warning(
+                        "worker_set_status: refusing clearCurrentEvent on \(workerId) — expected \(expectedEventId ?? "nil"), holds \(outcome.held ?? "nothing")"
+                    )
+                    return ClearRefusedResponse(currentEventId: outcome.held)
+                }
+                if clearCurrent && force && expectedEventId == nil {
+                    workerLogger.warning(
+                        "worker_set_status: FORCED unguarded clearCurrentEvent on \(workerId) — closed \(outcome.held ?? "nothing")"
+                    )
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -957,9 +1099,16 @@ let workerEventActions: [SonataAction] = [
                         """, arguments: [resultText, now, attributedTokens, attributedModel, eventId])
                     }
                     // Stale/duplicate completion (event already terminal or no
-                    // longer owned by this caller): skip ALL side effects so we
-                    // don't disturb the current owner or a re-dispatched task.
-                    guard db.changesCount > 0 else { return nil }
+                    // longer owned by this caller): skip the event/task side
+                    // effects so we don't disturb the current owner or a
+                    // re-dispatched task — BUT still free any worker left pinned
+                    // to this non-live event, else its currentEventId sits `busy`
+                    // forever (the recurring stuck-busy class). See
+                    // reconcilePinnedWorkers.
+                    guard db.changesCount > 0 else {
+                        try reconcilePinnedWorkers(eventId: eventId, in: db)
+                        return nil
+                    }
 
                     // Set worker back to idle (unless draining — keep draining status)
                     var captured: String?
@@ -1120,8 +1269,13 @@ let workerEventActions: [SonataAction] = [
                             WHERE id = ? AND status = 'assigned'
                         """, arguments: [errorText, now, attributedTokens, attributedModel, eventId])
                     }
-                    // Stale/duplicate fail: skip side effects (see complete path).
-                    guard db.changesCount > 0 else { return nil }
+                    // Stale/duplicate fail: skip event/task side effects (see
+                    // complete path) but still free any worker left pinned to
+                    // this non-live event (recurring stuck-busy class).
+                    guard db.changesCount > 0 else {
+                        try reconcilePinnedWorkers(eventId: eventId, in: db)
+                        return nil
+                    }
 
                     var captured: String?
                     if let workerId = row?.assignedTo {

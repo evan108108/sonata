@@ -464,6 +464,113 @@ func waitForSonataHTTP(port: Int, timeoutSeconds: Double = 5.0) -> Bool {
     return false
 }
 
+/// Raise the process file-descriptor soft limit toward the hard limit.
+///
+/// macOS launches GUI apps with an RLIMIT_NOFILE soft limit of 256. Under
+/// multi-worker + SSE load Sonata hit that ceiling on 2026-07-17: an fcntl()
+/// on a freshly-accepted socket failed with EMFILE, SwiftNIO's ServiceGroup
+/// treated the HTTP server as finished-unexpectedly and tore it down for good
+/// (no auto-restart), and every subsequent connection timed out. Raising the
+/// limit at startup is the primary fix — it removes the trigger entirely.
+///
+/// The hard limit is effectively unlimited, but the kernel still caps a single
+/// process at kern.maxfilesperproc, so setrlimit above that fails. Step the
+/// request down until it takes rather than giving up on the first failure.
+/// `RLIM_INFINITY` is a C macro Swift can't import (the SDK marks it
+/// "structure not supported"), so spell out its value: (1 << 63) - 1.
+private let rlimInfinity: rlim_t = (rlim_t(1) << 63) - 1
+
+/// Raised by the supervised HTTP server task when it has restarted the server
+/// more times than its budget allows — a signal that the failure is not a
+/// transient fd spike and should surface as a fatal log rather than hot-loop.
+enum HTTPServerSupervisorError: Error {
+    case restartBudgetExhausted(Int)
+}
+
+@discardableResult
+func raiseFileDescriptorLimit(to target: rlim_t) -> Bool {
+    var lim = rlimit()
+    guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else {
+        sonataFileLog("Sonata init: getrlimit(RLIMIT_NOFILE) failed — leaving fd limit at default")
+        return false
+    }
+    let hardCeiling: rlim_t = lim.rlim_max == rlimInfinity ? target : min(target, lim.rlim_max)
+    guard hardCeiling > lim.rlim_cur else {
+        sonataFileLog("Sonata init: RLIMIT_NOFILE already \(lim.rlim_cur) (>= target \(target)) — no change")
+        return true
+    }
+    let stepDown: rlim_t = 1024
+    var desired = hardCeiling
+    while desired > lim.rlim_cur {
+        var newLim = lim
+        newLim.rlim_cur = desired
+        if setrlimit(RLIMIT_NOFILE, &newLim) == 0 {
+            let hardDesc = lim.rlim_max == rlimInfinity ? "unlimited" : String(lim.rlim_max)
+            sonataFileLog("Sonata init: raised RLIMIT_NOFILE soft limit \(lim.rlim_cur) → \(desired) (hard \(hardDesc))")
+            return true
+        }
+        desired = desired > lim.rlim_cur + stepDown ? desired - stepDown : lim.rlim_cur
+    }
+    sonataFileLog("Sonata init: could not raise RLIMIT_NOFILE above \(lim.rlim_cur)")
+    return false
+}
+
+/// Set FD_CLOEXEC on any TCP listen socket bound to `port`.
+///
+/// Sonata spawns worker/plugin child processes via fork+exec (SwiftTerm's
+/// forkpty for workers). fork() copies every open descriptor; only those
+/// carrying FD_CLOEXEC are closed at exec(). If the HTTP acceptor socket lacks
+/// the flag, each child inherits a copy — so after the server tears down the
+/// port stays in LISTEN with no acceptor (every connection times out) and a
+/// rebind hits EADDRINUSE. That is exactly what pinned :port on 2026-07-17.
+///
+/// fcntl(F_SETFD) is idempotent, so this is harmless belt-and-suspenders if
+/// NIO already set the flag. Best-effort: failures are logged, never fatal.
+func setCloseOnExecOnListenSockets(port: Int) {
+    var lim = rlimit()
+    let maxFD: Int32
+    if getrlimit(RLIMIT_NOFILE, &lim) == 0, lim.rlim_cur != rlimInfinity {
+        maxFD = Int32(min(lim.rlim_cur, 65536))
+    } else {
+        maxFD = 4096
+    }
+    var patched = 0
+    var fd: Int32 = 3   // skip stdin/stdout/stderr
+    while fd < maxFD {
+        defer { fd += 1 }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { continue }
+        guard (st.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK) else { continue }
+        // Must be an AF_INET socket whose local port is the server port.
+        var addr = sockaddr_in()
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                getsockname(fd, sp, &addrLen) == 0
+            }
+        }
+        guard named, addr.sin_family == sa_family_t(AF_INET) else { continue }
+        guard Int(UInt16(bigEndian: addr.sin_port)) == port else { continue }
+        // Distinguish the listener from accepted connections (which share the
+        // listener's local port): a listening socket has no peer, so
+        // getpeername fails with ENOTCONN. SO_ACCEPTCONN is unreadable via
+        // getsockopt on macOS (ENOPROTOOPT), so getpeername is the reliable
+        // test here. This leaves live client connection fds untouched.
+        var peer = sockaddr_in()
+        var peerLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let hasPeer = withUnsafeMutablePointer(to: &peer) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                getpeername(fd, sp, &peerLen) == 0
+            }
+        }
+        guard !hasPeer else { continue }
+        let flags = fcntl(fd, F_GETFD)
+        if flags >= 0 { _ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC) }
+        patched += 1
+    }
+    sonataFileLog("HTTP server: set FD_CLOEXEC on \(patched) listen socket(s) for port \(port)")
+}
+
 @main
 struct SonataApp: App {
     let dbPool: DatabasePool
@@ -479,6 +586,13 @@ struct SonataApp: App {
         // before any other code that might print, so it lives at the very top
         // of init().
         installSonataStdoutRedirect()
+
+        // Raise the file-descriptor soft limit before anything opens sockets or
+        // spawns workers. macOS gives GUI apps a 256 soft limit; that ceiling
+        // is what wedged the HTTP server on 2026-07-17 (EMFILE → NIO tore the
+        // server down permanently). 10240 is well above steady-state usage and
+        // under the kernel's per-process cap. See raiseFileDescriptorLimit.
+        raiseFileDescriptorLimit(to: 10240)
 
         // Singleton guard, part 1: another *bundled* Sonata is already running.
         // Bring it to front and stand down. This is the double-click case.
@@ -804,15 +918,64 @@ struct SonataApp: App {
                 // exposes uses WS. If it comes back, use
                 // `.http1WebSocketUpgrade(webSocketRouter:)` with a real ws
                 // router again.
-                let app = Application(
-                    router: router,
-                    server: .http1(),
-                    configuration: .init(address: .hostname("127.0.0.1", port: port)),
-                    logger: logger
-                )
-
-                // Start the HTTP server in a subtask
-                async let serverTask: Void = app.runService()
+                // Supervised HTTP server (2026-07-17 fd-exhaustion wedge).
+                //
+                // A transient fcntl/EMFILE spike makes NIO's ServiceGroup treat
+                // the HTTP server as finished-unexpectedly and tear it down for
+                // good — the process keeps running (scheduler, workers, health
+                // monitor) but the server never comes back, so every request
+                // times out. Instead of a one-shot `app.runService()`, rebuild
+                // and rerun the Application on any unexpected exit. The restart
+                // budget resets after a healthy run, so a one-off spike
+                // self-heals while a hard-broken config still gives up rather
+                // than hot-looping forever.
+                //
+                // runService() only returns/throws on teardown. Real process
+                // termination _exit()s from the willTerminate observer before we
+                // reach here, so a return we actually observe is the failure
+                // case → restart (unless our own task was cancelled).
+                let serverTask = Task { [logger] in
+                    let maxRestarts = 8
+                    let healthyRunSeconds: TimeInterval = 60
+                    var attempt = 0
+                    while !Task.isCancelled {
+                        let startedAt = Date()
+                        // After each (re)bind, strip the acceptor socket from
+                        // child-process inheritance so a later teardown can't
+                        // leave the port pinned in LISTEN (fd hygiene, fix #3).
+                        let cloexecSweep = Task {
+                            try? await Task.sleep(for: .milliseconds(500))
+                            setCloseOnExecOnListenSockets(port: port)
+                        }
+                        do {
+                            let app = Application(
+                                router: router,
+                                server: .http1(),
+                                configuration: .init(address: .hostname("127.0.0.1", port: port)),
+                                logger: logger
+                            )
+                            try await app.runService()
+                            cloexecSweep.cancel()
+                            if Task.isCancelled { break }
+                            sonataFileLog("HTTP server: runService returned unexpectedly — restarting")
+                        } catch {
+                            cloexecSweep.cancel()
+                            if Task.isCancelled { break }
+                            sonataFileLog("HTTP server: runService threw — \(error) — restarting")
+                        }
+                        // A server that stayed up long enough counts as healthy;
+                        // reset the budget so lifetime spikes don't accumulate.
+                        if Date().timeIntervalSince(startedAt) >= healthyRunSeconds { attempt = 0 }
+                        attempt += 1
+                        if attempt > maxRestarts {
+                            sonataFileLog("HTTP FATAL: HTTP server exceeded \(maxRestarts) restarts — giving up")
+                            throw HTTPServerSupervisorError.restartBudgetExhausted(maxRestarts)
+                        }
+                        let backoff = min(Double(attempt), 5.0)
+                        try? await Task.sleep(for: .seconds(backoff))
+                        sonataFileLog("HTTP server: restart attempt \(attempt)/\(maxRestarts)")
+                    }
+                }
 
                 // Give the HTTP server a moment to bind before starting services
                 try? await Task.sleep(for: .milliseconds(500))
@@ -1034,6 +1197,10 @@ struct SonataApp: App {
                 // Register shutdown handler
                 let shutdownHandler = {
                     logger.info("Sonata shutting down — stopping all services")
+                    // Cancel the supervisor first so runService() unwinds
+                    // gracefully and the restart loop sees isCancelled → exits
+                    // instead of rebinding the port during shutdown.
+                    serverTask.cancel()
                     await scheduler.shutdown()
                     await emailHandler.shutdown()
                     await friendRelay.shutdown()
@@ -1060,8 +1227,11 @@ struct SonataApp: App {
                 }
                 sigIntSource.resume()
 
-                // Await the server — this blocks until the server stops
-                try await serverTask
+                // Await the supervisor — this blocks until the server stops for
+                // good (graceful shutdown or exhausted restart budget). The
+                // supervising task rethrows only when the restart budget is
+                // exhausted; that surfaces here as a fatal-server log below.
+                try await serverTask.value
             } catch {
                 // Log to both Logger and file so we can see what went wrong
                 let logger = Logger(label: "sonata.http")

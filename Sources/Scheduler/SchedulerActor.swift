@@ -616,8 +616,23 @@ public actor SchedulerActor {
     // MARK: - Shell Execution
 
     /// Run a shell command and capture its stdout. Timeout: 5 minutes.
-    private static func runShellCommand(_ command: String) async throws -> String {
+    ///
+    /// Completion is driven by `terminationHandler` rather than `waitUntilExit()`. This
+    /// function runs on Swift's cooperative thread pool, which has one thread per core;
+    /// a blocking wait here holds one of those threads for up to the full 300s timeout.
+    /// Sonata's own HTTP server is served from that same pool, so a blocked thread can
+    /// starve the very request a child process is waiting on — e.g. a `mem task add` job
+    /// whose curl hits localhost:3211. That circular wait is a genuine self-deadlock, and
+    /// it presented as NIOAsyncWriter deinit traps on .17 on 2026-07-18.
+    ///
+    /// Output is drained continuously via `readabilityHandler` instead of a single
+    /// `readDataToEndOfFile()` after exit: with nobody reading while the child runs, any
+    /// job writing more than the 64KB pipe buffer would block forever waiting to write.
+    /// Internal rather than private so the deadlock/large-output regression tests can
+    /// drive it directly (see SchedulerShellCommandTests).
+    static func runShellCommand(_ command: String) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
+            let state = ShellRunState()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-c", command]
@@ -626,11 +641,28 @@ public actor SchedulerActor {
             process.standardOutput = pipe
             process.standardError = pipe
 
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
-                return
+            let readEnd = pipe.fileHandleForReading
+
+            @Sendable func finish(_ result: (status: Int32, output: String)) {
+                readEnd.readabilityHandler = nil
+                if result.status == 0 {
+                    continuation.resume(returning: result.output)
+                } else {
+                    continuation.resume(throwing: SchedulerError.shellFailed(
+                        exitCode: result.status,
+                        output: result.output
+                    ))
+                }
+            }
+
+            readEnd.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    // EOF: every write end is closed.
+                    if let result = state.noteEOF() { finish(result) }
+                } else {
+                    state.append(chunk)
+                }
             }
 
             // Timeout: 5 minutes
@@ -641,23 +673,79 @@ public actor SchedulerActor {
                     process.terminate()
                 }
             }
-            timer.resume()
 
-            process.waitUntilExit()
-            timer.cancel()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-
-            if process.terminationStatus == 0 {
-                continuation.resume(returning: output)
-            } else {
-                continuation.resume(throwing: SchedulerError.shellFailed(
-                    exitCode: process.terminationStatus,
-                    output: output
-                ))
+            process.terminationHandler = { proc in
+                timer.cancel()
+                let status = proc.terminationStatus
+                if let result = state.noteExit(status) {
+                    finish(result)
+                    return
+                }
+                // Exited but the pipe has not hit EOF — a surviving grandchild still holds
+                // the write end. Grant a short grace for in-flight output, then complete
+                // anyway so a background-spawning job can never strand this continuation.
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    if let result = state.forceFinish(status) { finish(result) }
+                }
             }
+
+            do {
+                try process.run()
+            } catch {
+                readEnd.readabilityHandler = nil
+                continuation.resume(throwing: error)
+                return
+            }
+
+            timer.resume()
         }
+    }
+}
+
+/// Collects a shell job's output and completes exactly once, when the process has exited
+/// *and* its output pipe has reached EOF (or a grace period has elapsed). Both events
+/// arrive on arbitrary threads, so all state is lock-protected and the "ready" transition
+/// is one-shot — that is what makes double-resume of the continuation impossible.
+private final class ShellRunState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    private var eofSeen = false
+    private var exitStatus: Int32?
+    private var completed = false
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(chunk)
+    }
+
+    func noteEOF() -> (status: Int32, output: String)? {
+        lock.lock()
+        defer { lock.unlock() }
+        eofSeen = true
+        return readyLocked()
+    }
+
+    func noteExit(_ status: Int32) -> (status: Int32, output: String)? {
+        lock.lock()
+        defer { lock.unlock() }
+        exitStatus = status
+        return readyLocked()
+    }
+
+    /// Complete on exit alone, ignoring a pipe that never reached EOF.
+    func forceFinish(_ status: Int32) -> (status: Int32, output: String)? {
+        lock.lock()
+        defer { lock.unlock() }
+        eofSeen = true
+        exitStatus = status
+        return readyLocked()
+    }
+
+    private func readyLocked() -> (status: Int32, String)? {
+        guard eofSeen, let status = exitStatus, !completed else { return nil }
+        completed = true
+        return (status, String(data: data, encoding: .utf8) ?? "")
     }
 }
 

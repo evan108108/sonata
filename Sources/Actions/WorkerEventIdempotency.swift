@@ -44,8 +44,32 @@ enum WorkerEventIdempotency {
             guard let id = payload["message_id"] as? String, !id.isEmpty else { return nil }
             return "sonar_dm:\(id)"
         case "pr_review":
-            guard let runId = payload["run_id"] as? String, !runId.isEmpty else { return nil }
-            return "pr_review:\(runId)"
+            // 2026-07-17 (pain #6, Supervisor "workspace lease tokens", DM
+            // 928af67c9d5c4d4bb7dd3e0485608f82): keyed on run_id previously —
+            // but prstar's dispatcher creates a NEW run_id row for every
+            // dispatch, so two events for the same PR+sha produced two
+            // different keys and the ON CONFLICT dedup below was a no-op.
+            // Supervisor cleanup for concurrent-dual-claim races (PR #446,
+            // #427, #444 all recently) traces to exactly this: the underlying
+            // artifact fingerprint (owner/repo#pr@sha for a given action)
+            // never made it into the key. Re-key on that fingerprint so a
+            // second dispatch for the same artifact silently drops. If a
+            // legitimate re-dispatch is needed at the same sha AFTER the
+            // first completes, prstar's own prstar_review_runs dedup
+            // (idx_prstar_runs_dedup on repo_id+pr_number+head_sha+action)
+            // already catches that upstream.
+            guard let owner = payload["owner"] as? String, !owner.isEmpty,
+                  let repo = payload["repo"] as? String, !repo.isEmpty,
+                  let headSha = payload["headSha"] as? String, !headSha.isEmpty,
+                  let action = payload["action"] as? String, !action.isEmpty
+            else { return nil }
+            // prNumber arrives as Int most of the time but a JSON re-parse
+            // through some plugin surfaces coerces it to String; accept either.
+            let prNumberStr: String
+            if let n = payload["prNumber"] as? Int { prNumberStr = String(n) }
+            else if let s = payload["prNumber"] as? String, !s.isEmpty { prNumberStr = s }
+            else { return nil }
+            return "pr_review:\(owner)/\(repo)#\(prNumberStr)@\(headSha)@\(action)"
         default:
             return nil
         }

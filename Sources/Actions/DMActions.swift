@@ -643,18 +643,21 @@ let dmActions: [SonataAction] = [
             // still applies for callers who follow the contract correctly.
             if result.status == "sent" {
                 try? await ctx.dbPool.write { db in
-                    guard let row = try Row.fetchOne(db, sql: """
-                        SELECT id, payload FROM workerEvents
+                    // Match the exact event by message_id IN SQL. Previously
+                    // this used fetchOne with no message_id filter and no
+                    // ORDER BY, then compared in Swift — so a leftover stale
+                    // sonar_dm event assigned to the same worker could be
+                    // returned instead of the one being replied to, the
+                    // comparison failed, and the auto-complete silently
+                    // no-op'd, leaving the worker stuck 'busy' (2026-07-17).
+                    // Filtering by message_id targets the right row regardless
+                    // of stale siblings.
+                    guard let eventId = try String.fetchOne(db, sql: """
+                        SELECT id FROM workerEvents
                         WHERE assignedTo = ? AND status = 'assigned' AND type = 'sonar_dm'
-                    """, arguments: [senderKey]) else { return }
-                    let eventId = row["id"] as? String ?? ""
-                    let payloadStr = row["payload"] as? String ?? "{}"
-                    guard let data = payloadStr.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: data),
-                          let dict = obj as? [String: Any],
-                          let msgId = dict["message_id"] as? String,
-                          msgId == toMessageId,
-                          !eventId.isEmpty else { return }
+                          AND json_extract(payload, '$.message_id') = ?
+                        LIMIT 1
+                    """, arguments: [senderKey, toMessageId]), !eventId.isEmpty else { return }
                     let now = nowMs()
                     try db.execute(sql: """
                         UPDATE workerEvents SET status = 'completed', completedAt = ?,

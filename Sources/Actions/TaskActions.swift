@@ -416,7 +416,17 @@ let taskActions: [SonataAction] = [
             if let v = ctx.params.stringArray("tags")        { setClauses.append("tags = ?");        args.append(encodeTags(v)) }
             if let v = ctx.params.string("assignedTo")  { setClauses.append("assignedTo = ?");  args.append(v) }
             if let v = ctx.params.int("dueAt")          { setClauses.append("dueAt = ?");       args.append(Int64(v)) }
-            if let v = ctx.params.int("startedAt")      { setClauses.append("startedAt = ?");   args.append(Int64(v)) }
+            // startedAt is an epoch-ms timestamp; 0 or negative is never a real
+            // start time. The supervisor's orphan-recovery procedure ("set
+            // status=pending + clear startedAt") has no null-capable path
+            // through this integer param, so sessions patch startedAt to 0 to
+            // "clear" it. Persisting a literal 0 reads as "started at 1970",
+            // which slips past every `startedAt IS NOT NULL` reaper guard and
+            // never re-nulls. Map <= 0 to SQL NULL so the clear actually clears.
+            if let v = ctx.params.int("startedAt") {
+                if v <= 0 { setClauses.append("startedAt = NULL") }
+                else      { setClauses.append("startedAt = ?"); args.append(Int64(v)) }
+            }
             if let v = ctx.params.int("completedAt")    { setClauses.append("completedAt = ?"); args.append(Int64(v)) }
             if let v = ctx.params.int("retryCount")     { setClauses.append("retryCount = ?");  args.append(v) }
             if let v = ctx.params.int("maxRetries")     { setClauses.append("maxRetries = ?");  args.append(v) }
@@ -447,6 +457,34 @@ let taskActions: [SonataAction] = [
                         )
                     }
                     try db.execute(sql: sql, arguments: bound)
+
+                    // Reverting an orphaned task to 'pending' must also cancel any
+                    // lingering pending/assigned workerEvent for it. The task-level
+                    // dupe guard in dispatchToChannel refuses a fresh dispatch while
+                    // such an event exists, so without this the task sits pending
+                    // forever with idle workers available — the exact wedge the
+                    // automated recovery paths (recoverOrphans / reapOverdueTasks)
+                    // avoid by cancelling the event and resetting the task in one
+                    // step. This aligns the manual patch path with them.
+                    //
+                    // 2026-07-20: cancelling the event was necessary but not
+                    // sufficient, and the gap cost a ~6h outage. The event also
+                    // holds the idempotency key, which outlives its terminal
+                    // status — so the fresh dispatch this block exists to enable
+                    // was refused anyway, by the ON CONFLICT branch instead of
+                    // the COUNT branch, and (until today) logged as though a
+                    // live event existed. Release the key with the event: a
+                    // terminal event that never completed its task has no claim
+                    // on the task's next attempt. Genuine completions keep their
+                    // key, or the dupe guard stops guarding.
+                    if newStatus == "pending" {
+                        try db.execute(sql: """
+                            UPDATE workerEvents SET status = 'cancelled', completedAt = ?, result = ?,
+                                idempotencyKey = NULL
+                            WHERE json_extract(payload, '$.task_id') = ?
+                              AND status IN ('pending', 'assigned')
+                            """, arguments: [now, "Task reverted to pending via mem_task_patch", id])
+                    }
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)

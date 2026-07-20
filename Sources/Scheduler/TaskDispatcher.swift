@@ -133,13 +133,20 @@ actor TaskDispatcher {
             """, arguments: [slotsAvailable])
         }
 
+        // One cycle id per poll tick, shared by every task dispatched in this
+        // pass. See dispatchToChannel: same tick → same cycle → the idempotency
+        // UNIQUE index still catches a genuine double-dispatch; next tick → new
+        // cycle → a task that came back to `pending` is retried 10s later
+        // instead of being locked out until midnight.
+        let dispatchCycle = String(Int64(Date().timeIntervalSince1970 * 1000))
+
         for task in tasks {
             guard !activeTasks.contains(task.id) else { continue }
-            await dispatch(task)
+            await dispatch(task, dispatchCycle: dispatchCycle)
         }
     }
 
-    private func dispatch(_ task: DispatcherTaskRow) async {
+    private func dispatch(_ task: DispatcherTaskRow, dispatchCycle: String) async {
         let taskId = task.id
         let title = task.title
         let prompt = task.prompt ?? task.title
@@ -151,7 +158,8 @@ actor TaskDispatcher {
             taskId: taskId,
             title: title,
             prompt: prompt,
-            priority: priorityToInt(task.priority)
+            priority: priorityToInt(task.priority),
+            dispatchCycle: dispatchCycle
         ) {
             // Dispatch succeeded — NOW mark active
             activeTasks.insert(taskId)

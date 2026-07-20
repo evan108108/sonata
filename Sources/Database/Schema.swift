@@ -1191,6 +1191,26 @@ extension DatabaseMigrator {
         // filters by sessionId when provided; NULL matches the legacy
         // global slot so pre-migration checkpoints stay reachable.
         registerMigration("v31_checkpoints_session_scope") { db in
+            // The `checkpoints` table is otherwise created lazily at runtime by
+            // CheckpointActions.ensureCheckpointTablesForAction — it is NOT in
+            // any earlier migration. On a FRESH database that lazy path hasn't
+            // run yet, so the index below hit `no such table: checkpoints` and
+            // aborted the whole migration → fresh app boot crashed at
+            // SonataApp.init and every fresh-DB test failed. Create the table
+            // here (idempotent) so the migrator stands alone. Existing installs
+            // already applied v31 and are skipped by identifier, so this is a
+            // no-op for them; on installs that CREATE'd via the lazy path the
+            // IF NOT EXISTS makes it a no-op too. (found + fixed 2026-07-17)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    skills TEXT,
+                    project TEXT,
+                    createdAt INTEGER NOT NULL,
+                    sessionId TEXT
+                )
+            """)
             do { try db.execute(sql: "ALTER TABLE checkpoints ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
             try db.execute(sql: """
                 CREATE INDEX IF NOT EXISTS idx_checkpoints_session_createdAt

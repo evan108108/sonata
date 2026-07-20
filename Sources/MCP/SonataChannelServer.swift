@@ -20,6 +20,10 @@ private enum DispatchOutcome {
     case dispatched
     case workerTaken
     case taskAlreadyActive
+    /// A terminal event still owns this task's idempotency key. Distinct from
+    /// .taskAlreadyActive, which means a LIVE event exists — conflating the two
+    /// in the log cost hours on 2026-07-20.
+    case idempotencyConflict(String)
 }
 
 actor SonataChannelServer {
@@ -76,7 +80,8 @@ actor SonataChannelServer {
         taskId: String,
         title: String,
         prompt: String,
-        priority: Int = 5
+        priority: Int = 5,
+        dispatchCycle: String
     ) async -> String? {
         guard let workerId = await findIdleWorker() else {
             logger.info("No idle channel workers for task \(taskId)")
@@ -86,11 +91,27 @@ actor SonataChannelServer {
         let eventId = newUUID()
         let now = nowMs()
 
-        // Build payload with task metadata
+        // Build payload with task metadata.
+        //
+        // `dispatch_cycle` is REQUIRED (no default) so this cannot silently fall
+        // back to WorkerEventIdempotency's day bucket. 2026-07-20: with a
+        // day-scoped key, one task dispatched at 02:30 whose event was closed
+        // without the task completing could not be re-dispatched until midnight
+        // — and five tasks chained behind it starved with it.
+        //
+        // The cycle is the dispatcher's POLL TICK, not a per-attempt nonce, and
+        // that distinction is load-bearing in both directions. Two dispatches
+        // racing inside one tick share a cycle, so the UNIQUE index still does
+        // the job it was added for (2026-07-07: two workers on one task). The
+        // next tick, 10s later, is a different cycle — so a task that came back
+        // to `pending` retries in 10 seconds, and a task that legitimately
+        // COMPLETED can be re-run the same day. A nonce would have made every
+        // key unique and quietly turned the dedup guard off.
         let payload: [String: Any] = [
             "task_id": taskId,
             "title": title,
             "prompt": prompt,
+            "dispatch_cycle": dispatchCycle,
         ]
         let payloadJSON: String
         if let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -161,7 +182,7 @@ actor SonataChannelServer {
                         UPDATE workers SET status = 'idle', currentEventId = NULL
                         WHERE workerId = ? AND currentEventId = ?
                     """, arguments: [workerId, eventId])
-                    return .taskAlreadyActive
+                    return .idempotencyConflict(idemKey ?? "<none>")
                 }
                 return .dispatched
             }
@@ -169,6 +190,16 @@ actor SonataChannelServer {
             switch outcome {
             case .taskAlreadyActive:
                 logger.info("Skipping dispatch — task \(taskId) already has an active workerEvent (task-level dupe guard)")
+                return nil
+            case .idempotencyConflict(let key):
+                // 2026-07-20: this used to log the .taskAlreadyActive message
+                // above, asserting an active event that a direct query of
+                // workerEvents flatly contradicted. Two people burned hours
+                // separately chasing an event that did not exist. The two
+                // branches mean different things and must read differently:
+                // that one says "another event is live", this one says "a
+                // TERMINAL event still owns this idempotency key."
+                logger.warning("Skipping dispatch — task \(taskId) blocked by an existing idempotencyKey \(key) held by an already-terminal event (no active event exists)")
                 return nil
             case .workerTaken:
                 // Worker was taken between findIdleWorker() and the claim.

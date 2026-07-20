@@ -90,6 +90,13 @@ actor HealthMonitor {
     /// Worker must have heartbeated this recently to still be "alive" and
     /// worth nudging. Past this it's the reaper's job, not the nudger's.
     private let workerHeartbeatFreshness: TimeInterval = 90   // 90s
+    /// TTL for an un-replied sonar_dm workerEvent. A DM event stays `assigned`
+    /// only to hold the worker busy while it drafts a reply and to let
+    /// dm_reply's auto-complete fire. If neither happens within this window the
+    /// DM was handled-without-reply, the worker died, or the auto-complete
+    /// missed — sweepStaleDMEvents closes it and frees the worker. 30 min
+    /// (Evan, 2026-07-17): long enough that a genuine slow reply is never at risk.
+    private let sonarDMTtl: TimeInterval = 30 * 60
     /// Don't re-nudge the same worker more often than this.
     private let workerNudgeCooldown: TimeInterval = 5 * 60    // 5 min
 
@@ -351,6 +358,15 @@ actor HealthMonitor {
             // "phantom tasks" pinning new workers. This sweep cancels those
             // orphans within one monitor cycle.
             await sweepOrphanedEvents()
+
+            // Close sonar_dm workerEvents that have sat `assigned` past the TTL
+            // with no reply, freeing their workers. Distinct from the two
+            // sweeps above: a stale DM is CLOSED, never re-enqueued (requeuing
+            // would re-deliver the message to a second worker → crosstalk).
+            // Backstops the dm_reply auto-complete for DMs that are handled
+            // without a reply, whose worker died, or where the auto-complete
+            // missed (2026-07-17).
+            await sweepStaleDMEvents()
 
             // Offline escalation ladder. sweepStaleWorkersForActions now only
             // MARKS workers offline (Fix #3 in dispatch-hardening-bundle) — it
@@ -1121,6 +1137,91 @@ actor HealthMonitor {
                 logger.info("reclaimStrandedEvents: re-enqueued stranded event \(s.eventId), freed worker \(s.workerId)")
             } catch {
                 logger.warning("reclaimStrandedEvents: recovery failed for \(s.workerId): \(error)")
+            }
+        }
+    }
+
+    /// Close sonar_dm workerEvents that have sat `assigned` past `sonarDMTtl`
+    /// without a reply, and free the worker holding them.
+    ///
+    /// Distinct from reclaimStrandedEvents, which RE-ENQUEUES stranded task
+    /// events to 'pending' for another worker: a stale DM must be CLOSED, never
+    /// requeued — re-dispatching a sonar_dm would deliver the same message to a
+    /// second worker and cause crosstalk. A sonar_dm event only stays open to
+    /// (a) hold the worker busy while it drafts a reply and (b) let dm_reply's
+    /// auto-complete fire. Past the TTL neither happened, so the event is
+    /// abandoned; the right move is to close it and release the worker.
+    ///
+    /// Guard (review, 2026-07-17): never force-close a DM a worker is genuinely
+    /// still working. A worker whose `lastHeartbeat` is fresh AND whose
+    /// `lastProgressAt` is still advancing is mid-flight (e.g. a slow LLM
+    /// reply) — leave its event open until it goes quiet. Only a stranded /
+    /// idle / gone worker's DM event is closed. Mirrors reclaimStrandedEvents'
+    /// lastProgressAt discriminator.
+    private func sweepStaleDMEvents() async {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let ttlBeforeMs = nowMs - Int64(sonarDMTtl * 1000)
+        let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
+        let progressStaleBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+
+        struct StaleDM { let eventId: String; let workerId: String? }
+        let stale: [StaleDM]
+        do {
+            stale = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT id AS eventId, assignedTo AS workerId
+                    FROM workerEvents
+                    WHERE type = 'sonar_dm'
+                      AND status = 'assigned'
+                      AND assignedAt IS NOT NULL AND assignedAt < ?
+                    LIMIT 200
+                    """, arguments: [ttlBeforeMs])
+                    .compactMap { row -> StaleDM? in
+                        guard let eid = row["eventId"] as? String else { return nil }
+                        return StaleDM(eventId: eid, workerId: row["workerId"] as? String)
+                    }
+            }
+        } catch {
+            logger.warning("sweepStaleDMEvents: query failed: \(error)")
+            return
+        }
+        guard !stale.isEmpty else { return }
+
+        for s in stale {
+            // Skip if a live worker still holds this exact event AND looks
+            // genuinely mid-processing (fresh heartbeat + advancing progress).
+            if let wid = s.workerId, !wid.isEmpty {
+                let stillWorking = (try? await dbPool.read { db -> Bool in
+                    (try Int.fetchOne(db, sql: """
+                        SELECT 1 FROM workers
+                        WHERE workerId = ? AND currentEventId = ? AND status = 'busy'
+                          AND lastHeartbeat >= ?
+                          AND lastProgressAt IS NOT NULL AND lastProgressAt >= ?
+                        """, arguments: [wid, s.eventId, aliveSinceMs, progressStaleBeforeMs])) != nil
+                }) ?? false
+                if stillWorking { continue }
+            }
+            do {
+                try await dbPool.write { db in
+                    try db.execute(sql: """
+                        UPDATE workerEvents SET status = 'completed', completedAt = ?,
+                            result = 'auto-closed — sonar_dm exceeded TTL with no reply'
+                        WHERE id = ? AND status = 'assigned'
+                    """, arguments: [nowMs, s.eventId])
+                    if let wid = s.workerId, !wid.isEmpty {
+                        try db.execute(sql: """
+                            UPDATE workers SET status = 'idle',
+                                currentEventId = NULL, currentEventTokens = NULL, currentSlug = NULL,
+                                currentCacheReadTokens = NULL, currentInputTokens = NULL,
+                                currentPromptHash = NULL, currentSessionLabel = NULL,
+                                currentCwdBasename = NULL
+                            WHERE workerId = ? AND currentEventId = ?
+                        """, arguments: [wid, s.eventId])
+                    }
+                }
+                logger.info("sweepStaleDMEvents: closed stale sonar_dm \(s.eventId), freed worker \(s.workerId ?? "-")")
+            } catch {
+                logger.warning("sweepStaleDMEvents: close failed for \(s.eventId): \(error)")
             }
         }
     }
