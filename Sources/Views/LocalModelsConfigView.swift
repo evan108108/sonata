@@ -12,6 +12,7 @@ struct LocalModelsConfigView: View {
     @State private var deletingId: String? = nil
     @State private var confirmingDeleteId: String? = nil
     @State private var editingRow: InstalledChatModel? = nil
+    @State private var systemModels: [SystemModelStatus] = []
 
     /// Transient state shown while a download is in flight. The actor doesn't
     /// surface byte-level progress yet (BinaryProvisioner downloads the whole
@@ -63,6 +64,8 @@ struct LocalModelsConfigView: View {
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
             }
+
+            systemModelsSection
         }
         .padding()
         .sheet(isPresented: $showingAddSheet) {
@@ -75,7 +78,58 @@ struct LocalModelsConfigView: View {
                 Task { await runEdit(id: row.id, displayName: displayName, extra: extra) }
             }
         }
-        .onAppear { refresh() }
+        .onAppear {
+            refresh()
+            refreshSystemModels()
+        }
+    }
+
+    private var systemModelsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider().padding(.vertical, 4)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("System models")
+                    .font(.subheadline)
+                Text("Non-chat models Sonata downloads and runs internally. Not selectable in chat pickers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            VStack(spacing: 0) {
+                ForEach(systemModels) { row in
+                    systemModelRow(row)
+                    if row.id != systemModels.last?.id {
+                        Divider().opacity(0.3)
+                    }
+                }
+            }
+            .background(Color.black.opacity(0.15))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func systemModelRow(_ row: SystemModelStatus) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: row.installed ? "cube" : "arrow.down.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.displayName).font(.system(.body, design: .default))
+                Text(row.subtitle)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                Text(row.path)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Text(row.installed ? row.sizeLabel : "not downloaded")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var description: some View {
@@ -186,6 +240,13 @@ struct LocalModelsConfigView: View {
         Task {
             let rows = await InstalledChatModelManager.shared.listInstalled()
             await MainActor.run { installed = rows }
+        }
+    }
+
+    private func refreshSystemModels() {
+        Task.detached {
+            let rows = SystemModelStatus.snapshot()
+            await MainActor.run { systemModels = rows }
         }
     }
 
@@ -433,5 +494,73 @@ private struct AddLocalModelSheet: View {
             .padding()
         }
         .frame(width: 600, height: 460)
+    }
+}
+
+/// Read-only status of a locally-hosted non-chat model. The two Sonata ships
+/// today are the embedding backend (llama.cpp + EmbeddingGemma on port 7712)
+/// and the pulpie HTML-block classifier (in-process CoreML). Neither is
+/// user-selectable — they exist to inform, not to configure.
+struct SystemModelStatus: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let subtitle: String
+    let path: String
+    let installed: Bool
+    let sizeLabel: String
+
+    static func snapshot() -> [SystemModelStatus] {
+        [embeddingGemma(), pulpie()]
+    }
+
+    private static func embeddingGemma() -> SystemModelStatus {
+        // Mirrors BinaryProvisioner.embeddingGemmaModel: <dataDir>/bin/<name>-<version>
+        let path = "\(SonataInstance.dataDirectory)/bin/embeddinggemma-300m-Q8_0"
+        let (exists, bytes) = fileSize(atPath: path)
+        return SystemModelStatus(
+            id: "embeddinggemma-300m",
+            displayName: "EmbeddingGemma 300M",
+            subtitle: "embeddings · llama.cpp · port 7712",
+            path: path,
+            installed: exists,
+            sizeLabel: formatBytes(bytes))
+    }
+
+    private static func pulpie() -> SystemModelStatus {
+        let root = PulpieModel.installDirectory.path
+        let pkg = PulpieModel.installDirectory.appendingPathComponent(PulpieModel.packageName).path
+        let installed = FileManager.default.fileExists(atPath: pkg)
+        let bytes = installed ? directorySize(atPath: root) : 0
+        return SystemModelStatus(
+            id: "pulpie-orange-small",
+            displayName: "Pulpie Orange Small",
+            subtitle: "HTML block classifier · CoreML · in-process (read tool)",
+            path: root,
+            installed: installed,
+            sizeLabel: formatBytes(bytes))
+    }
+
+    private static func fileSize(atPath path: String) -> (Bool, Int64) {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        guard let attrs, let size = attrs[.size] as? NSNumber else { return (false, 0) }
+        return (true, size.int64Value)
+    }
+
+    private static func directorySize(atPath path: String) -> Int64 {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(atPath: path) else { return 0 }
+        var total: Int64 = 0
+        for case let sub as String in enumerator {
+            let attrs = try? fm.attributesOfItem(atPath: "\(path)/\(sub)")
+            if let size = attrs?[.size] as? NSNumber { total += size.int64Value }
+        }
+        return total
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let f = ByteCountFormatter()
+        f.allowedUnits = [.useMB, .useGB]
+        f.countStyle = .file
+        return f.string(fromByteCount: bytes)
     }
 }
