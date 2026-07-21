@@ -30,15 +30,37 @@ private func registerTaskDomain(dbPool: DatabasePool) {
             let taskId = try params.require("taskId")
             let queriedAt = nowMs()
 
-            let taskRow: Row? = try dbPool.read { db in
-                try Row.fetchOne(db, sql: """
+            struct TaskFields: Sendable {
+                let status: String
+                let createdAt: Int64
+                let startedAt: Int64?
+                let completedAt: Int64?
+                let updatedAt: Int64
+                let assignedTo: String?
+                let source: String?
+                let lastError: String?
+                let title: String
+            }
+            let task: TaskFields? = try await dbPool.read { db in
+                guard let row = try Row.fetchOne(db, sql: """
                     SELECT id, title, status, source, assignedTo, dueAt,
                            startedAt, completedAt, retryCount, lastError,
                            createdAt, updatedAt
                     FROM tasks WHERE id = ?
-                """, arguments: [taskId])
+                """, arguments: [taskId]) else { return nil }
+                return TaskFields(
+                    status: row["status"],
+                    createdAt: row["createdAt"],
+                    startedAt: row["startedAt"],
+                    completedAt: row["completedAt"],
+                    updatedAt: row["updatedAt"],
+                    assignedTo: row["assignedTo"],
+                    source: row["source"],
+                    lastError: row["lastError"],
+                    title: row["title"]
+                )
             }
-            guard let taskRow else {
+            guard let task else {
                 return WhatHappenedResponse.errorResponse(
                     domain: "task",
                     artifact_id: taskId,
@@ -46,15 +68,15 @@ private func registerTaskDomain(dbPool: DatabasePool) {
                 )
             }
 
-            let status: String = taskRow["status"]
-            let createdAt: Int64 = taskRow["createdAt"]
-            let startedAt: Int64? = taskRow["startedAt"]
-            let completedAt: Int64? = taskRow["completedAt"]
-            let updatedAt: Int64 = taskRow["updatedAt"]
-            let assignedTo: String? = taskRow["assignedTo"]
-            let source: String? = taskRow["source"]
-            let lastError: String? = taskRow["lastError"]
-            let title: String = taskRow["title"]
+            let status = task.status
+            let createdAt = task.createdAt
+            let startedAt = task.startedAt
+            let completedAt = task.completedAt
+            let updatedAt = task.updatedAt
+            let assignedTo = task.assignedTo
+            let source = task.source
+            let lastError = task.lastError
+            let title = task.title
 
             var actions: [WhatHappenedAction] = []
 
@@ -96,27 +118,38 @@ private func registerTaskDomain(dbPool: DatabasePool) {
 
             // workerEvents rows related to this task. Payload is JSON;
             // task rows carry a task_id field.
-            let weRows: [Row] = try dbPool.read { db in
+            struct WorkerEventFields: Sendable {
+                let status: String
+                let type: String
+                let assignedTo: String?
+                let createdAt: Int64
+                let assignedAt: Int64?
+                let completedAt: Int64?
+            }
+            let weRows: [WorkerEventFields] = try await dbPool.read { db in
                 try Row.fetchAll(db, sql: """
                     SELECT id, type, payload, status, assignedTo,
                            createdAt, assignedAt, completedAt
                     FROM workerEvents
                     WHERE payload LIKE ?
                     ORDER BY createdAt ASC
-                """, arguments: ["%\"task_id\":\"\(taskId)\"%"])
+                """, arguments: ["%\"task_id\":\"\(taskId)\"%"]).map { row in
+                    WorkerEventFields(
+                        status: row["status"],
+                        type: row["type"],
+                        assignedTo: row["assignedTo"],
+                        createdAt: row["createdAt"],
+                        assignedAt: row["assignedAt"],
+                        completedAt: row["completedAt"]
+                    )
+                }
             }
-            for row in weRows {
-                let evStatus: String = row["status"]
-                let evType: String = row["type"]
-                let evAssignedTo: String? = row["assignedTo"]
-                let evCreatedAt: Int64 = row["createdAt"]
-                let evAssignedAt: Int64? = row["assignedAt"]
-                let evCompletedAt: Int64? = row["completedAt"]
+            for ev in weRows {
                 actions.append(WhatHappenedAction(
-                    when: evCompletedAt ?? evAssignedAt ?? evCreatedAt,
-                    action_kind: "workerEvent_\(evType)_\(evStatus)",
-                    actor: evAssignedTo,
-                    verdict: evStatus,
+                    when: ev.completedAt ?? ev.assignedAt ?? ev.createdAt,
+                    action_kind: "workerEvent_\(ev.type)_\(ev.status)",
+                    actor: ev.assignedTo,
+                    verdict: ev.status,
                     sha: nil,
                     url: nil,
                     meta: nil
@@ -180,16 +213,34 @@ private func registerDMDomain(dbPool: DatabasePool) {
             let messageId = try params.require("messageId")
             let queriedAt = nowMs()
 
-            let row: Row? = try dbPool.read { db in
-                try Row.fetchOne(db, sql: """
+            struct DMFields: Sendable {
+                let target: String
+                let fromSessionId: String?
+                let sentAtMs: Int64
+                let deliveredAtMs: Int64?
+                let ackedAtMs: Int64?
+                let deliveryStatus: String
+                let resolvedKind: String?
+            }
+            let dm: DMFields? = try await dbPool.read { db in
+                guard let row = try Row.fetchOne(db, sql: """
                     SELECT messageId, targetSessionId, fromSessionId, body,
                            sentAtMs, receivedAtMs, deliveredAtMs, ackedAtMs,
                            deliveryStatus, resolvedSessionKey, resolvedKind
                     FROM dm_messages
                     WHERE messageId = ?
-                """, arguments: [messageId])
+                """, arguments: [messageId]) else { return nil }
+                return DMFields(
+                    target: row["targetSessionId"],
+                    fromSessionId: row["fromSessionId"],
+                    sentAtMs: row["sentAtMs"],
+                    deliveredAtMs: row["deliveredAtMs"],
+                    ackedAtMs: row["ackedAtMs"],
+                    deliveryStatus: row["deliveryStatus"],
+                    resolvedKind: row["resolvedKind"]
+                )
             }
-            guard let row else {
+            guard let dm else {
                 return WhatHappenedResponse.errorResponse(
                     domain: "dm",
                     artifact_id: messageId,
@@ -197,13 +248,13 @@ private func registerDMDomain(dbPool: DatabasePool) {
                 )
             }
 
-            let target: String = row["targetSessionId"]
-            let fromSessionId: String? = row["fromSessionId"]
-            let sentAtMs: Int64 = row["sentAtMs"]
-            let deliveredAtMs: Int64? = row["deliveredAtMs"]
-            let ackedAtMs: Int64? = row["ackedAtMs"]
-            let deliveryStatus: String = row["deliveryStatus"]
-            let resolvedKind: String? = row["resolvedKind"]
+            let target = dm.target
+            let fromSessionId = dm.fromSessionId
+            let sentAtMs = dm.sentAtMs
+            let deliveredAtMs = dm.deliveredAtMs
+            let ackedAtMs = dm.ackedAtMs
+            let deliveryStatus = dm.deliveryStatus
+            let resolvedKind = dm.resolvedKind
 
             var actions: [WhatHappenedAction] = []
             actions.append(WhatHappenedAction(
@@ -294,15 +345,41 @@ private func registerMemoryDomain(dbPool: DatabasePool) {
             let id = try params.require("id")
             let queriedAt = nowMs()
 
-            let row: Row? = try dbPool.read { db in
-                try Row.fetchOne(db, sql: """
+            struct MemoryFields: Sendable {
+                let type: String
+                let source: String?
+                let status: String?
+                let supersededBy: String?
+                let revisionOf: String?
+                let revisionNote: String?
+                let createdAt: Int64
+                let updatedAt: Int64
+                let lastAccessedAt: Int64?
+                let accessCount: Int?
+                let importance: Double
+            }
+            let memory: MemoryFields? = try await dbPool.read { db in
+                guard let row = try Row.fetchOne(db, sql: """
                     SELECT id, type, source, importance, status, supersededBy,
                            revisionOf, revisionNote, createdAt, updatedAt,
                            lastAccessedAt, accessCount
                     FROM memories WHERE id = ?
-                """, arguments: [id])
+                """, arguments: [id]) else { return nil }
+                return MemoryFields(
+                    type: row["type"],
+                    source: row["source"],
+                    status: row["status"],
+                    supersededBy: row["supersededBy"],
+                    revisionOf: row["revisionOf"],
+                    revisionNote: row["revisionNote"],
+                    createdAt: row["createdAt"],
+                    updatedAt: row["updatedAt"],
+                    lastAccessedAt: row["lastAccessedAt"],
+                    accessCount: row["accessCount"],
+                    importance: (row["importance"] as? Double) ?? 0
+                )
             }
-            guard let row else {
+            guard let memory else {
                 return WhatHappenedResponse.errorResponse(
                     domain: "memory",
                     artifact_id: id,
@@ -310,16 +387,16 @@ private func registerMemoryDomain(dbPool: DatabasePool) {
                 )
             }
 
-            let type: String = row["type"]
-            let source: String? = row["source"]
-            let status: String? = row["status"]
-            let supersededBy: String? = row["supersededBy"]
-            let revisionOf: String? = row["revisionOf"]
-            let revisionNote: String? = row["revisionNote"]
-            let createdAt: Int64 = row["createdAt"]
-            let updatedAt: Int64 = row["updatedAt"]
-            let lastAccessedAt: Int64? = row["lastAccessedAt"]
-            let accessCount: Int? = row["accessCount"]
+            let type = memory.type
+            let source = memory.source
+            let status = memory.status
+            let supersededBy = memory.supersededBy
+            let revisionOf = memory.revisionOf
+            let revisionNote = memory.revisionNote
+            let createdAt = memory.createdAt
+            let updatedAt = memory.updatedAt
+            let lastAccessedAt = memory.lastAccessedAt
+            let accessCount = memory.accessCount
 
             var actions: [WhatHappenedAction] = []
             actions.append(WhatHappenedAction(
@@ -331,7 +408,7 @@ private func registerMemoryDomain(dbPool: DatabasePool) {
                 url: nil,
                 meta: [
                     "type": .string(type),
-                    "importance": .double((row["importance"] as? Double) ?? 0),
+                    "importance": .double(memory.importance),
                 ]
             ))
             if let revisionOf {
@@ -384,17 +461,15 @@ private func registerMemoryDomain(dbPool: DatabasePool) {
 
             actions.sort { $0.when < $1.when }
 
-            let embedRow: Row? = try dbPool.read { db in
-                try Row.fetchOne(db, sql: """
-                    SELECT model, dimensions, createdAt
-                    FROM memoryEmbeddings
-                    WHERE memoryId = ?
-                    ORDER BY createdAt DESC LIMIT 1
-                """, arguments: [id])
-            }
+            let hasEmbedding: Bool = (try? await dbPool.read { db in
+                try Int.fetchOne(db, sql: """
+                    SELECT 1 FROM memoryEmbeddings
+                    WHERE memoryId = ? LIMIT 1
+                """, arguments: [id]) != nil
+            }) ?? false
 
             var staleness: [String] = []
-            if embedRow == nil {
+            if !hasEmbedding {
                 staleness.append("no embedding stored for this memory")
             }
             if status == "archived" {

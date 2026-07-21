@@ -304,15 +304,17 @@ enum MCPToolHandlers {
                 try String.fetchOne(db, sql: "SELECT sessionLabel FROM workers WHERE workerId = ?", arguments: [sessionKey])
             }).flatMap { $0 }
         case .interactive:
-            let row: Row? = try? dbPool.read { db in
-                try Row.fetchOne(db, sql: """
-                    SELECT name, claudeSessionId, cwd FROM interactiveSessions
-                    WHERE ('session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)) = ?
-                """, arguments: [sessionKey])
-            }.flatMap { $0 }
-            label = row?["name"]
-            claudeSessionId = row?["claudeSessionId"]
-            cwd = row?["cwd"]
+            let fields: (name: String?, claudeSessionId: String?, cwd: String?)? =
+                try? await dbPool.read { db in
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT name, claudeSessionId, cwd FROM interactiveSessions
+                        WHERE ('session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)) = ?
+                    """, arguments: [sessionKey]) else { return nil }
+                    return (row["name"], row["claudeSessionId"], row["cwd"])
+                }
+            label = fields?.name
+            claudeSessionId = fields?.claudeSessionId
+            cwd = fields?.cwd
         case .supervisor:
             label = "supervisor"
         }

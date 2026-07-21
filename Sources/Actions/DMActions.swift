@@ -211,43 +211,45 @@ func enumerateDMTargets(dbPool: DatabasePool) async -> [DMTarget] {
     let conns = MCPConnections.shared
 
     // Workers.
-    if let rows = try? dbPool.read({ db -> [Row] in
+    let workerRows: [(wid: String, label: String)] = (try? await dbPool.read { db in
         try Row.fetchAll(db, sql: """
             SELECT workerId, sessionLabel FROM workers
             WHERE status != 'offline'
-        """)
-    }) {
-        for row in rows {
+        """).compactMap { row -> (String, String)? in
             guard let wid: String = row["workerId"],
-                  let label: String = row["sessionLabel"] else { continue }
-            if await conns.hasLive(wid) {
-                out.append(DMTarget(
-                    name: label, kind: "worker",
-                    workerId: wid, sessionId: nil,
-                    sessionKey: wid, peerId: nil
-                ))
-            }
+                  let label: String = row["sessionLabel"] else { return nil }
+            return (wid, label)
+        }
+    }) ?? []
+    for (wid, label) in workerRows {
+        if await conns.hasLive(wid) {
+            out.append(DMTarget(
+                name: label, kind: "worker",
+                workerId: wid, sessionId: nil,
+                sessionKey: wid, peerId: nil
+            ))
         }
     }
 
     // Interactive sessions.
-    if let rows = try? dbPool.read({ db -> [Row] in
+    let sessionRows: [(sid: String, name: String)] = (try? await dbPool.read { db in
         try Row.fetchAll(db, sql: """
             SELECT sessionId, name FROM interactiveSessions
             WHERE status = 'live'
-        """)
-    }) {
-        for row in rows {
+        """).compactMap { row -> (String, String)? in
             guard let sid: String = row["sessionId"],
-                  let name: String = row["name"] else { continue }
-            let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
-            if await conns.hasLive(key) {
-                out.append(DMTarget(
-                    name: name, kind: "session",
-                    workerId: nil, sessionId: sid,
-                    sessionKey: key, peerId: nil
-                ))
-            }
+                  let name: String = row["name"] else { return nil }
+            return (sid, name)
+        }
+    }) ?? []
+    for (sid, name) in sessionRows {
+        let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
+        if await conns.hasLive(key) {
+            out.append(DMTarget(
+                name: name, kind: "session",
+                workerId: nil, sessionId: sid,
+                sessionKey: key, peerId: nil
+            ))
         }
     }
 

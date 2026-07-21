@@ -178,44 +178,66 @@ final class AllSessionsViewModel: ObservableObject {
         var attachedIds: Set<String> = []
         let dbPool = SonataApp.sharedDbPool
 
-        let workerRows: [Row] = (try? dbPool?.read { db in
-            try Row.fetchAll(db, sql: "SELECT workerId, sessionLabel, currentEventId, lastHeartbeat FROM workers WHERE status != 'offline'")
+        struct WorkerRow: Sendable {
+            let wid: String
+            let currentEventId: String?
+            let lastHeartbeat: Int64
+            let label: String?
+        }
+        let workerRows: [WorkerRow] = (try? await dbPool?.read { db in
+            try Row.fetchAll(db, sql: "SELECT workerId, sessionLabel, currentEventId, lastHeartbeat FROM workers WHERE status != 'offline'").compactMap { row -> WorkerRow? in
+                guard let wid: String = row["workerId"] else { return nil }
+                return WorkerRow(
+                    wid: wid,
+                    currentEventId: row["currentEventId"],
+                    lastHeartbeat: row["lastHeartbeat"] ?? 0,
+                    label: row["sessionLabel"]
+                )
+            }
         }).flatMap { $0 } ?? []
-        for row in workerRows {
-            guard let wid: String = row["workerId"] else { continue }
-            let currentEventId: String? = row["currentEventId"]
-            let lastHeartbeat: Int64 = row["lastHeartbeat"] ?? 0
-            let label: String? = row["sessionLabel"]
+        for w in workerRows {
             collected.append(AllSessionsRow(
-                sessionKey: wid,
-                claudeSessionId: wid,
+                sessionKey: w.wid,
+                claudeSessionId: w.wid,
                 kind: .worker,
                 section: .workers,
                 cwd: nil,
                 pid: nil,
-                hasSSE: await MCPConnections.shared.hasLive(wid),
-                inFlightEventId: (currentEventId?.isEmpty ?? true) ? nil : currentEventId,
-                lastSeenMs: lastHeartbeat,
+                hasSSE: await MCPConnections.shared.hasLive(w.wid),
+                inFlightEventId: (w.currentEventId?.isEmpty ?? true) ? nil : w.currentEventId,
+                lastSeenMs: w.lastHeartbeat,
                 firstPrompt: nil,
                 lastPrompt: nil,
-                displayName: label
+                displayName: w.label
             ))
-            attachedIds.insert(wid)
+            attachedIds.insert(w.wid)
         }
 
-        let sessionRows: [Row] = (try? dbPool?.read { db in
-            try Row.fetchAll(db, sql: "SELECT sessionId, name, cwd, claudeSessionId, lastActivityAt FROM interactiveSessions WHERE status = 'live'")
+        struct SessionRow: Sendable {
+            let sid: String
+            let name: String?
+            let cwd: String?
+            let claudeSessionId: String?
+            let lastActivityAt: Int64?
+        }
+        let sessionRows: [SessionRow] = (try? await dbPool?.read { db in
+            try Row.fetchAll(db, sql: "SELECT sessionId, name, cwd, claudeSessionId, lastActivityAt FROM interactiveSessions WHERE status = 'live'").compactMap { row -> SessionRow? in
+                guard let sid: String = row["sessionId"] else { return nil }
+                return SessionRow(
+                    sid: sid,
+                    name: row["name"],
+                    cwd: row["cwd"],
+                    claudeSessionId: row["claudeSessionId"],
+                    lastActivityAt: row["lastActivityAt"]
+                )
+            }
         }).flatMap { $0 } ?? []
-        for row in sessionRows {
-            guard let sid: String = row["sessionId"] else { continue }
-            let ckey: String = row["claudeSessionId"] ?? sid
-            let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
+        for s in sessionRows {
+            let ckey: String = s.claudeSessionId ?? s.sid
+            let key = "session-" + s.sid.replacingOccurrences(of: "-", with: "").prefix(16)
             let proc = byClaudeSessionId[ckey]
-            let rowCwd: String? = row["cwd"]
-            let cwd = (rowCwd?.isEmpty ?? true) ? proc?.cwd : rowCwd
+            let cwd = (s.cwd?.isEmpty ?? true) ? proc?.cwd : s.cwd
             let (first, last) = Self.transcriptPrompts(sessionId: ckey, cwd: cwd)
-            let lastActivityAt: Int64? = row["lastActivityAt"]
-            let name: String? = row["name"]
             collected.append(AllSessionsRow(
                 sessionKey: key,
                 claudeSessionId: ckey,
@@ -225,12 +247,12 @@ final class AllSessionsViewModel: ObservableObject {
                 pid: proc?.pid,
                 hasSSE: await MCPConnections.shared.hasLive(key),
                 inFlightEventId: nil,
-                lastSeenMs: proc?.updatedAt ?? lastActivityAt ?? 0,
+                lastSeenMs: proc?.updatedAt ?? s.lastActivityAt ?? 0,
                 firstPrompt: first,
                 lastPrompt: last,
-                displayName: name
+                displayName: s.name
             ))
-            attachedIds.insert(sid)
+            attachedIds.insert(s.sid)
             attachedIds.insert(ckey)
             attachedIds.insert(key)
         }

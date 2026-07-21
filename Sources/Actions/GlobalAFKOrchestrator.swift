@@ -501,28 +501,30 @@ extension GlobalAFKOrchestrator {
     /// registry snapshot used to carry (claudeSessionId / cwd / sessionLabel).
     private static func enrich(target: DMTarget, dbPool: DatabasePool) async -> AFKEnrichedTarget {
         if target.kind == "session", let sid = target.sessionId {
-            let row: Row? = try? dbPool.read { db in
-                try Row.fetchOne(db, sql: """
-                    SELECT claudeSessionId, cwd, name FROM interactiveSessions
-                    WHERE sessionId = ?
-                """, arguments: [sid])
-            }
+            let fields: (claudeSessionId: String?, cwd: String?, name: String?)? =
+                try? await dbPool.read { db in
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT claudeSessionId, cwd, name FROM interactiveSessions
+                        WHERE sessionId = ?
+                    """, arguments: [sid]) else { return nil }
+                    return (row["claudeSessionId"], row["cwd"], row["name"])
+                }
             return AFKEnrichedTarget(
                 target: target,
-                claudeSessionId: row?["claudeSessionId"] as? String,
-                cwd: row?["cwd"] as? String,
-                sessionLabel: row?["name"] as? String
+                claudeSessionId: fields?.claudeSessionId,
+                cwd: fields?.cwd,
+                sessionLabel: fields?.name
             )
         }
         if target.kind == "worker", let wid = target.workerId {
-            let row: Row? = try? dbPool.read { db in
+            let label: String? = try? await dbPool.read { db in
                 try Row.fetchOne(db, sql:
                     "SELECT sessionLabel FROM workers WHERE workerId = ?",
-                    arguments: [wid])
+                    arguments: [wid])?["sessionLabel"] as String?
             }
             return AFKEnrichedTarget(
                 target: target, claudeSessionId: nil, cwd: nil,
-                sessionLabel: row?["sessionLabel"] as? String
+                sessionLabel: label
             )
         }
         return AFKEnrichedTarget(target: target, claudeSessionId: nil, cwd: nil, sessionLabel: nil)
