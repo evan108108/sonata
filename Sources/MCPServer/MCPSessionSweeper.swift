@@ -62,25 +62,27 @@ actor MCPSessionSweeper {
     }
 
     private func updateWorkerHeartbeat(workerId: String, at heartbeatAt: Int64) async {
-        // Transcript-usage sampling (from old sweeper) preserved verbatim.
-        // Determines if there's an in-flight event by reading currentEventId
-        // from DB instead of registry snapshot.
-        //
-        // Deliberately does NOT write `currentContextTokens`: readWorkerTranscriptUsage
-        // resolves the most-recently-modified JSONL in the SHARED worker project
-        // dir, so with several workers running it can sample a different session's
-        // transcript than `workerId`. That is survivable for the cumulative
-        // columns (display + cost roll-ups) but not for a context reading, which
-        // SidecarLifecycle rotates sessions on — a borrowed number would rotate
-        // the wrong sidecar. The bridge knows its own transcript and owns that
-        // field.
-        let inFlight: String? = (try? await dbPool.read { db in
-            try String.fetchOne(db, sql:
-                "SELECT currentEventId FROM workers WHERE workerId = ?",
-                arguments: [workerId])
-        }) ?? nil
+        // One read for both facts we need about this worker: whether it holds an
+        // event, and which transcript on disk is its own.
+        let row: (eventId: String?, sessionId: String?)? = try? await dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT currentEventId, sessionId FROM workers WHERE workerId = ?",
+                arguments: [workerId]
+            ) else { return nil }
+            return (row["currentEventId"], row["sessionId"])
+        }
+        let inFlight: String? = row?.eventId
+        let sessionId: String? = row?.sessionId
 
-        let usage = inFlight == nil ? nil : await readWorkerTranscriptUsage(workerId: workerId)
+        // Sampled whether or not an event is in flight. The cumulative columns
+        // below are still gated on `inFlight` — they are event-scoped and get
+        // NULLed on completion, so writing them at idle would resurrect a
+        // finished event's numbers. `currentContextTokens` is the opposite: a
+        // session's context does not empty when its event does, and an idle
+        // session sitting on a nearly-full window is exactly what the sidecar
+        // monitor needs to see.
+        let usage = await readWorkerTranscriptUsage(sessionId: sessionId)
         do {
             try await dbPool.write { db in
                 try db.execute(sql: """
@@ -89,14 +91,16 @@ actor MCPSessionSweeper {
                         lastProgressAt = COALESCE(?, lastProgressAt),
                         currentEventTokens = COALESCE(?, currentEventTokens),
                         currentInputTokens = COALESCE(?, currentInputTokens),
-                        currentCacheReadTokens = COALESCE(?, currentCacheReadTokens)
+                        currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
+                        currentContextTokens = COALESCE(?, currentContextTokens)
                     WHERE workerId = ?
                 """, arguments: [
                     heartbeatAt,
                     inFlight == nil ? nil : heartbeatAt,
-                    usage?.totalTokens,
-                    usage?.inputTokens,
-                    usage?.cacheReadTokens,
+                    inFlight == nil ? nil : usage?.totalTokens,
+                    inFlight == nil ? nil : usage?.inputTokens,
+                    inFlight == nil ? nil : usage?.cacheReadTokens,
+                    usage?.contextTokens,
                     workerId,
                 ])
             }
@@ -119,57 +123,112 @@ actor MCPSessionSweeper {
         }
     }
 
-    // Transcript-usage helper — unchanged from the old sweeper.
+    // MARK: - Transcript usage
 
-    private struct TranscriptUsage {
-        let totalTokens: Int64
-        let inputTokens: Int64
-        let cacheReadTokens: Int64
-    }
-
-    private func readWorkerTranscriptUsage(workerId: String) async -> TranscriptUsage? {
+    /// Resolve this worker's own transcript and parse it.
+    ///
+    /// Resolution is by `workers.sessionId`, which the app records when it
+    /// spawns the session, and which is the transcript's filename. It used to
+    /// pick the most-recently-modified `.jsonl` in the shared worker project
+    /// directory while ignoring its `workerId` argument entirely — so with
+    /// several workers running, whichever session wrote last had its numbers
+    /// copied onto every other worker's row. Two live workers were observed
+    /// holding byte-identical readings (currentInputTokens=26,398,350) at the
+    /// same instant. Nil sessionId means no transcript we can attribute, which
+    /// reports as "no reading" rather than a borrowed one.
+    private func readWorkerTranscriptUsage(sessionId: String?) async -> TranscriptUsage? {
+        guard let sessionId, !sessionId.isEmpty else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let cwd = "\(home)/.sonata/worker"
+        // Claude Code's project-dir encoding replaces BOTH `/` and `.` with `-`,
+        // so `/Users/evan/.sonata/worker` becomes `-Users-evan--sonata-worker`.
         let encoded = cwd.replacingOccurrences(
             of: #"[\/.]"#, with: "-", options: .regularExpression)
-        let projectsDir = "\(home)/.claude/projects/\(encoded)"
+        let path = "\(home)/.claude/projects/\(encoded)/\(sessionId).jsonl"
 
-        guard let path = mostRecentJSONL(in: projectsDir) else { return nil }
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        var totalTokens: Int64 = 0
-        var inputTokens: Int64 = 0
-        var cacheReadTokens: Int64 = 0
-        var sawAssistant = false
-        for line in text.split(separator: "\n") {
-            guard !line.isEmpty,
-                  let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  obj["type"] as? String == "assistant",
-                  let msg = obj["message"] as? [String: Any],
-                  let usage = msg["usage"] as? [String: Any] else { continue }
-            sawAssistant = true
-            let input = (usage["input_tokens"] as? Int64) ?? 0
-            let cacheCreate = (usage["cache_creation_input_tokens"] as? Int64) ?? 0
-            let cacheRead = (usage["cache_read_input_tokens"] as? Int64) ?? 0
-            let output = (usage["output_tokens"] as? Int64) ?? 0
-            totalTokens += input + cacheCreate + cacheRead + output
-            inputTokens += input + cacheCreate + cacheRead
-            cacheReadTokens += cacheRead
-        }
-        if !sawAssistant { return nil }
-        return TranscriptUsage(totalTokens: totalTokens, inputTokens: inputTokens, cacheReadTokens: cacheReadTokens)
+        return parseTranscriptUsage(jsonl: text)
+    }
+}
+
+// MARK: - Transcript parsing (pure)
+
+/// Token usage read out of a session transcript.
+///
+/// Two different questions, two different numbers, and conflating them is the
+/// bug this type exists to keep separated:
+///
+/// - `totalTokens` / `inputTokens` / `cacheReadTokens` are SUMS across every
+///   assistant turn. They answer "what has this event cost?" and are what the
+///   prompt-cache panel and HealthMonitor consume.
+/// - `contextTokens` is the LAST non-sidechain turn only. It answers "how full
+///   is the window right now?"
+///
+/// A sum cannot answer the second question: every turn re-sends the whole
+/// conversation, so the total climbs without bound and passes a 200K window
+/// within a few turns — six real transcripts read 2,217%–17,475% when their
+/// sums were used this way. Only the last turn tracks actual occupancy, and
+/// only the last turn correctly DROPS after a compaction.
+struct TranscriptUsage: Equatable, Sendable {
+    let totalTokens: Int64
+    let inputTokens: Int64
+    let cacheReadTokens: Int64
+    /// Last non-sidechain assistant turn's `input + cacheCreate + cacheRead`.
+    let contextTokens: Int64
+}
+
+/// Parse transcript JSONL into cumulative usage plus current context occupancy.
+///
+/// Nil when the transcript carries no assistant turn yet — a freshly-spawned
+/// session that hasn't answered. Callers treat that as "no reading", never as
+/// zero, because zero would read as an empty context window.
+///
+/// Malformed lines are SKIPPED, not thrown on. A transcript is a file being
+/// appended to by another process, so a torn final line is an ordinary race,
+/// not corruption — failing the whole read would drop a good reading for every
+/// worker mid-write. Lines that parse but aren't assistant turns are skipped by
+/// the same path.
+///
+/// `isSidechain` turns are excluded. A sub-agent's usage describes ITS window,
+/// not its parent's, and a sidecar is a dispatcher that spawns agents
+/// constantly — counting one would report an agent's context as the sidecar's
+/// and rotate the wrong session.
+///
+/// `cacheRead` is deliberately counted ONCE, inside `input + cacheCreate +
+/// cacheRead`. It is not added again on top; doing so double-counts it, which
+/// is half of what made the original rotation signal read 15,890%.
+func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
+    var totalTokens: Int64 = 0
+    var inputTokens: Int64 = 0
+    var cacheReadTokens: Int64 = 0
+    var contextTokens: Int64 = 0
+    var sawAssistant = false
+
+    for line in jsonl.split(separator: "\n") {
+        guard !line.isEmpty,
+              let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["type"] as? String == "assistant",
+              obj["isSidechain"] as? Bool != true,
+              let msg = obj["message"] as? [String: Any],
+              let usage = msg["usage"] as? [String: Any] else { continue }
+        sawAssistant = true
+        let input = (usage["input_tokens"] as? Int64) ?? 0
+        let cacheCreate = (usage["cache_creation_input_tokens"] as? Int64) ?? 0
+        let cacheRead = (usage["cache_read_input_tokens"] as? Int64) ?? 0
+        let output = (usage["output_tokens"] as? Int64) ?? 0
+        totalTokens += input + cacheCreate + cacheRead + output
+        inputTokens += input + cacheCreate + cacheRead
+        cacheReadTokens += cacheRead
+        // Overwritten each turn — the last assignment wins.
+        contextTokens = input + cacheCreate + cacheRead
     }
 
-    private func mostRecentJSONL(in dir: String) -> String? {
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
-        var best: (String, Date)?
-        for entry in entries where entry.hasSuffix(".jsonl") {
-            let p = "\(dir)/\(entry)"
-            let attrs = try? fm.attributesOfItem(atPath: p)
-            let m = attrs?[.modificationDate] as? Date ?? Date.distantPast
-            if best == nil || m > best!.1 { best = (p, m) }
-        }
-        return best?.0
-    }
+    guard sawAssistant else { return nil }
+    return TranscriptUsage(
+        totalTokens: totalTokens,
+        inputTokens: inputTokens,
+        cacheReadTokens: cacheReadTokens,
+        contextTokens: contextTokens
+    )
 }

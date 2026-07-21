@@ -34,10 +34,23 @@ func ensureGlobalMCPServers() {
     let home = fm.homeDirectoryForCurrentUser
 
     // Phase D — neither mem-server.ts nor sonata-bridge.ts is deployed any
-    // more. The in-app HTTP+SSE server at /mcp replaces both. Old files at
-    // ~/.sonata/mcp/{mem-server,sonata-bridge}.ts are left alone in case
-    // long-lived terminal sessions still have them loaded as stdio children;
-    // a manual cleanup step removes them after the migration soaks.
+    // more. The in-app HTTP+SSE server at /mcp replaces both.
+    //
+    // The soak is over and the cleanup has now happened for
+    // ~/.sonata/mcp/sonata-bridge.ts: deleted 2026-07-21, after confirming no
+    // process was running it and that every session config (workers,
+    // supervisor, interactive) points at the HTTP transport. Leaving it on disk
+    // had a real cost — it read as live code, and a heartbeat field was written
+    // into it that consequently never reached the database.
+    //
+    // ~/.sonata/mcp/mem-server.ts is deliberately still there. It is equally
+    // undeployed, but the on-disk copy is NOT the same file as
+    // Sources/Sonata/Resources/mcp/mem-server.ts: it carries an afk_register
+    // sessionId auto-injection the bundled copy never had, and lacks the
+    // 2026-07-17 double-encoding fix the bundled copy does have. Deleting it
+    // would destroy the only copy of that behavior, so it wants a decision
+    // about whether the injection should be ported into the bundled resource
+    // rather than a sweep.
 
     // sonata-bridge: HTTP+SSE entry pointing at /mcp (no path), with
     // the bearer = ${SONA_SESSION_ID} env var. Claude substitutes the

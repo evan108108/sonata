@@ -230,11 +230,14 @@ enum MemorySidecarRegistration {
 /// Owns one sidecar's Claude Code process, mirroring `SupervisorCoordinator`.
 ///
 /// The differences from the supervisor are deliberate:
-/// - identity is minted for `role: .worker`, because that is the path that
-///   registers a `workers` row and heartbeats token usage — both of which the
-///   framework's monitor depends on;
-/// - no `--session-id`, so a rotation comes up as a fresh conversation, which
-///   is the entire point of rotating;
+/// - identity is minted for `role: .worker`, because that is the role the
+///   framework's monitor and drain check read against. Registering the
+///   `workers` row itself is done here (`registerWorkerRow`) rather than
+///   inherited: that used to fall out of sonata-bridge.ts registering on boot,
+///   and that bridge is no longer deployed;
+/// - a FRESH `--session-id` per spawn, not a stable one — a rotation still
+///   comes up as a new conversation, which is the entire point of rotating,
+///   while still naming a transcript the context monitor can attribute;
 /// - `stop()` disables auto-restart before terminating, so a rotation's
 ///   terminate is not immediately undone by the respawn timer.
 final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
@@ -244,6 +247,9 @@ final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     /// Delay between window creation and process start, giving the terminal
     /// view a layout pass so the PTY comes up with a sane size.
     static let startupDelay: TimeInterval = 1.0
+    /// Delay before registering the `workers` row, letting the session get its
+    /// process up first. Same 5s the pool workers use.
+    static let registrationDelay: TimeInterval = 5.0
 
     weak var terminalView: LocalProcessTerminalView?
 
@@ -299,9 +305,10 @@ final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=1")
 
-        // Identity. `role: .worker` is what makes the bridge register a
-        // `workers` row and heartbeat usage into it; the sidecar is kept out of
-        // the worker *pool* by its sessionLabel, not by its role.
+        // Identity. `role: .worker` is the role the monitor and drain check
+        // read against; the sidecar is kept out of the worker *pool* by its
+        // sessionLabel, not by its role. The row itself is created by
+        // `registerWorkerRow` below.
         let inProcExtras = MCPSpawn.extraArgsForInProcMCP(
             sessionKey: sessionKey,
             role: .worker,
@@ -313,7 +320,15 @@ final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             env.append("SESSION_LABEL=\(sessionLabel)")
         }
 
+        // Fresh conversation id per spawn. Rotation's point is a fresh CONTEXT,
+        // not the absence of an identifier — and without one there is no way to
+        // tell which transcript on disk belongs to this session, which is what
+        // the context monitor measures occupancy from. Minted per start so a
+        // rotated sidecar never resumes its predecessor's conversation.
+        let claudeSessionId = UUID().uuidString.lowercased()
+
         var args: [String] = [
+            "--session-id", claudeSessionId,
             "--dangerously-skip-permissions",
             "--dangerously-load-development-channels", "server:sonata-bridge",
             "--model", model,
@@ -334,12 +349,63 @@ final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
 
         logger.info("sidecar '\(sidecarName)' process started as \(sessionKey) in \(workingDirectory)")
 
+        registerWorkerRow(claudeSessionId: claudeSessionId)
+
         // Auto-confirm the development-channels warning prompt, same cadence
         // the supervisor uses.
         for delay in [2.0, 4.0, 7.0, 10.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.terminalView?.send(txt: "\r")
             }
+        }
+    }
+
+    /// Create this sidecar's `workers` row, carrying the conversation id its
+    /// transcript is named after.
+    ///
+    /// The row is not optional bookkeeping — three things the framework does
+    /// read it by `workerId == sessionKey`: the context monitor's occupancy
+    /// query, `SidecarLifecycle.drain`'s busy check, and the sweeper's
+    /// heartbeat. Until Phase D this happened for free, because sonata-bridge.ts
+    /// registered on boot. That bridge is no longer deployed, so nothing
+    /// registered the sidecar at all and every one of those reads found no row.
+    ///
+    /// Mirrors how `WorkersView` registers pool workers, including the delay:
+    /// registration is a courtesy the app performs on the session's behalf once
+    /// its process is up. `sessionLabel` is the sidecar's own key, never
+    /// `sona-worker-N`, so this row stays outside the dispatch pool
+    /// (`poolSlotSQLPredicate` globs `sona-worker-*`).
+    private func registerWorkerRow(claudeSessionId: String) {
+        let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
+        guard let url = URL(string: "http://localhost:\(port)/api/worker/register") else { return }
+        let workerId = sessionKey
+        let label = sessionLabel
+        let name = sidecarName
+        let log = logger
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.registrationDelay) {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: [
+                "workerId": workerId,
+                "sessionLabel": label,
+                "sessionId": claudeSessionId,
+                // Sidecars are routed to by event_type through SidecarRegistry,
+                // not by capability matching, so this stays empty rather than
+                // advertising work the sidecar will not do.
+                "capabilities": [String](),
+            ])
+            URLSession.shared.dataTask(with: req) { _, response, error in
+                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                if let error {
+                    log.warning("sidecar '\(name)' worker registration failed: \(error)")
+                } else if !(200..<300).contains(status) {
+                    log.warning("sidecar '\(name)' worker registration returned HTTP \(status)")
+                } else {
+                    log.info("sidecar '\(name)' registered as \(workerId) (session \(claudeSessionId))")
+                }
+            }.resume()
         }
     }
 

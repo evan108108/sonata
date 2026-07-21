@@ -1,0 +1,56 @@
+[
+  {
+    "session": "003b2bf9-3691-47fb-8c35-633223b1646c",
+    "totalTokens": 12189679,
+    "inputTokens": 12095651,
+    "cacheReadTokens": 11680927,
+    "contextTokens": 140350,
+    "contextPercentAt200K": 70,
+    "supersededProxyPercentAt200K": 11888
+  },
+  {
+    "session": "00e28d99-7356-4eb4-8531-af1203c7c19c",
+    "totalTokens": 10897473,
+    "inputTokens": 10834731,
+    "cacheReadTokens": 10066696,
+    "contextTokens": 202518,
+    "contextPercentAt200K": 101,
+    "supersededProxyPercentAt200K": 10450
+  },
+  {
+    "session": "016580d9-cfac-4331-a98c-1b1d7697b3fe",
+    "totalTokens": 2412721,
+    "inputTokens": 2340336,
+    "cacheReadTokens": 2093995,
+    "contextTokens": 95718,
+    "contextPercentAt200K": 47,
+    "supersededProxyPercentAt200K": 2217
+  },
+  {
+    "session": "01b63868-2ecb-471c-beb5-1851f78975e9",
+    "totalTokens": 13823503,
+    "inputTokens": 13668023,
+    "cacheReadTokens": 13018128,
+    "contextTokens": 168225,
+    "contextPercentAt200K": 84,
+    "supersededProxyPercentAt200K": 13343
+  },
+  {
+    "session": "01fb1f9a-3f72-4acd-9fcc-2a169ec6a915",
+    "totalTokens": 17956970,
+    "inputTokens": 17782046,
+    "cacheReadTokens": 17167854,
+    "contextTokens": 214213,
+    "contextPercentAt200K": 107,
+    "supersededProxyPercentAt200K": 17474
+  },
+  {
+    "session": "02539146-57cf-478b-bfdc-333bd8d97bdb",
+    "totalTokens": 9715020,
+    "inputTokens": 9620712,
+    "cacheReadTokens": 8827566,
+    "contextTokens": 161876,
+    "contextPercentAt200K": 80,
+    "supersededProxyPercentAt200K": 9224
+  }
+]
