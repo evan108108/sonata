@@ -36,6 +36,7 @@ let package = Package(
                 .copy("Sonata/Resources/supervisor"),
                 .copy("Sonata/Resources/mcp"),
                 .copy("Sonata/Resources/skills"),
+                .copy("Sonata/Resources/sidecars"),
                 .copy("Sonata/Resources/shaders"),
             ],
             swiftSettings: [
