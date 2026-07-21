@@ -178,7 +178,7 @@ final class AllSessionsViewModel: ObservableObject {
         var attachedIds: Set<String> = []
         let dbPool = SonataApp.sharedDbPool
 
-        let workerRows: [Row] = (try? await dbPool?.read { db in
+        let workerRows: [Row] = (try? dbPool?.read { db in
             try Row.fetchAll(db, sql: "SELECT workerId, sessionLabel, currentEventId, lastHeartbeat FROM workers WHERE status != 'offline'")
         }).flatMap { $0 } ?? []
         for row in workerRows {
@@ -203,7 +203,7 @@ final class AllSessionsViewModel: ObservableObject {
             attachedIds.insert(wid)
         }
 
-        let sessionRows: [Row] = (try? await dbPool?.read { db in
+        let sessionRows: [Row] = (try? dbPool?.read { db in
             try Row.fetchAll(db, sql: "SELECT sessionId, name, cwd, claudeSessionId, lastActivityAt FROM interactiveSessions WHERE status = 'live'")
         }).flatMap { $0 } ?? []
         for row in sessionRows {

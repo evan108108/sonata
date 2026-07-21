@@ -304,7 +304,7 @@ enum MCPToolHandlers {
                 try String.fetchOne(db, sql: "SELECT sessionLabel FROM workers WHERE workerId = ?", arguments: [sessionKey])
             }).flatMap { $0 }
         case .interactive:
-            let row: Row? = try? await dbPool.read { db in
+            let row: Row? = try? dbPool.read { db in
                 try Row.fetchOne(db, sql: """
                     SELECT name, claudeSessionId, cwd FROM interactiveSessions
                     WHERE ('session-' || SUBSTR(REPLACE(sessionId, '-', ''), 1, 16)) = ?

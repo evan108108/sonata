@@ -501,7 +501,7 @@ extension GlobalAFKOrchestrator {
     /// registry snapshot used to carry (claudeSessionId / cwd / sessionLabel).
     private static func enrich(target: DMTarget, dbPool: DatabasePool) async -> AFKEnrichedTarget {
         if target.kind == "session", let sid = target.sessionId {
-            let row: Row? = try? await dbPool.read { db in
+            let row: Row? = try? dbPool.read { db in
                 try Row.fetchOne(db, sql: """
                     SELECT claudeSessionId, cwd, name FROM interactiveSessions
                     WHERE sessionId = ?
@@ -515,7 +515,7 @@ extension GlobalAFKOrchestrator {
             )
         }
         if target.kind == "worker", let wid = target.workerId {
-            let row: Row? = try? await dbPool.read { db in
+            let row: Row? = try? dbPool.read { db in
                 try Row.fetchOne(db, sql:
                     "SELECT sessionLabel FROM workers WHERE workerId = ?",
                     arguments: [wid])

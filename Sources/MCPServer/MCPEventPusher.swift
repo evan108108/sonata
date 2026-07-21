@@ -145,8 +145,12 @@ actor MCPEventPusher {
         do {
             let placeholders = MCPEventPusher.notificationTypes
                 .map { _ in "?" }.joined(separator: ",")
-            let args: [DatabaseValueConvertible] = MCPEventPusher.notificationTypes
-                .map { $0 as DatabaseValueConvertible }
+            // Built out here, not inside the closure: `[any DatabaseValueConvertible]`
+            // is not Sendable and capturing it in the @Sendable read closure is an
+            // error under the Swift 6 language mode. StatementArguments is Sendable.
+            let args = StatementArguments(
+                MCPEventPusher.notificationTypes.map(\.databaseValue)
+            )
             notifs = try await dbPool.read { db in
                 try Row.fetchAll(db, sql: """
                     SELECT id, type, payload, priority, createdAt
@@ -154,7 +158,7 @@ actor MCPEventPusher {
                     WHERE status = 'pending' AND type IN (\(placeholders))
                     ORDER BY priority DESC, createdAt ASC
                     LIMIT 20
-                """, arguments: StatementArguments(args)).map { row in
+                """, arguments: args).map { row in
                     PendingNotification(
                         id: row["id"] as? String ?? "",
                         type: row["type"] as? String ?? "",

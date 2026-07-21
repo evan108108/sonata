@@ -30,7 +30,7 @@ private func registerTaskDomain(dbPool: DatabasePool) {
             let taskId = try params.require("taskId")
             let queriedAt = nowMs()
 
-            let taskRow: Row? = try await dbPool.read { db in
+            let taskRow: Row? = try dbPool.read { db in
                 try Row.fetchOne(db, sql: """
                     SELECT id, title, status, source, assignedTo, dueAt,
                            startedAt, completedAt, retryCount, lastError,
@@ -96,7 +96,7 @@ private func registerTaskDomain(dbPool: DatabasePool) {
 
             // workerEvents rows related to this task. Payload is JSON;
             // task rows carry a task_id field.
-            let weRows: [Row] = try await dbPool.read { db in
+            let weRows: [Row] = try dbPool.read { db in
                 try Row.fetchAll(db, sql: """
                     SELECT id, type, payload, status, assignedTo,
                            createdAt, assignedAt, completedAt
@@ -180,7 +180,7 @@ private func registerDMDomain(dbPool: DatabasePool) {
             let messageId = try params.require("messageId")
             let queriedAt = nowMs()
 
-            let row: Row? = try await dbPool.read { db in
+            let row: Row? = try dbPool.read { db in
                 try Row.fetchOne(db, sql: """
                     SELECT messageId, targetSessionId, fromSessionId, body,
                            sentAtMs, receivedAtMs, deliveredAtMs, ackedAtMs,
@@ -294,7 +294,7 @@ private func registerMemoryDomain(dbPool: DatabasePool) {
             let id = try params.require("id")
             let queriedAt = nowMs()
 
-            let row: Row? = try await dbPool.read { db in
+            let row: Row? = try dbPool.read { db in
                 try Row.fetchOne(db, sql: """
                     SELECT id, type, source, importance, status, supersededBy,
                            revisionOf, revisionNote, createdAt, updatedAt,
@@ -384,7 +384,7 @@ private func registerMemoryDomain(dbPool: DatabasePool) {
 
             actions.sort { $0.when < $1.when }
 
-            let embedRow: Row? = try await dbPool.read { db in
+            let embedRow: Row? = try dbPool.read { db in
                 try Row.fetchOne(db, sql: """
                     SELECT model, dimensions, createdAt
                     FROM memoryEmbeddings

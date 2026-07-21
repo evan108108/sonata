@@ -211,7 +211,7 @@ func enumerateDMTargets(dbPool: DatabasePool) async -> [DMTarget] {
     let conns = MCPConnections.shared
 
     // Workers.
-    if let rows = try? await dbPool.read({ db -> [Row] in
+    if let rows = try? dbPool.read({ db -> [Row] in
         try Row.fetchAll(db, sql: """
             SELECT workerId, sessionLabel FROM workers
             WHERE status != 'offline'
@@ -231,7 +231,7 @@ func enumerateDMTargets(dbPool: DatabasePool) async -> [DMTarget] {
     }
 
     // Interactive sessions.
-    if let rows = try? await dbPool.read({ db -> [Row] in
+    if let rows = try? dbPool.read({ db -> [Row] in
         try Row.fetchAll(db, sql: """
             SELECT sessionId, name FROM interactiveSessions
             WHERE status = 'live'
@@ -721,7 +721,7 @@ let dmActions: [SonataAction] = [
             } else if let senderKey = audit.senderSessionKey, !senderKey.isEmpty {
                 // Local DM — push dm_ack notification directly to the sender's SSE.
                 let frame = DMFrames.dmAckNotification(messageId: messageId, ackedAtMs: now)
-                _ = await MCPConnections.shared.push(senderKey, jsonRPC: frame)
+                _ = MCPConnections.shared.push(senderKey, jsonRPC: frame)
             }
 
             return DMAckResponse(status: "acknowledged")

@@ -739,13 +739,20 @@ let memoryActions: [SonataAction] = [
 
             args.append(id)
             let sql = "UPDATE memories SET \(setClauses.joined(separator: ", ")) WHERE id = ?"
-            // Snapshot to satisfy Sendable: `args` is a var; the dbPool.write closure
-            // is @Sendable and would capture the var by reference otherwise.
-            let finalArgs = args
+            // Build the arguments before the closure rather than inside it.
+            // `[any DatabaseValueConvertible]` is not Sendable, so capturing
+            // `args` in the @Sendable write closure is an error under the Swift 6
+            // language mode. StatementArguments *is* Sendable (GRDB, Statement.swift),
+            // so converting out here keeps the capture legal instead of merely
+            // snapshotting a still-non-Sendable array.
+            // Mapping through `databaseValue` also picks the non-failable
+            // Sequence initializer — `StatementArguments([Any])` is failable and
+            // would force an unwrap here for no benefit.
+            let finalArgs = StatementArguments(args.map(\.databaseValue))
 
             do {
                 try await ctx.dbPool.write { db in
-                    try db.execute(sql: sql, arguments: StatementArguments(finalArgs))
+                    try db.execute(sql: sql, arguments: finalArgs)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
