@@ -32,6 +32,12 @@ struct Sidecar: Sendable, Identifiable, Equatable {
         static let subscriptionCapPct = 20
         /// Percent of the context window at which `rotate_me` is posted.
         static let rotationThreshold = 70
+        /// Size of the model's context window, in tokens. 200K is the standard
+        /// Claude window and the historical assumption; sidecars on a 1M-context
+        /// model must say so at registration or the monitor divides by the wrong
+        /// denominator (a real 1M session measured against 200K reads ~107% at
+        /// roughly 21% actual occupancy, and rotates on its second event).
+        static let contextWindowTokens: Int64 = 200_000
     }
 
     /// Unique registry key.
@@ -61,6 +67,20 @@ struct Sidecar: Sendable, Identifiable, Equatable {
     /// Percent of the context window at which the monitor posts `rotate_me`.
     let rotationThreshold: Int
 
+    /// Size of this sidecar's model context window, in tokens — the denominator
+    /// the context monitor divides by.
+    ///
+    /// Per-sidecar rather than a framework constant because the window is a
+    /// property of the model a sidecar runs on, and sidecars are free to run on
+    /// different ones. Registration config is exactly where that belongs.
+    ///
+    /// `Int64` where its numeric neighbours are `Int`: this is a token count
+    /// compared against `workers.currentContextTokens`, which arrives from the
+    /// database as `Int64`. Matching the type keeps the conversion out of the
+    /// division, which is the one place a truncation would silently skew a
+    /// rotation decision.
+    let contextWindowTokens: Int64
+
     var id: String { name }
 
     init(
@@ -70,7 +90,8 @@ struct Sidecar: Sendable, Identifiable, Equatable {
         budgetTier: SidecarBudgetTier = Defaults.budgetTier,
         subscriptionCapPct: Int = Defaults.subscriptionCapPct,
         triggers: Set<String> = [],
-        rotationThreshold: Int = Defaults.rotationThreshold
+        rotationThreshold: Int = Defaults.rotationThreshold,
+        contextWindowTokens: Int64 = Defaults.contextWindowTokens
     ) {
         self.name = name
         self.skillPath = skillPath
@@ -79,6 +100,7 @@ struct Sidecar: Sendable, Identifiable, Equatable {
         self.subscriptionCapPct = subscriptionCapPct
         self.triggers = triggers
         self.rotationThreshold = rotationThreshold
+        self.contextWindowTokens = contextWindowTokens
     }
 
     /// Whether `skillPath` resolves on disk right now.

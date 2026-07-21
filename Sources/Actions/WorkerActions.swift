@@ -97,6 +97,7 @@ private struct WorkerListItem: Encodable {
     let currentSlug: String?
     let currentCacheReadTokens: Int64?
     let currentInputTokens: Int64?
+    let currentContextTokens: Int64?
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -114,12 +115,14 @@ private struct WorkerListItem: Encodable {
         try c.encodeIfPresent(currentSlug, forKey: .currentSlug)
         try c.encodeIfPresent(currentCacheReadTokens, forKey: .currentCacheReadTokens)
         try c.encodeIfPresent(currentInputTokens, forKey: .currentInputTokens)
+        try c.encodeIfPresent(currentContextTokens, forKey: .currentContextTokens)
     }
 
     enum CodingKeys: String, CodingKey {
         case _id, workerId, sessionLabel, status, capabilities
         case lastHeartbeat, currentEventId, registeredAt, currentTask, assignedAt
         case currentEventTokens, currentSlug, currentCacheReadTokens, currentInputTokens
+        case currentContextTokens
     }
 }
 
@@ -273,6 +276,7 @@ let workerActions: [SonataAction] = [
             ActionParam("currentSlug", .string, description: "Coarse 'what is it doing' label (event type in v0)"),
             ActionParam("currentCacheReadTokens", .integer, description: "Cumulative cache_read_input_tokens for in-flight event"),
             ActionParam("currentInputTokens", .integer, description: "Cumulative input-side tokens for in-flight event"),
+            ActionParam("currentContextTokens", .integer, description: "Last assistant turn's input+cacheCreate+cacheRead — how full the session's context window is right now (session-scoped, sent between events too)"),
             ActionParam("promptHash", .string, description: "8-char sha256 prefix of the event's prompt prefix"),
             ActionParam("sessionLabel", .string, description: "Human-readable worker-pool label (display for prompt cache panel)"),
             ActionParam("cwdBasename", .string, description: "Last path segment of worker cwd (display suffix)"),
@@ -284,6 +288,7 @@ let workerActions: [SonataAction] = [
             let currentSlug = ctx.params.string("currentSlug")
             let currentCacheReadTokens = ctx.params.int("currentCacheReadTokens").map { Int64($0) }
             let currentInputTokens = ctx.params.int("currentInputTokens").map { Int64($0) }
+            let currentContextTokens = ctx.params.int("currentContextTokens").map { Int64($0) }
             let promptHash = ctx.params.string("promptHash")
             let sessionLabel = ctx.params.string("sessionLabel")
             let cwdBasename = ctx.params.string("cwdBasename")
@@ -323,6 +328,10 @@ let workerActions: [SonataAction] = [
                             currentSlug = COALESCE(?, currentSlug),
                             currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
                             currentInputTokens = COALESCE(?, currentInputTokens),
+                            -- Session-scoped, unlike its neighbours: no event
+                            -- completion clears it, because a session's context
+                            -- doesn't empty when its event does.
+                            currentContextTokens = COALESCE(?, currentContextTokens),
                             currentPromptHash = COALESCE(?, currentPromptHash),
                             currentSessionLabel = COALESCE(?, currentSessionLabel),
                             currentCwdBasename = COALESCE(?, currentCwdBasename),
@@ -337,6 +346,7 @@ let workerActions: [SonataAction] = [
                                     lastProgressAt, lastProgressAt, now,
                                     currentEventTokens, currentSlug,
                                     currentCacheReadTokens, currentInputTokens,
+                                    currentContextTokens,
                                     promptHash, sessionLabel, cwdBasename, workerId]
                     )
                     let count = db.changesCount
@@ -544,7 +554,8 @@ let workerActions: [SonataAction] = [
                         currentEventTokens: row["currentEventTokens"] as? Int64,
                         currentSlug: row["currentSlug"] as? String,
                         currentCacheReadTokens: row["currentCacheReadTokens"] as? Int64,
-                        currentInputTokens: row["currentInputTokens"] as? Int64
+                        currentInputTokens: row["currentInputTokens"] as? Int64,
+                        currentContextTokens: row["currentContextTokens"] as? Int64
                     )
                 }
             } catch {

@@ -53,11 +53,6 @@ actor SidecarLifecycle {
         }
     }
 
-    /// Context window assumed for a sidecar session, in tokens.
-    // TODO: per-model context window lookup. Hardcoded while every sidecar
-    // runs on one model tier; formalize when a second tier joins.
-    static let contextWindowTokens: Int64 = 200_000
-
     /// How often the monitor samples context usage.
     static let monitorTickSeconds: TimeInterval = 30
 
@@ -222,7 +217,10 @@ actor SidecarLifecycle {
             guard let handle = handles[sidecar.name] else { continue }
             guard !rotating.contains(sidecar.name),
                   !rotateRequested.contains(sidecar.name) else { continue }
-            guard let pct = await contextPercent(sessionKey: handle.sessionKey) else { continue }
+            guard let pct = await contextPercent(
+                sessionKey: handle.sessionKey,
+                windowTokens: sidecar.contextWindowTokens
+            ) else { continue }
             guard pct >= sidecar.rotationThreshold else { continue }
 
             rotateRequested.insert(sidecar.name)
@@ -231,35 +229,55 @@ actor SidecarLifecycle {
         }
     }
 
-    /// Percent of the context window this session is currently carrying.
+    /// Percent of `windowTokens` this session is currently carrying.
     ///
-    /// `currentInputTokens + currentCacheReadTokens` is what the session drags
-    /// into its next turn — cache reads occupy the window exactly like fresh
-    /// input, they are just cheaper. Output tokens are excluded: they are
-    /// already counted as input on the following turn.
+    /// ## What `currentContextTokens` is
     ///
-    /// Nil when the worker row is missing or has no token data yet (a
+    /// The bridge writes it on every heartbeat as the LAST assistant turn's
+    /// `input + cacheCreate + cacheRead` — the prompt the model just read, which
+    /// is what the session drags into its next turn. Four properties matter
+    /// here, all of them deliberate:
+    ///
+    /// - **Last turn only, never a sum.** Every turn re-sends the whole
+    ///   conversation, so a running total grows without bound and says nothing
+    ///   about occupancy.
+    /// - **Cache reads counted once.** They occupy the window exactly like fresh
+    ///   input, just cheaper — and they are already inside that sum.
+    /// - **Sub-agent turns skipped** (`isSidechain`). A sidecar is a dispatcher
+    ///   that spawns agents constantly; an agent's window is not its parent's.
+    /// - **Session-scoped, not event-scoped.** Reported between events too, and
+    ///   nothing clears it when an event completes, so an idle sidecar sitting
+    ///   on a full context is still visible here.
+    ///
+    /// ## What it is not
+    ///
+    /// Explicitly NOT `currentInputTokens (+ currentCacheReadTokens)`, which
+    /// this used to read. Those are per-event sums that climb without bound —
+    /// a live worker showed 16.08M against a 200K window — and adding the two
+    /// double-counts cache reads on top of that.
+    ///
+    /// That proxy is also why a "readings >= 100% are garbage" filter once
+    /// looked reasonable. Do not add one back. With a real signal and a correct
+    /// `windowTokens`, a reading over 100% means a session genuinely past its
+    /// window, which is the single most important case to act on. Measured
+    /// against the WRONG denominator it means the sidecar's registration is
+    /// lying about its model — also something to fix rather than suppress.
+    ///
+    /// Nil when the worker row is missing or has no reading yet (a
     /// freshly-spawned session that hasn't taken a turn), which the caller
     /// treats as "no signal" rather than "zero".
-    private func contextPercent(sessionKey: String) async -> Int? {
+    private func contextPercent(sessionKey: String, windowTokens: Int64) async -> Int? {
+        guard windowTokens > 0 else { return nil }
         do {
             return try await dbPool.read { db -> Int? in
                 guard let row = try Row.fetchOne(
                     db,
-                    sql: """
-                        SELECT currentInputTokens, currentCacheReadTokens
-                        FROM workers WHERE workerId = ?
-                        """,
+                    sql: "SELECT currentContextTokens FROM workers WHERE workerId = ?",
                     arguments: [sessionKey]
                 ) else { return nil }
 
-                let input: Int64? = row["currentInputTokens"]
-                let cacheRead: Int64? = row["currentCacheReadTokens"]
-                guard input != nil || cacheRead != nil else { return nil }
-
-                let used = (input ?? 0) + (cacheRead ?? 0)
-                guard used > 0, Self.contextWindowTokens > 0 else { return nil }
-                return Int((used * 100) / Self.contextWindowTokens)
+                guard let used: Int64 = row["currentContextTokens"], used > 0 else { return nil }
+                return Int((used * 100) / windowTokens)
             }
         } catch {
             logger.error("sidecar context read failed for \(sessionKey): \(error)")

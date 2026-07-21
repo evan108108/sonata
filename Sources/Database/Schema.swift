@@ -428,6 +428,16 @@ func createSchema(in db: Database) throws {
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentInputTokens INTEGER") } catch { /* column exists */ }
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentPromptHash TEXT") } catch { /* column exists */ }
 
+    // Migration: current context occupancy — the LAST assistant turn's
+    // input+cacheCreate+cacheRead, i.e. how full the session's window is right
+    // now. Deliberately separate from the currentInputTokens/currentCacheRead
+    // pair above: those are SUMS across every turn of an event (they answer
+    // "what did this event cost?") and overstate occupancy by an order of
+    // magnitude within a few turns. Unlike them this is session-scoped, not
+    // event-scoped — the bridge reports it between events too, and nothing
+    // clears it when an event finishes.
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentContextTokens INTEGER") } catch { /* column exists */ }
+
     // Migration: readable-name carry for prompt cache panel — bridge ships these in heartbeat,
     // roll-up writes them into promptCacheStats for display alongside the promptHash.
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentSessionLabel TEXT") } catch { /* column exists */ }
@@ -1243,6 +1253,12 @@ extension DatabaseMigrator {
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_whathappened_domain
                 ON plugin_whathappened(domain)
             """)
+        }
+
+        registerMigration("v33_worker_context_tokens") { db in
+            // Last-turn context occupancy. See the createSchema body for why
+            // this can't be derived from the cumulative columns beside it.
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentContextTokens INTEGER") } catch { /* column exists */ }
         }
     }
 }

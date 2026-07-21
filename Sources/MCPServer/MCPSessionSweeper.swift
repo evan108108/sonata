@@ -65,6 +65,15 @@ actor MCPSessionSweeper {
         // Transcript-usage sampling (from old sweeper) preserved verbatim.
         // Determines if there's an in-flight event by reading currentEventId
         // from DB instead of registry snapshot.
+        //
+        // Deliberately does NOT write `currentContextTokens`: readWorkerTranscriptUsage
+        // resolves the most-recently-modified JSONL in the SHARED worker project
+        // dir, so with several workers running it can sample a different session's
+        // transcript than `workerId`. That is survivable for the cumulative
+        // columns (display + cost roll-ups) but not for a context reading, which
+        // SidecarLifecycle rotates sessions on — a borrowed number would rotate
+        // the wrong sidecar. The bridge knows its own transcript and owns that
+        // field.
         let inFlight: String? = (try? await dbPool.read { db in
             try String.fetchOne(db, sql:
                 "SELECT currentEventId FROM workers WHERE workerId = ?",
