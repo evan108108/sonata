@@ -149,9 +149,26 @@ cp "$BIN_SRC" "$BIN_DST"
 # same class of bug after 2026-05-05 / 2026-05-06 incidents). Without this the
 # binary swaps but any resource file NEW since the last install never lands —
 # 2026-07-21: pulpie-simplify.js / pulpie-markdown.js hit this exactly.
-echo "==> rsync resources → Contents/Resources/ AND Sonata_Sonata.bundle/"
-/usr/bin/rsync -a "$REPO/Sources/Sonata/Resources/" "$APP/Contents/Resources/"
-/usr/bin/rsync -a "$REPO/Sources/Sonata/Resources/" "$APP/Sonata_Sonata.bundle/"
+#
+# --delete, because copy-only leaves DELETED resources behind forever. Phase D
+# removed Resources/mcp/ from the repo on 2026-07-21 and both installed copies
+# still held mem-server.ts + sonata-bridge.ts afterwards: the source of truth
+# said "gone", the running app said "here". Harmless that time; a stale script
+# the app still knows how to execute would not be.
+#
+# The excludes are load-bearing, not tidiness. Contents/Resources/ is a real
+# .app resource directory that holds things this repo does not ship — AppIcon.icns
+# and bin/ (meilisearch) — so a bare --delete against a source tree that
+# contains neither would delete the app icon and the search binary on every
+# deploy. Sonata_Sonata.bundle/ holds nothing but these resources, so it needs
+# no exclusions. Anything added to Contents/Resources/ from outside this repo
+# must be added here too.
+echo "==> rsync resources → Contents/Resources/ AND Sonata_Sonata.bundle/ (pruning removed files)"
+/usr/bin/rsync -a --delete \
+  --exclude 'AppIcon.icns' \
+  --exclude 'bin/' \
+  "$REPO/Sources/Sonata/Resources/" "$APP/Contents/Resources/"
+/usr/bin/rsync -a --delete "$REPO/Sources/Sonata/Resources/" "$APP/Sonata_Sonata.bundle/"
 
 echo "==> re-sealing bundle (move resource bundle out, sign .app, move back)"
 mv "$RESOURCE_BUNDLE" "$TMP_BUNDLE"

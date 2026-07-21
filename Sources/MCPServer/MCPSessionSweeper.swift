@@ -82,7 +82,7 @@ actor MCPSessionSweeper {
         // session's context does not empty when its event does, and an idle
         // session sitting on a nearly-full window is exactly what the sidecar
         // monitor needs to see.
-        let usage = await readWorkerTranscriptUsage(sessionId: sessionId)
+        let usage = await readWorkerTranscriptUsage(workerId: workerId, sessionId: sessionId)
 
         // Feed the sidecar spend ledger from the same reading. This is the
         // live path: the `worker_heartbeat` action would be the intuitive home
@@ -193,6 +193,10 @@ actor MCPSessionSweeper {
 
     // MARK: - Transcript usage
 
+    /// Resolved transcript path per worker, so the directory scan runs once per
+    /// session instead of on every 15s tick.
+    private var transcriptPaths = TranscriptPathCache()
+
     /// Resolve this worker's own transcript and parse it.
     ///
     /// Resolution is by `workers.sessionId`, which the app records when it
@@ -204,18 +208,126 @@ actor MCPSessionSweeper {
     /// holding byte-identical readings (currentInputTokens=26,398,350) at the
     /// same instant. Nil sessionId means no transcript we can attribute, which
     /// reports as "no reading" rather than a borrowed one.
-    private func readWorkerTranscriptUsage(sessionId: String?) async -> TranscriptUsage? {
+    ///
+    /// ## Why this scans instead of building one path
+    ///
+    /// Keying on sessionId fixed the borrowing, but the *directory* stayed
+    /// hardcoded to `~/.sonata/worker` — correct for every caller that existed
+    /// at the time, and silently wrong the moment a session ran anywhere else.
+    /// Sidecars do: the memory sidecar's cwd is `~/.sonata/sidecar-memory`, so
+    /// its transcript lives under `-Users-evan--sonata-sidecar-memory/` and the
+    /// single constructed path never matched. `readWorkerTranscriptUsage`
+    /// returned nil for it forever, which cost more than a missing number:
+    /// `currentContextTokens` stayed NULL, so the sidecar could never compute a
+    /// context percentage, so it could never post rotate_me — and
+    /// `recordSidecarSpend` is gated on a non-nil reading, so the spend ledger
+    /// stayed at zero and throttling could never fire. Both features were inert
+    /// on a shipped build, and nothing errored: nil reads as "no turns yet",
+    /// which is exactly what a freshly-spawned session looks like.
+    ///
+    /// So the cwd is no longer assumed. We look for `<sessionId>.jsonl` across
+    /// every project directory. The anti-borrowing property survives because
+    /// resolution is still an exact match on a unique session id — see
+    /// `resolveTranscriptPath`, which deliberately has no
+    /// most-recently-modified fallback, since that fallback IS the original
+    /// bug.
+    private func readWorkerTranscriptUsage(
+        workerId: String, sessionId: String?
+    ) async -> TranscriptUsage? {
         guard let sessionId, !sessionId.isEmpty else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let cwd = "\(home)/.sonata/worker"
-        // Claude Code's project-dir encoding replaces BOTH `/` and `.` with `-`,
-        // so `/Users/evan/.sonata/worker` becomes `-Users-evan--sonata-worker`.
-        let encoded = cwd.replacingOccurrences(
-            of: #"[\/.]"#, with: "-", options: .regularExpression)
-        let path = "\(home)/.claude/projects/\(encoded)/\(sessionId).jsonl"
+        let projectsRoot = "\(home)/.claude/projects"
 
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        // Cached hit still gets an existence check: a transcript can be moved
+        // or cleaned up under a session that is otherwise unchanged, and
+        // serving a path that no longer resolves would report "no reading"
+        // permanently instead of rescanning once.
+        var path = transcriptPaths.cached(workerId: workerId, sessionId: sessionId)
+        if let cached = path, !FileManager.default.fileExists(atPath: cached) {
+            transcriptPaths.forget(workerId: workerId)
+            path = nil
+        }
+        if path == nil {
+            guard let resolved = resolveTranscriptPath(
+                projectsRoot: projectsRoot, sessionId: sessionId
+            ) else { return nil }
+            transcriptPaths.store(workerId: workerId, sessionId: sessionId, path: resolved)
+            path = resolved
+        }
+
+        guard let path, let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return nil
+        }
         return parseTranscriptUsage(jsonl: text)
+    }
+}
+
+// MARK: - Transcript location (pure)
+
+/// Locate a session's transcript under the Claude projects root.
+///
+/// Claude Code names a transcript after its session id and files it under a
+/// directory derived from the session's cwd, so the only stable fact is the
+/// filename. Rather than reconstruct the directory — which means assuming a
+/// cwd, and assuming wrong for anything that isn't a pool worker — this scans
+/// for an exact `<sessionId>.jsonl` match.
+///
+/// There is deliberately **no** most-recently-modified fallback. That fallback
+/// is what the original implementation did, and it copied one session's token
+/// numbers onto every other worker's row. A miss must stay a miss: reporting
+/// "no reading" is recoverable, reporting someone else's reading is not.
+///
+/// Directories are visited in sorted order so a miss costs the same scan every
+/// time and a hit is deterministic. Session ids are UUIDs, so at most one
+/// directory can match in practice.
+func resolveTranscriptPath(
+    projectsRoot: String,
+    sessionId: String,
+    fileManager: FileManager = .default
+) -> String? {
+    guard !sessionId.isEmpty else { return nil }
+    guard let dirs = try? fileManager.contentsOfDirectory(atPath: projectsRoot) else { return nil }
+
+    let filename = "\(sessionId).jsonl"
+    for dir in dirs.sorted() {
+        let candidate = "\(projectsRoot)/\(dir)/\(filename)"
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: candidate, isDirectory: &isDirectory),
+           !isDirectory.boolValue {
+            return candidate
+        }
+    }
+    return nil
+}
+
+/// Remembers where a worker's transcript was found, so the scan is once per
+/// session rather than once per tick.
+///
+/// Entries are keyed by worker and validated against the session id they were
+/// resolved for. Rotation is the only thing that changes a worker's session id,
+/// so an entry's useful life IS its session's life and there is no separate
+/// invalidation step to forget to run. A stale entry cannot be served: the
+/// session id is compared before the path is handed back, and a changed id
+/// simply misses.
+///
+/// Keying by worker rather than by session also bounds the dictionary to the
+/// number of live workers instead of growing by one entry per rotation.
+struct TranscriptPathCache {
+    private var entries: [String: (sessionId: String, path: String)] = [:]
+
+    /// The path cached for this exact (worker, session) pair, or nil when the
+    /// caller must resolve it afresh.
+    func cached(workerId: String, sessionId: String) -> String? {
+        guard let entry = entries[workerId], entry.sessionId == sessionId else { return nil }
+        return entry.path
+    }
+
+    mutating func store(workerId: String, sessionId: String, path: String) {
+        entries[workerId] = (sessionId: sessionId, path: path)
+    }
+
+    mutating func forget(workerId: String) {
+        entries[workerId] = nil
     }
 }
 
