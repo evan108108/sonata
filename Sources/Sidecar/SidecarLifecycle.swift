@@ -67,25 +67,91 @@ actor SidecarLifecycle {
     /// sidecar near its context ceiling should rotate before it picks up more.
     static let rotateEventPriority = 9
 
+    /// How long an outstanding `rotate_me` may go uncompleted before the
+    /// lifecycle will consider rotating the sidecar without it.
+    ///
+    /// 10 minutes = 20 monitor ticks, so the wedge check has sampled the
+    /// sidecar's context reading twenty times before it acts on the trend —
+    /// the discriminator in `wedgeDecision` is only as good as the number of
+    /// samples behind it. Erring long is also the cheaper mistake: firing late
+    /// costs a few extra minutes of a sidecar pinned above threshold, firing
+    /// early terminates a session that was about to rotate itself.
+    static let rotateGraceSeconds: TimeInterval = 600
+
+    /// Movement in a sidecar's context reading, in percentage points, that
+    /// counts as "the session took a turn since we last looked".
+    ///
+    /// The reading is the last assistant turn's prompt size, so between turns
+    /// it is literally unchanged; any movement at all means a turn happened.
+    /// The tolerance exists because the reading is rounded to whole percent —
+    /// on the default 200K window one point is 2000 tokens, so 2 points is a
+    /// 4000-token floor, well under any real turn at 70%+ occupancy. Below
+    /// that, "movement" would be rounding, not life.
+    static let contextMovementTolerancePct = 2
+
+    /// How fresh `workers.lastHeartbeat` must be for a sidecar to count as
+    /// alive. 90s matches the liveness cutoff already used by
+    /// `HealthMonitor.workerHeartbeatFreshness` and `system_status` rather
+    /// than introducing a third opinion about when a worker is a zombie.
+    static let heartbeatFreshnessSeconds: TimeInterval = 90
+
     private let dbPool: DatabasePool
     private let logger: Logger
     private let spawner: Spawner
+
+    /// Source of "now" for rotation bookkeeping. Injectable so the grace
+    /// period is testable without waiting one out in real time.
+    ///
+    /// Deliberately NOT used by `drain`, which interleaves its deadline with
+    /// `Task.sleep`: a frozen test clock would spin that loop forever. Wall
+    /// time is the right clock for a loop that sleeps on wall time.
+    private let now: @Sendable () -> Date
 
     /// Live session per sidecar name.
     private var handles: [String: SidecarSessionHandle] = [:]
     /// Names currently mid-rotation — guards against a second rotation
     /// starting while one is draining.
     private var rotating: Set<String> = []
-    /// Names a `rotate_me` has already been posted for. Without this the
-    /// monitor would re-post every tick for as long as the session sits above
-    /// threshold, since context only drops once the session is replaced.
-    private var rotateRequested: Set<String> = []
+    /// Sidecars a `rotate_me` has already been posted for, and what we knew
+    /// when we posted it. Without this latch the monitor would re-post every
+    /// tick for as long as the session sits above threshold, since context
+    /// only drops once the session is replaced.
+    ///
+    /// A dict rather than a `Set` because the latch is also the wedge
+    /// timeout's only record: post time anchors the grace period and the two
+    /// context readings anchor the "is it still moving?" check. Cleared by
+    /// `spawn`, so a completed rotation re-arms the monitor by the normal
+    /// path.
+    private var rotateRequested: [String: RotateRequest] = [:]
     private var monitorTask: Task<Void, Never>?
 
-    init(dbPool: DatabasePool, logger: Logger, spawner: @escaping Spawner) {
+    /// What the monitor knew when it posted a `rotate_me`, plus the newest
+    /// reading since. In-memory and actor-scoped: an outstanding rotate
+    /// request does not survive a Sonata restart, and it shouldn't — a restart
+    /// takes the sidecar's session with it.
+    struct RotateRequest: Equatable {
+        let postedAtMs: Int64
+        /// Context percent at the moment `rotate_me` went out.
+        let contextPctAtPost: Int
+        /// Context percent at the most recent tick. Updated every tick so the
+        /// short-horizon comparison sees one 30s step, not the whole window.
+        var previousContextPct: Int
+    }
+
+    init(
+        dbPool: DatabasePool,
+        logger: Logger,
+        spawner: @escaping Spawner,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.dbPool = dbPool
         self.logger = logger
         self.spawner = spawner
+        self.now = now
+    }
+
+    private func currentTimeMs() -> Int64 {
+        Int64(now().timeIntervalSince1970 * 1000)
     }
 
     // MARK: - Spawn
@@ -102,7 +168,7 @@ actor SidecarLifecycle {
 
         let handle = try await spawner(sidecar)
         handles[sidecar.name] = handle
-        rotateRequested.remove(sidecar.name)
+        rotateRequested[sidecar.name] = nil
         SidecarRegistry.shared.setSessionKey(handle.sessionKey, for: sidecar.name)
         logger.info("sidecar '\(sidecar.name)' spawned as session \(handle.sessionKey)")
     }
@@ -185,7 +251,7 @@ actor SidecarLifecycle {
         // still hold a stale key if a previous spawn published one and then
         // failed.
         SidecarRegistry.shared.setSessionKey(nil, for: sidecar.name)
-        rotateRequested.remove(sidecar.name)
+        rotateRequested[sidecar.name] = nil
 
         guard let handle = handles.removeValue(forKey: sidecar.name) else {
             logger.debug("sidecar '\(sidecar.name)' has no live session to stop")
@@ -244,23 +310,197 @@ actor SidecarLifecycle {
         monitorTask = nil
     }
 
-    /// Sample every live sidecar and post `rotate_me` for any that crossed its
-    /// threshold.
-    private func tick() async {
+    /// Sample every live sidecar: post `rotate_me` for any that crossed its
+    /// threshold, and force-rotate any whose `rotate_me` went unanswered.
+    ///
+    /// Internal rather than private so tests can drive one sample at a time
+    /// instead of racing the 30s timer.
+    func tick() async {
         for sidecar in SidecarRegistry.shared.all() {
             guard sidecar.budgetTier != .off else { continue }
             guard let handle = handles[sidecar.name] else { continue }
-            guard !rotating.contains(sidecar.name),
-                  !rotateRequested.contains(sidecar.name) else { continue }
-            guard let pct = await contextPercent(
+            guard !rotating.contains(sidecar.name) else { continue }
+
+            let pct = await contextPercent(
                 sessionKey: handle.sessionKey,
                 windowTokens: sidecar.contextWindowTokens
-            ) else { continue }
+            )
+
+            // Already asked this one to rotate. The only question left is
+            // whether it is still going to.
+            if let outstanding = rotateRequested[sidecar.name] {
+                await checkForWedge(sidecar: sidecar, handle: handle, request: outstanding, contextPct: pct)
+                continue
+            }
+
+            guard let pct else { continue }
             guard pct >= sidecar.rotationThreshold else { continue }
 
-            rotateRequested.insert(sidecar.name)
+            rotateRequested[sidecar.name] = RotateRequest(
+                postedAtMs: currentTimeMs(),
+                contextPctAtPost: pct,
+                previousContextPct: pct
+            )
             logger.info("sidecar '\(sidecar.name)' at \(pct)% of context (threshold \(sidecar.rotationThreshold)%) — posting rotate_me")
             await postRotateMe(sidecar: sidecar, sessionKey: handle.sessionKey, contextPct: pct)
+        }
+    }
+
+    // MARK: - Wedge fallback
+
+    /// Why a sidecar with an outstanding `rotate_me` was or wasn't rotated
+    /// out from under it.
+    ///
+    /// A named case per reason rather than a `Bool` so the log line says which
+    /// condition held the rotation back, and so the tests name the discriminator
+    /// they are exercising instead of asserting on an undifferentiated false.
+    enum WedgeDecision: Equatable {
+        /// All four conditions align: the sidecar is alive, pinned, and out of
+        /// time. Rotate it without waiting for the event.
+        case forceRotate
+        /// Condition 2 — the sidecar has not had long enough yet.
+        case withinGracePeriod
+        /// Condition 3 — no context reading at all, so there is no trend to
+        /// judge. Distinct from a low reading: absent signal is not evidence.
+        case noContextReading
+        /// Condition 3 — the reading dropped below the rotation threshold, so
+        /// whatever we were worried about resolved itself.
+        case contextBelowThreshold
+        /// Condition 3 — the reading is still moving, so the session is taking
+        /// turns. Busy and slow, not wedged.
+        case contextMoving
+        /// Condition 4 — the session is not heartbeating. A dead session is a
+        /// different failure with a different fix; rotating here would paper
+        /// over it and respawn into whatever killed the first one.
+        case heartbeatStale
+    }
+
+    /// The four-condition wedge test, as a pure function of what the monitor
+    /// observed. Kept static and input-only so the discriminators can be tested
+    /// directly — the interesting cases are combinations of readings, not
+    /// database or actor states.
+    ///
+    /// Condition 1 (the latch is still set) is the caller's: this is only
+    /// reached for a sidecar that has an outstanding `RotateRequest`.
+    ///
+    /// ## On condition 3
+    ///
+    /// `contextMoving` is the load-bearing one, and it treats movement in
+    /// EITHER direction as a sign of life. A sidecar working through its
+    /// rotate_me takes turns, and each turn moves its reading — down when the
+    /// session compacts or is replaced, up as it accumulates. A wedged session
+    /// takes no turns at all, so its reading sits at exactly the value it had
+    /// when the monitor posted. Flat-and-pinned is the signature we act on;
+    /// anything else waits another cycle.
+    ///
+    /// Reading a climb as "still alive, leave it" is the deliberately
+    /// conservative call. It means a sidecar wedged in a loop that still burns
+    /// context never force-rotates here — but that is a live, spending session
+    /// and a different failure from the pinned one this fallback exists for,
+    /// and unilaterally terminating a session that is visibly working is the
+    /// mistake worth avoiding. The primary route through
+    /// `worker_event_complete` is untouched and still handles every rotation
+    /// that completes normally.
+    ///
+    /// So, stated as the scope this net does and does not cover: it catches a
+    /// PINNED wedge, not a LOOP wedge. If loop-wedges turn up in practice they
+    /// want their own signal — a per-turn context growth rate, something that
+    /// can tell "climbing because it is working" from "climbing because it is
+    /// stuck in a cycle" — and not a loosening of the flatness test here,
+    /// which would take the pinned case's safety with it.
+    static func wedgeDecision(
+        elapsedSincePostMs: Int64,
+        rotationThreshold: Int,
+        contextPctAtPost: Int,
+        previousContextPct: Int,
+        currentContextPct: Int?,
+        heartbeatAgeMs: Int64?
+    ) -> WedgeDecision {
+        // Condition 2 — grace period since the rotate_me was posted.
+        guard elapsedSincePostMs >= Int64(rotateGraceSeconds * 1000) else {
+            return .withinGracePeriod
+        }
+
+        // Condition 3 — the reading is still pinned above threshold and flat.
+        guard let currentContextPct else { return .noContextReading }
+        guard currentContextPct >= rotationThreshold else { return .contextBelowThreshold }
+
+        // Both horizons: against the post-time anchor (did anything happen at
+        // all in ten minutes?) and against the last tick (is it moving right
+        // now?). A session that drifted away and back would read flat on the
+        // anchor alone.
+        let movedSincePost = abs(currentContextPct - contextPctAtPost) >= contextMovementTolerancePct
+        let movedSinceLastTick = abs(currentContextPct - previousContextPct) >= contextMovementTolerancePct
+        guard !movedSincePost, !movedSinceLastTick else { return .contextMoving }
+
+        // Condition 4 — the process is alive.
+        guard let heartbeatAgeMs,
+              heartbeatAgeMs <= Int64(heartbeatFreshnessSeconds * 1000) else {
+            return .heartbeatStale
+        }
+
+        return .forceRotate
+    }
+
+    /// Apply `wedgeDecision` to a sidecar whose `rotate_me` is outstanding,
+    /// and rotate it if all four conditions hold.
+    private func checkForWedge(
+        sidecar: Sidecar,
+        handle: SidecarSessionHandle,
+        request: RotateRequest,
+        contextPct: Int?
+    ) async {
+        let decision = Self.wedgeDecision(
+            elapsedSincePostMs: currentTimeMs() - request.postedAtMs,
+            rotationThreshold: sidecar.rotationThreshold,
+            contextPctAtPost: request.contextPctAtPost,
+            previousContextPct: request.previousContextPct,
+            currentContextPct: contextPct,
+            heartbeatAgeMs: await heartbeatAgeMs(sessionKey: handle.sessionKey)
+        )
+
+        // Record this tick's reading before acting, so the next tick's
+        // short-horizon comparison is against this sample whatever we decide.
+        // Skipped when there was no reading: overwriting a real previous value
+        // with nothing would make the following tick's comparison meaningless.
+        if let contextPct {
+            rotateRequested[sidecar.name]?.previousContextPct = contextPct
+        }
+
+        guard decision == .forceRotate else {
+            logger.debug("sidecar '\(sidecar.name)' has an outstanding rotate_me; not force-rotating (\(decision))")
+            return
+        }
+
+        logger.warning("""
+            sidecar '\(sidecar.name)' never completed its rotate_me \
+            (posted \(Int((currentTimeMs() - request.postedAtMs) / 1000))s ago, context flat at \
+            \(contextPct.map(String.init) ?? "?")% of \(sidecar.rotationThreshold)% threshold, \
+            still heartbeating) — force-rotating
+            """)
+
+        // Clears the latch via spawn on the way back up, exactly as a
+        // completed rotation would.
+        await rotate(sidecar)
+    }
+
+    /// How long ago this session last heartbeated. Nil when the worker row is
+    /// gone — same meaning as a stale heartbeat for our purposes, but the
+    /// caller distinguishes them in the decision it returns.
+    private func heartbeatAgeMs(sessionKey: String) async -> Int64? {
+        do {
+            let last = try await dbPool.read { db -> Int64? in
+                try Row.fetchOne(
+                    db,
+                    sql: "SELECT lastHeartbeat FROM workers WHERE workerId = ?",
+                    arguments: [sessionKey]
+                )?["lastHeartbeat"]
+            }
+            guard let last else { return nil }
+            return currentTimeMs() - last
+        } catch {
+            logger.error("sidecar heartbeat read failed for \(sessionKey): \(error)")
+            return nil
         }
     }
 
@@ -337,7 +577,9 @@ actor SidecarLifecycle {
         }()
 
         let eventId = newUUID()
-        let now = nowMs()
+        // Not named `now`: that is the injected clock on this actor, and a
+        // local of the same name would shadow it out of reach.
+        let postedAt = currentTimeMs()
         do {
             try await dbPool.write { db in
                 try db.execute(
@@ -346,13 +588,13 @@ actor SidecarLifecycle {
                             (id, type, payload, priority, assignedTo, status, createdAt, assignedAt)
                         VALUES (?, 'rotate_me', ?, ?, ?, 'assigned', ?, ?)
                         """,
-                    arguments: [eventId, payloadJSON, Self.rotateEventPriority, sessionKey, now, now]
+                    arguments: [eventId, payloadJSON, Self.rotateEventPriority, sessionKey, postedAt, postedAt]
                 )
             }
         } catch {
             // Re-arm so the next tick tries again rather than silently never
             // rotating this sidecar.
-            rotateRequested.remove(sidecar.name)
+            rotateRequested[sidecar.name] = nil
             logger.error("failed to post rotate_me for sidecar '\(sidecar.name)': \(error)")
         }
     }

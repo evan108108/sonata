@@ -1249,15 +1249,18 @@ let workerEventActions: [SonataAction] = [
                         // 120s drain timeout on the very event that asked for
                         // the rotation.
                         //
-                        // TODO: timeout fallback for wedged sidecar rotation.
-                        // If a sidecar never completes its rotate_me — hung, or
+                        // This is the PRIMARY route, not the only one. If a
+                        // sidecar never completes its rotate_me — hung, or
                         // crashed after the push — this branch never fires, and
                         // `SidecarLifecycle.rotateRequested` latches the name so
-                        // the monitor will not re-post. The sidecar then sits
-                        // above its context threshold forever. The fix is a
-                        // deadline on the outstanding rotate_me (post time +
-                        // grace) after which the lifecycle rotates unilaterally;
-                        // out of scope here.
+                        // the monitor will not re-post. The safety net under
+                        // that is `SidecarLifecycle.wedgeDecision`, which the
+                        // 30s monitor consults for any sidecar with an
+                        // outstanding request: past its grace period, still
+                        // pinned above threshold, reading flat, and still
+                        // heartbeating means rotate unilaterally. Nothing here
+                        // needs to change for it — a rotation that completes
+                        // normally clears the latch by this path first.
                         if row?.type == "rotate_me",
                            let name = json["sidecar"] as? String, !name.isEmpty {
                             rotateSidecar = name
