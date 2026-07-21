@@ -1477,8 +1477,12 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 slotLabel: sessionLabel
             )
             if inProcExtras != nil {
-                // SONA_SESSION_ID still emitted (mem-server.ts sibling-injection
-                // compatibility — Open Question 3 in plan §12). Other legacy
+                // SONA_SESSION_ID still emitted. The original reason —
+                // mem-server.ts sibling-injection compatibility, Open Question
+                // 3 in plan §12 — died with that proxy on 2026-07-21, but the
+                // var is still load-bearing: the global ~/.claude.json entry
+                // uses `Bearer ${SONA_SESSION_ID}`, so a session that never
+                // sees it falls back to an anon-XXX bearer. Other legacy
                 // identity vars (WORKER_ID, SESSION_LABEL, restart-nudge trio)
                 // are NOT emitted: identity is in the URL path now, and the
                 // restart nudge fires inline via MCPNotificationDispatcher

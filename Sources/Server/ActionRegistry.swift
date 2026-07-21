@@ -545,11 +545,12 @@ struct MCPCallRequest: Decodable, @unchecked Sendable {
 /// string is emitted as-is so error messages still read cleanly.
 ///
 /// Consumers all had defensive `typeof result === "string"` parsing so this
-/// change is backward-safe for them. The one consumer that needs an update
-/// alongside this change is `Sources/Sonata/Resources/mcp/mem-server.ts`,
-/// which was passing `result.result` straight through as MCP text content —
-/// that surface now needs to JSON.stringify when the payload isn't already
-/// a string.
+/// change is backward-safe for them. The one consumer that needed an update
+/// alongside this change was the `mem-server.ts` stdio proxy, which passed
+/// `result.result` straight through as MCP text content. That proxy was
+/// deleted on 2026-07-21 (Phase D — see `ensureGlobalMCPServers`), so the
+/// only remaining consumers are raw HTTP callers, which want the nested
+/// value this encode produces.
 struct MCPCallResponse: Encodable {
     let result: String
     var error: Bool = false

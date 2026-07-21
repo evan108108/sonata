@@ -33,24 +33,34 @@ func ensureGlobalMCPServers() {
     let fm = FileManager.default
     let home = fm.homeDirectoryForCurrentUser
 
-    // Phase D — neither mem-server.ts nor sonata-bridge.ts is deployed any
-    // more. The in-app HTTP+SSE server at /mcp replaces both.
+    // Phase D — COMPLETE as of 2026-07-21. Neither mem-server.ts nor
+    // sonata-bridge.ts survives; the in-app HTTP+SSE server at /mcp is the
+    // only transport. Both stdio proxies are gone from ~/.sonata/mcp (dir
+    // removed), and the bundled `Sources/Sonata/Resources/mcp` resource went
+    // with them (its `.copy` entry is out of Package.swift).
     //
-    // The soak is over and the cleanup has now happened for
-    // ~/.sonata/mcp/sonata-bridge.ts: deleted 2026-07-21, after confirming no
-    // process was running it and that every session config (workers,
-    // supervisor, interactive) points at the HTTP transport. Leaving it on disk
-    // had a real cost — it read as live code, and a heartbeat field was written
-    // into it that consequently never reached the database.
+    // ~/.sonata/mcp/sonata-bridge.ts was deleted first, after confirming no
+    // process ran it and that every session config points at the HTTP
+    // transport. Leaving it on disk had a real cost — it read as live code,
+    // and a heartbeat field was written into it that consequently never
+    // reached the database.
     //
-    // ~/.sonata/mcp/mem-server.ts is deliberately still there. It is equally
-    // undeployed, but the on-disk copy is NOT the same file as
-    // Sources/Sonata/Resources/mcp/mem-server.ts: it carries an afk_register
-    // sessionId auto-injection the bundled copy never had, and lacks the
-    // 2026-07-17 double-encoding fix the bundled copy does have. Deleting it
-    // would destroy the only copy of that behavior, so it wants a decision
-    // about whether the injection should be ported into the bundled resource
-    // rather than a sweep.
+    // mem-server.ts was held back one round because the on-disk copy looked
+    // like a divergent hand-edit: it carried an afk_register sessionId
+    // auto-injection the bundled copy lacked. It was not divergent. The file
+    // was byte-identical to `git show 96d96c1:…/Resources/mcp/mem-server.ts`
+    // — a stale build artifact of a tracked commit, so nothing was unique to
+    // it. And the behavior it carried was already dead: afk_register itself
+    // was retired in 89b1fc9 (2026-06-08, "route by sessionId, retire tokens
+    // and AFKRegistry entirely"). AFK now routes on sessionId via
+    // sonata_whoami + global_afk_set/_status, and the live 240-tool surface
+    // has no afk_register at all. Porting the injection would have
+    // resurrected a helper for a tool that no longer exists.
+    //
+    // `serversToRemove` below is what makes this irreversible in the right
+    // direction: any lingering `memory` stdio entry — the only config shape
+    // that could ever spawn mem-server.ts — is scrubbed from both Claude
+    // config files on every startup.
 
     // sonata-bridge: HTTP+SSE entry pointing at /mcp (no path), with
     // the bearer = ${SONA_SESSION_ID} env var. Claude substitutes the
