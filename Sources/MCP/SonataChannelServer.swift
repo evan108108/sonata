@@ -54,6 +54,12 @@ actor SonataChannelServer {
     }
 
     /// Find an idle worker registered via channel.
+    ///
+    /// Restricted to pool slots (`poolSlotSQLPredicate`). Without that guard
+    /// this picked *any* idle row ordered by freshest heartbeat, so a
+    /// long-lived non-pool session — a sidecar — would be the top candidate the
+    /// moment it registered, and `dispatchToChannel` would feed it arbitrary
+    /// tasks.
     func findIdleWorker() async -> String? {
         do {
             return try await dbPool.read { db in
@@ -61,6 +67,7 @@ actor SonataChannelServer {
                     SELECT workerId FROM workers
                     WHERE status = 'idle'
                     AND lastHeartbeat > ?
+                    AND \(poolSlotSQLPredicate)
                     ORDER BY lastHeartbeat DESC
                     LIMIT 1
                 """, arguments: [nowMs() - 30_000])

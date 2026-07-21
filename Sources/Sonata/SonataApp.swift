@@ -249,6 +249,79 @@ func ensureRoleDirectories() {
     }
 }
 
+/// Bring up the sidecar subsystem: load user config, register the sidecars this
+/// build ships, install spend tracking, and spawn everything not switched off.
+///
+/// Order is load-bearing. `SidecarConfigStore.load()` must complete before
+/// registration, because registration folds the stored config into the
+/// immutable `Sidecar` value. Registering first would bake in framework
+/// defaults and silently ignore the user's tuned tier and cap.
+///
+/// Every failure here is logged and survived rather than thrown: sidecars are
+/// an assist, and a machine that cannot run one should still boot Sonata.
+func bootSidecars(dbPool: DatabasePool, logger: Logger) async {
+    do {
+        try SidecarConfigStore.shared.load()
+    } catch {
+        // A corrupt config file is worth shouting about, but it must not cost
+        // the user their sidecars — carry on with defaults.
+        logger.error("Sidecar config failed to load (\(error)) — continuing on defaults")
+    }
+
+    guard let skillPath = MemorySidecarRegistration.bundledSkillPath() else {
+        logger.error("""
+            Sidecar 'memory' not registered: SKILL.md missing from the app \
+            bundle. Check that Package.swift still copies \
+            Sonata/Resources/sidecars.
+            """)
+        return
+    }
+
+    // Two-step so `config(for:)` can seed from the registration's own defaults
+    // when the user has never opened the panel, then fold the result back in.
+    let baseline = MemorySidecarRegistration.sidecar(skillPath: skillPath, config: .default)
+    let config = SidecarConfigStore.shared.config(for: baseline)
+    let memorySidecar = MemorySidecarRegistration.sidecar(skillPath: skillPath, config: config)
+
+    do {
+        try SidecarRegistry.shared.register(memorySidecar)
+    } catch {
+        logger.error("Sidecar 'memory' failed to register: \(error)")
+        return
+    }
+
+    let tracker = SidecarSpendTracker()
+    SidecarSpendRegistry.shared.install(tracker)
+
+    let lifecycle = SidecarLifecycle(
+        dbPool: dbPool,
+        logger: logger,
+        spawner: SidecarSpawnerFactory.make(logger: logger)
+    )
+    SidecarRuntime.shared.install(lifecycle: lifecycle, tracker: tracker)
+
+    await lifecycle.spawnAllRegistered()
+
+    // Safe to sample context from here on: the monitor reads
+    // `workers.currentContextTokens`, the last assistant turn's usage, which is
+    // an actual measure of what the next turn carries. It replaced a cumulative
+    // per-event sum that read in the thousands of percent and would have
+    // rotated the sidecar on its first multi-turn event.
+    //
+    // The `rotate_me` events this posts are not consumed yet — the handler that
+    // routes them to `SidecarLifecycle.rotate(_:)` lands with the event-routing
+    // seam. Until then they accumulate harmlessly in `workerEvents`, which is
+    // the right failure mode: a rotation is deferred, never lost.
+    await lifecycle.startMonitoring()
+
+    let running = await lifecycle.runningSidecarNames().sorted()
+    if running.isEmpty {
+        logger.info("Sidecars registered but none running (tier=off, or spawn failed above)")
+    } else {
+        logger.info("Sidecars running: \(running.joined(separator: ", "))")
+    }
+}
+
 /// Deploy Sona's bundled Claude Code skills to ~/.claude/skills/. Currently
 /// just the `/afk` skill because that's the one tied directly to Sonata
 /// runtime (channel-push from EmailHandler). Always overwrites so the skill
@@ -1193,6 +1266,13 @@ struct SonataApp: App {
                 }
                 await GlobalAFKOrchestrator.shared.start(dbPool: pool)
                 logger.info("Auto-started restored interactive sessions")
+
+                // 6d. Bring up registered sidecars — long-lived Claude Code
+                // sessions that receive events by type and dispatch each to a
+                // headless internal agent. Runs after the worker pool and the
+                // supervisor because a sidecar registers a `workers` row of its
+                // own and we want the pool's slots claimed first.
+                await bootSidecars(dbPool: pool, logger: logger)
 
                 // Register shutdown handler
                 let shutdownHandler = {

@@ -99,11 +99,15 @@ actor TaskDispatcher {
         // that lets the backlog build.
         await expireStaleScheduledTasks()
 
-        // Dynamic concurrency: match available idle workers
+        // Dynamic concurrency: match available idle workers. Counts pool slots
+        // only (`poolSlotSQLPredicate`) — a non-pool session holding a
+        // `workers` row, such as a sidecar, would otherwise inflate the count
+        // and let the dispatcher release one more task than the pool can take.
         let idleWorkerCount: Int = (try? await dbPool.read { db in
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM workers
                 WHERE status = 'idle' AND lastHeartbeat >= ?
+                  AND \(poolSlotSQLPredicate)
             """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 30_000]) ?? 0
         }) ?? 0
 

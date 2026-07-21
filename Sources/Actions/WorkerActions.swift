@@ -141,6 +141,23 @@ private struct PromptCacheStatsItem: Encodable {
 
 // MARK: - Helpers
 
+/// SQL predicate matching a worker-pool slot, for use in a `workers` query.
+///
+/// The pool is exactly the `sona-worker-N` slots. Other things legitimately
+/// hold a `workers` row — sidecars register one so their token usage is
+/// visible to the context monitor — but they are long-lived sessions that
+/// receive work only by explicit assignment, and handing them generic pending
+/// events would pull them off the job they exist to do.
+///
+/// Shared rather than inlined because the three selectors that pick "an idle
+/// worker" (`MCPEventPusher.assignPendingToIdleWorkers`,
+/// `SonataChannelServer.findIdleWorker`, `TaskDispatcher`'s concurrency count)
+/// each had their own version of this rule and only one of them was right —
+/// two would happily have dispatched arbitrary tasks into a sidecar. One
+/// constant so the next thing that registers a `workers` row can't reopen the
+/// same gap.
+let poolSlotSQLPredicate = "sessionLabel GLOB 'sona-worker-*'"
+
 /// Sweep workers whose lastHeartbeat is older than 30s ago — mark them
 /// `offline` (an ALERT), delete draining ones. Bridge heartbeats every 15s,
 /// so 30s gives a 2x margin while clearing ghost rows quickly when a session

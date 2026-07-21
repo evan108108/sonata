@@ -63,15 +63,19 @@ actor MCPEventPusher {
     /// Find live workers with no assigned event and hand them pending work.
     /// "Live" = has an SSE stream in MCPConnections. "Idle" = DB says
     /// status='idle', currentEventId IS NULL, sessionLabel is a valid pool
-    /// slot.
+    /// slot (`poolSlotSQLPredicate`).
+    ///
+    /// The predicate used to also admit `sessionLabel = 'supervisor'`. That was
+    /// dead: the supervisor keeps its state in `supervisorState` and has never
+    /// had a `workers` row, so the branch matched nothing while implying the
+    /// supervisor was a dispatch target.
     private func assignPendingToIdleWorkers() async {
         // Query the DB for eligible workers, cross-check hasLive.
         let candidates: [String] = (try? await dbPool.read { db -> [String] in
             try String.fetchAll(db, sql: """
                 SELECT workerId FROM workers
                 WHERE status = 'idle' AND currentEventId IS NULL
-                  AND (sessionLabel = 'supervisor'
-                       OR sessionLabel GLOB 'sona-worker-*')
+                  AND \(poolSlotSQLPredicate)
             """)
         }) ?? []
         if candidates.isEmpty { return }
