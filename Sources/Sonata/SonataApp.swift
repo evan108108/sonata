@@ -927,6 +927,7 @@ struct SonataApp: App {
                 registry.register(dmActions)
                 registry.register(calendarActions)
                 registry.register(emailActions)
+                registry.register(emailOutboundActions)
                 registry.register(emailInboxActions)
                 registry.register(schedulerActions)
                 registry.register(supervisorActions)

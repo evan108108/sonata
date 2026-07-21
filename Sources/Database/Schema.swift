@@ -1260,5 +1260,35 @@ extension DatabaseMigrator {
             // this can't be derived from the cumulative columns beside it.
             do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentContextTokens INTEGER") } catch { /* column exists */ }
         }
+
+        // v34: which session owns an email thread. Written when a session sends
+        // through Sonata's own outbound seam (email_send/email_reply) or when an
+        // `[AFK-#<sessionKey>]` reply routes to a live session — the two moments
+        // Sonata actually observes a session acting on a thread.
+        //
+        // This exists because Sonata has no other way to know. Sessions have
+        // historically sent mail through the AgentMail MCP server, which never
+        // touches this process, and the `emails` table only ever receives
+        // inbound rows. So "which session owns this thread" was unknowable, and
+        // inbound replies on a session-owned thread were dispatched to whichever
+        // pool worker claimed them first — putting a second Sona on a thread the
+        // user was already holding a conversation on.
+        //
+        // threadId is the PK: one owner per thread, most recent sender wins. A
+        // thread with no row here behaves exactly as it always did.
+        registerMigration("v34_email_thread_owners") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS emailThreadOwners (
+                    threadId         TEXT PRIMARY KEY,
+                    ownerSessionKey  TEXT NOT NULL,
+                    firstSentAt      INTEGER NOT NULL,
+                    lastSentAt       INTEGER NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS emailThreadOwners_by_owner
+                ON emailThreadOwners(ownerSessionKey)
+                """)
+        }
     }
 }

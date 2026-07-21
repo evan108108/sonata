@@ -37,14 +37,39 @@ actor EmailHandler {
     /// Refreshed at each poll cycle so UI changes take effect within one cycle.
     private var currentInboxes: [InboxConfig] = []
 
+    /// Whether a session is currently connected and able to consume a channel
+    /// push. Injected so tests can drive both branches of owned-thread routing
+    /// without standing up a live MCP connection.
+    private let isSessionLive: @Sendable (String) async -> Bool
+
+    /// Push an inbound email to a session as a channel notification. Injected
+    /// alongside `isSessionLive` for the same reason.
+    private let pushToSession: @Sendable (_ sessionKey: String, _ email: EmailRecord) async -> Bool
+
     // MARK: - Init
 
-    init(dbPool: DatabasePool, logger: Logger? = nil, resolver: EmailProviderResolver = EmailProviderResolver()) {
+    init(
+        dbPool: DatabasePool,
+        logger: Logger? = nil,
+        resolver: EmailProviderResolver = EmailProviderResolver(),
+        isSessionLive: (@Sendable (String) async -> Bool)? = nil,
+        pushToSession: (@Sendable (_ sessionKey: String, _ email: EmailRecord) async -> Bool)? = nil
+    ) {
         self.dbPool = dbPool
         var log = logger ?? Logger(label: "sonata.email")
         log.logLevel = .info
         self.logger = log
         self.resolver = resolver
+        self.isSessionLive = isSessionLive ?? { await MCPConnections.shared.hasLive($0) }
+        self.pushToSession = pushToSession ?? { sessionKey, email in
+            await MCPNotificationDispatcher.shared.pushAFKReply(
+                sessionKey: sessionKey,
+                fromAddr: email.from,
+                subject: email.subject,
+                messageId: email.messageId,
+                replyText: email.body
+            )
+        }
     }
 
     // MARK: - Lifecycle
@@ -190,10 +215,14 @@ actor EmailHandler {
             // Pull out any [AFK-#<sessionId>] replies and route them via the
             // channel before falling through to the normal dispatch flow.
             let afterAFK = await routeAFKReplies(newEmails)
+            // Then pull out replies on threads a live session already owns —
+            // the case the subject tag misses (a thread whose tag was never
+            // typed, or was stripped by the user's mail client on reply).
+            let afterOwned = await routeOwnedThreadEmails(afterAFK)
             // Then pull out [APPROVAL NEEDED] reply directives (APPROVE / REJECT
             // / DELETE) which update contacts.autoAllowEmail/blockEmail and
             // re-dispatch any pending_approval rows on APPROVE.
-            let afterApproval = await routeApprovalReplies(afterAFK)
+            let afterApproval = await routeApprovalReplies(afterOwned)
             if afterApproval.isEmpty { continue }
             await processNewEmails(afterApproval, inbox: inbox)
         }
@@ -246,11 +275,68 @@ actor EmailHandler {
             )
             if pushed {
                 logger.info("EmailHandler: routed AFK reply to session \(resolved.sessionKey) (subject sessionId=\(target), msg \(email.messageId))")
+                // A successful tag route is the other moment Sonata observes a
+                // session acting on a thread — record it, so the thread keeps
+                // routing to this session even if a later reply loses the tag.
+                // This is what closes the loop for threads started via
+                // email_send, where the provider hadn't yet assigned a threadId.
+                await EmailThreadOwnership.record(
+                    threadId: email.threadId, sessionKey: resolved.sessionKey, dbPool: dbPool)
                 try? await markEmailProcessed(messageId: email.messageId, success: true)
             } else {
                 logger.info("EmailHandler: AFK target \(target) resolved to \(resolved.sessionKey) but channel push failed; falling through")
                 leftover.append(email)
             }
+        }
+        return leftover
+    }
+
+    // MARK: - Owned-Thread Routing
+
+    /// Split out emails arriving on a thread a live session already owns, and
+    /// push them to that session instead of dispatching a worker event.
+    ///
+    /// This is the suppression that keeps a second Sona off a conversation the
+    /// user is already having. Without it, an inbound reply on a coordinator's
+    /// thread becomes a first-class `email` workerEvent whose own payload tells
+    /// the claiming worker to read, reply, mark replied and complete — so the
+    /// worker answers on the thread, correctly following instructions it should
+    /// never have been handed. Guarding that in worker prose failed three times
+    /// in one day; the event simply must not be created.
+    ///
+    /// Deliberately narrow. All three conditions must hold:
+    ///   1. Global AFK is on — the only mode where a session is holding an
+    ///      email conversation rather than working the inbox as a queue.
+    ///   2. The thread has a recorded owner (see `emailThreadOwners`).
+    ///   3. That owner is live and can consume a channel push.
+    /// Any of them false and the email falls through completely untouched, so
+    /// normal inbox handling is bit-for-bit unchanged when AFK is off.
+    func routeOwnedThreadEmails(_ emails: [EmailRecord]) async -> [EmailRecord] {
+        guard !emails.isEmpty else { return emails }
+        guard await globalAFKEnabled(dbPool: dbPool) else { return emails }
+
+        var leftover: [EmailRecord] = []
+        for email in emails {
+            guard let owner = await EmailThreadOwnership.owner(
+                threadId: email.threadId, dbPool: dbPool) else {
+                leftover.append(email); continue
+            }
+            guard await isSessionLive(owner) else {
+                // Owner is gone (tab closed, Sonata restarted). Falling through
+                // to normal dispatch is the right call — better a worker answers
+                // than the mail lands in a session that can't consume it.
+                logger.info("EmailHandler: thread \(email.threadId) owned by \(owner) but that session isn't live — falling through to worker dispatch")
+                leftover.append(email); continue
+            }
+            guard await pushToSession(owner, email) else {
+                logger.info("EmailHandler: thread \(email.threadId) owned by live session \(owner) but channel push failed — falling through to worker dispatch")
+                leftover.append(email); continue
+            }
+            // Loud on purpose. A suppression nobody can see in the log is worse
+            // than the bug it fixes — this line is how you tell "routed to the
+            // owner" apart from "silently dropped".
+            logger.info("EmailHandler: global AFK on, thread \(email.threadId) owned by session \(owner) — email \(email.messageId) suppressed to notification instead of worker dispatch")
+            try? await markEmailProcessed(messageId: email.messageId, success: true)
         }
         return leftover
     }

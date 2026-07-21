@@ -70,6 +70,18 @@ enum MCPToolHandlers {
             return await memTaskUnwatch(
                 args: args, sessionKey: sessionKey,
                 actionRegistry: actionRegistry, dbPool: dbPool)
+        case "email_send", "email_reply":
+            // The outbound seam needs to know WHO is sending: the AFK subject
+            // tag is stamped from the caller's sessionKey, and thread ownership
+            // is recorded against it. Injecting here (rather than declaring the
+            // args and trusting callers to fill them) means identity can't be
+            // spoofed or forgotten — same pattern dm_broadcast uses above.
+            var identifiedArgs = args
+            identifiedArgs["sessionKey"] = sessionKey
+            identifiedArgs["role"] = role.rawValue
+            return await actionRegistry.executeMCPTool(
+                name: toolName, args: identifiedArgs, dbPool: dbPool
+            )
         case "sonata_identify":
             return await sonataIdentify(args: args, sessionKey: sessionKey, dbPool: dbPool)
         case "sonata_whoami":
