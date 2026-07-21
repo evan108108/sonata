@@ -83,6 +83,19 @@ actor MCPSessionSweeper {
         // session sitting on a nearly-full window is exactly what the sidecar
         // monitor needs to see.
         let usage = await readWorkerTranscriptUsage(sessionId: sessionId)
+
+        // Feed the sidecar spend ledger from the same reading. This is the
+        // live path: the `worker_heartbeat` action would be the intuitive home
+        // for it, but nothing POSTs that endpoint since the sonata-bridge stdio
+        // proxy was retired, and it carries no output-token field anyway. Here
+        // the numbers are already in hand and already parsed from the
+        // transcript that is the only real source for them.
+        if let usage {
+            await recordSidecarSpend(
+                workerId: workerId, sessionId: sessionId, usage: usage, at: heartbeatAt
+            )
+        }
+
         do {
             try await dbPool.write { db in
                 try db.execute(sql: """
@@ -107,6 +120,61 @@ actor MCPSessionSweeper {
         } catch {
             logger.warning("Sweeper worker-heartbeat write failed for \(workerId): \(error)")
         }
+    }
+
+    // MARK: - Sidecar spend
+
+    /// Cumulative transcript totals as of this worker's last sample, with the
+    /// session they were read from.
+    ///
+    /// In-memory only, and deliberately so. Spend is a rolling-window guard,
+    /// not an accounting record: a fresh process starts with an empty
+    /// watermark and rebuilds it from the next sweep, costing at most one tick
+    /// of under-counting per sidecar. Persisting it would buy very little and
+    /// add a schema to keep in sync with a ledger that is itself in-memory.
+    private var lastSpendSample: [String: (sessionId: String?, total: Int64, input: Int64)] = [:]
+
+    /// Attribute the delta since the last sample to the sidecar that owns this
+    /// worker row, if any.
+    ///
+    /// Transcript totals are cumulative and monotonic *within one session*, so
+    /// the delta is what was spent since the previous 15s tick. A rotation
+    /// starts a new transcript and resets them, which is why the session id is
+    /// stored alongside: on a change, the new total counts in full rather than
+    /// producing a nonsense negative.
+    private func recordSidecarSpend(
+        workerId: String, sessionId: String?, usage: TranscriptUsage, at: Int64
+    ) async {
+        // Resolve by live session key rather than by comparing `sessionLabel`
+        // to the sidecar's name — those are not the same string (the memory
+        // sidecar is named "memory" but labelled "sidecar-memory"), and the key
+        // is what rotation actually republishes.
+        guard let name = sidecarName(forWorkerId: workerId),
+              let tracker = SidecarRuntime.shared.tracker else { return }
+
+        let delta = sidecarSpendDelta(
+            previous: lastSpendSample[workerId], sessionId: sessionId, usage: usage
+        )
+        lastSpendSample[workerId] = (sessionId, usage.totalTokens, usage.inputTokens)
+
+        guard delta.input > 0 || delta.output > 0 else { return }
+        await tracker.record(
+            sidecar: name,
+            inputTokens: Int(delta.input),
+            outputTokens: Int(delta.output),
+            at: at
+        )
+    }
+
+    /// The sidecar whose live session is `workerId`, or nil for a pool slot.
+    ///
+    /// Linear over the registry rather than a maintained reverse index: there
+    /// is one sidecar today and a handful at any plausible future point, and a
+    /// second index would be one more thing rotation has to keep in step.
+    private func sidecarName(forWorkerId workerId: String) -> String? {
+        SidecarRegistry.shared.all().first {
+            SidecarRegistry.shared.sessionKey(for: $0.name) == workerId
+        }?.name
     }
 
     private func updateSupervisorHeartbeat(at heartbeatAt: Int64) async {
@@ -175,6 +243,46 @@ struct TranscriptUsage: Equatable, Sendable {
     let cacheReadTokens: Int64
     /// Last non-sidechain assistant turn's `input + cacheCreate + cacheRead`.
     let contextTokens: Int64
+}
+
+/// Spend to attribute to a sidecar for one sweep, given the previous sample.
+///
+/// Free function rather than a method so the arithmetic — the part that would
+/// be wrong in a way nobody notices until a sidecar has quietly eaten its
+/// weekly budget four times over — is testable without an actor or a database.
+///
+/// Transcript totals are cumulative over a session, so the ordinary case is a
+/// simple subtraction. Two cases are not ordinary:
+///
+/// - **A different session id.** Rotation starts a fresh transcript whose
+///   totals restart near zero. Subtracting the old watermark would produce a
+///   large negative; the new total counts in full instead.
+/// - **The same id, but smaller numbers.** Shouldn't happen, but a truncated or
+///   replaced file on disk would do it, and the honest reading of "cumulative
+///   went backwards" is that this is a different run of the session. Treated
+///   the same as a rotation, and specifically NOT clamped to zero per field:
+///   clamping would let a shrink silently re-bill the whole new total as delta
+///   on the *following* sweep.
+///
+/// `usage.inputTokens` is input+cacheCreate+cacheRead; output is whatever
+/// `totalTokens` carries beyond that. They are split back apart because
+/// `SidecarSpendTracker.record` takes them separately, even though it sums them.
+func sidecarSpendDelta(
+    previous: (sessionId: String?, total: Int64, input: Int64)?,
+    sessionId: String?,
+    usage: TranscriptUsage
+) -> (input: Int64, output: Int64) {
+    let continues = previous.map {
+        $0.sessionId == sessionId && $0.total <= usage.totalTokens && $0.input <= usage.inputTokens
+    } ?? false
+
+    let baseTotal = continues ? (previous?.total ?? 0) : 0
+    let baseInput = continues ? (previous?.input ?? 0) : 0
+
+    return (
+        input: max(0, usage.inputTokens - baseInput),
+        output: max(0, (usage.totalTokens - usage.inputTokens) - (baseTotal - baseInput))
+    )
 }
 
 /// Parse transcript JSONL into cumulative usage plus current context occupancy.

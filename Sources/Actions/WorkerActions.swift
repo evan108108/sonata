@@ -912,13 +912,46 @@ let workerEventActions: [SonataAction] = [
             let now = nowMs()
             let id = newUUID()
             let idemKey = WorkerEventIdempotency.key(type: type, payloadJSON: payload)
+
+            // Sidecar routing seam. A sidecar owns a set of event types
+            // outright, so an event of one of those types is pre-assigned to
+            // its live session instead of landing `pending` for the pool.
+            //
+            // This is the only enqueue site that needs the lookup.
+            // `MCPEventPusher.pushPendingWorkerEvents` routes purely on
+            // `assignedTo`, so writing the right value here is sufficient —
+            // and it has to happen here rather than at push time, because
+            // `assignPendingToIdleWorkers` would otherwise hand the event to a
+            // pool slot first (sidecars are excluded from that selector by
+            // `poolSlotSQLPredicate`, but the event isn't).
+            //
+            // Nil covers three cases that all mean "route normally": no
+            // sidecar owns this type, the owner has never spawned, or it is
+            // mid-rotation with its key withdrawn. Deliberately additive —
+            // when it's nil the INSERT below is byte-for-byte the original.
+            //
+            // Note the asymmetry with the pool path: no `workers.status =
+            // 'busy'` CAS is taken here. A sidecar is a long-lived dispatcher
+            // that returns immediately, not a slot that gets consumed, and
+            // claiming it busy would make the context monitor's drain check
+            // read it as permanently occupied.
+            let sidecarAssignee = SidecarRegistry.shared.assignee(forEventType: type)
+
             do {
                 try await ctx.dbPool.write { db in
-                    try db.execute(sql: """
-                        INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
-                        VALUES (?, ?, ?, ?, 'pending', ?, ?)
-                        ON CONFLICT(idempotencyKey) DO NOTHING
-                    """, arguments: [id, type, payload, priority, now, idemKey])
+                    if let sidecarAssignee {
+                        try db.execute(sql: """
+                            INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, idempotencyKey)
+                            VALUES (?, ?, ?, ?, ?, 'assigned', ?, ?, ?)
+                            ON CONFLICT(idempotencyKey) DO NOTHING
+                        """, arguments: [id, type, payload, priority, sidecarAssignee, now, now, idemKey])
+                    } else {
+                        try db.execute(sql: """
+                            INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
+                            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                            ON CONFLICT(idempotencyKey) DO NOTHING
+                        """, arguments: [id, type, payload, priority, now, idemKey])
+                    }
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
@@ -1076,9 +1109,13 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let resultText = ctx.params.string("result")
             let now = nowMs()
-            let completedWorkerId: String?
+            // `rotateSidecar` rides out of the transaction alongside the freed
+            // worker id: the rotation it triggers must happen *after* the
+            // commit, but whether to rotate at all can only be decided inside,
+            // where the owner-guard has already ruled the completion genuine.
+            let completion: (workerId: String?, rotateSidecar: String?)
             do {
-                completedWorkerId = try await ctx.dbPool.write { db -> String? in
+                completion = try await ctx.dbPool.write { db -> (workerId: String?, rotateSidecar: String?) in
                     let row = try WorkerEventRow.fetchOne(db,
                         sql: "SELECT * FROM workerEvents WHERE id = ?",
                         arguments: [eventId])
@@ -1135,7 +1172,7 @@ let workerEventActions: [SonataAction] = [
                     // reconcilePinnedWorkers.
                     guard db.changesCount > 0 else {
                         try reconcilePinnedWorkers(eventId: eventId, in: db)
-                        return nil
+                        return (nil, nil)
                     }
 
                     // Set worker back to idle (unless draining — keep draining status)
@@ -1193,9 +1230,39 @@ let workerEventActions: [SonataAction] = [
                     }
 
                     // Complete associated task + unblock dependents + parent rollup
+                    var rotateSidecar: String?
                     if let payload = row?.payload,
                        let payloadData = payload.data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
+
+                        // A sidecar that has finished its `rotate_me` event is
+                        // telling us it has wound down and is ready to be
+                        // replaced. Capture the name; the actual rotation runs
+                        // after this transaction commits.
+                        //
+                        // Completion-side rather than push-side deliberately.
+                        // `SidecarLifecycle.rotate` drains by polling
+                        // `workers.currentEventId`, and the worker reset above
+                        // has just cleared it — so the drain returns
+                        // immediately. Rotating when the event was *pushed*
+                        // would instead make the sidecar wait out the full
+                        // 120s drain timeout on the very event that asked for
+                        // the rotation.
+                        //
+                        // TODO: timeout fallback for wedged sidecar rotation.
+                        // If a sidecar never completes its rotate_me — hung, or
+                        // crashed after the push — this branch never fires, and
+                        // `SidecarLifecycle.rotateRequested` latches the name so
+                        // the monitor will not re-post. The sidecar then sits
+                        // above its context threshold forever. The fix is a
+                        // deadline on the outstanding rotate_me (post time +
+                        // grace) after which the lifecycle rotates unilaterally;
+                        // out of scope here.
+                        if row?.type == "rotate_me",
+                           let name = json["sidecar"] as? String, !name.isEmpty {
+                            rotateSidecar = name
+                        }
+
                         if let taskId = json["task_id"] as? String {
                             try db.execute(sql: """
                                 UPDATE tasks SET status = 'completed', result = ?, completedAt = ?, updatedAt = ?
@@ -1217,16 +1284,28 @@ let workerEventActions: [SonataAction] = [
                             """, arguments: StatementArguments(args))
                         }
                     }
-                    return captured
+                    return (captured, rotateSidecar)
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
 
             // Notify WorkerManager for cycling evaluation
-            if let wid = completedWorkerId {
+            if let wid = completion.workerId {
                 DispatchQueue.main.async {
                     WorkerManager.shared.onEventCompleted(workerId: wid)
+                }
+            }
+
+            // Rotate the sidecar now that its wind-down event is committed.
+            // Detached because `rotate` drains, terminates and respawns a whole
+            // session: awaiting it here would hold the sidecar's own
+            // `complete_event` HTTP response open for the duration, and the
+            // session being torn down is the one waiting on that response.
+            if let name = completion.rotateSidecar {
+                Task.detached {
+                    guard let sidecar = SidecarRegistry.shared.lookup(byName: name) else { return }
+                    await SidecarRuntime.shared.lifecycle?.rotate(sidecar)
                 }
             }
 

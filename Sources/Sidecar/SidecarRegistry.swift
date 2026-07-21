@@ -21,12 +21,15 @@ final class SidecarRegistry: @unchecked Sendable {
 
     enum RegistrationError: Error, CustomStringConvertible {
         case duplicateName(String)
+        case unknownName(String)
         case eventTypeAlreadyOwned(eventType: String, owner: String, incoming: String)
 
         var description: String {
             switch self {
             case .duplicateName(let name):
                 return "Sidecar '\(name)' is already registered. Sidecar names are unique registry keys."
+            case .unknownName(let name):
+                return "Sidecar '\(name)' is not registered, so there is nothing to update. Register it first."
             case .eventTypeAlreadyOwned(let eventType, let owner, let incoming):
                 return """
                     Event type '\(eventType)' is already owned by sidecar '\(owner)'; \
@@ -66,6 +69,46 @@ final class SidecarRegistry: @unchecked Sendable {
             }
         }
 
+        sidecarsByName[sidecar.name] = sidecar
+        for eventType in sidecar.eventTypes {
+            nameByEventType[eventType] = sidecar.name
+        }
+    }
+
+    /// Replace the stored config for an already-registered sidecar.
+    ///
+    /// Exists because `register` throws `duplicateName` on a second call, which
+    /// is right for boot-time registration but wrong for the throttle callback:
+    /// dropping a sidecar's tier means writing a changed `Sidecar` value back
+    /// under a name that is by definition already taken.
+    ///
+    /// The event-type index is rebuilt from `sidecar.eventTypes` rather than
+    /// assumed unchanged, so an update that adds or removes a type leaves
+    /// routing consistent. Collisions are checked against *other* sidecars only
+    /// — a sidecar keeping its own types must not conflict with itself.
+    /// All-or-nothing, like `register`: a throw leaves the registry untouched.
+    ///
+    /// The live session key is deliberately left alone. It is owned by
+    /// `SidecarLifecycle` and has nothing to do with config; rewriting it here
+    /// would silently undo a mid-rotation withdrawal.
+    func update(_ sidecar: Sidecar) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard sidecarsByName[sidecar.name] != nil else {
+            throw RegistrationError.unknownName(sidecar.name)
+        }
+        for eventType in sidecar.eventTypes {
+            if let owner = nameByEventType[eventType], owner != sidecar.name {
+                throw RegistrationError.eventTypeAlreadyOwned(
+                    eventType: eventType, owner: owner, incoming: sidecar.name
+                )
+            }
+        }
+
+        for (eventType, owner) in nameByEventType where owner == sidecar.name {
+            nameByEventType.removeValue(forKey: eventType)
+        }
         sidecarsByName[sidecar.name] = sidecar
         for eventType in sidecar.eventTypes {
             nameByEventType[eventType] = sidecar.name

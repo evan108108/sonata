@@ -11,6 +11,21 @@ enum SidecarBudgetTier: String, Codable, Sendable, CaseIterable {
     case low
     case standard
     case high
+
+    /// The next tier down, or nil at `.off` — there is nowhere below it.
+    ///
+    /// Lives on the tier rather than in the throttle handler because "one tier
+    /// down" is a property of the ladder itself, and a handler that spelled the
+    /// order out inline would be a second place for it to drift from
+    /// `CaseIterable`'s declaration order.
+    var nextLower: SidecarBudgetTier? {
+        switch self {
+        case .high:     return .standard
+        case .standard: return .low
+        case .low:      return .off
+        case .off:      return nil
+        }
+    }
 }
 
 /// Configuration for one sidecar: a long-lived Sonata-hosted Claude Code

@@ -323,6 +323,72 @@ func bootSidecars(dbPool: DatabasePool, logger: Logger) async {
     )
     SidecarRuntime.shared.install(lifecycle: lifecycle, tracker: tracker)
 
+    // What to actually DO when a sidecar blows its budget. The tracker decides
+    // *that* one should be throttled and deliberately holds no reference to the
+    // config store or the lifecycle; this closure is the other half.
+    //
+    // Both branches persist before they act on the session. A tier drop that
+    // rotated first and then failed to write would come back at the old tier on
+    // the next launch and immediately overspend again — the throttle has to
+    // survive a restart to mean anything.
+    await tracker.setApplyThrottle { [weak lifecycle] name, action in
+        guard let sidecar = SidecarRegistry.shared.lookup(byName: name) else { return }
+
+        let newTier: SidecarBudgetTier
+        switch action {
+        case .none:
+            return
+        case .dropTier:
+            // Nowhere to drop to means the ladder bottomed out; `.off` is
+            // already the floor and stopping it again is a no-op.
+            guard let lower = sidecar.budgetTier.nextLower else { return }
+            newTier = lower
+        case .off:
+            newTier = .off
+        }
+
+        let throttled = Sidecar(
+            name: sidecar.name,
+            skillPath: sidecar.skillPath,
+            eventTypes: sidecar.eventTypes,
+            budgetTier: newTier,
+            subscriptionCapPct: sidecar.subscriptionCapPct,
+            triggers: sidecar.triggers,
+            rotationThreshold: sidecar.rotationThreshold,
+            contextWindowTokens: sidecar.contextWindowTokens
+        )
+
+        do {
+            try SidecarRegistry.shared.update(throttled)
+        } catch {
+            logger.error("Sidecar '\(name)' throttle could not update the registry: \(error)")
+            return
+        }
+
+        // Persist so the drop outlives this launch. A write failure is logged
+        // and swallowed: the in-memory tier has already changed, so a read-only
+        // disk degrades to "the throttle forgets on restart" rather than
+        // "the throttle does not apply".
+        var stored = SidecarConfigStore.shared.config(forName: name)
+        stored.tier = newTier
+        do {
+            try SidecarConfigStore.shared.setConfig(stored, forName: name)
+        } catch {
+            logger.error("Sidecar '\(name)' throttled to \(newTier.rawValue) but config did not persist: \(error)")
+        }
+
+        // `.off` stands the session down for good; a tier drop rotates, because
+        // the tier is read when a session builds its prompts and only a fresh
+        // one will pick up the new value.
+        if newTier == .off {
+            logger.warning("Sidecar '\(name)' hit its spend cap — stopping it")
+            await lifecycle?.stop(throttled)
+        } else {
+            logger.warning("Sidecar '\(name)' over budget — dropping to \(newTier.rawValue) and rotating")
+            await lifecycle?.rotate(throttled)
+        }
+    }
+
     await lifecycle.spawnAllRegistered()
 
     // Safe to sample context from here on: the monitor reads
@@ -331,10 +397,12 @@ func bootSidecars(dbPool: DatabasePool, logger: Logger) async {
     // per-event sum that read in the thousands of percent and would have
     // rotated the sidecar on its first multi-turn event.
     //
-    // The `rotate_me` events this posts are not consumed yet — the handler that
-    // routes them to `SidecarLifecycle.rotate(_:)` lands with the event-routing
-    // seam. Until then they accumulate harmlessly in `workerEvents`, which is
-    // the right failure mode: a rotation is deferred, never lost.
+    // The `rotate_me` events this posts are now consumed: the sidecar handles
+    // one like any other event and calls `complete_event`, and the branch in
+    // `worker_event_complete` turns that completion into
+    // `SidecarLifecycle.rotate(_:)`. Any that piled up before that handler
+    // existed are still in `workerEvents` and rotate on their next push —
+    // deferred, never lost, as intended.
     await lifecycle.startMonitoring()
 
     let running = await lifecycle.runningSidecarNames().sorted()

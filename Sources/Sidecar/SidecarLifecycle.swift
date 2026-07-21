@@ -161,6 +161,41 @@ actor SidecarLifecycle {
         }
     }
 
+    /// Stand a sidecar down for good: withdraw its routing key, terminate the
+    /// session, forget the handle. Unlike `rotate`, nothing is respawned.
+    ///
+    /// This is what `.off` means operationally — the sidecar stays registered
+    /// and keeps its config (so the settings panel can still show it and the
+    /// user can turn it back on), it just has no session and receives no
+    /// events. `assignee(forEventType:)` returns nil the moment the key is
+    /// withdrawn, so its event types fall back to normal worker routing rather
+    /// than queueing for a session that is gone.
+    ///
+    /// Idempotent: stopping an already-stopped sidecar withdraws the key again
+    /// and returns. The throttle callback can fire `.off` more than once for
+    /// the same sidecar across a restart, and a spend ceiling is not somewhere
+    /// to be throwing.
+    ///
+    /// No drain, deliberately — unlike `rotate`, which waits so in-flight work
+    /// survives into the replacement session. There is no replacement here, so
+    /// waiting would only delay the stop.
+    func stop(_ sidecar: Sidecar) async {
+        // Withdraw first, so nothing is routed at the session while it is
+        // being torn down. Done unconditionally: a sidecar with no handle can
+        // still hold a stale key if a previous spawn published one and then
+        // failed.
+        SidecarRegistry.shared.setSessionKey(nil, for: sidecar.name)
+        rotateRequested.remove(sidecar.name)
+
+        guard let handle = handles.removeValue(forKey: sidecar.name) else {
+            logger.debug("sidecar '\(sidecar.name)' has no live session to stop")
+            return
+        }
+
+        await handle.terminate()
+        logger.info("sidecar '\(sidecar.name)' session \(handle.sessionKey) stopped")
+    }
+
     /// Wait for the session to finish whatever it is holding, bounded by
     /// `drainTimeoutSeconds`.
     private func drain(sessionKey: String, name: String) async {
