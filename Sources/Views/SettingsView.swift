@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var webExpanded = false
     @State private var localModelsExpanded = false
     @State private var anthropicModelsExpanded = false
+    @State private var sidecarsExpanded = false
 
     // Whole-window translucency. Shares the UserDefaults key the WindowGroup
     // root reads, so dragging the slider updates the live window immediately.
@@ -278,6 +279,11 @@ struct SettingsView: View {
                     // MARK: - Local Models Section (Phase F.3)
                     collapsibleSection("Local Models", icon: "cube.box", expanded: $localModelsExpanded) {
                         LocalModelsConfigView()
+                    }
+
+                    // MARK: - Sidecars Section (Sidecar Phase 1)
+                    collapsibleSection("Sidecars", icon: "bolt.horizontal.circle", expanded: $sidecarsExpanded) {
+                        SidecarsConfigView()
                     }
                 }
                 .padding()
