@@ -153,6 +153,49 @@ enum MCPToolHandlers {
             return await webviewDrive(args: args) { sid in
                 let r = try await WebviewSessionService.shared.getPageInfo(sessionId: sid); return (true, r)
             }
+        // `read` is the consumption half of the pair `look` starts. `look`
+        // answers "what is on this page and what can I do next" — structured
+        // JSON: url, title, a text prefix, links, form controls. `read` answers
+        // "what does this page SAY" — the main content as markdown, with nav,
+        // sidebars, cookie banners and footers dropped.
+        //
+        // It is not an innerText dump: it runs the pulpie pipeline over the
+        // live DOM (simplify JS → CoreML classifier → markdown JS), so what
+        // comes back is the article, not the chrome around it. Classification
+        // failures surface as errors; there is no whole-page fallback, because
+        // a boilerplate-laden dump that claims to be an extraction is worse
+        // than a visible failure.
+        case "read":
+            return await webviewDrive(args: args) { sid in
+                // The classifier's CoreML model is built for macOS 15; the rest
+                // of the package still targets 14.
+                guard #available(macOS 15, *) else {
+                    return (false, "read: requires macOS 15 or later (the pulpie CoreML model targets macOS 15)")
+                }
+                let r = try await WebviewSessionService.shared.readPage(sessionId: sid)
+                let payload: [String: Any] = [
+                    "url": r.url, "title": r.title, "markdown": r.markdown,
+                    "extractionMs": r.extractionMs, "blockCount": r.blockCount,
+                    "mainBlockCount": r.mainBlockCount,
+                ]
+                let json = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return (true, json)
+            }
+        case "page_save_html":
+            return await webviewDrive(args: args) { sid in
+                guard let path = args["path"] as? String, !path.isEmpty else {
+                    return (false, "page_save_html: path required")
+                }
+                // The serialized DOM goes disk-side only — the response carries
+                // just the receipt, never the html.
+                let saved = try await WebviewSessionService.shared.saveHTML(sessionId: sid, path: path)
+                let payload: [String: Any] = ["path": saved.path, "bytes": saved.bytes,
+                                              "url": saved.url, "title": saved.title]
+                let json = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return (true, json)
+            }
         default:
             // Fall through to the full ActionRegistry surface — MCPHandshake
             // advertises every registered action via mergedToolSchemas, so
@@ -703,6 +746,19 @@ enum MCPToolSchemas {
             "name": "get_page_info",
             "description": "Lightweight page state: { url, title, readyState, scroll, viewport }.",
             "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "read",
+            "description": "Compact markdown of the page's main content (via pulpie classifier). Complement to `look`: `look` returns structured JSON for deciding next action, `read` returns markdown for consumption. Returns { url, title, markdown, extractionMs, blockCount, mainBlockCount }.",
+            "inputSchema": ["type": "object", "properties": ["sessionId": ["type": "string"]], "required": ["sessionId"]],
+        ],
+        [
+            "name": "page_save_html",
+            "description": "Serialize the rendered DOM natively and write it to `path`. Returns { path, bytes, url, title } — the html itself never crosses MCP, so a 5 MB page costs no tokens. Prefer this over evaluate(\"document.documentElement.outerHTML\") whenever you want the whole page.",
+            "inputSchema": ["type": "object", "properties": [
+                "sessionId": ["type": "string"],
+                "path": ["type": "string", "description": "Absolute destination path. Parent dirs are created; an existing file is overwritten."]
+            ], "required": ["sessionId", "path"]],
         ],
     ]
 }

@@ -1,0 +1,985 @@
+{
+ "page": "usaspending_dod",
+ "blockCount": 195,
+ "mainCount": 140,
+ "otherCount": 55,
+ "blocks": [
+  {
+   "itemId": "1",
+   "html": "<div class=\"site-header\" _item_id=\"1\"><a class=\"skip-nav\">Skip to main content</a></div>"
+  },
+  {
+   "itemId": "2",
+   "html": "<div class=\"usa-banner__header-text-wrapper\" _item_id=\"2\"><img src=\"img/uswds/us_flag_small.png\" alt=\"U.S. flag\" class=\"usa-banner__header-flag\"></div>"
+  },
+  {
+   "itemId": "3",
+   "html": "<div class=\"usa-banner__header-sub-text\" _item_id=\"3\">An official website of the United States government</div>"
+  },
+  {
+   "itemId": "4",
+   "html": "<button class=\"usa-accordion__button usa-banner__button\" _item_id=\"4\"><span class=\"usa-banner__button-text\">Here’s how you know</span></button>"
+  },
+  {
+   "itemId": "5",
+   "html": "<div class=\"usa-media-block__body\" _item_id=\"5\"><img src=\"img/uswds/icon-dot-gov.svg\" alt=\"Lock\" class=\"usa-banner__content-icon\"></div>"
+  },
+  {
+   "itemId": "6",
+   "html": "<p _item_id=\"6\"><strong>Official websites use .gov</strong><br></p>"
+  },
+  {
+   "itemId": "7",
+   "html": "<p _item_id=\"7\">A<strong>.gov</strong> website belongs to an official government organization in the United States.</p>"
+  },
+  {
+   "itemId": "8",
+   "html": "<div class=\"usa-media-block__body\" _item_id=\"8\"><img src=\"img/uswds/icon-https.svg\" alt=\"Lock\" class=\"usa-banner__content-icon\"></div>"
+  },
+  {
+   "itemId": "9",
+   "html": "<p _item_id=\"9\"><strong>Secure .gov websites use HTTPS</strong><br></p>"
+  },
+  {
+   "itemId": "10",
+   "html": "<p _item_id=\"10\">A<strong>lock (<img src=\"img/uswds/lock.svg\" alt=\"Lock\" class=\"usa-banner__content-lock\">)</strong> or <strong>https://</strong> means you’ve safely connected to the .gov website. Share sensitive information only on official, secure websites.</p>"
+  },
+  {
+   "itemId": "11",
+   "html": "<h1 _item_id=\"11\">Department of Defense (DOD)</h1>"
+  },
+  {
+   "itemId": "12",
+   "html": "<button class=\"usa-dt-picker__item active\" _item_id=\"12\"><span>Copy link</span></button>"
+  },
+  {
+   "itemId": "13",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"13\"><span>Email</span></button>"
+  },
+  {
+   "itemId": "14",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"14\"><span>X (Twitter)</span></button>"
+  },
+  {
+   "itemId": "15",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"15\"><span>Facebook</span></button>"
+  },
+  {
+   "itemId": "16",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"16\"><span>LinkedIn</span></button>"
+  },
+  {
+   "itemId": "17",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"17\"><span>Reddit</span></button>"
+  },
+  {
+   "itemId": "18",
+   "html": "<div class=\"usda-share-icon usa-share-icon-508\" _item_id=\"18\"><span class=\"usda-share-icon__share-text\">Share</span></div>"
+  },
+  {
+   "itemId": "19",
+   "html": "<div class=\"filter__dropdown-container numeric-picker__wrapper\" _item_id=\"19\"><span class=\"filter__dropdown-label-sm\">Filter by:</span></div>"
+  },
+  {
+   "itemId": "20",
+   "html": "<button class=\"filter__dropdown-button-sm enabled\" _item_id=\"20\"><span class=\"filter__dropdown-button-text\">FY 2025</span></button>"
+  },
+  {
+   "itemId": "21",
+   "html": "<button class=\"usa-dt-picker__item active\" _item_id=\"21\"><span>Copy link</span></button>"
+  },
+  {
+   "itemId": "22",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"22\"><span>Email</span></button>"
+  },
+  {
+   "itemId": "23",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"23\"><span>X (Twitter)</span></button>"
+  },
+  {
+   "itemId": "24",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"24\"><span>Facebook</span></button>"
+  },
+  {
+   "itemId": "25",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"25\"><span>LinkedIn</span></button>"
+  },
+  {
+   "itemId": "26",
+   "html": "<button class=\"usa-dt-picker__item\" _item_id=\"26\"><span>Reddit</span></button>"
+  },
+  {
+   "itemId": "27",
+   "html": "<div class=\"usda-share-icon usa-share-icon-508\" _item_id=\"27\"><span class=\"usda-share-icon__share-text\">Share</span></div>"
+  },
+  {
+   "itemId": "28",
+   "html": "<a class=\"usa-profile-back-link__item\" _item_id=\"28\">Back to Agency Profile Page</a>"
+  },
+  {
+   "itemId": "29",
+   "html": "<h2 class=\"page-title__name\" _item_id=\"29\">Department of Defense (DOD) </h2>"
+  },
+  {
+   "itemId": "30",
+   "html": "<div class=\"page-title\" _item_id=\"30\"><img src=\"graphics/agency/DOD.jpg\" alt=\"Department of Defense (DOD) logo\" class=\"page-title__image\"></div>"
+  },
+  {
+   "itemId": "31",
+   "html": "<h3 _item_id=\"31\">Overview</h3>"
+  },
+  {
+   "itemId": "32",
+   "html": "<div class=\"section__date-note\" _item_id=\"32\">Data through 9/29/2025</div>"
+  },
+  {
+   "itemId": "33",
+   "html": "<h4 _item_id=\"33\">About this Agency's Data</h4>"
+  },
+  {
+   "itemId": "34",
+   "html": "<p _item_id=\"34\">There is a 90 day delay in displaying contract award data, subcontract data, and Account Breakdown by Award (File C) data for the Department of Defense (DOD). For more information, visit our <a>About the Data</a> module. To see a complete list of this agency's submissions, visit our <a>Submission Statistics page</a>.</p>"
+  },
+  {
+   "itemId": "35",
+   "html": "<h4 _item_id=\"35\">Agency Mission</h4>"
+  },
+  {
+   "itemId": "36",
+   "html": "<p _item_id=\"36\">The mission of the Department of Defense is to provide the military forces needed to deter war and to protect the security of our country.</p>"
+  },
+  {
+   "itemId": "37",
+   "html": "<h4 _item_id=\"37\">Website</h4>"
+  },
+  {
+   "itemId": "38",
+   "html": "<div class=\"agency-overview__data\" _item_id=\"38\"><a class=\"usa-bold-link\">https://www.defense.gov/</a></div>"
+  },
+  {
+   "itemId": "39",
+   "html": "<h4 _item_id=\"39\">Congressional Justification of Budget (CJ)</h4>"
+  },
+  {
+   "itemId": "40",
+   "html": "<div class=\"agency-overview__data\" _item_id=\"40\"><a class=\"usa-bold-link\">https://www.defense.gov/cj</a></div>"
+  },
+  {
+   "itemId": "41",
+   "html": "<h4 class=\"fy-summary__heading\" _item_id=\"41\">FY 2025 Summary</h4>"
+  },
+  {
+   "itemId": "42",
+   "html": "<div class=\"section__date-note\" _item_id=\"42\">Data through 9/29/2025</div>"
+  },
+  {
+   "itemId": "43",
+   "html": "<div class=\"visualization-section__subtitle\" _item_id=\"43\">How much funding is available to this agency?</div>"
+  },
+  {
+   "itemId": "44",
+   "html": "<div class=\"visualization-section__data\" _item_id=\"44\">$2.21 Trillion<br></div>"
+  },
+  {
+   "itemId": "45",
+   "html": "<div class=\"visualization-section__data\" _item_id=\"45\">in budgetary resources</div>"
+  },
+  {
+   "itemId": "46",
+   "html": "<div class=\"visualization-section__secondary-data\" _item_id=\"46\">16.7% of the FY 2025 U.S. federal budget</div>"
+  },
+  {
+   "itemId": "47",
+   "html": "<div class=\"bar-chart__label\" _item_id=\"47\">FY 21</div>"
+  },
+  {
+   "itemId": "48",
+   "html": "<div class=\"bar-chart__label\" _item_id=\"48\">FY 22</div>"
+  },
+  {
+   "itemId": "49",
+   "html": "<div class=\"bar-chart__label\" _item_id=\"49\">FY 23</div>"
+  },
+  {
+   "itemId": "50",
+   "html": "<div class=\"bar-chart__label\" _item_id=\"50\">FY 24</div>"
+  },
+  {
+   "itemId": "51",
+   "html": "<div class=\"bar-chart__label bar-chart__label_selected\" _item_id=\"51\">FY 25</div>"
+  },
+  {
+   "itemId": "52",
+   "html": "<div class=\"visualization-section__label\" _item_id=\"52\">Total Budgetary Resources Over Time</div>"
+  },
+  {
+   "itemId": "53",
+   "html": "<div class=\"visualization-section__subtitle\" _item_id=\"53\">How much has this agency planned to spend?</div>"
+  },
+  {
+   "itemId": "54",
+   "html": "<div class=\"visualization-section__data\" _item_id=\"54\">$1.45 Trillion<br></div>"
+  },
+  {
+   "itemId": "55",
+   "html": "<div class=\"visualization-section__data\" _item_id=\"55\">in total obligations</div>"
+  },
+  {
+   "itemId": "56",
+   "html": "<div class=\"visualization-section__secondary-data\" _item_id=\"56\">65.6% of total budgetary resources</div>"
+  },
+  {
+   "itemId": "57",
+   "html": "<desc _item_id=\"57\">The area under the curve representative of the following periods, dates, and obligations: Period unknown with end date 10/01/2024 and obligation $0,Period 2 with end date 11/30/2024 and obligation $398,456,658,002,Period 3 with end date 12/31/2024 and obligation $855,512,284,093,Period 4 with end date 01/31/2025 and obligation $595,239,307,527,Period 5 with end date 02/28/2025 and obligation $682,134,002,640,Period 6 with end date 03/31/2025 and obligation $782,076,175,877,Period 7 with end date...</desc>"
+  },
+  {
+   "itemId": "58",
+   "html": "<desc _item_id=\"58\">The linear line representative of the following periods, dates, and obligations: Period unknown with end date 10/01/2024 and obligation $0,Period 2 with end date 11/30/2024 and obligation $398,456,658,002,Period 3 with end date 12/31/2024 and obligation $855,512,284,093,Period 4 with end date 01/31/2025 and obligation $595,239,307,527,Period 5 with end date 02/28/2025 and obligation $682,134,002,640,Period 6 with end date 03/31/2025 and obligation $782,076,175,877,Period 7 with end date 04/30/20...</desc>"
+  },
+  {
+   "itemId": "59",
+   "html": "<description _item_id=\"59\">The X-Axis consisting of a horizontal line and labels</description>"
+  },
+  {
+   "itemId": "60",
+   "html": "<text class=\"x-axis-label\" _item_id=\"60\">Oct FY25</text>"
+  },
+  {
+   "itemId": "61",
+   "html": "<text class=\"x-axis-label\" _item_id=\"61\">Sep FY25</text>"
+  },
+  {
+   "itemId": "62",
+   "html": "<description _item_id=\"62\">The Y-Axis consisting of a vertical line and labels</description>"
+  },
+  {
+   "itemId": "63",
+   "html": "<div class=\"visualization-section__label\" _item_id=\"63\">Total Obligations Over Time</div>"
+  },
+  {
+   "itemId": "64",
+   "html": "<div class=\"visualization-section__subtitle\" _item_id=\"64\">How much has this agency<br></div>"
+  },
+  {
+   "itemId": "65",
+   "html": "<div class=\"visualization-section__subtitle\" _item_id=\"65\">planned to spend on awards?</div>"
+  },
+  {
+   "itemId": "66",
+   "html": "<div class=\"visualization-section__data\" _item_id=\"66\">$501.50 Billion<br></div>"
+  },
+  {
+   "itemId": "67",
+   "html": "<div class=\"visualization-section__data\" _item_id=\"67\">in award obligations</div>"
+  },
+  {
+   "itemId": "68",
+   "html": "<div class=\"visualization-section__secondary-data\" _item_id=\"68\">34.6% of total obligations</div>"
+  },
+  {
+   "itemId": "69",
+   "html": "<text class=\"obligations-by-award-type__label\" _item_id=\"69\">All Financial Assistance 2.0%</text>"
+  },
+  {
+   "itemId": "70",
+   "html": "<text class=\"obligations-by-award-type__label\" _item_id=\"70\">All Contracts 98.0%</text>"
+  },
+  {
+   "itemId": "71",
+   "html": "<div class=\"visualization-section__label\" _item_id=\"71\">Award Obligations by Type</div>"
+  },
+  {
+   "itemId": "72",
+   "html": "<h3 _item_id=\"72\">Status of Funds</h3>"
+  },
+  {
+   "itemId": "73",
+   "html": "<div class=\"section__date-note\" _item_id=\"73\">Data through 9/29/2025</div>"
+  },
+  {
+   "itemId": "74",
+   "html": "<div class=\"status-of-funds__intro-section-title\" _item_id=\"74\">How was funding distributed in FY 2025 for Department of Defense (DOD)?</div>"
+  },
+  {
+   "itemId": "75",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"75\">Each year, federal agencies receive funding from Congress, known as<span class=\"status-of-funds__glossary-term\">budgetary resources</span> </div>"
+  },
+  {
+   "itemId": "76",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"76\">. In FY 2025, the Department of Defense (DOD) had $2.21 Trillion distributed among its 6 sub-components. Agencies spend available budgetary resources by making financial promises called<span class=\"status-of-funds__glossary-term\">obligations</span> </div>"
+  },
+  {
+   "itemId": "77",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"77\">. In this section, we show the total budgetary resources broken out by agency sub-component and how much of that funding has been obligated for the fiscal year selected.</div>"
+  },
+  {
+   "itemId": "78",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"78\">We also show<span class=\"status-of-funds__glossary-term\">outlays</span> </div>"
+  },
+  {
+   "itemId": "79",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"79\">for each agency sub-component, or the amount of money that has actually been paid out and not just promised (“obligated”). Note that outlays for any given year are not a subset of the agency’s obligations for that year since agencies can pay out funds related to obligations from previous years.</div>"
+  },
+  {
+   "itemId": "80",
+   "html": "<div class=\"status-of-funds__intro-section-italic-text\" _item_id=\"80\">Select a segment in the chart below to dive deeper into the data.</div>"
+  },
+  {
+   "itemId": "81",
+   "html": "<div class=\"drilldown-level__label\" _item_id=\"81\">Parent Agency</div>"
+  },
+  {
+   "itemId": "82",
+   "html": "<div class=\"drilldown-level__name\" _item_id=\"82\">Department of Defense (DOD)</div>"
+  },
+  {
+   "itemId": "83",
+   "html": "<div class=\"drilldown-level__description\" _item_id=\"83\"><strong>$1.45T</strong> committed of <strong>$2.21T</strong> Total Budgetary Resources</div>"
+  },
+  {
+   "itemId": "84",
+   "html": "<div class=\"status-of-funds__controls-heading\" _item_id=\"84\">Department of Defense (DOD) by </div>"
+  },
+  {
+   "itemId": "85",
+   "html": "<div class=\"status-of-funds__controls-heading emphasis\" _item_id=\"85\">Sub-Component </div>"
+  },
+  {
+   "itemId": "86",
+   "html": "<div class=\"status-of-funds__controls-heading\" _item_id=\"86\">for FY 2025</div>"
+  },
+  {
+   "itemId": "87",
+   "html": "<p class=\"rounded-toggle__label\" _item_id=\"87\">View Outlays</p>"
+  },
+  {
+   "itemId": "88",
+   "html": "<div class=\"heading\" _item_id=\"88\">What is this?</div>"
+  },
+  {
+   "itemId": "89",
+   "html": "<text id=\"tick-labels-axis\" _item_id=\"89\">$0</text>"
+  },
+  {
+   "itemId": "90",
+   "html": "<text id=\"tick-labels-axis\" _item_id=\"90\">$200B</text>"
+  },
+  {
+   "itemId": "91",
+   "html": "<text id=\"tick-labels-axis\" _item_id=\"91\">$400B</text>"
+  },
+  {
+   "itemId": "92",
+   "html": "<text id=\"tick-labels-axis\" _item_id=\"92\">$600B</text>"
+  },
+  {
+   "itemId": "93",
+   "html": "<text id=\"tick-labels-axis\" _item_id=\"93\">$800B</text>"
+  },
+  {
+   "itemId": "94",
+   "html": "<text id=\"tick-labels-axis\" _item_id=\"94\">$1.0T</text>"
+  },
+  {
+   "itemId": "95",
+   "html": "<tspan _item_id=\"95\">Defense-wide</tspan>"
+  },
+  {
+   "itemId": "96",
+   "html": "<tspan _item_id=\"96\">Navy, Marine Corps</tspan>"
+  },
+  {
+   "itemId": "97",
+   "html": "<tspan _item_id=\"97\">Military Sales Program</tspan>"
+  },
+  {
+   "itemId": "98",
+   "html": "<tspan _item_id=\"98\">Air Force</tspan>"
+  },
+  {
+   "itemId": "99",
+   "html": "<tspan _item_id=\"99\">Army</tspan>"
+  },
+  {
+   "itemId": "100",
+   "html": "<tspan _item_id=\"100\">International Security Assistance</tspan>"
+  },
+  {
+   "itemId": "101",
+   "html": "<div class=\"legend__text\" _item_id=\"101\">FY25 Obligations</div>"
+  },
+  {
+   "itemId": "102",
+   "html": "<div class=\"legend__text\" _item_id=\"102\">FY25 Total Budgetary Resources</div>"
+  },
+  {
+   "itemId": "103",
+   "html": "<p class=\"default-note\" _item_id=\"103\"><strong>NOTE:</strong> The agency sub-components displayed in this section were added to provide greater transparency into the organization of agencies’ account data. These sub-components are based on the Bureau associated with a federal account in OMB’s Master Accounts Title file. Sub-components are identified using Agency Identifier (AID) and MAIN Account codes. Where possible, Department of Defense (DoD) sub-components correspond to the branches of the Armed Forces and accounts for the agency are attributed t...</p>"
+  },
+  {
+   "itemId": "104",
+   "html": "<h3 _item_id=\"104\">Award Spending</h3>"
+  },
+  {
+   "itemId": "105",
+   "html": "<div class=\"section__date-note\" _item_id=\"105\">Data through 9/30/2025</div>"
+  },
+  {
+   "itemId": "106",
+   "html": "<div class=\"status-of-funds__intro-section-title\" _item_id=\"106\">How much is Department of Defense (DOD) spending on contracts and financial assistance?</div>"
+  },
+  {
+   "itemId": "107",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"107\">Federal agencies use some portion of their<span class=\"status-of-funds__glossary-term\">budgetary resources</span> </div>"
+  },
+  {
+   "itemId": "108",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"108\">for awards to recipients in the form of contracts and financial assistance. Each award consists of a roll-up of individual<span class=\"status-of-funds__glossary-term\">transactions</span> </div>"
+  },
+  {
+   "itemId": "109",
+   "html": "<div class=\"status-of-funds__intro-section-text\" _item_id=\"109\">, including transactions that obligate money. In this section, we show which sub-agencies of Department of Defense (DOD) have issued awards through different types of contracts or financial assistance and how much each sub-agency has obligated (promised to spend).</div>"
+  },
+  {
+   "itemId": "110",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"110\">All Awards</div>"
+  },
+  {
+   "itemId": "111",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"111\">Contracts</div>"
+  },
+  {
+   "itemId": "112",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"112\">Contract IDVs</div>"
+  },
+  {
+   "itemId": "113",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"113\">Grants</div>"
+  },
+  {
+   "itemId": "114",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"114\">Loans</div>"
+  },
+  {
+   "itemId": "115",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"115\">Direct Payments</div>"
+  },
+  {
+   "itemId": "116",
+   "html": "<div class=\"usa-dt-tab__label-text\" _item_id=\"116\">Other Financial Assistance</div>"
+  },
+  {
+   "itemId": "117",
+   "html": "<div class=\"usa-dt-information-box__title\" _item_id=\"117\">Award Obligations</div>"
+  },
+  {
+   "itemId": "118",
+   "html": "<div class=\"usa-dt-information-box__amount\" _item_id=\"118\">$501.50 Billion</div>"
+  },
+  {
+   "itemId": "119",
+   "html": "<div class=\"usa-dt-information-box__title\" _item_id=\"119\">Number of Transactions</div>"
+  },
+  {
+   "itemId": "120",
+   "html": "<div class=\"usa-dt-information-box__amount\" _item_id=\"120\">4.52 Million</div>"
+  },
+  {
+   "itemId": "121",
+   "html": "<div class=\"usa-dt-information-box__title\" _item_id=\"121\">Number of New Awards</div>"
+  },
+  {
+   "itemId": "122",
+   "html": "<div class=\"usa-dt-information-box__amount\" _item_id=\"122\">3.88 Million</div>"
+  },
+  {
+   "itemId": "123",
+   "html": "<div class=\"table-header__label\" _item_id=\"123\">Sub-Agency Name</div>"
+  },
+  {
+   "itemId": "124",
+   "html": "<div class=\"table-header__label\" _item_id=\"124\">Award Obligations</div>"
+  },
+  {
+   "itemId": "125",
+   "html": "<div class=\"table-header__label\" _item_id=\"125\">Number of Transactions</div>"
+  },
+  {
+   "itemId": "126",
+   "html": "<div class=\"table-header__label\" _item_id=\"126\">Number of New Awards</div>"
+  },
+  {
+   "itemId": "127",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"127\">Department of the Navy</div>"
+  },
+  {
+   "itemId": "128",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"128\">$177,227,198,499</td>"
+  },
+  {
+   "itemId": "129",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"129\">219,648</td>"
+  },
+  {
+   "itemId": "130",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"130\">75,512</td>"
+  },
+  {
+   "itemId": "131",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"131\">Department of the Army</div>"
+  },
+  {
+   "itemId": "132",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"132\">$111,791,652,566</td>"
+  },
+  {
+   "itemId": "133",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"133\">158,322</td>"
+  },
+  {
+   "itemId": "134",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"134\">47,509</td>"
+  },
+  {
+   "itemId": "135",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"135\">Department of the Air Force</div>"
+  },
+  {
+   "itemId": "136",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"136\">$99,488,028,417</td>"
+  },
+  {
+   "itemId": "137",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"137\">117,988</td>"
+  },
+  {
+   "itemId": "138",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"138\">35,003</td>"
+  },
+  {
+   "itemId": "139",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"139\">Defense Logistics Agency</div>"
+  },
+  {
+   "itemId": "140",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"140\">$55,936,174,561</td>"
+  },
+  {
+   "itemId": "141",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"141\">3,908,769</td>"
+  },
+  {
+   "itemId": "142",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"142\">3,702,031</td>"
+  },
+  {
+   "itemId": "143",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"143\">Defense Health Agency</div>"
+  },
+  {
+   "itemId": "144",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"144\">$19,868,735,405</td>"
+  },
+  {
+   "itemId": "145",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"145\">15,282</td>"
+  },
+  {
+   "itemId": "146",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"146\">3,729</td>"
+  },
+  {
+   "itemId": "147",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"147\">Missile Defense Agency</div>"
+  },
+  {
+   "itemId": "148",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"148\">$9,084,858,489</td>"
+  },
+  {
+   "itemId": "149",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"149\">3,838</td>"
+  },
+  {
+   "itemId": "150",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"150\">262</td>"
+  },
+  {
+   "itemId": "151",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"151\">Defense Information Systems Agency</div>"
+  },
+  {
+   "itemId": "152",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"152\">$7,160,146,340</td>"
+  },
+  {
+   "itemId": "153",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"153\">49,889</td>"
+  },
+  {
+   "itemId": "154",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"154\">7,464</td>"
+  },
+  {
+   "itemId": "155",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"155\">USTRANSCOM</div>"
+  },
+  {
+   "itemId": "156",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"156\">$4,819,407,472</td>"
+  },
+  {
+   "itemId": "157",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"157\">6,111</td>"
+  },
+  {
+   "itemId": "158",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"158\">3,553</td>"
+  },
+  {
+   "itemId": "159",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"159\">U.S. Special Operations Command</div>"
+  },
+  {
+   "itemId": "160",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"160\">$4,303,270,526</td>"
+  },
+  {
+   "itemId": "161",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"161\">6,172</td>"
+  },
+  {
+   "itemId": "162",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"162\">2,019</td>"
+  },
+  {
+   "itemId": "163",
+   "html": "<div class=\"usda-table__expandable-cell-content\" _item_id=\"163\">Washington Headquarters Services</div>"
+  },
+  {
+   "itemId": "164",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"164\">$3,821,195,956</td>"
+  },
+  {
+   "itemId": "165",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"165\">4,582</td>"
+  },
+  {
+   "itemId": "166",
+   "html": "<td class=\"usda-table__cell usda-table__cell_right\" _item_id=\"166\">1,059</td>"
+  },
+  {
+   "itemId": "167",
+   "html": "<div class=\"usa-dt-pagination__totals\" _item_id=\"167\">1-10 of 26 results</div>"
+  },
+  {
+   "itemId": "168",
+   "html": "<div class=\"usa-dt-pagination__limit-selector__wrapper\" _item_id=\"168\"><label>Rows per page: </label></div>"
+  },
+  {
+   "itemId": "169",
+   "html": "<select class=\"usa-dt-pagination__limit-selector\" _item_id=\"169\"><option>10</option><option>25</option><option>50</option><option>100</option></select>"
+  },
+  {
+   "itemId": "170",
+   "html": "<li class=\"pager__item\" _item_id=\"170\"><button class=\"pager__button pager__button_active\">1</button></li>"
+  },
+  {
+   "itemId": "171",
+   "html": "<li class=\"pager__item\" _item_id=\"171\"><button class=\"pager__button\">2</button></li>"
+  },
+  {
+   "itemId": "172",
+   "html": "<li class=\"pager__item\" _item_id=\"172\"><button class=\"pager__button\">3</button></li>"
+  },
+  {
+   "itemId": "173",
+   "html": "<p class=\"default-note\" _item_id=\"173\"><strong>NOTE:</strong> The sub-agencies presented in this section represent awarding organizations and were sourced from the General Services Administration (GSA) Federal Hierarchy (available at <a>https://sam.gov/content/hierarchy</a>). This award hierarchy establishes the relationship between a department or independent agency’s sub-tiers and its offices and is used by federal agencies as the authoritative source for managing federal funding and awarding organizations.</p>"
+  },
+  {
+   "itemId": "174",
+   "html": "<div class=\"stay-in-touch__title\" _item_id=\"174\">Stay in touch</div>"
+  },
+  {
+   "itemId": "175",
+   "html": "<div class=\"stay-in-touch__second-row-title\" _item_id=\"175\">Your USAspending ideas</div>"
+  },
+  {
+   "itemId": "176",
+   "html": "<div class=\"stay-in-touch__second-row-text\" _item_id=\"176\">We're looking for your ideas! Tell us what you want to see on USAspending.gov.</div>"
+  },
+  {
+   "itemId": "177",
+   "html": "<button class=\"button__md  button-type__text-right-icon-light  button-text__left-align\" _item_id=\"177\">Tell Us</button>"
+  },
+  {
+   "itemId": "178",
+   "html": "<div class=\"stay-in-touch__second-row-title\" _item_id=\"178\">How to search USAspending.gov</div>"
+  },
+  {
+   "itemId": "179",
+   "html": "<div class=\"stay-in-touch__second-row-text\" _item_id=\"179\">Learn how you can search for federal spending in your area with our new Featured Content.</div>"
+  },
+  {
+   "itemId": "180",
+   "html": "<button class=\"button__md  button-type__text-right-icon-light  button-text__left-align\" _item_id=\"180\">Learn More</button>"
+  },
+  {
+   "itemId": "181",
+   "html": "<div class=\"stay-in-touch__second-row-title\" _item_id=\"181\">Sign up for release notes</div>"
+  },
+  {
+   "itemId": "182",
+   "html": "<div class=\"stay-in-touch__second-row-text\" _item_id=\"182\">Get release notes to your inbox to keep up with what's new on USAspending.gov.</div>"
+  },
+  {
+   "itemId": "183",
+   "html": "<button class=\"button__md  button-type__text-right-icon-light  button-text__left-align\" _item_id=\"183\">Sign Up</button>"
+  },
+  {
+   "itemId": "184",
+   "html": "<div class=\"footer-logo\" _item_id=\"184\"><a><img src=\"img/footer_logo.png\" alt=\"USAspending.gov\"></a></div>"
+  },
+  {
+   "itemId": "185",
+   "html": "<div class=\"footer-heading\" _item_id=\"185\">Building a more transparent government.</div>"
+  },
+  {
+   "itemId": "186",
+   "html": "<div class=\"footer-subHeading\" _item_id=\"186\">Providing publicly accessible and searchable data on what the federal government spends each year.</div>"
+  },
+  {
+   "itemId": "187",
+   "html": "<div class=\"footer-link-section-title\" _item_id=\"187\">ABOUT</div>"
+  },
+  {
+   "itemId": "188",
+   "html": "<ul _item_id=\"188\"><li><a>Mission</a></li></ul>"
+  },
+  {
+   "itemId": "189",
+   "html": "<div class=\"footer-link-section-title\" _item_id=\"189\">HELP</div>"
+  },
+  {
+   "itemId": "190",
+   "html": "<ul _item_id=\"190\"><li><a>FAQs</a></li><span>...</span><li><a>Email Us</a></li></ul>"
+  },
+  {
+   "itemId": "191",
+   "html": "<div class=\"footer-link-section-title\" _item_id=\"191\">RELATED SITES</div>"
+  },
+  {
+   "itemId": "192",
+   "html": "<ul _item_id=\"192\"><li><a>Fiscal Data</a></li><li><a>Bureau of the Fiscal Service</a></li></ul>"
+  },
+  {
+   "itemId": "193",
+   "html": "<ul _item_id=\"193\"><li><a>Accessibility</a></li><span>...</span><li><a>D&amp;B Information</a></li></ul>"
+  },
+  {
+   "itemId": "194",
+   "html": "<div class=\"footer-copyright-section\" _item_id=\"194\">© 2026 USAspending.gov</div>"
+  },
+  {
+   "itemId": "195",
+   "html": "<a class=\"_acs _acsbadge--default _acsbadge--medium _acsbottomright _acsAnimate\" _item_id=\"195\"><span class=\"_acsBadgeLabel\">Feedback</span> </a></body></html>"
+  }
+ ],
+ "labels": [
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other"
+ ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "anthropic",
+    "blocks": 49,
+    "mainHtmlChars": 6968,
+    "markdownChars": 1910
+  },
+  {
+    "name": "socrata",
+    "blocks": 193,
+    "mainHtmlChars": 25531,
+    "markdownChars": 3687
+  },
+  {
+    "name": "usaspending",
+    "blocks": 195,
+    "mainHtmlChars": 29189,
+    "markdownChars": 7309
+  },
+  {
+    "name": "wikipedia",
+    "blocks": 1009,
+    "mainHtmlChars": 509341,
+    "markdownChars": 128103
+  }
+]

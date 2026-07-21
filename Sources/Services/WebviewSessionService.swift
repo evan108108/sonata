@@ -170,6 +170,216 @@ final class WebviewSessionService {
                         width: Int(image.size.width), height: Int(image.size.height))
     }
 
+    /// Result of `saveHTML` — everything the caller needs *except* the HTML,
+    /// which stayed on disk.
+    struct SavedPage {
+        let path: String
+        let bytes: Int
+        let url: String
+        let title: String
+    }
+
+    /// Serialize the rendered DOM and write it straight to `path`. The HTML
+    /// never crosses the MCP boundary — that's the whole point: a real page's
+    /// outerHTML is 250 KB–5 MB, which the caller would otherwise pay for in
+    /// tokens. Parent directories are created; an existing file is overwritten.
+    func saveHTML(sessionId: String, path: String) async throws -> SavedPage {
+        let expanded = (path as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else { throw DriveError.badArgs("path must be absolute: \(path)") }
+        let (tab, wv) = try liveWebView(sessionId)
+        let page = try await serializePage(wv)
+        touch(tab)
+
+        let dest = URL(fileURLWithPath: expanded)
+        let data = Data(page.html.utf8)
+        try FileManager.default.createDirectory(
+            at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: dest)
+        return SavedPage(path: dest.path, bytes: data.count, url: page.url, title: page.title)
+    }
+
+    // MARK: - read (pulpie main-content extraction)
+
+    /// What `read` reports back. `markdown` is the payload; the two counts say
+    /// how much of the page survived classification.
+    struct PageRead: Sendable {
+        let url: String
+        let title: String
+        let markdown: String
+        let extractionMs: Int
+        let blockCount: Int
+        let mainBlockCount: Int
+    }
+
+    /// Run the three-stage pulpie pipeline against a session's live DOM and
+    /// return the page's main content as markdown.
+    ///
+    ///   1. `pulpie-simplify.js` walks the DOM, tags contributing elements with
+    ///      `data-pulpie-id` and returns one block per text run.
+    ///   2. `PulpieClassifier` (CoreML) labels every block main | other.
+    ///   3. `pulpie-markdown.js` prunes the tree to the main-labeled spans and
+    ///      converts what's left with a port of pulpie's html2text.
+    ///
+    /// The per-block `anchor`s stage 2 emits never enter Swift — they are
+    /// parked on the page (`globalThis.__pulpieRead`) between the two
+    /// injections, because only stage 3 knows how to resolve them. Swift moves
+    /// texts down and labels back, nothing else.
+    ///
+    /// Deliberately NO fallback: if the classifier can't load, the caller gets
+    /// the error rather than a silent whole-page dump that looks like a
+    /// successful extraction.
+    ///
+    /// macOS 15+ only — the package targets 14, but the classifier's CoreML
+    /// model is built with `minimum_deployment_target=macOS15`.
+    @available(macOS 15, *)
+    func readPage(sessionId: String) async throws -> PageRead {
+        let started = Date()
+        let (tab, wv) = try liveWebView(sessionId)
+
+        let pass = try await simplifyPass(wv)
+
+        // Empty page (or a subtree with no meaningful content) — no blocks to
+        // classify, so don't pay a model load to learn that. blockCount: 0
+        // tells the caller exactly what happened.
+        let labels: [PulpieClassifier.Label] = pass.texts.isEmpty
+            ? []
+            : try await PulpieClassifier.shared.classify(blocks: pass.texts)
+        guard labels.count == pass.ids.count else {
+            throw DriveError.js(
+                "pulpie classifier returned \(labels.count) labels for \(pass.ids.count) blocks")
+        }
+
+        // labelMap is one entry per item_id, straight from block order — stage
+        // 2 ids are dense and 1-based, so this is a positional zip.
+        var labelMap: [String: String] = [:]
+        for (id, label) in zip(pass.ids, labels) { labelMap[id] = label.rawValue }
+
+        let markdown = try await markdownPass(wv, labels: labelMap)
+        touch(tab)
+
+        return PageRead(
+            url: pass.url,
+            title: pass.title,
+            markdown: markdown,
+            extractionMs: Int((Date().timeIntervalSince(started) * 1000).rounded()),
+            blockCount: pass.ids.count,
+            mainBlockCount: labels.filter { $0 == .main }.count)
+    }
+
+    /// Stage 2's output, minus the anchors (which stay on the page).
+    private struct SimplifyPass: Sendable {
+        let ids: [String]
+        let texts: [String]
+        let url: String
+        let title: String
+    }
+
+    private func simplifyPass(_ wv: WKWebView) async throws -> SimplifyPass {
+        let source = try Self.pulpieScript("pulpie-simplify")
+        // url/title ride along in this batch rather than a second round trip,
+        // so they describe the page the blocks were actually taken from.
+        // PulpieClassifier expects each block's simplified HTML, not plaintext.
+        // The Orange model was distilled on MinerU's segmentation, where blocks
+        // are HTML fragments carrying `_item_id` and their element/class shape —
+        // the tokenizer's per-sep window is what encodes "this is <nav>" vs
+        // "this is <article>". Stripping to `b.text` deletes exactly that signal
+        // and drops every block to `other` (verified 2026-07-21: newsroom went
+        // 21/49 main -> 0/49). Task #4's classifier fixtures store `html` per
+        // block for the same reason.
+        let js = """
+        \(source)
+        ;(() => {
+          const r = globalThis.__pulpieSimplify({ includeHtml: true });
+          globalThis.__pulpieRead = {
+            anchors: Object.fromEntries(r.blocks.map(b => [String(b.item_id), b.anchor]))
+          };
+          return {
+            ids: r.blocks.map(b => String(b.item_id)),
+            texts: r.blocks.map(b => b.html),
+            url: location.href,
+            title: document.title
+          };
+        })()
+        """
+        return try await withCheckedThrowingContinuation { cont in
+            wv.evaluateJavaScript(js, in: nil, in: .page) { result in
+                switch result {
+                case .success(let value):
+                    guard let d = value as? [String: Any],
+                          let ids = d["ids"] as? [String],
+                          let texts = d["texts"] as? [String] else {
+                        cont.resume(throwing: DriveError.js("pulpie simplify returned no block list"))
+                        return
+                    }
+                    cont.resume(returning: SimplifyPass(
+                        ids: ids, texts: texts,
+                        url: d["url"] as? String ?? "", title: d["title"] as? String ?? ""))
+                case .failure(let err):
+                    cont.resume(throwing: DriveError.js(err.localizedDescription))
+                }
+            }
+        }
+    }
+
+    private func markdownPass(_ wv: WKWebView, labels: [String: String]) async throws -> String {
+        let source = try Self.pulpieScript("pulpie-markdown")
+        let labelsJSON = (try? JSONSerialization.data(withJSONObject: labels, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        // `stripLxmlBlanks` stays off: it exists to reproduce a lossy re-parse
+        // in the Python pipeline that welds words together across dropped
+        // whitespace nodes. Turn it on only when diffing against the oracle.
+        let js = """
+        \(source)
+        ;(() => {
+          const state = globalThis.__pulpieRead || {};
+          delete globalThis.__pulpieRead;
+          return globalThis.PulpieMarkdown.extractMainMarkdown(
+            document, \(labelsJSON), { anchors: state.anchors || null });
+        })()
+        """
+        return try await withCheckedThrowingContinuation { cont in
+            wv.evaluateJavaScript(js, in: nil, in: .page) { result in
+                switch result {
+                case .success(let value):
+                    guard let md = value as? String else {
+                        cont.resume(throwing: DriveError.js("pulpie markdown returned no string"))
+                        return
+                    }
+                    cont.resume(returning: md)
+                case .failure(let err):
+                    cont.resume(throwing: DriveError.js(err.localizedDescription))
+                }
+            }
+        }
+    }
+
+    /// Load a pulpie stage script from the bundle and make it injectable.
+    ///
+    /// Two transforms, both forced by `evaluateJavaScript`, which runs classic
+    /// scripts in the page's global scope:
+    ///   * top-level `export` is a SyntaxError in a classic script, so the
+    ///     module syntax is stripped;
+    ///   * the file is wrapped in an IIFE, so a second `read` on the same page
+    ///     doesn't collide with the first's top-level `const` declarations.
+    /// Both stages install themselves onto `globalThis`, which survives the
+    /// wrap — that global is the handle the orchestration calls.
+    private static func pulpieScript(_ name: String) throws -> String {
+        guard let url = Bundle.module.url(
+                forResource: name, withExtension: "js", subdirectory: "web"),
+              let source = try? String(contentsOf: url, encoding: .utf8) else {
+            throw DriveError.js("pulpie stage script missing from bundle: \(name).js")
+        }
+        let classic = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                if line.hasPrefix("export default") { return "// " + line }
+                if line.hasPrefix("export ") { return String(line.dropFirst("export ".count)) }
+                return String(line)
+            }
+            .joined(separator: "\n")
+        return "(function () {\n\(classic)\n})();"
+    }
+
     // MARK: - WKWebView async bridge
 
     /// evaluateJavaScript in the page content world (unsandboxed, per spec §9 —
@@ -180,6 +390,34 @@ final class WebviewSessionService {
                 switch result {
                 case .success(let value):
                     cont.resume(returning: WebviewSessionService.stringify(value))
+                case .failure(let err):
+                    cont.resume(throwing: DriveError.js(err.localizedDescription))
+                }
+            }
+        }
+    }
+
+    private struct PageSerialization: Sendable {
+        let html: String
+        let url: String
+        let title: String
+    }
+
+    /// One eval batch → typed value. Deliberately *not* built on `runJS`: that
+    /// would JSON-encode the multi-megabyte html only for us to decode it back.
+    /// Unpacking inside the completion handler also keeps a non-Sendable `Any`
+    /// off the continuation.
+    private func serializePage(_ wv: WKWebView) async throws -> PageSerialization {
+        try await withCheckedThrowingContinuation { cont in
+            wv.evaluateJavaScript(WebviewJS.serializePage, in: nil, in: .page) { result in
+                switch result {
+                case .success(let value):
+                    guard let d = value as? [String: Any], let html = d["html"] as? String else {
+                        cont.resume(throwing: DriveError.js("page serialization returned no html"))
+                        return
+                    }
+                    cont.resume(returning: PageSerialization(
+                        html: html, url: d["url"] as? String ?? "", title: d["title"] as? String ?? ""))
                 case .failure(let err):
                     cont.resume(throwing: DriveError.js(err.localizedDescription))
                 }
@@ -240,6 +478,12 @@ enum WebviewJS {
         (() => ({ url: location.href, title: document.title, readyState: document.readyState,
           scrollX: window.scrollX, scrollY: window.scrollY,
           viewport: { w: window.innerWidth, h: window.innerHeight } }))()
+        """
+    /// Full serialized DOM plus the metadata `page_save_html` reports back, in
+    /// one round trip. The html half is consumed natively, never returned.
+    static let serializePage = """
+        (() => ({ html: document.documentElement.outerHTML,
+          url: location.href, title: document.title }))()
         """
     /// JSON-encode a Swift string into a JS string literal (safe injection).
     private static func jsString(_ s: String) -> String {

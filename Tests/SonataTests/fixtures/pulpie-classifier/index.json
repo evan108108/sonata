@@ -1,0 +1,26 @@
+[
+ {
+  "name": "anthropic_newsroom",
+  "blocks": 49,
+  "main": 21,
+  "bytes": 12996
+ },
+ {
+  "name": "chicago_permits",
+  "blocks": 193,
+  "main": 87,
+  "bytes": 33660
+ },
+ {
+  "name": "usaspending_dod",
+  "blocks": 195,
+  "main": 140,
+  "bytes": 31490
+ },
+ {
+  "name": "wikipedia_rag",
+  "blocks": 483,
+  "main": 62,
+  "bytes": 101202
+ }
+]

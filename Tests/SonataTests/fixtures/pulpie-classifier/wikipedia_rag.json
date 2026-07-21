@@ -1,0 +1,2425 @@
+{
+ "page": "wikipedia_rag",
+ "blockCount": 483,
+ "mainCount": 62,
+ "otherCount": 421,
+ "blocks": [
+  {
+   "itemId": "1",
+   "html": "<a class=\"mw-jump-link\" _item_id=\"1\">Jump to content</a>"
+  },
+  {
+   "itemId": "2",
+   "html": "<div class=\"vector-header-start\" _item_id=\"2\"> <a class=\"mw-logo\"> <img src=\"/static/images/icons/enwiki-25.svg\" class=\"mw-logo-icon\"> <span class=\"mw-logo-container skin-invert\"> <img src=\"/static/images/mobile/copyright/wikipedia-wordmark-en-25.svg\" alt=\"Wikipedia\" class=\"mw-logo-wordmark\"> <img src=\"/static/images/mobile/copyright/wikipedia-tagline-en-25.svg\" alt=\"The Free Encyclopedia\" class=\"mw-logo-tagline\"> </span> </a> </div>"
+  },
+  {
+   "itemId": "3",
+   "html": "<div class=\"vector-search-box-vue  vector-search-box-collapses vector-search-box-show-thumbnail vector-search-box-auto-expand-width vector-search-box\" id=\"p-search\" _item_id=\"3\"><a class=\"cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--icon-only search-toggle\"><span class=\"vector-icon mw-ui-icon-search mw-ui-icon-wikimedia-search cdx-button__icon\"></span> <span>Search</span> </a> </div>"
+  },
+  {
+   "itemId": "4",
+   "html": "<form class=\"cdx-search-input cdx-search-input--has-end-button\" id=\"searchform\" _item_id=\"4\"><button class=\"cdx-button cdx-search-input__end-button\">Search</button> </form>"
+  },
+  {
+   "itemId": "5",
+   "html": "<div class=\"frb-header\" _item_id=\"5\">We owe you an explanation.</div>"
+  },
+  {
+   "itemId": "6",
+   "html": "<div class=\"frb-subheader\" _item_id=\"6\"> <span class=\"frb-replaced\">July 21</span>: An important update for readers <span class=\"frb-replaced\">in the United States</span>. </div>"
+  },
+  {
+   "itemId": "7",
+   "html": "<p _item_id=\"7\"> You deserve an explanation, so please don't skip this 1-minute read. It's <span class=\"frb-replaced\">Tuesday</span>, <span class=\"frb-replaced\">July 21</span>, and you only had a small chance of seeing our message. This year, Wikipedia has seen fewer visitors and fewer new supporters, so your visit today means a lot. We hope that Wikipedia has given you at least <span class=\"frb-replaced\">$2.75</span> of knowledge recently. If everyone who finds Wikipedia useful gave <span class=\"frb-replaced\">$2.75</span>, we'd hit our goal in a few hours. </p>"
+  },
+  {
+   "itemId": "8",
+   "html": "<p _item_id=\"8\"> It's been 25 years and Wikipedia is still free. It's still created by people, not machines, and we don't run ads or put up paywalls because we're not here to make a profit off your attention. In other words, it's still the internet we were promised. </p>"
+  },
+  {
+   "itemId": "9",
+   "html": "<p _item_id=\"9\"> Less than 2% of our readers donate, so if you've never given and Wikipedia has provided you with at least <span class=\"frb-replaced\">$2.75</span> worth of knowledge, donate today. If you are undecided, remember any contribution helps. </p>"
+  },
+  {
+   "itemId": "10",
+   "html": "<div class=\"frb-wmf-identity-message\" _item_id=\"10\"> Proud host of Wikipedia and other free knowledge projects </div>"
+  },
+  {
+   "itemId": "11",
+   "html": "<legend class=\"frb-numbered error-highlight\" _item_id=\"11\"> How often would you like to donate? </legend>"
+  },
+  {
+   "itemId": "12",
+   "html": "<ul _item_id=\"12\"> <li> <input class=\"frb-radio\" id=\"frb-frequency-onetime\"> <label class=\"frb-radio-label\">Once</label> </li> <span>...</span><li> <input class=\"frb-radio\" id=\"frb-frequency-annual\"> <label class=\"frb-radio-label\">Yearly</label> </li> </ul>"
+  },
+  {
+   "itemId": "13",
+   "html": "<div class=\"frb-recurring-pitch\" _item_id=\"13\">Support Wikipedia year-round</div>"
+  },
+  {
+   "itemId": "14",
+   "html": "<div class=\"frb-recurring-pitch-thanks\" _item_id=\"14\">Thanks for your generous support</div>"
+  },
+  {
+   "itemId": "15",
+   "html": "<legend class=\"frb-numbered\" _item_id=\"15\"><span class=\"error-highlight\">Please select an amount (<span class=\"frb-replace-currencycode\">USD</span>)</span><br></legend>"
+  },
+  {
+   "itemId": "16",
+   "html": "<legend class=\"frb-numbered\" _item_id=\"16\"><span class=\"avg-donation-once\">The average donation in <span class=\"frb-replace-countryname\">the United States</span> is around <span class=\"frb-replaced\">$13</span>.</span> </legend>"
+  },
+  {
+   "itemId": "17",
+   "html": "<li _item_id=\"17\"> <input class=\"frb-radio\" id=\"frb-amt-ps1\"> <label class=\"frb-radio-label\">$2.75</label> </li>"
+  },
+  {
+   "itemId": "18",
+   "html": "<li _item_id=\"18\"> <input class=\"frb-radio\" id=\"frb-amt-ps2\"> <label class=\"frb-radio-label\">$15</label> </li>"
+  },
+  {
+   "itemId": "19",
+   "html": "<li class=\"frb-highlight\" _item_id=\"19\"><input class=\"frb-radio\" id=\"frb-amt-ps3\"> <label class=\"frb-radio-label\">$25</label> </li>"
+  },
+  {
+   "itemId": "20",
+   "html": "<div class=\"frb-amount-highlight\" _item_id=\"20\">Preferred Amount</div>"
+  },
+  {
+   "itemId": "21",
+   "html": "<li _item_id=\"21\"> <input class=\"frb-radio\" id=\"frb-amt-ps4\"> <label class=\"frb-radio-label\">$50</label> </li>"
+  },
+  {
+   "itemId": "22",
+   "html": "<li _item_id=\"22\"> <input class=\"frb-radio\" id=\"frb-amt-ps5\"> <label class=\"frb-radio-label\">$100</label> </li>"
+  },
+  {
+   "itemId": "23",
+   "html": "<li _item_id=\"23\"> <input class=\"frb-radio\" id=\"frb-amt-ps6\"> <label class=\"frb-radio-label\">$250</label> </li>"
+  },
+  {
+   "itemId": "24",
+   "html": "<li _item_id=\"24\"> <input class=\"frb-radio\" id=\"frb-amt-ps7\"> <label class=\"frb-radio-label\">$500</label> </li>"
+  },
+  {
+   "itemId": "25",
+   "html": "<li class=\"frb-amt-other\" _item_id=\"25\"> <label class=\"sr-only\">Other amount</label> <input class=\"frb-radio\" id=\"input_amount_other\"> <input id=\"frb-amt-other-input\"> <label class=\"frb-amt-other-label sr-only\">Other</label> </li>"
+  },
+  {
+   "itemId": "26",
+   "html": "<legend class=\"frb-numbered error-highlight\" _item_id=\"26\"> Please select a payment method </legend>"
+  },
+  {
+   "itemId": "27",
+   "html": "<div class=\"frb-button frb-pm-ach\" _item_id=\"27\"> <input class=\"frb-radio\" id=\"frb-pm-ach\"> <label class=\"frb-label\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/b/be/Trustly_logos_only.png\"> <span>Online Banking</span> </label> </div>"
+  },
+  {
+   "itemId": "28",
+   "html": "<label class=\"frb-label\" _item_id=\"28\"><span class=\"frb-pm-cc-label\">Credit / Debit Card</span> </label>"
+  },
+  {
+   "itemId": "29",
+   "html": "<fieldset class=\"frb-continue\" _item_id=\"29\"> <button class=\"frb-submit\" id=\"frb-continue\"> <span class=\"frb-submit-txt-continue\">Continue</span> <span class=\"frb-submit-txt-donate\"> <span class=\"frb-submit-txt-onetime\">Donate <span class=\"frb-ptf-total frb-replaced\"></span> one time</span> <span class=\"frb-submit-txt-monthly\">Donate <span class=\"frb-ptf-total frb-replaced\"></span> monthly</span> <span class=\"frb-submit-txt-annual\">Donate <span class=\"frb-ptf-total frb-replaced\"></span> yearly</span> </span> </button> </fieldset>"
+  },
+  {
+   "itemId": "30",
+   "html": "<div class=\"frb-error frb-error-smallamount\" _item_id=\"30\">Please select an amount (minimum $1)</div>"
+  },
+  {
+   "itemId": "31",
+   "html": "<div class=\"frb-error frb-error-bigamount\" _item_id=\"31\">We cannot accept donations greater than 25000 USD through our website. Please contact our major gifts staff at benefactors@wikimedia.org.</div>"
+  },
+  {
+   "itemId": "32",
+   "html": "<div class=\"frb-error frb-error-method\" _item_id=\"32\">Please select a payment method</div>"
+  },
+  {
+   "itemId": "33",
+   "html": "<div class=\"frb-step frb-step-1\" _item_id=\"33\"><button class=\"frb-rml-link\"> Maybe later </button> </div>"
+  },
+  {
+   "itemId": "34",
+   "html": "<legend _item_id=\"34\"> Can we follow up and let you know if we need your help again? <span class=\"frb-explanation\">The support and advice we get from donors in <span class=\"frb-replace-countryname\">the United States</span> is priceless, but many donors don't let us stay in touch. Will you commit today, this <span class=\"frb-replace-dayofweek\">Tuesday</span>, to staying in touch with the Wikimedia Foundation?</span> </legend>"
+  },
+  {
+   "itemId": "35",
+   "html": "<ul _item_id=\"35\"> <li class=\"frb-button\"> <input class=\"frb-optin frb-radio\" id=\"frb-optin-yes\"> <label class=\"frb-label\">Yes</label> </li> <li class=\"frb-button\"> <input class=\"frb-optin frb-radio\" id=\"frb-optin-no\"> <label class=\"frb-label\">No</label> </li> </ul>"
+  },
+  {
+   "itemId": "36",
+   "html": "<div class=\"frb-optin-no-prompt__no\" _item_id=\"36\">Sorry to hear that. We don't email often; would you consider changing your mind?</div>"
+  },
+  {
+   "itemId": "37",
+   "html": "<div class=\"frb-optin-no-prompt__yes\" _item_id=\"37\">Thanks for changing your mind! We’ll respect your inbox.</div>"
+  },
+  {
+   "itemId": "38",
+   "html": "<div class=\"frb-optin-smallprint frb-smallprint\" _item_id=\"38\"> Your information is handled in accordance with our <a class=\"frb-link-privacy\">donor privacy policy</a>, and each email you receive will include easy unsubscribe options. </div>"
+  },
+  {
+   "itemId": "39",
+   "html": "<div class=\"frb-step frb-step-optin\" _item_id=\"39\"><button class=\"frb-submit\" id=\"frb-donate\"> Continue </button> </div>"
+  },
+  {
+   "itemId": "40",
+   "html": "<div class=\"frb-error frb-error-optin\" _item_id=\"40\">Please select an email option</div>"
+  },
+  {
+   "itemId": "41",
+   "html": "<div class=\"frb-dialog-title\" _item_id=\"41\">Almost done: Please, make it<span class=\"frb-upsell-ask frb-replaced\"></span> monthly. </div>"
+  },
+  {
+   "itemId": "42",
+   "html": "<div class=\"frb-dialog-text\" _item_id=\"42\">Monthly support is the best way to ensure that Wikipedia keeps thriving.</div>"
+  },
+  {
+   "itemId": "43",
+   "html": "<div class=\"frb-step-upsell\" _item_id=\"43\"><button class=\"frb-submit active\" id=\"frb-monthly-donate-no\"> No thanks! I'll make a one-time donation of <span class=\"frb-ptf-total frb-replaced\"></span> </button> <button class=\"frb-submit active\" id=\"frb-monthly-donate-yes\"> Yes, I'll donate <span class=\"frb-upsell-ask frb-replaced\"></span> each month </button> <button class=\"frb-monthly-diff-amt-link\"> Yes, I'll donate monthly, but for a different amount </button> </div>"
+  },
+  {
+   "itemId": "44",
+   "html": "<div class=\"frb-footer frb-smallprint\" _item_id=\"44\"><a class=\"frb-link-problems\">Problems donating?</a> | <a class=\"frb-link-faq\">Frequently asked questions</a> | <button class=\"frb-wydg-link\">Where your donation goes</button> | <a id=\"frb-otherways-link\">Other ways to give</a> | <span class=\"frb-footer-button frb-iad\"> <button class=\"frb-iad-link\"> <span class=\"frb-already-donated-text\">I already donated</span> </button> </span> </div>"
+  },
+  {
+   "itemId": "45",
+   "html": "<div class=\"frb-footer-legal\" _item_id=\"45\"> <span class=\"frb-legal-US\">We never sell your information. By submitting, you are agreeing to our <a class=\"frb-link-privacy\">donor privacy policy</a>. The Wikimedia Foundation is a nonprofit, <a class=\"frb-link-tax\">tax-exempt organization</a>.</span> <span class=\"recurring-details\">If you make a recurring donation, you will be debited by the Wikimedia Foundation until you notify us to stop. We’ll send you an email which will include a link to <a class=\"frb-link-cancel\">easy cancellation instructions</a>.</span> </div>"
+  },
+  {
+   "itemId": "46",
+   "html": "<div class=\"frb-dialog-title\" _item_id=\"46\">How would you like to be reminded?</div>"
+  },
+  {
+   "itemId": "47",
+   "html": "<div class=\"frb-dialog-text\" _item_id=\"47\">Whether you give now or later, any contribution helps. We can send you an email or text message reminder to join the 2% of readers who donate.</div>"
+  },
+  {
+   "itemId": "48",
+   "html": "<div class=\"frb-rml-intro\" _item_id=\"48\"><button class=\"frb-submit frb-rml-btn active\" id=\"frb-rml-email-btn\">Send me an email</button> <button class=\"frb-submit frb-rml-btn active\" id=\"frb-rml-text-btn\">Send me a text message</button> </div>"
+  },
+  {
+   "itemId": "49",
+   "html": "<div class=\"frb-dialog-title\" _item_id=\"49\"> 🎉 Thank you for donating recently! 🎉 </div>"
+  },
+  {
+   "itemId": "50",
+   "html": "<div class=\"frb-iad-dialog-header\" _item_id=\"50\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/4/43/Badge-one-time.png\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/4/4f/Badge-monthly.png\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/d/de/Badge-workplace-giving.png\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/7/73/Badge-daf.png\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/6/6a/Badge-cga.png\"> <img src=\"https://upload.wikimedia.org/wikipedia/donate/8/81/Badge-endowment.png\"> </div>"
+  },
+  {
+   "itemId": "51",
+   "html": "<div class=\"frb-dialog-text\" _item_id=\"51\"> Your support means the world to us. We'll hide banners in this browser for one month. </div>"
+  },
+  {
+   "itemId": "52",
+   "html": "<div class=\"frb-iad-buttons\" _item_id=\"52\"> <button class=\"frb-dialog-close\"> Close </button> </div>"
+  },
+  {
+   "itemId": "53",
+   "html": "<div class=\"frb-dialog-title\" _item_id=\"53\">Where your donation goes</div>"
+  },
+  {
+   "itemId": "54",
+   "html": "<div class=\"wydg-intro\" _item_id=\"54\"> Accountability and transparency are core values at the Wikimedia Foundation. We manage funds and resources to ensure that every contribution supports our mission. We have earned the Platinum Seal of Transparency from Candid (formerly GuideStar), and Charity Navigator awarded us its highest rating. You can <a class=\"frb-link-annualreport\">read our most recent annual report</a> for more information about our financial health. </div>"
+  },
+  {
+   "itemId": "55",
+   "html": "<text class=\"pct-label\" _item_id=\"55\">45%</text>"
+  },
+  {
+   "itemId": "56",
+   "html": "<text class=\"center-number\" _item_id=\"56\">$85.4M</text>"
+  },
+  {
+   "itemId": "57",
+   "html": "<text class=\"center-description\" _item_id=\"57\">Technology</text>"
+  },
+  {
+   "itemId": "58",
+   "html": "<text class=\"pct-label\" _item_id=\"58\">32%</text>"
+  },
+  {
+   "itemId": "59",
+   "html": "<text class=\"center-number\" _item_id=\"59\">$60.7M</text>"
+  },
+  {
+   "itemId": "60",
+   "html": "<text class=\"center-description\" _item_id=\"60\">Support</text>"
+  },
+  {
+   "itemId": "61",
+   "html": "<text class=\"pct-label\" _item_id=\"61\">12%</text>"
+  },
+  {
+   "itemId": "62",
+   "html": "<text class=\"center-number\" _item_id=\"62\">$22.8M</text>"
+  },
+  {
+   "itemId": "63",
+   "html": "<text class=\"center-description\" _item_id=\"63\">Fundraising</text>"
+  },
+  {
+   "itemId": "64",
+   "html": "<text class=\"pct-label\" _item_id=\"64\">11%</text>"
+  },
+  {
+   "itemId": "65",
+   "html": "<text class=\"center-number\" _item_id=\"65\">$20.9M</text>"
+  },
+  {
+   "itemId": "66",
+   "html": "<text class=\"center-description\" _item_id=\"66\">General</text>"
+  },
+  {
+   "itemId": "67",
+   "html": "<text class=\"center-number\" _item_id=\"67\">$189.7M</text>"
+  },
+  {
+   "itemId": "68",
+   "html": "<text class=\"center-description\" _item_id=\"68\">Total Funding</text>"
+  },
+  {
+   "itemId": "69",
+   "html": "<summary _item_id=\"69\"> <span>45%</span> Investment in Technology </summary>"
+  },
+  {
+   "itemId": "70",
+   "html": "<summary _item_id=\"70\"> <span>32%</span> Support for Volunteers </summary>"
+  },
+  {
+   "itemId": "71",
+   "html": "<summary _item_id=\"71\"> <span>12%</span> Allocation to Fundraising Efforts </summary>"
+  },
+  {
+   "itemId": "72",
+   "html": "<summary _item_id=\"72\"> <span>11%</span> General and Administrative Expenses </summary>"
+  },
+  {
+   "itemId": "73",
+   "html": "<div class=\"frb-dialog-title\" _item_id=\"73\">Other ways to give</div>"
+  },
+  {
+   "itemId": "74",
+   "html": "<a class=\"otherways-cards__card\" _item_id=\"74\"><img src=\"https://upload.wikimedia.org/wikipedia/donate/7/73/Badge-daf.png\"> </a>"
+  },
+  {
+   "itemId": "75",
+   "html": "<h4 _item_id=\"75\">Donor-Advised Fund (DAF)</h4>"
+  },
+  {
+   "itemId": "76",
+   "html": "<p _item_id=\"76\">Unlock tax benefits by directing your donation via your Donor-Advised Fund (DAF)</p>"
+  },
+  {
+   "itemId": "77",
+   "html": "<a class=\"otherways-cards__card\" _item_id=\"77\"><img src=\"https://upload.wikimedia.org/wikipedia/donate/a/ad/Badge-ira.png\"> </a>"
+  },
+  {
+   "itemId": "78",
+   "html": "<h4 _item_id=\"78\">Individual Retirement Account (IRA)</h4>"
+  },
+  {
+   "itemId": "79",
+   "html": "<p _item_id=\"79\">Qualified Charitable Distributions from a tax efficient eligible IRA</p>"
+  },
+  {
+   "itemId": "80",
+   "html": "<a class=\"otherways-cards__card\" _item_id=\"80\"><img src=\"https://upload.wikimedia.org/wikipedia/donate/d/de/Badge-workplace-giving.png\"> </a>"
+  },
+  {
+   "itemId": "81",
+   "html": "<h4 _item_id=\"81\">Workplace Giving</h4>"
+  },
+  {
+   "itemId": "82",
+   "html": "<p _item_id=\"82\">Involve your employer and increase the impact of your donation</p>"
+  },
+  {
+   "itemId": "83",
+   "html": "<a class=\"otherways-cards__card\" _item_id=\"83\"><img src=\"https://upload.wikimedia.org/wikipedia/donate/e/ed/WP20Symbols_MediaWiki.svg\"> </a>"
+  },
+  {
+   "itemId": "84",
+   "html": "<h4 _item_id=\"84\">Try Editing Wikipedia</h4>"
+  },
+  {
+   "itemId": "85",
+   "html": "<p _item_id=\"85\">Editing Wikipedia is easier than you might think! You will get suggestions and help as you start.</p>"
+  },
+  {
+   "itemId": "86",
+   "html": "<dialog class=\"frb frb-dialog frb-rml-enabled frb-annual-enabled\" id=\"frb-dialog-otherways\" _item_id=\"86\"><a class=\"frb-dialog-otherways-link\">More ways to give</a> </dialog>"
+  },
+  {
+   "itemId": "87",
+   "html": "<h1 class=\"firstHeading mw-first-heading\" id=\"firstHeading\" _item_id=\"87\"><span><span class=\"mw-page-title-main\">Retrieval-augmented generation</span></span></h1>"
+  },
+  {
+   "itemId": "88",
+   "html": "<div class=\"vector-dropdown mw-portlet mw-portlet-lang\" id=\"p-lang-btn\" _item_id=\"88\"><input class=\"vector-dropdown-checkbox mw-interlanguage-selector\" id=\"p-lang-btn-checkbox\"> <label class=\"vector-dropdown-label cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--action-progressive mw-portlet-lang-heading-21\" id=\"p-lang-btn-label\"><span class=\"vector-icon mw-ui-icon-language-progressive mw-ui-icon-wikimedia-language-progressive cdx-button__icon\"></span> <span class=\"vector-dropdown-label-text\">21 languages</span> </label> </div>"
+  },
+  {
+   "itemId": "89",
+   "html": "<ul class=\"vector-menu-content-list\" _item_id=\"89\"> <li class=\"interlanguage-link interwiki-ar mw-list-item\"><a class=\"interlanguage-link-target\"><span>العربية</span></a></li><span>...</span><li class=\"interlanguage-link interwiki-zh mw-list-item\"><a class=\"interlanguage-link-target\"><span>中文</span></a></li> </ul>"
+  },
+  {
+   "itemId": "90",
+   "html": "<div class=\"after-portlet after-portlet-lang\" _item_id=\"90\"><span class=\"wb-langlinks-edit wb-langlinks-link\"><a class=\"wbc-editpage\">Edit links</a></span></div>"
+  },
+  {
+   "itemId": "91",
+   "html": "<div class=\"noprint\" id=\"siteSub\" _item_id=\"91\">From Wikipedia, the free encyclopedia</div>"
+  },
+  {
+   "itemId": "92",
+   "html": "<p id=\"mwAw\" _item_id=\"92\"><b id=\"mwBA\">Retrieval-augmented generation</b> (<b id=\"mwBQ\">RAG</b>) is a technique that enables <a id=\"mwBg\">large language models</a> (LLMs) to retrieve and incorporate new information from external data sources.<sup class=\"mw-ref reference\" id=\"cite_ref-IBM-2023_1-0\"><a id=\"mwBw\"><span class=\"mw-reflink-text\" id=\"mwCA\"><span class=\"cite-bracket\" id=\"mwCQ\">[</span>1<span class=\"cite-bracket\" id=\"mwCg\">]</span></span></a></sup> With RAG, LLMs first refer to a specified set of documents, then respond to user queries. These documents supplement information from the LLM's pre-existing <a class=\"mw-redirect\" id=\"mwCw\">training data</a>.<sup class=\"mw-ref reference\" id=\"cite_ref-MIT_Technology_Review-2024_2-0\"><a id=\"mwDA\"><span class=\"mw-reflink-text\" id=\"mwDQ\"><span class=\"cite-bracket\" id=\"mwDg\">[</span>2<span class=\"cite-bracket\" id=\"mwDw\">]</span></span></a></sup> This allows LLMs to use domain-specific and/or updated information that is not available in the training data.<sup class=\"mw-ref reference\" id=\"cite_ref-MIT_Technology_Review-2024_2-1\"><a id=\"mwEA\"><span class=\"mw-reflink-text\" id=\"mwEQ\"><span class=\"cite-bracket\" id=\"mwEg\">[</span>2<span class=\"cite-bracket\" id=\"mwEw\">]</span></span></a></sup> For example, this enables LLM-based <a id=\"mwFA\">chatbo...</a></p>"
+  },
+  {
+   "itemId": "93",
+   "html": "<p id=\"mwFQ\" _item_id=\"93\">RAG improves LLMs by incorporating <a id=\"mwFg\">information retrieval</a> before generating responses.<sup class=\"mw-ref reference\" id=\"cite_ref-BUZBP_3-0\"><a id=\"mwFw\"><span class=\"mw-reflink-text\" id=\"mwGA\"><span class=\"cite-bracket\" id=\"mwGQ\">[</span>3<span class=\"cite-bracket\" id=\"mwGg\">]</span></span></a></sup> Unlike LLMs that rely on static training data, RAG pulls relevant text from databases, uploaded documents, or web sources.<sup class=\"mw-ref reference\" id=\"cite_ref-IBM-2023_1-1\"><a id=\"mwGw\"><span class=\"mw-reflink-text\" id=\"mwHA\"><span class=\"cite-bracket\" id=\"mwHQ\">[</span>1<span class=\"cite-bracket\" id=\"mwHg\">]</span></span></a></sup> According to <i id=\"mwHw\"><a id=\"mwIA\">Ars Technica</a></i>, \"RAG is a way of improving LLM performance, in essence by blending the LLM process with a web search or other document look-up process to help LLMs stick to the facts.\" This method helps reduce <a class=\"mw-redirect\" id=\"mwIQ\">AI hallucinations</a>,<sup class=\"mw-ref reference\" id=\"cite_ref-BUZBP_3-1\"><a id=\"mwIg\"><span class=\"mw-reflink-text\" id=\"mwIw\"><span class=\"cite-bracket\" id=\"mwJA\">[</span>3<span class=\"cite-bracket\" id=\"mwJQ\">]</span></span></a></sup> which have caused chatbots to describe pol...</p>"
+  },
+  {
+   "itemId": "94",
+   "html": "<p id=\"mwKg\" _item_id=\"94\">RAG also reduces the need to retrain LLMs with new data, saving on computational and financial costs.<sup class=\"mw-ref reference\" id=\"cite_ref-IBM-2023_1-2\"><a id=\"mwKw\"><span class=\"mw-reflink-text\" id=\"mwLA\"><span class=\"cite-bracket\" id=\"mwLQ\">[</span>1<span class=\"cite-bracket\" id=\"mwLg\">]</span></span></a></sup> Beyond efficiency gains, RAG also allows LLMs to include sources in their responses, so users can verify the cited sources. This provides greater transparency, as users can cross-check retrieved content to ensure accuracy and relevance.</p>"
+  },
+  {
+   "itemId": "95",
+   "html": "<p id=\"mwLw\" _item_id=\"95\">The term retrieval-augmented generation (RAG) was introduced in a 2020 paper that described combining a parametric language model with a non-parametric external memory accessed through retrieval at inference time.<sup class=\"mw-ref reference\" id=\"cite_ref-BUZBP_3-2\"><a id=\"mwMA\"><span class=\"mw-reflink-text\" id=\"mwMQ\"><span class=\"cite-bracket\" id=\"mwMg\">[</span>3<span class=\"cite-bracket\" id=\"mwMw\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "96",
+   "html": "<h2 id=\"RAG_and_LLM_limitations\" _item_id=\"96\">RAG and LLM limitations</h2>"
+  },
+  {
+   "itemId": "97",
+   "html": "<div class=\"mw-heading mw-heading2\" _item_id=\"97\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "98",
+   "html": "<p id=\"mwNg\" _item_id=\"98\">LLMs can provide incorrect information. For example, when Google first demonstrated its LLM tool \"<a class=\"mw-redirect\" id=\"mwNw\">Google Bard</a>\" (later re-branded to Gemini), the LLM provided incorrect information about the <a id=\"mwOA\">James Webb Space Telescope</a>. This error contributed to a $100 billion decline in <a id=\"mwOQ\">Google's</a> stock value.<sup class=\"mw-ref reference\" id=\"cite_ref-Ars_Technica-2024_4-1\"><a id=\"mwOg\"><span class=\"mw-reflink-text\" id=\"mwOw\"><span class=\"cite-bracket\" id=\"mwPA\">[</span>4<span class=\"cite-bracket\" id=\"mwPQ\">]</span></span></a></sup> RAG is used to prevent these errors, but it does not solve all the problems. For example, LLMs can generate misinformation even when pulling from factually correct sources if they misinterpret the context....</p>"
+  },
+  {
+   "itemId": "99",
+   "html": "<p id=\"mwSQ\" _item_id=\"99\">LLMs with RAG are programmed to prioritize new information. This technique has been called \"prompt stuffing.\" Without prompt stuffing, the LLM's input is generated by a user; with prompt stuffing, additional relevant context is added to this input to guide the model's response. This approach provides the LLM with key information early in the prompt, encouraging it to prioritize the supplied data over pre-existing training knowledge.<sup class=\"mw-ref reference\" id=\"cite_ref-6\"><a id=\"mwSg\"><span class=\"mw-reflink-text\" id=\"mwSw\"><span class=\"cite-bracket\" id=\"mwTA\">[</span>6<span class=\"cite-bracket\" id=\"mwTQ\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "100",
+   "html": "<h2 id=\"Process\" _item_id=\"100\">Process</h2>"
+  },
+  {
+   "itemId": "101",
+   "html": "<div class=\"mw-heading mw-heading2\" _item_id=\"101\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "102",
+   "html": "<p id=\"mwTw\" _item_id=\"102\">Retrieval-augmented generation (RAG) enhances <a id=\"mwUA\">large language models</a> (LLMs) by incorporating an <a id=\"mwUQ\">information-retrieval</a> mechanism that allows models to access and utilize additional data beyond their original training set. <i id=\"mwUg\"><a id=\"mwUw\">Ars Technica</a></i> notes that \"when new information becomes available, rather than having to retrain the model, all that's needed is to augment the model's external knowledge base with the updated information\" (\"augmentation\").<sup class=\"mw-ref reference\" id=\"cite_ref-Ars_Technica-2024_4-2\"><a id=\"mwVA\"><span class=\"mw-reflink-text\" id=\"mwVQ\"><span class=\"cite-bracket\" id=\"mwVg\">[</span>4<span class=\"cite-bracket\" id=\"mwVw\">]</span></span></a></sup> IBM states that \"in the generative phase, the LLM draws...</p>"
+  },
+  {
+   "itemId": "103",
+   "html": "<h3 id=\"RAG_key_stages\" _item_id=\"103\">RAG key stages</h3>"
+  },
+  {
+   "itemId": "104",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"104\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "105",
+   "html": "<figure class=\"mw-default-size\" id=\"mwXQ\" _item_id=\"105\"><a class=\"mw-file-description\" id=\"mwXg\"><img src=\"//upload.wikimedia.org/wikipedia/commons/thumb/1/14/RAG_diagram.svg/250px-RAG_diagram.svg.png\" class=\"mw-file-element\" id=\"mwXw\"></a></figure>"
+  },
+  {
+   "itemId": "106",
+   "html": "<figcaption id=\"mwYA\" _item_id=\"106\">Overview of RAG process, combining external documents and user input into an LLM prompt to get tailored output</figcaption>"
+  },
+  {
+   "itemId": "107",
+   "html": "<p id=\"mwYQ\" _item_id=\"107\">Typically, the data to be referenced is converted into LLM <a class=\"mw-redirect\" id=\"mwYg\">embeddings</a>, numerical representations in the form of a large vector space. RAG can be used on unstructured (usually text), semi-structured, or structured data (for example <a class=\"mw-redirect\" id=\"mwYw\">knowledge graphs</a>). These embeddings are then stored in a <a id=\"mwZA\">vector database</a> to allow for <a id=\"mwZQ\">document retrieval</a>.</p>"
+  },
+  {
+   "itemId": "108",
+   "html": "<p id=\"mwZg\" _item_id=\"108\">Given a user query, a document retriever is first called to select the most relevant documents that will be used to augment the query.<sup class=\"mw-ref reference\" id=\"cite_ref-MIT_Technology_Review-2024_2-3\"><a id=\"mwZw\"><span class=\"mw-reflink-text\" id=\"mwaA\"><span class=\"cite-bracket\" id=\"mwaQ\">[</span>2<span class=\"cite-bracket\" id=\"mwag\">]</span></span></a></sup><sup class=\"mw-ref reference\" id=\"cite_ref-BUZBP_3-3\"><a id=\"mwaw\"><span class=\"mw-reflink-text\" id=\"mwbA\"><span class=\"cite-bracket\" id=\"mwbQ\">[</span>3<span class=\"cite-bracket\" id=\"mwbg\">]</span></span></a></sup> This comparison can be done using a variety of methods, which depend in part on the type of indexing used.<sup class=\"mw-ref reference\" id=\"cite_ref-IBM-2023_1-4\"><a id=\"mwbw\"><span class=\"mw-reflink-text\" id=\"mwcA\"><span class=\"cite-bracket\" id=\"mwcQ\">[</span>1<span class=\"cite-bracket\" id=\"mwcg\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "109",
+   "html": "<p id=\"mwcw\" _item_id=\"109\">The model feeds this relevant retrieved information into the LLM via <a id=\"mwdA\">prompt engineering</a> of the user's original query. Newer implementations (<span id=\"mwdQ\">as of 2023</span><span></span><sup class=\"noprint Inline-Template Template-Fact\" id=\"mweA\"><span>[</span><i><a><span>citation needed</span></a></i><span>]</span></sup></p>"
+  },
+  {
+   "itemId": "110",
+   "html": "<p id=\"mweQ\" _item_id=\"110\">Finally, the LLM can generate output based on both the query and the retrieved documents.<sup class=\"mw-ref reference\" id=\"cite_ref-MIT_Technology_Review-2024_2-4\"><a id=\"mweg\"><span class=\"mw-reflink-text\" id=\"mwew\"><span class=\"cite-bracket\" id=\"mwfA\">[</span>2<span class=\"cite-bracket\" id=\"mwfQ\">]</span></span></a></sup><sup class=\"mw-ref reference\" id=\"cite_ref-BUZBP_3-4\"><a id=\"mwfg\"><span class=\"mw-reflink-text\" id=\"mwfw\"><span class=\"cite-bracket\" id=\"mwgA\">[</span>3<span class=\"cite-bracket\" id=\"mwgQ\">]</span></span></a></sup> Some models incorporate extra steps to improve output, such as the re-ranking of retrieved information, context selection, and <a id=\"mwgg\">fine-tuning</a>.</p>"
+  },
+  {
+   "itemId": "111",
+   "html": "<h2 id=\"Applications\" _item_id=\"111\">Applications</h2>"
+  },
+  {
+   "itemId": "112",
+   "html": "<div class=\"mw-heading mw-heading2\" _item_id=\"112\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "113",
+   "html": "<p id=\"mwhA\" _item_id=\"113\">Retrieval-augmented generation is used in applications where generated responses need to be grounded in external or frequently updated information.<sup class=\"noprint Inline-Template Template-Fact\" id=\"mwhg\"><span>[</span><i><a><span>citation needed</span></a></i><span>]</span></sup></p>"
+  },
+  {
+   "itemId": "114",
+   "html": "<p id=\"mwhw\" _item_id=\"114\">In healthcare, RAG has been studied as a way to ground large language model outputs in external medical knowledge sources, although reviews have noted continuing challenges around evaluation, ethics, and clinical reliability.<sup class=\"mw-ref reference\" id=\"cite_ref-7\"><a id=\"mwiA\"><span class=\"mw-reflink-text\" id=\"mwiQ\"><span class=\"cite-bracket\" id=\"mwig\">[</span>7<span class=\"cite-bracket\" id=\"mwiw\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "115",
+   "html": "<h2 id=\"Improvements\" _item_id=\"115\">Improvements</h2>"
+  },
+  {
+   "itemId": "116",
+   "html": "<div class=\"mw-heading mw-heading2\" _item_id=\"116\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "117",
+   "html": "<p id=\"mwjQ\" _item_id=\"117\">Improvements to the basic process above can be applied at different stages in the RAG flow. </p>"
+  },
+  {
+   "itemId": "118",
+   "html": "<h3 id=\"Encoder\" _item_id=\"118\">Encoder</h3>"
+  },
+  {
+   "itemId": "119",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"119\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "120",
+   "html": "<p id=\"mwjw\" _item_id=\"120\">These methods focus on the encoding of text as either dense or sparse vectors. <a class=\"mw-redirect\" id=\"mwkA\">Sparse vectors</a>, which encode the identity of a word, are typically <a id=\"mwkQ\">dictionary</a>-length and contain mostly zeros. <a class=\"mw-redirect\" id=\"mwkg\">Dense vectors</a>, which encode meaning, are more compact and contain fewer zeros. Various enhancements can improve the way similarities are calculated in the vector stores (databases).<sup class=\"mw-ref reference\" id=\"cite_ref-Luan-2021_8-0\"><a id=\"mwkw\"><span class=\"mw-reflink-text\" id=\"mwlA\"><span class=\"cite-bracket\" id=\"mwlQ\">[</span>8<span class=\"cite-bracket\" id=\"mwlg\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "121",
+   "html": "<ul id=\"mwlw\" _item_id=\"121\"><li id=\"mwmA\">Performance improves by optimizing how vector similarities are calculated. <a id=\"mwmQ\">Dot products</a> enhance similarity scoring, while <a class=\"mw-redirect\" id=\"mwmg\">approximate nearest neighbor</a> (ANN) searches improve retrieval efficiency over <a id=\"mwmw\">K-nearest neighbors</a> (KNN) searches.<sup class=\"mw-ref reference\" id=\"cite_ref-9\"><a id=\"mwnA\"><span class=\"mw-reflink-text\" id=\"mwnQ\"><span class=\"cite-bracket\" id=\"mwng\">[</span>9<span class=\"cite-bracket\" id=\"mwnw\">]</span></span></a></sup></li> <span>...</span><li id=\"mwqw\">Other retrieval techniques focus on improving accuracy by refining how documents are selected. Some retrieval methods combine sparse representations, such as SPLADE, with query expansion strategies to improve search accuracy and recall.<sup class=\"mw-ref reference\" id=\"cite_ref-11\"><a id=\"mwrA\"><span class=\"mw-reflink-text\" id=\"mwrQ\"><span class=\"cite-bracket\" id=\"mwrg\">[</span>11<span class=\"cite-bracket\" id=\"mwrw\">]</span></span></a></sup></li></ul>"
+  },
+  {
+   "itemId": "122",
+   "html": "<h3 id=\"Retriever-centric_methods\" _item_id=\"122\">Retriever-centric methods</h3>"
+  },
+  {
+   "itemId": "123",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"123\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "124",
+   "html": "<p id=\"mwsQ\" _item_id=\"124\">These methods aim to enhance the quality of document retrieval in vector databases:</p>"
+  },
+  {
+   "itemId": "125",
+   "html": "<ul id=\"mwsg\" _item_id=\"125\"><li id=\"mwsw\">Pre-training the retriever using the <i id=\"mwtA\">Inverse Cloze Task</i> (ICT), a technique that helps the model learn retrieval patterns by predicting masked text within documents.<sup class=\"mw-ref reference\" id=\"cite_ref-orqa_12-0\"><a id=\"mwtQ\"><span class=\"mw-reflink-text\" id=\"mwtg\"><span class=\"cite-bracket\" id=\"mwtw\">[</span>12<span class=\"cite-bracket\" id=\"mwuA\">]</span></span></a></sup></li> <span>...</span><li id=\"mwwA\">Reranking techniques can refine retriever performance by prioritizing the most relevant retrieved documents during training.<sup class=\"mw-ref reference\" id=\"cite_ref-14\"><a id=\"mwwQ\"><span class=\"mw-reflink-text\" id=\"mwwg\"><span class=\"cite-bracket\" id=\"mwww\">[</span>14<span class=\"cite-bracket\" id=\"mwxA\">]</span></span></a></sup></li></ul>"
+  },
+  {
+   "itemId": "126",
+   "html": "<h3 id=\"Language_model\" _item_id=\"126\">Language model</h3>"
+  },
+  {
+   "itemId": "127",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"127\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "128",
+   "html": "<div class=\"thumbimage noresize\" _item_id=\"128\"> <span><a class=\"mw-file-description\"><img src=\"//upload.wikimedia.org/wikipedia/commons/thumb/4/48/Language_model_in_Deepmind%27s_2021_Retro_for_RAG.svg/330px-Language_model_in_Deepmind%27s_2021_Retro_for_RAG.svg.png\" class=\"mw-file-element\"></a></span> </div>"
+  },
+  {
+   "itemId": "129",
+   "html": "<div class=\"thumbcaption\" _item_id=\"129\">Retro language model for RAG. Each Retro block consists of Attention, Chunked Cross Attention, and Feed Forward layers. Black-lettered boxes show data being changed, and blue lettering shows the algorithm performing the changes.</div>"
+  },
+  {
+   "itemId": "130",
+   "html": "<p id=\"mwxw\" _item_id=\"130\">By redesigning the language model with the retriever in mind, a 25-time smaller network can get comparable perplexity as its much larger counterparts.<sup class=\"mw-ref reference\" id=\"cite_ref-borgeaud_15-0\"><a id=\"mwyA\"><span class=\"mw-reflink-text\" id=\"mwyQ\"><span class=\"cite-bracket\" id=\"mwyg\">[</span>15<span class=\"cite-bracket\" id=\"mwyw\">]</span></span></a></sup> Because it is trained from scratch, this method (Retro) incurs the high cost of training runs that the original RAG scheme avoided. The hypothesis is that by giving domain knowledge during training, Retro needs less focus on the domain and can devote its smaller weight resources only to language semantics. The redesigned language model is show...</p>"
+  },
+  {
+   "itemId": "131",
+   "html": "<p id=\"mwzA\" _item_id=\"131\">It has been reported that Retro is not reproducible, so modifications were made to make it so. The more reproducible version is called Retro++ and includes in-context RAG.<sup class=\"mw-ref reference\" id=\"cite_ref-wang2023a_16-0\"><a id=\"mwzQ\"><span class=\"mw-reflink-text\" id=\"mwzg\"><span class=\"cite-bracket\" id=\"mwzw\">[</span>16<span class=\"cite-bracket\" id=\"mw0A\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "132",
+   "html": "<h3 id=\"Chunking\" _item_id=\"132\">Chunking</h3>"
+  },
+  {
+   "itemId": "133",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"133\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "134",
+   "html": "<div class=\"hatnote navigation-not-searchable\" id=\"mw0w\" _item_id=\"134\">See also: <a>Chunking (computing)</a></div>"
+  },
+  {
+   "itemId": "135",
+   "html": "<p id=\"mw1A\" _item_id=\"135\">Chunking involves various strategies for breaking up the data into vectors so the retriever can find details in it.</p>"
+  },
+  {
+   "itemId": "136",
+   "html": "<div class=\"thumbimage noresize\" _item_id=\"136\"> <span><a class=\"mw-file-description\"><img src=\"//upload.wikimedia.org/wikipedia/commons/thumb/0/0c/Rag-doc-styles.png/500px-Rag-doc-styles.png\" class=\"mw-file-element\"></a></span> </div>"
+  },
+  {
+   "itemId": "137",
+   "html": "<div class=\"thumbcaption\" _item_id=\"137\">Different data styles have patterns that correct chunking can take advantage of.</div>"
+  },
+  {
+   "itemId": "138",
+   "html": "<p id=\"mw1g\" _item_id=\"138\">Three types of chunking strategies are:<sup class=\"noprint Inline-Template Template-Fact\" id=\"mw2A\"><span>[</span><i><a><span>citation needed</span></a></i><span>]</span></sup></p>"
+  },
+  {
+   "itemId": "139",
+   "html": "<ul id=\"mw2Q\" _item_id=\"139\"><li id=\"mw2g\">Fixed length with overlap. This is fast and easy. Overlapping consecutive chunks helps to maintain semantic context across chunks.</li> <span>...</span><li id=\"mw3g\">File format-based chunking. Certain file types have natural chunks built in, and it's best to respect them. For example, code files are best chunked and vectorized as whole functions or classes. HTML files should leave <span id=\"mw3w\">&lt;table&gt; or base64 encoded &lt;img&gt;</span> elements intact. Similar considerations should be taken for pdf files. Libraries such as Unstructured or <a id=\"mw4A\">LangChain</a> ...</li></ul>"
+  },
+  {
+   "itemId": "140",
+   "html": "<h3 id=\"Hybrid_search\" _item_id=\"140\">Hybrid search</h3>"
+  },
+  {
+   "itemId": "141",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"141\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "142",
+   "html": "<p id=\"mw4g\" _item_id=\"142\">Sometimes vector database searches (<i id=\"mw4w\">aka</i> <a id=\"mw5A\">semantic search</a> technique) can miss key facts needed to answer a user's question. One way to mitigate this is to do a traditional text search (<i id=\"mw5Q\">aka</i> <a id=\"mw5g\">full text search</a>), combine those results to the text chunks linked to the retrieved vectors from the vector search, and feed the combined hybrid text (using effective scoring or reranking scoring) into the language model for generation.<sup class=\"mw-ref reference\" id=\"cite_ref-17\"><a id=\"mw5w\"><span class=\"mw-reflink-text\" id=\"mw6A\"><span class=\"cite-bracket\" id=\"mw6Q\">[</span>17<span class=\"cite-bracket\" id=\"mw6g\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "143",
+   "html": "<h2 id=\"Challenges\" _item_id=\"143\">Challenges</h2>"
+  },
+  {
+   "itemId": "144",
+   "html": "<div class=\"mw-heading mw-heading2\" _item_id=\"144\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "145",
+   "html": "<p id=\"mw7A\" _item_id=\"145\">RAG does not prevent hallucinations in LLMs. According to <i id=\"mw7Q\"><a id=\"mw7g\">Ars Technica</a></i>, \"It is not a direct solution because the LLM can still hallucinate around the source material in its response.\"<sup class=\"mw-ref reference\" id=\"cite_ref-Ars_Technica-2024_4-3\"><a id=\"mw7w\"><span class=\"mw-reflink-text\" id=\"mw8A\"><span class=\"cite-bracket\" id=\"mw8Q\">[</span>4<span class=\"cite-bracket\" id=\"mw8g\">]</span></span></a></sup></p>"
+  },
+  {
+   "itemId": "146",
+   "html": "<p id=\"mw8w\" _item_id=\"146\">While RAG improves the accuracy of large language models (LLMs), it does not eliminate all challenges. One limitation is that while RAG reduces the need for frequent model retraining, it does not remove it entirely. Additionally, LLMs may struggle to recognize when they lack sufficient information to provide a reliable response. Without specific training, models may generate answers even when they should indicate uncertainty. According to <a id=\"mw9A\">IBM</a>, this issue can arise when the model lacks the abilit...</p>"
+  },
+  {
+   "itemId": "147",
+   "html": "<h3 id=\"RAG_poisoning\" _item_id=\"147\">RAG poisoning</h3>"
+  },
+  {
+   "itemId": "148",
+   "html": "<div class=\"mw-heading mw-heading3\" _item_id=\"148\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "149",
+   "html": "<p id=\"mw-g\" _item_id=\"149\">RAG systems may retrieve factually correct but misleading sources, leading to errors in interpretation. In some cases, an LLM may extract statements from a source without considering its context, resulting in an incorrect conclusion. Additionally, when faced with conflicting information, RAG models may struggle to determine which source is accurate. The worst case outcome of this limitation is that the model may combine details from multiple sources producing responses that merge outdated and up...<i id=\"mw-w\"><a id=\"mw_A\"></a></i><sup class=\"mw-ref reference\" id=\"cite_ref-MIT_Technology_Review-2024_2-5\"><a id=\"mw_Q\"><span class=\"mw-reflink-text\" id=\"mw_g\"><span class=\"cite-bracket\" id=\"mw_w\"></span><span class=\"cite-bracket\" id=\"mwAQA\"></span></span></a></sup></p>"
+  },
+  {
+   "itemId": "150",
+   "html": "<h2 id=\"References\" _item_id=\"150\">References</h2>"
+  },
+  {
+   "itemId": "151",
+   "html": "<div class=\"mw-heading mw-heading2\" _item_id=\"151\"><span class=\"mw-editsection\"><span class=\"mw-editsection-bracket\">[</span><a><span>edit</span></a><span class=\"mw-editsection-bracket\">]</span></span></div>"
+  },
+  {
+   "itemId": "152",
+   "html": "<li id=\"cite_note-IBM-2023-1\" _item_id=\"152\"><span class=\"mw-cite-backlink\" id=\"mwAR0\"><a id=\"mwAR4\"><span class=\"cite-accessibility-label\">Jump up to: </span><span class=\"mw-linkback-text\" id=\"mwAR8\">1</span></a> <a id=\"mwASA\"><span class=\"mw-linkback-text\" id=\"mwASE\">2</span></a> <a id=\"mwASI\"><span class=\"mw-linkback-text\" id=\"mwASM\">3</span></a> <a id=\"mwASQ\"><span class=\"mw-linkback-text\" id=\"mwASU\">4</span></a> <a id=\"mwASY\"><span class=\"mw-linkback-text\" id=\"mwASc\">5</span></a> <a id=\"mwASg\"><span class=\"mw-linkback-text\" id=\"mwASk\">6</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-IBM-2023-1\"><cite class=\"citation web cs1\" id=\"mwASs\"><a class=\"external text\" id=\"mwASw\">\"What is retrieval-augmented generation?\"</a>. <i id=\"mwAS0\">IBM</i>. 22 August 2023<span class=\"reference-accessdate\" id=\"mwAS4\">. Retrieved <span class=\"nowrap\" id=\"mwAS8\">7 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwATA\"></span></span></li>"
+  },
+  {
+   "itemId": "153",
+   "html": "<li id=\"cite_note-MIT_Technology_Review-2024-2\" _item_id=\"153\"><span class=\"mw-cite-backlink\" id=\"mwATE\"><a id=\"mwATI\"><span class=\"cite-accessibility-label\">Jump up to: </span><span class=\"mw-linkback-text\" id=\"mwATM\">1</span></a> <a id=\"mwATQ\"><span class=\"mw-linkback-text\" id=\"mwATU\">2</span></a> <a id=\"mwATY\"><span class=\"mw-linkback-text\" id=\"mwATc\">3</span></a> <a id=\"mwATg\"><span class=\"mw-linkback-text\" id=\"mwATk\">4</span></a> <a id=\"mwATo\"><span class=\"mw-linkback-text\" id=\"mwATs\">5</span></a> <a id=\"mwATw\"><span class=\"mw-linkback-text\" id=\"mwAT0\">6</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-MIT_Technology_Review-2024-2\"><cite class=\"citation web cs1\" id=\"mwAT8\"><a class=\"external text\" id=\"mwAUA\">\"Why Google's AI Overviews gets things wrong\"</a>. <i id=\"mwAUE\">MIT Technology Review</i>. 31 May 2024<span class=\"reference-accessdate\" id=\"mwAUI\">. Retrieved <span class=\"nowrap\" id=\"mwAUM\">7 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAUQ\"></span></span></li>"
+  },
+  {
+   "itemId": "154",
+   "html": "<li id=\"cite_note-BUZBP-3\" _item_id=\"154\"><span class=\"mw-cite-backlink\" id=\"mwAUU\"><a id=\"mwAUY\"><span class=\"cite-accessibility-label\">Jump up to: </span><span class=\"mw-linkback-text\" id=\"mwAUc\">1</span></a> <a id=\"mwAUg\"><span class=\"mw-linkback-text\" id=\"mwAUk\">2</span></a> <a id=\"mwAUo\"><span class=\"mw-linkback-text\" id=\"mwAUs\">3</span></a> <a id=\"mwAUw\"><span class=\"mw-linkback-text\" id=\"mwAU0\">4</span></a> <a id=\"mwAU4\"><span class=\"mw-linkback-text\" id=\"mwAU8\">5</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-BUZBP-3\"><cite class=\"citation journal cs1\" id=\"CITEREFLewisPerezPiktusPetroni2020\">Lewis, Patrick; Perez, Ethan; Piktus, Aleksandra; Petroni, Fabio; Karpukhin, Vladimir; Goyal, Naman; Küttler, Heinrich; Lewis, Mike; Yih, Wen-tau; Rocktäschel, Tim; Riedel, Sebastian; Kiela, Douwe (2020). <a class=\"external text\" id=\"mwAVE\">\"Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks\"</a>. <i id=\"mwAVI\">Advances in Neural Information Processing Systems</i>. <b id=\"mwAVM\">33</b>. Curran Associates, Inc.: <span class=\"nowrap\" id=\"mwAVQ\">9459–</span>9474. <a class=\"mw-redirect\" id=\"mwAVU\">arXiv</a>:<span class=\"id-lock-free\" id=\"mwAVY\"><a class=\"external text\" id=\"mwAVc\">2005.11401</a></span>.</cite><span class=\"Z3988\" id=\"mwAVg\"></span></span></li>"
+  },
+  {
+   "itemId": "155",
+   "html": "<li id=\"cite_note-Ars_Technica-2024-4\" _item_id=\"155\"><span class=\"mw-cite-backlink\" id=\"mwAVk\"><a id=\"mwAVo\"><span class=\"cite-accessibility-label\">Jump up to: </span><span class=\"mw-linkback-text\" id=\"mwAVs\">1</span></a> <a id=\"mwAVw\"><span class=\"mw-linkback-text\" id=\"mwAV0\">2</span></a> <a id=\"mwAV4\"><span class=\"mw-linkback-text\" id=\"mwAV8\">3</span></a> <a id=\"mwAWA\"><span class=\"mw-linkback-text\" id=\"mwAWE\">4</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-Ars_Technica-2024-4\"><cite class=\"citation web cs1\" id=\"mwAWM\"><a class=\"external text\" id=\"mwAWQ\">\"Can a technology called RAG keep AI models from making stuff up?\"</a>. <i id=\"mwAWU\">Ars Technica</i>. 6 June 2024<span class=\"reference-accessdate\" id=\"mwAWY\">. Retrieved <span class=\"nowrap\" id=\"mwAWc\">7 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAWg\"></span></span></li>"
+  },
+  {
+   "itemId": "156",
+   "html": "<li id=\"cite_note-5\" _item_id=\"156\"><span class=\"mw-cite-backlink\" id=\"mwAWk\"><a id=\"mwAWo\"><span class=\"mw-linkback-text\" id=\"mwAWs\">↑</span></a></span> </li>"
+  },
+  {
+   "itemId": "157",
+   "html": "<cite class=\"citation book cs1\" id=\"CITEREFGoetz2015\" _item_id=\"157\">Goetz, Rebecca Anne (2015). \"Barack Hussein Obama: America's First Muslim President?\". In Sutton, Matthew Avery; Dochuk, Darren (eds.).<i id=\"mwAW0\">Faith in the New Millennium: The Future of Religion and American Politics</i>. Oxford University Press. <a class=\"mw-redirect\" id=\"mwAW4\">doi</a>:<a class=\"external text\" id=\"mwAW8\">10.1093/acprof:oso/9780199372690.003.0006</a>. <a class=\"mw-redirect\" id=\"mwAXA\">ISBN</a><span id=\"mwAXE\"> </span></cite>"
+  },
+  {
+   "itemId": "158",
+   "html": "<bdi id=\"mwAXM\" _item_id=\"158\">9780199372737</bdi>"
+  },
+  {
+   "itemId": "159",
+   "html": "<cite class=\"citation book cs1\" id=\"CITEREFGoetz2015\" _item_id=\"159\">.</cite>"
+  },
+  {
+   "itemId": "160",
+   "html": "<li id=\"cite_note-6\" _item_id=\"160\"><span class=\"mw-cite-backlink\" id=\"mwAXU\"><a id=\"mwAXY\"><span class=\"mw-linkback-text\" id=\"mwAXc\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-6\"><cite class=\"citation web cs1\" id=\"mwAXk\"><a class=\"external text\" id=\"mwAXo\">\"Mitigating LLM hallucinations in text summarisation\"</a>. <i id=\"mwAXs\">BBC</i>. 20 June 2024<span class=\"reference-accessdate\" id=\"mwAXw\">. Retrieved <span class=\"nowrap\" id=\"mwAX0\">7 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAX4\"></span></span></li>"
+  },
+  {
+   "itemId": "161",
+   "html": "<li id=\"cite_note-7\" _item_id=\"161\"><span class=\"mw-cite-backlink\" id=\"mwAX8\"><a id=\"mwAYA\"><span class=\"mw-linkback-text\" id=\"mwAYE\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-7\"><cite class=\"citation journal cs1\" id=\"CITEREFAmugongoMascheroniBrooksDoering2025\">Amugongo, Lameck Mbangula; Mascheroni, Pietro; Brooks, Steven; Doering, Stefan; Seidel, Jan (2025-06-11). <a class=\"external text\" id=\"mwAYM\">\"Retrieval augmented generation for large language models in healthcare: A systematic review\"</a>. <i id=\"mwAYQ\">PLOS Digital Health</i>. <b id=\"mwAYU\">4</b> (6) e0000877. <a class=\"mw-redirect\" id=\"mwAYY\">doi</a>:<span class=\"id-lock-free\" id=\"mwAYc\"><a class=\"external text\" id=\"mwAYg\">10.1371/journal.pdig.0000877</a></span>. <a class=\"mw-redirect\" id=\"mwAYk\">PMC</a><span id=\"mwAYo\"> </span><span class=\"id-lock-free\" id=\"mwAYs\"><a class=\"external text\" id=\"mwAYw\">12157099</a></span>.</cite><span class=\"Z3988\" id=\"mwAY0\"></span></span></li>"
+  },
+  {
+   "itemId": "162",
+   "html": "<li id=\"cite_note-Luan-2021-8\" _item_id=\"162\"><span class=\"mw-cite-backlink\" id=\"mwAY4\"><a id=\"mwAY8\"><span class=\"cite-accessibility-label\">Jump up to: </span><span class=\"mw-linkback-text\" id=\"mwAZA\">1</span></a> <a id=\"mwAZE\"><span class=\"mw-linkback-text\" id=\"mwAZI\">2</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-Luan-2021-8\"><cite class=\"citation journal cs1\" id=\"CITEREFLuanEisensteinToutanovaCollins2021\">Luan, Yi; Eisenstein, Jacob; Toutanova, Kristina; Collins, Michael (26 April 2021). <a class=\"external text\" id=\"mwAZQ\">\"Sparse, Dense, and Attentional Representations for Text Retrieval\"</a>. <i id=\"mwAZU\">Transactions of the Association for Computational Linguistics</i>. <b id=\"mwAZY\">9</b>: <span class=\"nowrap\" id=\"mwAZc\">329–</span>345. <a class=\"mw-redirect\" id=\"mwAZg\">arXiv</a>:<span class=\"id-lock-free\" id=\"mwAZk\"><a class=\"external text\" id=\"mwAZo\">2005.00181</a></span>. <a class=\"mw-redirect\" id=\"mwAZs\">doi</a>:<a class=\"external text\" id=\"mwAZw\">10.1162/tacl_a_00369</a><span class=\"reference-accessdate\" id=\"mwAZ0\">. Retrieved <span class=\"nowrap\" id=\"mwAZ4\">15 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAZ8\"></span></span></li>"
+  },
+  {
+   "itemId": "163",
+   "html": "<li id=\"cite_note-9\" _item_id=\"163\"><span class=\"mw-cite-backlink\" id=\"mwAaA\"><a id=\"mwAaE\"><span class=\"mw-linkback-text\" id=\"mwAaI\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-9\"><cite class=\"citation web cs1\" id=\"mwAaQ\"><a class=\"external text\" id=\"mwAaU\">\"Information retrieval\"</a>. <i id=\"mwAaY\">Microsoft</i>. 10 January 2025<span class=\"reference-accessdate\" id=\"mwAac\">. Retrieved <span class=\"nowrap\" id=\"mwAag\">15 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAak\"></span></span></li>"
+  },
+  {
+   "itemId": "164",
+   "html": "<li id=\"cite_note-colbert-10\" _item_id=\"164\"><span class=\"mw-cite-backlink\" id=\"mwAao\"><a id=\"mwAas\"><span class=\"mw-linkback-text\" id=\"mwAaw\">↑</span></a></span> </li>"
+  },
+  {
+   "itemId": "165",
+   "html": "<cite class=\"citation book cs1\" id=\"CITEREFKhattabZaharia2020\" _item_id=\"165\">Khattab, Omar; Zaharia, Matei (2020).<span class=\"id-lock-subscription\" id=\"mwAa4\"><a class=\"external text\" id=\"mwAa8\">\"ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT\"</a></span>. <i id=\"mwAbA\">Proceedings of the 43rd International ACM SIGIR Conference on Research and Development in Information Retrieval</i>. pp.<span id=\"mwAbE\"> </span><span class=\"nowrap\" id=\"mwAbI\">39–</span>48. <a class=\"mw-redirect\" id=\"mwAbM\">doi</a>:<a class=\"external text\" id=\"mwAbQ\">10.1145/3397271.3401075</a>. <a class=\"mw-redirect\" id=\"mwAbU\">ISBN</a><span id=\"mwAbY\"> </span></cite>"
+  },
+  {
+   "itemId": "166",
+   "html": "<bdi id=\"mwAbg\" _item_id=\"166\">978-1-4503-8016-4</bdi>"
+  },
+  {
+   "itemId": "167",
+   "html": "<cite class=\"citation book cs1\" id=\"CITEREFKhattabZaharia2020\" _item_id=\"167\">.</cite>"
+  },
+  {
+   "itemId": "168",
+   "html": "<li id=\"cite_note-11\" _item_id=\"168\"><span class=\"mw-cite-backlink\" id=\"mwAbo\"><a id=\"mwAbs\"><span class=\"mw-linkback-text\" id=\"mwAbw\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-11\"><cite class=\"citation web cs1\" id=\"CITEREFWangConroyMolinoYang2024\">Wang, Yup; Conroy, John M.; Molino, Neil; Yang, Julia; Green, Mike (2024). <a class=\"external text\" id=\"mwAb4\">\"Laboratory for Analytic Sciences in TREC 2024 Retrieval Augmented Generation Track\"</a>. <i id=\"mwAb8\">NIST TREC 2024</i><span class=\"reference-accessdate\" id=\"mwAcA\">. Retrieved <span class=\"nowrap\" id=\"mwAcE\">15 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAcI\"></span></span></li>"
+  },
+  {
+   "itemId": "169",
+   "html": "<li id=\"cite_note-orqa-12\" _item_id=\"169\"><span class=\"mw-cite-backlink\" id=\"mwAcM\"><a id=\"mwAcQ\"><span class=\"mw-linkback-text\" id=\"mwAcU\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-orqa-12\"><cite class=\"citation web cs1\" id=\"CITEREFLeeChangToutanova2019\">Lee, Kenton; Chang, Ming-Wei; Toutanova, Kristina (2019). <a class=\"external text\" id=\"mwAcc\">\"<span class=\"cs1-kern-left\" id=\"mwAcg\"></span>\"Latent Retrieval for Weakly Supervised Open Domain Question Answering\"<span class=\"cs1-kern-right\" id=\"mwAck\"></span>\"</a> <span class=\"cs1-format\" id=\"mwAco\">(PDF)</span>.</cite><span class=\"Z3988\" id=\"mwAcs\"></span></span></li>"
+  },
+  {
+   "itemId": "170",
+   "html": "<li id=\"cite_note-13\" _item_id=\"170\"><span class=\"mw-cite-backlink\" id=\"mwAcw\"><a id=\"mwAc0\"><span class=\"mw-linkback-text\" id=\"mwAc4\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-13\"><cite class=\"citation book cs1\" id=\"CITEREFShiMinYasunagaSeo2024\">Shi, Weijia; Min, Sewon; Yasunaga, Michihiro; Seo, Minjoon; James, Rich; Lewis, Mike; Zettlemoyer, Luke; Yih, Wen-tau (June 2024). <a class=\"external text\" id=\"mwAdA\">\"REPLUG: Retrieval-Augmented Black-Box Language Models\"</a>. <i id=\"mwAdE\">Proceedings of the 2024 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers)</i>. pp.<span id=\"mwAdI\"> </span><span class=\"nowrap\" id=\"mwAdM\">8371–</span>8384. <a class=\"mw-redirect\" id=\"mwAdQ\">arXiv</a>:<span class=\"id-lock-free\" id=\"mwAdU\"><a class=\"external text\" id=\"mwAdY\">2301.12652</a></span>. <a class=\"mw-redirect\" id=\"mwAdc\">doi</a>:<a class=\"external text\" id=\"mwAdg\">10.18653/v1/2024.naacl-long.463</a><span class=\"reference-accessdate\" id=\"mwAdk\">. Retrieved <span class=\"nowrap\" id=\"mwAdo\">16 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAds\"></span></span></li>"
+  },
+  {
+   "itemId": "171",
+   "html": "<li id=\"cite_note-14\" _item_id=\"171\"><span class=\"mw-cite-backlink\" id=\"mwAdw\"><a id=\"mwAd0\"><span class=\"mw-linkback-text\" id=\"mwAd4\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-14\"><cite class=\"citation journal cs1\" id=\"CITEREFRamLevineDalmedigosMuhlgay2023\">Ram, Ori; Levine, Yoav; Dalmedigos, Itay; Muhlgay, Dor; Shashua, Amnon; Leyton-Brown, Kevin; Shoham, Yoav (2023). <a class=\"external text\" id=\"mwAeA\">\"In-Context Retrieval-Augmented Language Models\"</a>. <i id=\"mwAeE\">Transactions of the Association for Computational Linguistics</i>. <b id=\"mwAeI\">11</b>: <span class=\"nowrap\" id=\"mwAeM\">1316–</span>1331. <a class=\"mw-redirect\" id=\"mwAeQ\">arXiv</a>:<span class=\"id-lock-free\" id=\"mwAeU\"><a class=\"external text\" id=\"mwAeY\">2302.00083</a></span>. <a class=\"mw-redirect\" id=\"mwAec\">doi</a>:<a class=\"external text\" id=\"mwAeg\">10.1162/tacl_a_00605</a><span class=\"reference-accessdate\" id=\"mwAek\">. Retrieved <span class=\"nowrap\" id=\"mwAeo\">16 March</span> 2025</span>.</cite><span class=\"Z3988\" id=\"mwAes\"></span></span></li>"
+  },
+  {
+   "itemId": "172",
+   "html": "<li id=\"cite_note-borgeaud-15\" _item_id=\"172\"><span class=\"mw-cite-backlink\" id=\"mwAew\"><a id=\"mwAe0\"><span class=\"mw-linkback-text\" id=\"mwAe4\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-borgeaud-15\"><cite class=\"citation web cs1\" id=\"CITEREFBorgeaudMensch2021\">Borgeaud, Sebastian; Mensch, Arthur (2021). <a class=\"external text\" id=\"mwAfA\">\"Improving language models by retrieving from trillions of tokens\"</a> <span class=\"cs1-format\" id=\"mwAfE\">(PDF)</span>.</cite><span class=\"Z3988\" id=\"mwAfI\"></span></span></li>"
+  },
+  {
+   "itemId": "173",
+   "html": "<li id=\"cite_note-wang2023a-16\" _item_id=\"173\"><span class=\"mw-cite-backlink\" id=\"mwAfM\"><a id=\"mwAfQ\"><span class=\"mw-linkback-text\" id=\"mwAfU\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-wang2023a-16\"><cite class=\"citation book cs1\" id=\"CITEREFWangPingXuMcAfee2023\">Wang, Boxin; Ping, Wei; Xu, Peng; McAfee, Lawrence; Liu, Zihan; Shoeybi, Mohammad; Dong, Yi; Kuchaiev, Oleksii; Li, Bo; Xiao, Chaowei; Anandkumar, Anima; Catanzaro, Bryan (2023). <a class=\"external text\" id=\"mwAfc\">\"Shall We Pretrain Autoregressive Language Models with Retrieval? A Comprehensive Study\"</a>. <i id=\"mwAfg\">Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing</i>. pp.<span id=\"mwAfk\"> </span><span class=\"nowrap\" id=\"mwAfo\">7763–</span>7786. <a class=\"mw-redirect\" id=\"mwAfs\">doi</a>:<span class=\"id-lock-free\" id=\"mwAfw\"><a class=\"external text\" id=\"mwAf0\">10.18653/v1/2023.emnlp-main.482</a></span>.</cite><span class=\"Z3988\" id=\"mwAf4\"></span></span></li>"
+  },
+  {
+   "itemId": "174",
+   "html": "<li id=\"cite_note-17\" _item_id=\"174\"><span class=\"mw-cite-backlink\" id=\"mwAf8\"><a id=\"mwAgA\"><span class=\"mw-linkback-text\" id=\"mwAgE\">↑</span></a></span> <span class=\"mw-reference-text reference-text\" id=\"mw-reference-text-cite_note-17\"><cite class=\"citation journal cs1\" id=\"CITEREFBruchGaiIngber2023\">Bruch, Sebastian; Gai, Siyu; Ingber, Amir (2023). \"An Analysis of Fusion Functions for Hybrid Retrieval\". <i id=\"mwAgM\">ACM Transactions on Information Systems</i>. <b id=\"mwAgQ\">42</b> (1): <span class=\"nowrap\" id=\"mwAgU\">1–</span>35. <a class=\"mw-redirect\" id=\"mwAgY\">arXiv</a>:<span class=\"id-lock-free\" id=\"mwAgc\"><a class=\"external text\" id=\"mwAgg\">2210.11934</a></span>. <a class=\"mw-redirect\" id=\"mwAgk\">doi</a>:<a class=\"external text\" id=\"mwAgo\">10.1145/3596512</a>.</cite><span class=\"Z3988\" id=\"mwAgs\"></span></span></li>"
+  },
+  {
+   "itemId": "175",
+   "html": "<th class=\"navbox-title\" _item_id=\"175\"><button class=\"mw-collapsible-toggle mw-collapsible-toggle-default mw-collapsible-toggle-collapsed\"><span class=\"mw-collapsible-text\">show</span></button><span class=\"mw-empty-elt\"></span></th>"
+  },
+  {
+   "itemId": "176",
+   "html": "<ul _item_id=\"176\"><li class=\"nv-view\"><a><abbr>v</abbr></a></li><span>...</span><li class=\"nv-edit\"><a><abbr>e</abbr></a></li></ul>"
+  },
+  {
+   "itemId": "177",
+   "html": "<div id=\"Generative_AI6448\" _item_id=\"177\"><a>Generative AI</a></div>"
+  },
+  {
+   "itemId": "178",
+   "html": "<th class=\"navbox-group\" _item_id=\"178\">Concepts</th>"
+  },
+  {
+   "itemId": "179",
+   "html": "<ul _item_id=\"179\"><li><a>Autoencoder</a></li> <span>...</span><li><a>Word embedding</a></li></ul>"
+  },
+  {
+   "itemId": "180",
+   "html": "<th class=\"navbox-group\" _item_id=\"180\">Models</th>"
+  },
+  {
+   "itemId": "181",
+   "html": "<th class=\"navbox-group\" _item_id=\"181\">Text</th>"
+  },
+  {
+   "itemId": "182",
+   "html": "<li _item_id=\"182\"><a class=\"mw-redirect\">Amazon Nova</a></li>"
+  },
+  {
+   "itemId": "183",
+   "html": "<li _item_id=\"183\"><a>Character.ai</a></li>"
+  },
+  {
+   "itemId": "184",
+   "html": "<li _item_id=\"184\"><a class=\"mw-redirect\">Claude</a></li>"
+  },
+  {
+   "itemId": "185",
+   "html": "<li _item_id=\"185\"><a>Command</a></li>"
+  },
+  {
+   "itemId": "186",
+   "html": "<li _item_id=\"186\"><a>DeepSeek</a></li>"
+  },
+  {
+   "itemId": "187",
+   "html": "<li _item_id=\"187\"><a>Doubao</a></li>"
+  },
+  {
+   "itemId": "188",
+   "html": "<li _item_id=\"188\"><a>Ernie</a></li>"
+  },
+  {
+   "itemId": "189",
+   "html": "<li _item_id=\"189\"><a>EXAONE</a></li>"
+  },
+  {
+   "itemId": "190",
+   "html": "<li _item_id=\"190\"><a>Gemini</a></li>"
+  },
+  {
+   "itemId": "191",
+   "html": "<li _item_id=\"191\"><a>Gemma</a></li>"
+  },
+  {
+   "itemId": "192",
+   "html": "<li _item_id=\"192\"><a>GLM</a></li>"
+  },
+  {
+   "itemId": "193",
+   "html": "<li _item_id=\"193\"><a class=\"mw-redirect\">GPT</a> </li>"
+  },
+  {
+   "itemId": "194",
+   "html": "<ul _item_id=\"194\"><li><a>ChatGPT</a></li></ul>"
+  },
+  {
+   "itemId": "195",
+   "html": "<li _item_id=\"195\"><a>Grok</a></li>"
+  },
+  {
+   "itemId": "196",
+   "html": "<li _item_id=\"196\"><a>IBM Granite</a></li>"
+  },
+  {
+   "itemId": "197",
+   "html": "<li _item_id=\"197\"><a>Kimi</a></li>"
+  },
+  {
+   "itemId": "198",
+   "html": "<li _item_id=\"198\"><a>MAI</a></li>"
+  },
+  {
+   "itemId": "199",
+   "html": "<li _item_id=\"199\"><a>Microsoft Copilot</a></li>"
+  },
+  {
+   "itemId": "200",
+   "html": "<li _item_id=\"200\"><a>Mistral</a></li>"
+  },
+  {
+   "itemId": "201",
+   "html": "<li _item_id=\"201\"><a class=\"mw-redirect\">MiniMax</a></li>"
+  },
+  {
+   "itemId": "202",
+   "html": "<li _item_id=\"202\"><a>Muse Spark</a></li>"
+  },
+  {
+   "itemId": "203",
+   "html": "<li _item_id=\"203\"><a>Nemotron</a></li>"
+  },
+  {
+   "itemId": "204",
+   "html": "<li _item_id=\"204\"><a>Perplexity</a></li>"
+  },
+  {
+   "itemId": "205",
+   "html": "<li _item_id=\"205\"><a>Solar</a></li>"
+  },
+  {
+   "itemId": "206",
+   "html": "<li _item_id=\"206\"><a>Poe</a></li>"
+  },
+  {
+   "itemId": "207",
+   "html": "<li _item_id=\"207\"><a>HKChat</a></li>"
+  },
+  {
+   "itemId": "208",
+   "html": "<li _item_id=\"208\"><a>Qwen</a></li>"
+  },
+  {
+   "itemId": "209",
+   "html": "<li _item_id=\"209\"><a>Tencent Hy</a></li>"
+  },
+  {
+   "itemId": "210",
+   "html": "<li _item_id=\"210\"><a>Xiaomi MiMo</a></li>"
+  },
+  {
+   "itemId": "211",
+   "html": "<li _item_id=\"211\"><a>You.com</a></li>"
+  },
+  {
+   "itemId": "212",
+   "html": "<th class=\"navbox-group\" _item_id=\"212\"><a>Image</a></th>"
+  },
+  {
+   "itemId": "213",
+   "html": "<ul _item_id=\"213\"><li><a>Adobe Firefly</a></li> <span>...</span><li><a>Stable Diffusion</a></li></ul>"
+  },
+  {
+   "itemId": "214",
+   "html": "<th class=\"navbox-group\" _item_id=\"214\"><a>Video</a></th>"
+  },
+  {
+   "itemId": "215",
+   "html": "<li _item_id=\"215\"><a>Dream Machine</a></li>"
+  },
+  {
+   "itemId": "216",
+   "html": "<li _item_id=\"216\"><a>Genie</a> </li>"
+  },
+  {
+   "itemId": "217",
+   "html": "<ul _item_id=\"217\"><li><a>world model</a></li></ul>"
+  },
+  {
+   "itemId": "218",
+   "html": "<li _item_id=\"218\"><a class=\"mw-redirect\">Hailuo AI</a></li>"
+  },
+  {
+   "itemId": "219",
+   "html": "<li _item_id=\"219\"><a>Kling AI</a></li>"
+  },
+  {
+   "itemId": "220",
+   "html": "<li _item_id=\"220\"><a>LTX</a></li>"
+  },
+  {
+   "itemId": "221",
+   "html": "<li _item_id=\"221\"><a>Runway Gen</a></li>"
+  },
+  {
+   "itemId": "222",
+   "html": "<li _item_id=\"222\"><a>Seedance</a></li>"
+  },
+  {
+   "itemId": "223",
+   "html": "<li _item_id=\"223\"><a>Sora</a></li>"
+  },
+  {
+   "itemId": "224",
+   "html": "<li _item_id=\"224\"><a>Veo</a></li>"
+  },
+  {
+   "itemId": "225",
+   "html": "<th class=\"navbox-group\" _item_id=\"225\"><a>Speech</a></th>"
+  },
+  {
+   "itemId": "226",
+   "html": "<ul _item_id=\"226\"><li><a>15.ai</a></li> <span>...</span><li><a class=\"mw-redirect\">MiniMax Speech</a></li></ul>"
+  },
+  {
+   "itemId": "227",
+   "html": "<th class=\"navbox-group\" _item_id=\"227\"><a>Music</a></th>"
+  },
+  {
+   "itemId": "228",
+   "html": "<ul _item_id=\"228\"><li><a>Eleven Music</a></li> <span>...</span><li><a>Udio</a></li></ul>"
+  },
+  {
+   "itemId": "229",
+   "html": "<th class=\"navbox-group\" _item_id=\"229\">Products</th>"
+  },
+  {
+   "itemId": "230",
+   "html": "<th class=\"navbox-group\" _item_id=\"230\"><a>Coding tools</a></th>"
+  },
+  {
+   "itemId": "231",
+   "html": "<ul _item_id=\"231\"><li><a class=\"mw-redirect\">Claude Code</a></li> <span>...</span><li><a>Replit</a></li></ul>"
+  },
+  {
+   "itemId": "232",
+   "html": "<th class=\"navbox-group\" _item_id=\"232\"><a>Agents</a></th>"
+  },
+  {
+   "itemId": "233",
+   "html": "<ul _item_id=\"233\"><li><a>AutoGPT</a></li> <span>...</span><li><a>OpenClaw</a></li></ul>"
+  },
+  {
+   "itemId": "234",
+   "html": "<th class=\"navbox-group\" _item_id=\"234\">Applications</th>"
+  },
+  {
+   "itemId": "235",
+   "html": "<li _item_id=\"235\"><a>Deepfake</a> </li>"
+  },
+  {
+   "itemId": "236",
+   "html": "<ul _item_id=\"236\"><li><a>audio</a></li></ul>"
+  },
+  {
+   "itemId": "237",
+   "html": "<li _item_id=\"237\"><a>Slop</a> </li>"
+  },
+  {
+   "itemId": "238",
+   "html": "<ul _item_id=\"238\"><li><a>slopaganda</a></li></ul>"
+  },
+  {
+   "itemId": "239",
+   "html": "<th class=\"navbox-group\" _item_id=\"239\"><a>Companies</a></th>"
+  },
+  {
+   "itemId": "240",
+   "html": "<li _item_id=\"240\"><a>Aleph Alpha</a></li>"
+  },
+  {
+   "itemId": "241",
+   "html": "<li _item_id=\"241\"><a>Anthropic</a></li>"
+  },
+  {
+   "itemId": "242",
+   "html": "<li _item_id=\"242\"><a>Anysphere</a></li>"
+  },
+  {
+   "itemId": "243",
+   "html": "<li _item_id=\"243\"><a>Baichuan</a></li>"
+  },
+  {
+   "itemId": "244",
+   "html": "<li _item_id=\"244\"><a>Canva</a></li>"
+  },
+  {
+   "itemId": "245",
+   "html": "<li _item_id=\"245\"><a>Cognition AI</a></li>"
+  },
+  {
+   "itemId": "246",
+   "html": "<li _item_id=\"246\"><a>Cohere</a></li>"
+  },
+  {
+   "itemId": "247",
+   "html": "<li _item_id=\"247\"><a>Contextual AI</a></li>"
+  },
+  {
+   "itemId": "248",
+   "html": "<li _item_id=\"248\"><a>DeepSeek</a></li>"
+  },
+  {
+   "itemId": "249",
+   "html": "<li _item_id=\"249\"><a>DeepL</a></li>"
+  },
+  {
+   "itemId": "250",
+   "html": "<li _item_id=\"250\"><a>EleutherAI</a></li>"
+  },
+  {
+   "itemId": "251",
+   "html": "<li _item_id=\"251\"><a>ElevenLabs</a></li>"
+  },
+  {
+   "itemId": "252",
+   "html": "<li _item_id=\"252\"><a>Google</a> </li>"
+  },
+  {
+   "itemId": "253",
+   "html": "<ul _item_id=\"253\"><li><a>AI</a></li> <li><a>DeepMind</a></li></ul>"
+  },
+  {
+   "itemId": "254",
+   "html": "<li _item_id=\"254\"><a>HeyGen</a></li>"
+  },
+  {
+   "itemId": "255",
+   "html": "<li _item_id=\"255\"><a>Hugging Face</a></li>"
+  },
+  {
+   "itemId": "256",
+   "html": "<li _item_id=\"256\"><a>Inflection AI</a></li>"
+  },
+  {
+   "itemId": "257",
+   "html": "<li _item_id=\"257\"><a>Kuaishou</a></li>"
+  },
+  {
+   "itemId": "258",
+   "html": "<li _item_id=\"258\"><a>Lightricks</a></li>"
+  },
+  {
+   "itemId": "259",
+   "html": "<li _item_id=\"259\"><a>Lovable</a></li>"
+  },
+  {
+   "itemId": "260",
+   "html": "<li _item_id=\"260\"><a class=\"mw-redirect\">Luma Labs</a></li>"
+  },
+  {
+   "itemId": "261",
+   "html": "<li _item_id=\"261\"><a>Meta AI</a></li>"
+  },
+  {
+   "itemId": "262",
+   "html": "<li _item_id=\"262\"><a>Meta Superintelligence Labs</a></li>"
+  },
+  {
+   "itemId": "263",
+   "html": "<li _item_id=\"263\"><a>Microsoft AI</a></li>"
+  },
+  {
+   "itemId": "264",
+   "html": "<li _item_id=\"264\"><a>MiniMax</a></li>"
+  },
+  {
+   "itemId": "265",
+   "html": "<li _item_id=\"265\"><a>Mistral AI</a></li>"
+  },
+  {
+   "itemId": "266",
+   "html": "<li _item_id=\"266\"><a>Moonshot AI</a></li>"
+  },
+  {
+   "itemId": "267",
+   "html": "<li _item_id=\"267\"><a>OpenAI</a></li>"
+  },
+  {
+   "itemId": "268",
+   "html": "<li _item_id=\"268\"><a>Perplexity AI</a></li>"
+  },
+  {
+   "itemId": "269",
+   "html": "<li _item_id=\"269\"><a>Runway</a></li>"
+  },
+  {
+   "itemId": "270",
+   "html": "<li _item_id=\"270\"><a>Safe Superintelligence</a></li>"
+  },
+  {
+   "itemId": "271",
+   "html": "<li _item_id=\"271\"><a>Sakana AI</a></li>"
+  },
+  {
+   "itemId": "272",
+   "html": "<li _item_id=\"272\"><a>Salesforce</a></li>"
+  },
+  {
+   "itemId": "273",
+   "html": "<li _item_id=\"273\"><a>Scale AI</a></li>"
+  },
+  {
+   "itemId": "274",
+   "html": "<li _item_id=\"274\"><a>SoundHound AI</a></li>"
+  },
+  {
+   "itemId": "275",
+   "html": "<li _item_id=\"275\"><a>SpaceXAI</a></li>"
+  },
+  {
+   "itemId": "276",
+   "html": "<li _item_id=\"276\"><a>Stability AI</a></li>"
+  },
+  {
+   "itemId": "277",
+   "html": "<li _item_id=\"277\"><a>StepFun</a></li>"
+  },
+  {
+   "itemId": "278",
+   "html": "<li _item_id=\"278\"><a>Synthesia</a></li>"
+  },
+  {
+   "itemId": "279",
+   "html": "<li _item_id=\"279\"><a>Thinking Machines Lab</a></li>"
+  },
+  {
+   "itemId": "280",
+   "html": "<li _item_id=\"280\"><a>Upstage</a></li>"
+  },
+  {
+   "itemId": "281",
+   "html": "<li _item_id=\"281\"><a>Xiaomi</a></li>"
+  },
+  {
+   "itemId": "282",
+   "html": "<li _item_id=\"282\"><a>Z.ai</a></li>"
+  },
+  {
+   "itemId": "283",
+   "html": "<th class=\"navbox-group\" _item_id=\"283\"><a>Controversies</a></th>"
+  },
+  {
+   "itemId": "284",
+   "html": "<li _item_id=\"284\"><a>Generative AI pornography</a> </li>"
+  },
+  {
+   "itemId": "285",
+   "html": "<li _item_id=\"285\"><a>Deepfake pornography</a> </li>"
+  },
+  {
+   "itemId": "286",
+   "html": "<ul _item_id=\"286\"><li><a>on Grok</a></li> <li><a>of Taylor Swift</a></li></ul>"
+  },
+  {
+   "itemId": "287",
+   "html": "<li _item_id=\"287\"><a>Pause Giant AI Experiments</a></li>"
+  },
+  {
+   "itemId": "288",
+   "html": "<li _item_id=\"288\"><a>Removal of Sam Altman from OpenAI</a></li>"
+  },
+  {
+   "itemId": "289",
+   "html": "<li _item_id=\"289\"><a>Statement on AI Risk</a></li>"
+  },
+  {
+   "itemId": "290",
+   "html": "<li _item_id=\"290\"><a>Tay (chatbot)</a></li>"
+  },
+  {
+   "itemId": "291",
+   "html": "<li _item_id=\"291\"><i><a>Théâtre D'opéra Spatial</a></i></li>"
+  },
+  {
+   "itemId": "292",
+   "html": "<li _item_id=\"292\"><a>Voiceverse NFT plagiarism</a></li>"
+  },
+  {
+   "itemId": "293",
+   "html": "<ul _item_id=\"293\"><li><span class=\"noviewer\"><span><img src=\"//upload.wikimedia.org/wikipedia/en/thumb/9/96/Symbol_category_class.svg/20px-Symbol_category_class.svg.png\" class=\"mw-file-element\"></span></span> <a>Category</a></li> <li><span class=\"noviewer\"><a class=\"mw-file-description\"><img src=\"//upload.wikimedia.org/wikipedia/en/thumb/4/4a/Commons-logo.svg/20px-Commons-logo.svg.png\" class=\"mw-file-element\"></a></span> <a class=\"extiw\">Commons</a></li></ul>"
+  },
+  {
+   "itemId": "294",
+   "html": "<th class=\"navbox-title\" _item_id=\"294\"><button class=\"mw-collapsible-toggle mw-collapsible-toggle-default mw-collapsible-toggle-collapsed\"><span class=\"mw-collapsible-text\">show</span></button><span class=\"mw-empty-elt\"></span></th>"
+  },
+  {
+   "itemId": "295",
+   "html": "<ul _item_id=\"295\"><li class=\"nv-view\"><a><abbr>v</abbr></a></li><span>...</span><li class=\"nv-edit\"><a><abbr>e</abbr></a></li></ul>"
+  },
+  {
+   "itemId": "296",
+   "html": "<div id=\"Artificial_intelligence_(AI)10508\" _item_id=\"296\"><a>Artificial intelligence</a> (AI)</div>"
+  },
+  {
+   "itemId": "297",
+   "html": "<li _item_id=\"297\"><a>History</a> </li>"
+  },
+  {
+   "itemId": "298",
+   "html": "<ul _item_id=\"298\"><li><a>timeline</a></li></ul>"
+  },
+  {
+   "itemId": "299",
+   "html": "<li _item_id=\"299\"><a>Glossary</a></li>"
+  },
+  {
+   "itemId": "300",
+   "html": "<li _item_id=\"300\"><a>Companies</a></li>"
+  },
+  {
+   "itemId": "301",
+   "html": "<li _item_id=\"301\"><a>Projects</a></li>"
+  },
+  {
+   "itemId": "302",
+   "html": "<li _item_id=\"302\"><a>List of open-source AI software</a></li>"
+  },
+  {
+   "itemId": "303",
+   "html": "<th class=\"navbox-group\" _item_id=\"303\">Concepts</th>"
+  },
+  {
+   "itemId": "304",
+   "html": "<li _item_id=\"304\"><a>Automated reasoning</a></li>"
+  },
+  {
+   "itemId": "305",
+   "html": "<li _item_id=\"305\"><a>Automated planning</a></li>"
+  },
+  {
+   "itemId": "306",
+   "html": "<li _item_id=\"306\"><a>Constraint satisfaction</a></li>"
+  },
+  {
+   "itemId": "307",
+   "html": "<li _item_id=\"307\"><a>Knowledge representation</a></li>"
+  },
+  {
+   "itemId": "308",
+   "html": "<li _item_id=\"308\"><a>Parameter</a> </li>"
+  },
+  {
+   "itemId": "309",
+   "html": "<ul _item_id=\"309\"><li><a>Hyperparameter</a></li></ul>"
+  },
+  {
+   "itemId": "310",
+   "html": "<li _item_id=\"310\"><a>Loss functions</a></li>"
+  },
+  {
+   "itemId": "311",
+   "html": "<li _item_id=\"311\"><a>Regression</a> </li>"
+  },
+  {
+   "itemId": "312",
+   "html": "<ul _item_id=\"312\"><li><a>Bias–variance tradeoff</a></li> <span>...</span><li><a>Overfitting</a></li></ul>"
+  },
+  {
+   "itemId": "313",
+   "html": "<li _item_id=\"313\"><a>Clustering</a></li>"
+  },
+  {
+   "itemId": "314",
+   "html": "<li _item_id=\"314\"><a>Gradient descent</a> </li>"
+  },
+  {
+   "itemId": "315",
+   "html": "<ul _item_id=\"315\"><li><a>SGD</a></li> <span>...</span><li><a>Conjugate gradient method</a></li></ul>"
+  },
+  {
+   "itemId": "316",
+   "html": "<li _item_id=\"316\"><a>Backpropagation</a></li>"
+  },
+  {
+   "itemId": "317",
+   "html": "<li _item_id=\"317\"><a>Attention</a></li>"
+  },
+  {
+   "itemId": "318",
+   "html": "<li _item_id=\"318\"><a>Convolution</a></li>"
+  },
+  {
+   "itemId": "319",
+   "html": "<li _item_id=\"319\"><a>Normalization</a> </li>"
+  },
+  {
+   "itemId": "320",
+   "html": "<ul _item_id=\"320\"><li><a>Batchnorm</a></li></ul>"
+  },
+  {
+   "itemId": "321",
+   "html": "<li _item_id=\"321\"><a>Activation</a> </li>"
+  },
+  {
+   "itemId": "322",
+   "html": "<ul _item_id=\"322\"><li><a>Softmax</a></li> <span>...</span><li><a class=\"mw-redirect\">Rectifier</a></li></ul>"
+  },
+  {
+   "itemId": "323",
+   "html": "<li _item_id=\"323\"><a>Gating</a></li>"
+  },
+  {
+   "itemId": "324",
+   "html": "<li _item_id=\"324\"><a>Weight initialization</a></li>"
+  },
+  {
+   "itemId": "325",
+   "html": "<li _item_id=\"325\"><a>Regularization</a></li>"
+  },
+  {
+   "itemId": "326",
+   "html": "<li _item_id=\"326\"><a>Datasets</a> </li>"
+  },
+  {
+   "itemId": "327",
+   "html": "<ul _item_id=\"327\"><li><a>Augmentation</a></li></ul>"
+  },
+  {
+   "itemId": "328",
+   "html": "<li _item_id=\"328\"><a>Prompt engineering</a></li>"
+  },
+  {
+   "itemId": "329",
+   "html": "<li _item_id=\"329\"><a>Reinforcement learning</a> </li>"
+  },
+  {
+   "itemId": "330",
+   "html": "<ul _item_id=\"330\"><li><a>Q-learning</a></li> <span>...</span><li><a>Policy gradient</a></li></ul>"
+  },
+  {
+   "itemId": "331",
+   "html": "<li _item_id=\"331\"><a>Diffusion</a></li>"
+  },
+  {
+   "itemId": "332",
+   "html": "<li _item_id=\"332\"><a>Latent diffusion model</a></li>"
+  },
+  {
+   "itemId": "333",
+   "html": "<li _item_id=\"333\"><a>Autoregression</a></li>"
+  },
+  {
+   "itemId": "334",
+   "html": "<li _item_id=\"334\"><a>Adversary</a></li>"
+  },
+  {
+   "itemId": "335",
+   "html": "<li _item_id=\"335\"><a class=\"mw-selflink selflink\">RAG</a></li>"
+  },
+  {
+   "itemId": "336",
+   "html": "<li _item_id=\"336\"><a>Uncanny valley</a></li>"
+  },
+  {
+   "itemId": "337",
+   "html": "<li _item_id=\"337\"><a>LLM post-training</a></li>"
+  },
+  {
+   "itemId": "338",
+   "html": "<li _item_id=\"338\"><a>RLHF</a></li>"
+  },
+  {
+   "itemId": "339",
+   "html": "<li _item_id=\"339\"><a>Self-supervised learning</a></li>"
+  },
+  {
+   "itemId": "340",
+   "html": "<li _item_id=\"340\"><a class=\"mw-redirect\">Reflection</a></li>"
+  },
+  {
+   "itemId": "341",
+   "html": "<li _item_id=\"341\"><a>Recursive self-improvement</a></li>"
+  },
+  {
+   "itemId": "342",
+   "html": "<li _item_id=\"342\"><a>Hallucination</a></li>"
+  },
+  {
+   "itemId": "343",
+   "html": "<li _item_id=\"343\"><a>Word embedding</a></li>"
+  },
+  {
+   "itemId": "344",
+   "html": "<li _item_id=\"344\"><a>Vibe coding</a></li>"
+  },
+  {
+   "itemId": "345",
+   "html": "<li _item_id=\"345\"><a>Symbolic AI</a></li>"
+  },
+  {
+   "itemId": "346",
+   "html": "<li _item_id=\"346\"><a>Neuro-symbolic AI</a></li>"
+  },
+  {
+   "itemId": "347",
+   "html": "<th class=\"navbox-group\" _item_id=\"347\"><a>Applications</a></th>"
+  },
+  {
+   "itemId": "348",
+   "html": "<li _item_id=\"348\"><a>Automated theorem proving</a></li>"
+  },
+  {
+   "itemId": "349",
+   "html": "<li _item_id=\"349\"><a>General game playing</a></li>"
+  },
+  {
+   "itemId": "350",
+   "html": "<li _item_id=\"350\"><a>Machine learning</a> </li>"
+  },
+  {
+   "itemId": "351",
+   "html": "<ul _item_id=\"351\"><li><a>In-context learning</a></li></ul>"
+  },
+  {
+   "itemId": "352",
+   "html": "<li _item_id=\"352\"><a>Artificial neural network</a> </li>"
+  },
+  {
+   "itemId": "353",
+   "html": "<ul _item_id=\"353\"><li><a>Deep learning</a></li></ul>"
+  },
+  {
+   "itemId": "354",
+   "html": "<li _item_id=\"354\"><a>Language model</a> </li>"
+  },
+  {
+   "itemId": "355",
+   "html": "<ul _item_id=\"355\"><li><a>Large</a></li> <span>...</span><li><a>Reasoning</a></li></ul>"
+  },
+  {
+   "itemId": "356",
+   "html": "<li _item_id=\"356\"><a>Model Context Protocol</a></li>"
+  },
+  {
+   "itemId": "357",
+   "html": "<li _item_id=\"357\"><a>Intelligent agent</a> </li>"
+  },
+  {
+   "itemId": "358",
+   "html": "<ul _item_id=\"358\"><li><a>AI agent</a></li></ul>"
+  },
+  {
+   "itemId": "359",
+   "html": "<li _item_id=\"359\"><a>Artificial human companion</a></li>"
+  },
+  {
+   "itemId": "360",
+   "html": "<li _item_id=\"360\"><a>Humanity's Last Exam</a></li>"
+  },
+  {
+   "itemId": "361",
+   "html": "<li _item_id=\"361\"><a>Lethal autonomous weapons (LAWs)</a></li>"
+  },
+  {
+   "itemId": "362",
+   "html": "<li _item_id=\"362\"><a>Generative AI</a></li>"
+  },
+  {
+   "itemId": "363",
+   "html": "<li _item_id=\"363\"><a>Weak AI</a></li>"
+  },
+  {
+   "itemId": "364",
+   "html": "<li _item_id=\"364\">Hypothetical</li>"
+  },
+  {
+   "itemId": "365",
+   "html": "<ul _item_id=\"365\"><li><a>Artificial general intelligence (AGI)</a></li> <li><a class=\"mw-redirect\">Artificial superintelligence (ASI)</a></li></ul>"
+  },
+  {
+   "itemId": "366",
+   "html": "<li _item_id=\"366\"><a>Agent2Agent protocol</a></li>"
+  },
+  {
+   "itemId": "367",
+   "html": "<th class=\"navbox-group\" _item_id=\"367\">Implementations</th>"
+  },
+  {
+   "itemId": "368",
+   "html": "<th class=\"navbox-group\" _item_id=\"368\">Audio–visual</th>"
+  },
+  {
+   "itemId": "369",
+   "html": "<li _item_id=\"369\"><a>AlexNet</a></li>"
+  },
+  {
+   "itemId": "370",
+   "html": "<li _item_id=\"370\"><a>WaveNet</a></li>"
+  },
+  {
+   "itemId": "371",
+   "html": "<li _item_id=\"371\"><a>Human image synthesis</a></li>"
+  },
+  {
+   "itemId": "372",
+   "html": "<li _item_id=\"372\"><a>HWR</a></li>"
+  },
+  {
+   "itemId": "373",
+   "html": "<li _item_id=\"373\"><a>OCR</a></li>"
+  },
+  {
+   "itemId": "374",
+   "html": "<li _item_id=\"374\"><a>Computer vision</a></li>"
+  },
+  {
+   "itemId": "375",
+   "html": "<li _item_id=\"375\"><a>Speech synthesis</a> </li>"
+  },
+  {
+   "itemId": "376",
+   "html": "<ul _item_id=\"376\"><li><a>15.ai</a></li> <li><a>ElevenLabs</a></li></ul>"
+  },
+  {
+   "itemId": "377",
+   "html": "<li _item_id=\"377\"><a>Speech recognition</a> </li>"
+  },
+  {
+   "itemId": "378",
+   "html": "<ul _item_id=\"378\"><li><a>Whisper</a></li></ul>"
+  },
+  {
+   "itemId": "379",
+   "html": "<li _item_id=\"379\"><a>Facial recognition</a></li>"
+  },
+  {
+   "itemId": "380",
+   "html": "<li _item_id=\"380\"><a>AlphaFold</a></li>"
+  },
+  {
+   "itemId": "381",
+   "html": "<li _item_id=\"381\"><a>Text-to-image models</a> </li>"
+  },
+  {
+   "itemId": "382",
+   "html": "<ul _item_id=\"382\"><li><a class=\"mw-redirect\">Aurora</a></li> <span>...</span><li><a>Stable Diffusion</a></li></ul>"
+  },
+  {
+   "itemId": "383",
+   "html": "<li _item_id=\"383\"><a>Text-to-video models</a> </li>"
+  },
+  {
+   "itemId": "384",
+   "html": "<ul _item_id=\"384\"><li><a>Dream Machine</a></li> <span>...</span><li><a>Veo</a></li></ul>"
+  },
+  {
+   "itemId": "385",
+   "html": "<li _item_id=\"385\"><a>Music generation</a> </li>"
+  },
+  {
+   "itemId": "386",
+   "html": "<ul _item_id=\"386\"><li><a>Riffusion</a></li> <span>...</span><li><a>Udio</a></li></ul>"
+  },
+  {
+   "itemId": "387",
+   "html": "<li _item_id=\"387\"><a>World models</a> </li>"
+  },
+  {
+   "itemId": "388",
+   "html": "<ul _item_id=\"388\"><li><a>Genie</a></li> <li><a><i>Oasis</i></a></li></ul>"
+  },
+  {
+   "itemId": "389",
+   "html": "<th class=\"navbox-group\" _item_id=\"389\">Text</th>"
+  },
+  {
+   "itemId": "390",
+   "html": "<li _item_id=\"390\"><a>List of large language models</a></li>"
+  },
+  {
+   "itemId": "391",
+   "html": "<li _item_id=\"391\"><a>Project Debater</a></li>"
+  },
+  {
+   "itemId": "392",
+   "html": "<li _item_id=\"392\"><a>IBM Watson</a> </li>"
+  },
+  {
+   "itemId": "393",
+   "html": "<ul _item_id=\"393\"><li><a>IBM Watsonx</a></li></ul>"
+  },
+  {
+   "itemId": "394",
+   "html": "<th class=\"navbox-group\" _item_id=\"394\">Decisional</th>"
+  },
+  {
+   "itemId": "395",
+   "html": "<li _item_id=\"395\"><a>AlphaGo</a></li>"
+  },
+  {
+   "itemId": "396",
+   "html": "<li _item_id=\"396\"><a>AlphaZero</a></li>"
+  },
+  {
+   "itemId": "397",
+   "html": "<li _item_id=\"397\"><a>OpenAI Five</a></li>"
+  },
+  {
+   "itemId": "398",
+   "html": "<li _item_id=\"398\"><a>Self-driving car</a></li>"
+  },
+  {
+   "itemId": "399",
+   "html": "<li _item_id=\"399\"><a>MuZero</a></li>"
+  },
+  {
+   "itemId": "400",
+   "html": "<li _item_id=\"400\"><a>Action selection</a> </li>"
+  },
+  {
+   "itemId": "401",
+   "html": "<ul _item_id=\"401\"><li><a>AutoGPT</a></li></ul>"
+  },
+  {
+   "itemId": "402",
+   "html": "<li _item_id=\"402\"><a>Robot control</a></li>"
+  },
+  {
+   "itemId": "403",
+   "html": "<th class=\"navbox-group\" _item_id=\"403\"><a>Reasoning systems</a></th>"
+  },
+  {
+   "itemId": "404",
+   "html": "<ul _item_id=\"404\"><li><a>Deductive classifiers</a></li> <span>...</span><li><a>Rule-based systems</a></li></ul>"
+  },
+  {
+   "itemId": "405",
+   "html": "<th class=\"navbox-group\" _item_id=\"405\"><a>Cognitive architectures</a></th>"
+  },
+  {
+   "itemId": "406",
+   "html": "<ul _item_id=\"406\"><li><a>ACT-R</a></li> <span>...</span><li><a>OpenCog</a></li></ul>"
+  },
+  {
+   "itemId": "407",
+   "html": "<th class=\"navbox-group\" _item_id=\"407\"><a>Knowledge bases</a></th>"
+  },
+  {
+   "itemId": "408",
+   "html": "<ul _item_id=\"408\"><li><a class=\"mw-redirect\">ConceptNet</a></li> <span>...</span><li><a>YAGO</a></li></ul>"
+  },
+  {
+   "itemId": "409",
+   "html": "<th class=\"navbox-group\" _item_id=\"409\">People</th>"
+  },
+  {
+   "itemId": "410",
+   "html": "<ul _item_id=\"410\"><li><a>Alan Turing</a></li> <span>...</span><li><a>François Chollet</a></li></ul>"
+  },
+  {
+   "itemId": "411",
+   "html": "<th class=\"navbox-group\" _item_id=\"411\">Neural network architectures</th>"
+  },
+  {
+   "itemId": "412",
+   "html": "<li _item_id=\"412\"><a>Neural Turing machine</a></li>"
+  },
+  {
+   "itemId": "413",
+   "html": "<li _item_id=\"413\"><a>Differentiable neural computer</a></li>"
+  },
+  {
+   "itemId": "414",
+   "html": "<li _item_id=\"414\"><a>Transformer</a> </li>"
+  },
+  {
+   "itemId": "415",
+   "html": "<ul _item_id=\"415\"><li><a>Vision transformer (ViT)</a></li></ul>"
+  },
+  {
+   "itemId": "416",
+   "html": "<li _item_id=\"416\"><a>Recurrent neural network (RNN)</a></li>"
+  },
+  {
+   "itemId": "417",
+   "html": "<li _item_id=\"417\"><a>Long short-term memory (LSTM)</a></li>"
+  },
+  {
+   "itemId": "418",
+   "html": "<li _item_id=\"418\"><a>Gated recurrent unit (GRU)</a></li>"
+  },
+  {
+   "itemId": "419",
+   "html": "<li _item_id=\"419\"><a>Echo state network</a></li>"
+  },
+  {
+   "itemId": "420",
+   "html": "<li _item_id=\"420\"><a>Multilayer perceptron (MLP)</a></li>"
+  },
+  {
+   "itemId": "421",
+   "html": "<li _item_id=\"421\"><a>Convolutional neural network (CNN)</a></li>"
+  },
+  {
+   "itemId": "422",
+   "html": "<li _item_id=\"422\"><a>Residual neural network (RNN)</a></li>"
+  },
+  {
+   "itemId": "423",
+   "html": "<li _item_id=\"423\"><a>Highway network</a></li>"
+  },
+  {
+   "itemId": "424",
+   "html": "<li _item_id=\"424\"><a>Mamba</a></li>"
+  },
+  {
+   "itemId": "425",
+   "html": "<li _item_id=\"425\"><a>Autoencoder</a></li>"
+  },
+  {
+   "itemId": "426",
+   "html": "<li _item_id=\"426\"><a>Variational autoencoder (VAE)</a></li>"
+  },
+  {
+   "itemId": "427",
+   "html": "<li _item_id=\"427\"><a>Generative adversarial network (GAN)</a></li>"
+  },
+  {
+   "itemId": "428",
+   "html": "<li _item_id=\"428\"><a>Graph neural network (GNN)</a></li>"
+  },
+  {
+   "itemId": "429",
+   "html": "<th class=\"navbox-group\" _item_id=\"429\">Political</th>"
+  },
+  {
+   "itemId": "430",
+   "html": "<li _item_id=\"430\"><a>AI Cold War</a></li>"
+  },
+  {
+   "itemId": "431",
+   "html": "<li _item_id=\"431\"><a>AI in government</a></li>"
+  },
+  {
+   "itemId": "432",
+   "html": "<li _item_id=\"432\"><a>AI safety</a> (<a>Alignment</a>)</li>"
+  },
+  {
+   "itemId": "433",
+   "html": "<li _item_id=\"433\"><a>AI takeover</a></li>"
+  },
+  {
+   "itemId": "434",
+   "html": "<li _item_id=\"434\"><a>Elections</a></li>"
+  },
+  {
+   "itemId": "435",
+   "html": "<li _item_id=\"435\"><a>Ethics of AI</a></li>"
+  },
+  {
+   "itemId": "436",
+   "html": "<li _item_id=\"436\">EU <a>AI Act</a></li>"
+  },
+  {
+   "itemId": "437",
+   "html": "<li _item_id=\"437\"><a>Nationalism</a></li>"
+  },
+  {
+   "itemId": "438",
+   "html": "<li _item_id=\"438\"><a>Precautionary principle</a></li>"
+  },
+  {
+   "itemId": "439",
+   "html": "<li _item_id=\"439\"><a>Regulation of AI</a> </li>"
+  },
+  {
+   "itemId": "440",
+   "html": "<ul _item_id=\"440\"><li><a>US</a></li></ul>"
+  },
+  {
+   "itemId": "441",
+   "html": "<li _item_id=\"441\"><a>Virtual politician</a></li>"
+  },
+  {
+   "itemId": "442",
+   "html": "<li _item_id=\"442\"><a>Propaganda</a></li>"
+  },
+  {
+   "itemId": "443",
+   "html": "<th class=\"navbox-group\" _item_id=\"443\">Social and economic</th>"
+  },
+  {
+   "itemId": "444",
+   "html": "<li _item_id=\"444\"><a>AI boom</a></li>"
+  },
+  {
+   "itemId": "445",
+   "html": "<li _item_id=\"445\"><a>AI bubble</a></li>"
+  },
+  {
+   "itemId": "446",
+   "html": "<li _item_id=\"446\"><a>AI data center</a></li>"
+  },
+  {
+   "itemId": "447",
+   "html": "<li _item_id=\"447\"><a>AI effect</a></li>"
+  },
+  {
+   "itemId": "448",
+   "html": "<li _item_id=\"448\"><a>AI infrastructure</a></li>"
+  },
+  {
+   "itemId": "449",
+   "html": "<li _item_id=\"449\"><a>AI literacy</a></li>"
+  },
+  {
+   "itemId": "450",
+   "html": "<li _item_id=\"450\"><a>AI slop</a></li>"
+  },
+  {
+   "itemId": "451",
+   "html": "<li _item_id=\"451\"><a>AI winter</a></li>"
+  },
+  {
+   "itemId": "452",
+   "html": "<li _item_id=\"452\"><a>Anthropomorphism</a></li>"
+  },
+  {
+   "itemId": "453",
+   "html": "<li _item_id=\"453\"><a>Arms race</a></li>"
+  },
+  {
+   "itemId": "454",
+   "html": "<li _item_id=\"454\"><a>Competition</a></li>"
+  },
+  {
+   "itemId": "455",
+   "html": "<li _item_id=\"455\"><a class=\"mw-redirect\">Environmental impact</a></li>"
+  },
+  {
+   "itemId": "456",
+   "html": "<li _item_id=\"456\"><a>Explainable AI</a></li>"
+  },
+  {
+   "itemId": "457",
+   "html": "<li _item_id=\"457\"><a>Generative engine optimization</a></li>"
+  },
+  {
+   "itemId": "458",
+   "html": "<li _item_id=\"458\"><a>In architecture</a></li>"
+  },
+  {
+   "itemId": "459",
+   "html": "<li _item_id=\"459\"><a>In education</a></li>"
+  },
+  {
+   "itemId": "460",
+   "html": "<li _item_id=\"460\"><a>In fiction</a></li>"
+  },
+  {
+   "itemId": "461",
+   "html": "<li _item_id=\"461\"><a>In healthcare</a> </li>"
+  },
+  {
+   "itemId": "462",
+   "html": "<ul _item_id=\"462\"><li><a>Chatbot psychosis</a></li></ul>"
+  },
+  {
+   "itemId": "463",
+   "html": "<li _item_id=\"463\"><a>In marketing</a></li>"
+  },
+  {
+   "itemId": "464",
+   "html": "<li _item_id=\"464\"><a>In video games</a></li>"
+  },
+  {
+   "itemId": "465",
+   "html": "<li _item_id=\"465\"><a class=\"mw-redirect\">In visual art</a></li>"
+  },
+  {
+   "itemId": "466",
+   "html": "<li _item_id=\"466\"><a>Military applications</a> </li>"
+  },
+  {
+   "itemId": "467",
+   "html": "<ul _item_id=\"467\"><li><a>AI warfare</a></li></ul>"
+  },
+  {
+   "itemId": "468",
+   "html": "<li _item_id=\"468\"><a>Workplace impact</a></li>"
+  },
+  {
+   "itemId": "469",
+   "html": "<ul _item_id=\"469\"><li><span class=\"noviewer\"><span><img src=\"//upload.wikimedia.org/wikipedia/en/thumb/9/96/Symbol_category_class.svg/20px-Symbol_category_class.svg.png\" class=\"mw-file-element\"></span></span> <a>Category</a></li></ul>"
+  },
+  {
+   "itemId": "470",
+   "html": "<noscript _item_id=\"470\"><img src=\"https://en.wikipedia.org/wiki/Special:CentralAutoLogin/start?useformat=desktop&amp;type=1x1&amp;usesul3=1\"></noscript>"
+  },
+  {
+   "itemId": "471",
+   "html": "<div class=\"printfooter\" _item_id=\"471\">Retrieved from \"<a>https://en.wikipedia.org/w/index.php?title=Retrieval-augmented_generation&amp;oldid=1363937430</a>\"</div>"
+  },
+  {
+   "itemId": "472",
+   "html": "<div class=\"mw-normal-catlinks\" id=\"mw-normal-catlinks\" _item_id=\"472\"><a>Categories</a>: </div>"
+  },
+  {
+   "itemId": "473",
+   "html": "<ul _item_id=\"473\"><li><a>Large language models</a></li><span>...</span><li><a>Generative AI</a></li></ul>"
+  },
+  {
+   "itemId": "474",
+   "html": "<div class=\"mw-hidden-catlinks mw-hidden-cats-hidden\" id=\"mw-hidden-catlinks\" _item_id=\"474\">Hidden categories:</div>"
+  },
+  {
+   "itemId": "475",
+   "html": "<ul _item_id=\"475\"><li><a>Articles with short description</a></li><span>...</span><li><a>Articles with unsourced statements from August 2025</a></li></ul>"
+  },
+  {
+   "itemId": "476",
+   "html": "<ul class=\"mw-portlet mw-portlet-footer-info\" id=\"footer-info\" _item_id=\"476\"> <li id=\"footer-info-lastmod\"> This page was last edited on 13 July 2026, at 12:09<span class=\"anonymous-show\"> (UTC)</span>.</li> <span>...</span><li id=\"footer-info-copyright\">Text is available under the <a>Creative Commons Attribution-ShareAlike 4.0 License</a>; additional terms may apply. By using this site, you agree to the <a class=\"extiw\">Terms of Use</a> and <a class=\"extiw\">Privacy Policy</a>. Wikipedia® is a registered trademark of the <a class=\"external text\">Wikimedia Foundation, Inc.</a>, a non-profit organization.</li> </ul>"
+  },
+  {
+   "itemId": "477",
+   "html": "<ul class=\"mw-portlet mw-portlet-footer-places\" id=\"footer-places\" _item_id=\"477\"> <li id=\"footer-places-privacy\"><a>Privacy policy</a></li> <span>...</span><li id=\"footer-places-mobileview\"><a class=\"noprint stopMobileRedirectToggle\">Mobile view</a></li> </ul>"
+  },
+  {
+   "itemId": "478",
+   "html": "<source _item_id=\"478\"><img src=\"/static/images/footer/wikimedia.svg\" alt=\"Wikimedia Foundation\"></source>"
+  },
+  {
+   "itemId": "479",
+   "html": "<source _item_id=\"479\"><img src=\"/w/resources/assets/mediawiki_compact.svg\" alt=\"Powered by MediaWiki\"></source>"
+  },
+  {
+   "itemId": "480",
+   "html": "<div class=\"vector-sticky-header-icon-start vector-button-flush-left\" _item_id=\"480\"> <button class=\"cdx-button cdx-button--weight-quiet cdx-button--icon-only vector-sticky-header-search-toggle\"><span class=\"vector-icon mw-ui-icon-search mw-ui-icon-wikimedia-search cdx-button__icon\"></span> <span>Search</span> </button> </div>"
+  },
+  {
+   "itemId": "481",
+   "html": "<form class=\"cdx-search-input cdx-search-input--has-end-button\" id=\"vector-sticky-search-form\" _item_id=\"481\"><button class=\"cdx-button cdx-search-input__end-button\">Search</button> </form>"
+  },
+  {
+   "itemId": "482",
+   "html": "<div class=\"vector-sticky-header-context-bar-primary\" _item_id=\"482\"><span><span class=\"mw-page-title-main\">Retrieval-augmented generation</span></span></div>"
+  },
+  {
+   "itemId": "483",
+   "html": "<div class=\"vector-sticky-header-buttons\" _item_id=\"483\"> <button class=\"cdx-button cdx-button--weight-quiet mw-interlanguage-selector\" id=\"p-lang-btn-sticky-header\"><span class=\"vector-icon mw-ui-icon-wikimedia-language mw-ui-icon-wikimedia-wikimedia-language cdx-button__icon\"></span> <span>21 languages</span> </button> <a class=\"cdx-button cdx-button--fake-button cdx-button--fake-button--enabled cdx-button--weight-quiet cdx-button--action-progressive\" id=\"ca-addsection-sticky-header\"><span class=\"vector-icon mw-ui-icon-speechBubbleAdd-progressive mw-ui-icon-wikimedia-speechBubbleAdd-progressive cdx-button__icon\"></span> <span>Add topic</span> </a> </div></body></html>"
+  }
+ ],
+ "labels": [
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other"
+ ]
+}

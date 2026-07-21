@@ -1,0 +1,975 @@
+{
+ "page": "chicago_permits",
+ "blockCount": 193,
+ "mainCount": 87,
+ "otherCount": 106,
+ "blocks": [
+  {
+   "itemId": "1",
+   "html": "<div class=\"skip-links\" _item_id=\"1\"> <a class=\"skip-link\"> Skip to main content </a> </div>"
+  },
+  {
+   "itemId": "2",
+   "html": "<div class=\"header-content\" _item_id=\"2\"> <a class=\"logo\"><img src=\"/api/assets/73F1665C-0FE6-4183-8AD1-E91DB8EFAFA4?7CB02402-8E06-48B0-8C9A-3890182D58C7.png\" alt=\"Chicago Data Portal\" class=\"logo-image\"><span class=\"site-name\">Chicago Data Portal</span></a> </div>"
+  },
+  {
+   "itemId": "3",
+   "html": "<h2 class=\"menu-header-title\" _item_id=\"3\">Menu</h2>"
+  },
+  {
+   "itemId": "4",
+   "html": "<div class=\"mobile-menu\" id=\"mobile-menu\" _item_id=\"4\"><button class=\"menu-toggle menu-close-btn\"> <span class=\"socrata-icon-close-2\"><span class=\"aria-not-displayed\">Close</span></span> </button> </div>"
+  },
+  {
+   "itemId": "5",
+   "html": "<div class=\"site-chrome-nav-links\" _item_id=\"5\"><a class=\"site-chrome-nav-link mobile-button noselect dropdown-focus-target\">Browse</a><a class=\"site-chrome-nav-link mobile-button noselect dropdown-focus-target\">Tutorial</a><a class=\"site-chrome-nav-link mobile-button noselect dropdown-focus-target\">Feedback</a></div>"
+  },
+  {
+   "itemId": "6",
+   "html": "<div class=\"mobile-user-actions noselect\" _item_id=\"6\"> <a class=\"sign-in-toggle site-chrome-mobile-btn\">Sign In</a> </div>"
+  },
+  {
+   "itemId": "7",
+   "html": "<form class=\"common--autocomplete--components--SearchBox--form\" _item_id=\"7\"><label class=\"common--autocomplete--components--SearchBox--aria-not-displayed\">Search</label><input class=\"autocomplete-input common--autocomplete--components--SearchBox--search-box-static-mobile\" id=\"autocomplete-search-input-24554\"></form>"
+  },
+  {
+   "itemId": "8",
+   "html": "<h1 class=\"asset-name forge-typography--subheading4\" id=\"dslp-main-heading\" _item_id=\"8\">Building Permits</h1>"
+  },
+  {
+   "itemId": "9",
+   "html": "<forge-tab class=\"primer-tabs first-tab\" _item_id=\"9\">About</forge-tab>"
+  },
+  {
+   "itemId": "10",
+   "html": "<forge-tab class=\"primer-tabs\" _item_id=\"10\">Data</forge-tab>"
+  },
+  {
+   "itemId": "11",
+   "html": "<forge-tab class=\"primer-tabs\" _item_id=\"11\">Related Content</forge-tab>"
+  },
+  {
+   "itemId": "12",
+   "html": "<forge-button class=\"action-button\" id=\"action-button\" _item_id=\"12\"><span class=\"action-button-text\">Actions</span></forge-button>"
+  },
+  {
+   "itemId": "13",
+   "html": "<h2 class=\"h2 modal-header-title\" _item_id=\"13\">Access this Dataset via OData</h2>"
+  },
+  {
+   "itemId": "14",
+   "html": "<p class=\"small\" _item_id=\"14\">Use OData to open the dataset in tools like Excel or Tableau. This provides a direct connection to the data that can be refreshed on-demand within the connected application.</p>"
+  },
+  {
+   "itemId": "15",
+   "html": "<p class=\"small tableau\" _item_id=\"15\">Tableau users should select the OData v2 endpoint option.</p>"
+  },
+  {
+   "itemId": "16",
+   "html": "<section class=\"modal-content\" _item_id=\"16\"><a class=\"btn btn-default btn-sm documentation-link\"><span class=\"icon-copy-document\"></span>Socrata OData Documentation</a></section>"
+  },
+  {
+   "itemId": "17",
+   "html": "<h6 class=\"title\" id=\"endpoint\" _item_id=\"17\">OData Endpoint</h6>"
+  },
+  {
+   "itemId": "18",
+   "html": "<div class=\"dropdown-placeholder\" _item_id=\"18\"><span class=\"placeholder\">OData V4</span></div>"
+  },
+  {
+   "itemId": "19",
+   "html": "<div class=\"picklist-option\" id=\"picklist-https://data.cityofchicago.org/OData.svc/ydr8-5enu-0\" _item_id=\"19\"><span class=\"picklist-title\"><span class=\"picklist-item\">OData V2</span></span></div>"
+  },
+  {
+   "itemId": "20",
+   "html": "<div class=\"picklist-option\" id=\"picklist-https://data.cityofchicago.org/api/odata/v4/ydr8-5enu?$format=json-1\" _item_id=\"20\"><span class=\"picklist-title\"><span class=\"picklist-item\">OData V4</span></span></div>"
+  },
+  {
+   "itemId": "21",
+   "html": "<span class=\"input-group\" _item_id=\"21\"><span class=\"input-group-btn\"><button class=\"btn btn-primary btn-sm copy\">Copy</button></span></span>"
+  },
+  {
+   "itemId": "22",
+   "html": "<footer class=\"modal-actions\" _item_id=\"22\"><button class=\"btn btn-default btn-sm\">Done</button></footer>"
+  },
+  {
+   "itemId": "23",
+   "html": "<div _item_id=\"23\">Export</div>"
+  },
+  {
+   "itemId": "24",
+   "html": "<h2 class=\"asset-name\" _item_id=\"24\">Building Permits</h2>"
+  },
+  {
+   "itemId": "25",
+   "html": "<forge-badge class=\"landing-badge\" _item_id=\"25\"><span>Buildings</span></forge-badge>"
+  },
+  {
+   "itemId": "26",
+   "html": "<div _item_id=\"26\">This dataset includes information about building permits issued by the City of Chicago from 2006 to the present, excluding permits that have been voided or revoked after issuance. Most types of permits are issued subject to payment of the applicable permit fee. Work under a permit may not begin until the applicable permit fee is paid.<br></div>"
+  },
+  {
+   "itemId": "27",
+   "html": "<div _item_id=\"27\">For more information about building permits, see<a>http://www.chicago.gov/permit</a>.</div>"
+  },
+  {
+   "itemId": "28",
+   "html": "<forge-button class=\"collapse-button\" _item_id=\"28\">Read more</forge-button>"
+  },
+  {
+   "itemId": "29",
+   "html": "<div class=\"metadata-top-row\" _item_id=\"29\"><span class=\"metadata-label\">Last Updated</span><span class=\"date\">July 21, 2026</span></div>"
+  },
+  {
+   "itemId": "30",
+   "html": "<div class=\"metadata-row\" _item_id=\"30\"><span class=\"metadata-label\">Data Provided By</span><span class=\"date\">City of Chicago</span></div>"
+  },
+  {
+   "itemId": "31",
+   "html": "<h2 class=\"landing-page-section-header forge-typography--heading4\" _item_id=\"31\">Featured Content Using this Data</h2>"
+  },
+  {
+   "itemId": "32",
+   "html": "<div class=\"LinesEllipsis\" _item_id=\"32\">Search building permits</div>"
+  },
+  {
+   "itemId": "33",
+   "html": "<forge-tooltip _item_id=\"33\">Search building permits</forge-tooltip>"
+  },
+  {
+   "itemId": "34",
+   "html": "<div class=\"first\" _item_id=\"34\"><span class=\"date\">External Content</span></div>"
+  },
+  {
+   "itemId": "35",
+   "html": "<div class=\"preview-image\" _item_id=\"35\"><span class=\"aria-not-displayed\">Preview image</span></div>"
+  },
+  {
+   "itemId": "36",
+   "html": "<div class=\"entry-description\" _item_id=\"36\">Search for issued building permits by permit number or street address.</div>"
+  },
+  {
+   "itemId": "37",
+   "html": "<div class=\"LinesEllipsis\" _item_id=\"37\">Apply for a building permit</div>"
+  },
+  {
+   "itemId": "38",
+   "html": "<forge-tooltip _item_id=\"38\">Apply for a building permit</forge-tooltip>"
+  },
+  {
+   "itemId": "39",
+   "html": "<div class=\"first\" _item_id=\"39\"><span class=\"date\">External Content</span></div>"
+  },
+  {
+   "itemId": "40",
+   "html": "<div class=\"preview-image\" _item_id=\"40\"><span class=\"aria-not-displayed\">Preview image</span></div>"
+  },
+  {
+   "itemId": "41",
+   "html": "<div class=\"entry-description\" _item_id=\"41\">Start a building permit application online.</div>"
+  },
+  {
+   "itemId": "42",
+   "html": "<div class=\"LinesEllipsis\" _item_id=\"42\">Check building permit application status</div>"
+  },
+  {
+   "itemId": "43",
+   "html": "<forge-tooltip _item_id=\"43\">Check building permit application status</forge-tooltip>"
+  },
+  {
+   "itemId": "44",
+   "html": "<div class=\"first\" _item_id=\"44\"><span class=\"date\">External Content</span></div>"
+  },
+  {
+   "itemId": "45",
+   "html": "<div class=\"preview-image\" _item_id=\"45\"><span class=\"aria-not-displayed\">Preview image</span></div>"
+  },
+  {
+   "itemId": "46",
+   "html": "<div class=\"entry-description\" _item_id=\"46\">Check the status of a building permit application.</div>"
+  },
+  {
+   "itemId": "47",
+   "html": "<h2 class=\"landing-page-section-header\" _item_id=\"47\">About this Dataset</h2>"
+  },
+  {
+   "itemId": "48",
+   "html": "<dl class=\"metadata-pair\" _item_id=\"48\"><dt class=\"metadata-pair-key\">Updated</dt><dd class=\"metadata-pair-value with-flyout\">July 21, 2026</dd></dl>"
+  },
+  {
+   "itemId": "49",
+   "html": "<dl class=\"metadata-detail-group\" _item_id=\"49\"><dt class=\"metadata-detail-group-title\">Data Last Updated</dt><dd class=\"metadata-detail-group-value\">July 21, 2026</dd></dl>"
+  },
+  {
+   "itemId": "50",
+   "html": "<dl class=\"metadata-detail-group\" _item_id=\"50\"><dt class=\"metadata-detail-group-title\">Metadata Last Updated</dt><dd class=\"metadata-detail-group-value\">May 29, 2026</dd></dl>"
+  },
+  {
+   "itemId": "51",
+   "html": "<dl class=\"metadata-detail-group\" _item_id=\"51\"><dt class=\"metadata-detail-group-title\">Date Created</dt><dd class=\"metadata-detail-group-value\">September 30, 2011</dd></dl>"
+  },
+  {
+   "itemId": "52",
+   "html": "<dl class=\"metadata-pair\" _item_id=\"52\"><dt class=\"metadata-pair-key\">Views</dt><dd class=\"metadata-pair-value\">3.71M</dd></dl>"
+  },
+  {
+   "itemId": "53",
+   "html": "<dl class=\"metadata-pair download-count\" _item_id=\"53\"><dt class=\"metadata-pair-key\">Downloads</dt><dd class=\"metadata-pair-value\">161K</dd></dl>"
+  },
+  {
+   "itemId": "54",
+   "html": "<dl class=\"metadata-detail-group\" _item_id=\"54\"><dt class=\"metadata-detail-group-title\">Data Provided by</dt><dd class=\"metadata-detail-group-value\">City of Chicago</dd></dl>"
+  },
+  {
+   "itemId": "55",
+   "html": "<dl class=\"metadata-detail-group\" _item_id=\"55\"><dt class=\"metadata-detail-group-title\">Dataset Owner</dt><dd class=\"metadata-detail-group-value\">cocadmin</dd></dl>"
+  },
+  {
+   "itemId": "56",
+   "html": "<h3 class=\"metadata-table-title\" _item_id=\"56\">Metadata</h3>"
+  },
+  {
+   "itemId": "57",
+   "html": "<table class=\"table table-condensed table-borderless table-discrete table-striped\" _item_id=\"57\"><tbody><tr><td>Changes and Other Historical Information Useful to Understanding This Dataset</td><td><span class=\"Linkify\"><a>https://www.google.com/search?q=site:data.cityofchicago.org/stories+\"Related+dataset+ID+s\"+\"ydr8-5enu\"</a></span></td></tr><tr><td>Data Owner</td><td><span class=\"Linkify\">Department of Buildings</span></td></tr><tr><td>Time Period</td><td><span class=\"Linkify\">2006 to present</span></td></tr><tr><td>Frequency</td><td><span class=\"Linkify\">Data are updated daily</span></td></tr></tbody></table>"
+  },
+  {
+   "itemId": "58",
+   "html": "<h3 class=\"metadata-table-title\" _item_id=\"58\">Topics</h3>"
+  },
+  {
+   "itemId": "59",
+   "html": "<td _item_id=\"59\">Category</td>"
+  },
+  {
+   "itemId": "60",
+   "html": "<td _item_id=\"60\">Buildings</td>"
+  },
+  {
+   "itemId": "61",
+   "html": "<td _item_id=\"61\">Tags</td>"
+  },
+  {
+   "itemId": "62",
+   "html": "<div class=\"tag-list collapsible-content\" _item_id=\"62\"><span class=\"tag-span-elements\"><a>permits</a>, </span><span class=\"tag-span-elements\"><a>buildings</a></span></div>"
+  },
+  {
+   "itemId": "63",
+   "html": "<h3 class=\"metadata-table-title\" _item_id=\"63\">Licensing and Attribution</h3>"
+  },
+  {
+   "itemId": "64",
+   "html": "<table class=\"table table-condensed table-borderless table-discrete table-striped\" _item_id=\"64\"><tbody><tr><td>License</td><td>See Terms of Use</td></tr><tr><td>Source Link</td><td class=\"attribution\"><a>http://www.cityofchicago.org<span class=\"icon-external-square\"></span></a></td></tr></tbody></table>"
+  },
+  {
+   "itemId": "65",
+   "html": "<h3 class=\"metadata-table-title\" _item_id=\"65\">Resource</h3>"
+  },
+  {
+   "itemId": "66",
+   "html": "<table class=\"table table-condensed table-borderless table-discrete table-striped\" _item_id=\"66\"><tbody><tr><td>Resource name</td><td>building-permits</td></tr></tbody></table>"
+  },
+  {
+   "itemId": "67",
+   "html": "<h2 class=\"forge-typography--heading4 landing-page-section-header\" _item_id=\"67\">What's in this Dataset?</h2>"
+  },
+  {
+   "itemId": "68",
+   "html": "<dt class=\"metadata-pair-key\" _item_id=\"68\">Rows</dt>"
+  },
+  {
+   "itemId": "69",
+   "html": "<dd class=\"metadata-pair-value\" _item_id=\"69\">842K</dd>"
+  },
+  {
+   "itemId": "70",
+   "html": "<dt class=\"metadata-pair-key\" _item_id=\"70\">Columns</dt>"
+  },
+  {
+   "itemId": "71",
+   "html": "<dd class=\"metadata-pair-value\" _item_id=\"71\">116</dd>"
+  },
+  {
+   "itemId": "72",
+   "html": "<dt class=\"metadata-pair-key\" _item_id=\"72\">Each row is a</dt>"
+  },
+  {
+   "itemId": "73",
+   "html": "<dd class=\"metadata-pair-value\" _item_id=\"73\">Building Permit</dd>"
+  },
+  {
+   "itemId": "74",
+   "html": "<dt class=\"metadata-pair-key\" _item_id=\"74\">Row Identifier</dt>"
+  },
+  {
+   "itemId": "75",
+   "html": "<dd class=\"metadata-pair-value\" _item_id=\"75\">PERMIT#</dd>"
+  },
+  {
+   "itemId": "76",
+   "html": "<h2 class=\"forge-typography--heading4 landing-page-section-header\" _item_id=\"76\">Columns (116)</h2>"
+  },
+  {
+   "itemId": "77",
+   "html": "<button class=\"forge-table-head__cell-container\" _item_id=\"77\"><span class=\"forge-table-head__cell-text\">Column Name</span></button>"
+  },
+  {
+   "itemId": "78",
+   "html": "<div class=\"forge-table-head__cell-container\" _item_id=\"78\"><span class=\"forge-table-head__cell-text\">Description</span></div>"
+  },
+  {
+   "itemId": "79",
+   "html": "<button class=\"forge-table-head__cell-container\" _item_id=\"79\"><span class=\"forge-table-head__cell-text\">API Field Name</span></button>"
+  },
+  {
+   "itemId": "80",
+   "html": "<button class=\"forge-table-head__cell-container\" _item_id=\"80\"><span class=\"forge-table-head__cell-text\">Data Type</span></button>"
+  },
+  {
+   "itemId": "81",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"81\"><span>ID</span></div>"
+  },
+  {
+   "itemId": "82",
+   "html": "<div _item_id=\"82\">Unique database record identifier</div>"
+  },
+  {
+   "itemId": "83",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"83\"><span>id</span></div>"
+  },
+  {
+   "itemId": "84",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"84\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "85",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"85\"><span>PERMIT#</span></div>"
+  },
+  {
+   "itemId": "86",
+   "html": "<div _item_id=\"86\">Tracking number assigned at beginning of permit application process</div>"
+  },
+  {
+   "itemId": "87",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"87\"><span>permit_</span></div>"
+  },
+  {
+   "itemId": "88",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"88\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "89",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"89\"><span>PERMIT_STATUS</span></div>"
+  },
+  {
+   "itemId": "90",
+   "html": "<div _item_id=\"90\">Current status of permit (not available for all permit types).</div>"
+  },
+  {
+   "itemId": "91",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"91\"><span>permit_status</span></div>"
+  },
+  {
+   "itemId": "92",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"92\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "93",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"93\"><span>PERMIT_MILESTONE</span></div>"
+  },
+  {
+   "itemId": "94",
+   "html": "<div _item_id=\"94\">Current milestone of permit (not available for all permit types).</div>"
+  },
+  {
+   "itemId": "95",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"95\"><span>permit_milestone</span></div>"
+  },
+  {
+   "itemId": "96",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"96\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "97",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"97\"><span>PERMIT_TYPE</span></div>"
+  },
+  {
+   "itemId": "98",
+   "html": "<div _item_id=\"98\">Type of permit</div>"
+  },
+  {
+   "itemId": "99",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"99\"><span>permit_type</span></div>"
+  },
+  {
+   "itemId": "100",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"100\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "101",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"101\"><span>REVIEW_TYPE</span></div>"
+  },
+  {
+   "itemId": "102",
+   "html": "<div _item_id=\"102\">Process used to review permit application</div>"
+  },
+  {
+   "itemId": "103",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"103\"><span>review_type</span></div>"
+  },
+  {
+   "itemId": "104",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"104\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "105",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"105\"><span>APPLICATION_START_DATE</span></div>"
+  },
+  {
+   "itemId": "106",
+   "html": "<div _item_id=\"106\">Date when City began reviewing permit application</div>"
+  },
+  {
+   "itemId": "107",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"107\"><span>application_start_date</span></div>"
+  },
+  {
+   "itemId": "108",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"108\"><a>Floating Timestamp</a></div>"
+  },
+  {
+   "itemId": "109",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"109\"><span>ISSUE_DATE</span></div>"
+  },
+  {
+   "itemId": "110",
+   "html": "<div _item_id=\"110\">For most permit types, date when City determined permit was ready to issue, subject to payment of permit fees; For Express Permit Program, date when permit issued based on full payment of applicable permit fee</div>"
+  },
+  {
+   "itemId": "111",
+   "html": "<forge-button class=\"collapse-button\" _item_id=\"111\">Read more</forge-button>"
+  },
+  {
+   "itemId": "112",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"112\"><span>issue_date</span></div>"
+  },
+  {
+   "itemId": "113",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"113\"><a>Floating Timestamp</a></div>"
+  },
+  {
+   "itemId": "114",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"114\"><span>PROCESSING_TIME</span></div>"
+  },
+  {
+   "itemId": "115",
+   "html": "<div _item_id=\"115\">Number of days between APPLICATION_START_DATE and ISSUE_DATE</div>"
+  },
+  {
+   "itemId": "116",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"116\"><span>processing_time</span></div>"
+  },
+  {
+   "itemId": "117",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"117\"><a>Number</a></div>"
+  },
+  {
+   "itemId": "118",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"118\"><span>STREET_NUMBER</span></div>"
+  },
+  {
+   "itemId": "119",
+   "html": "<div _item_id=\"119\">Address number - for buildings with address ranges, primary address is used</div>"
+  },
+  {
+   "itemId": "120",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"120\"><span>street_number</span></div>"
+  },
+  {
+   "itemId": "121",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"121\"><a>Number</a></div>"
+  },
+  {
+   "itemId": "122",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"122\"><span>STREET_DIRECTION</span></div>"
+  },
+  {
+   "itemId": "123",
+   "html": "<div _item_id=\"123\">Street direction</div>"
+  },
+  {
+   "itemId": "124",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"124\"><span>street_direction</span></div>"
+  },
+  {
+   "itemId": "125",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"125\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "126",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"126\"><span>STREET_NAME</span></div>"
+  },
+  {
+   "itemId": "127",
+   "html": "<div _item_id=\"127\">Street name</div>"
+  },
+  {
+   "itemId": "128",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"128\"><span>street_name</span></div>"
+  },
+  {
+   "itemId": "129",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"129\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "130",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"130\"><span>WORK_TYPE</span></div>"
+  },
+  {
+   "itemId": "131",
+   "html": "<div _item_id=\"131\">Classification of activity authorized by permit (not available for all permit types).</div>"
+  },
+  {
+   "itemId": "132",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"132\"><span>work_type</span></div>"
+  },
+  {
+   "itemId": "133",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"133\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "134",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"134\"><span>WORK_DESCRIPTION</span></div>"
+  },
+  {
+   "itemId": "135",
+   "html": "<div _item_id=\"135\">Description of work authorized by the permit</div>"
+  },
+  {
+   "itemId": "136",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"136\"><span>work_description</span></div>"
+  },
+  {
+   "itemId": "137",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"137\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "138",
+   "html": "<div class=\"schema-column-name-cell\" _item_id=\"138\"><span>PERMIT_CONDITION</span></div>"
+  },
+  {
+   "itemId": "139",
+   "html": "<div _item_id=\"139\">Conditions or comments added by reviewing department(s)</div>"
+  },
+  {
+   "itemId": "140",
+   "html": "<div class=\"schema-column-field-name-cell\" _item_id=\"140\"><span>permit_condition</span></div>"
+  },
+  {
+   "itemId": "141",
+   "html": "<div class=\"schema-column-data-type-cell\" _item_id=\"141\"><a>Text</a></div>"
+  },
+  {
+   "itemId": "142",
+   "html": "<h2 class=\"dataset-landing-page-header forge-typography--heading4\" _item_id=\"142\">Dataset Changelog</h2>"
+  },
+  {
+   "itemId": "143",
+   "html": "<div class=\"alert default bootstrap-alert\" _item_id=\"143\">No changes have been archived yet</div>"
+  },
+  {
+   "itemId": "144",
+   "html": "<h2 class=\"h2 modal-header-title\" id=\"carto-modal-title\" _item_id=\"144\">Open this dataset in Carto?</h2>"
+  },
+  {
+   "itemId": "145",
+   "html": "<section class=\"modal-content\" _item_id=\"145\">Your browser will be redirected to Carto, would you like to proceed?</section>"
+  },
+  {
+   "itemId": "146",
+   "html": "<div _item_id=\"146\">Note that Carto has a file size limit of 150MB or 500,000 rows.</div>"
+  },
+  {
+   "itemId": "147",
+   "html": "<section class=\"modal-content\" _item_id=\"147\">Learn about more external integrations at<br></section>"
+  },
+  {
+   "itemId": "148",
+   "html": "<section class=\"modal-content\" _item_id=\"148\"><a>https://support.socrata.com/hc/en-us/articles/115010730868</a></section>"
+  },
+  {
+   "itemId": "149",
+   "html": "<footer class=\"modal-actions\" _item_id=\"149\"><a class=\"btn btn-default btn-sm\">Close</a><a class=\"btn btn-primary btn-sm\">Open</a></footer>"
+  },
+  {
+   "itemId": "150",
+   "html": "<h2 class=\"h2 modal-header-title\" id=\"plotly-modal-title\" _item_id=\"150\">Open this dataset in Plot.ly?</h2>"
+  },
+  {
+   "itemId": "151",
+   "html": "<section class=\"modal-content\" _item_id=\"151\">Your browser will be redirected to Plot.ly, would you like to proceed?</section>"
+  },
+  {
+   "itemId": "152",
+   "html": "<div _item_id=\"152\">Note that Plot.ly has a file size limit of 5MB.</div>"
+  },
+  {
+   "itemId": "153",
+   "html": "<section class=\"modal-content\" _item_id=\"153\">Learn about more external integrations at<br></section>"
+  },
+  {
+   "itemId": "154",
+   "html": "<section class=\"modal-content\" _item_id=\"154\"><a>https://support.socrata.com/hc/en-us/articles/115010730868</a></section>"
+  },
+  {
+   "itemId": "155",
+   "html": "<footer class=\"modal-actions\" _item_id=\"155\"><button class=\"btn btn-default btn-sm\">Close</button><button class=\"btn btn-primary btn-sm\">Open</button></footer>"
+  },
+  {
+   "itemId": "156",
+   "html": "<h2 class=\"h5 modal-header-title\" id=\"contact-owner-title\" _item_id=\"156\">Send a Message to the Owner of this Dataset</h2>"
+  },
+  {
+   "itemId": "157",
+   "html": "<p class=\"small\" _item_id=\"157\">Send a short message to the dataset owner to ask a question, make a comment, or point out something about the data.</p>"
+  },
+  {
+   "itemId": "158",
+   "html": "<div _item_id=\"158\"><label class=\"block-label\" id=\"subject-label\">Subject</label><input class=\"text-input subject\" id=\"subject\"></div>"
+  },
+  {
+   "itemId": "159",
+   "html": "<div _item_id=\"159\"><label class=\"block-label\" id=\"message-label\">Message</label></div>"
+  },
+  {
+   "itemId": "160",
+   "html": "<div _item_id=\"160\"><label class=\"block-label\" id=\"email-label\">Your Email<span class=\"x-small quiet\" id=\"description\">(Your email address will be shared with the dataset owner so they can get back to you)</span></label><input class=\"text-input email\" id=\"email\"></div>"
+  },
+  {
+   "itemId": "161",
+   "html": "<footer class=\"modal-actions\" _item_id=\"161\"><button class=\"btn btn-default btn-sm\" id=\"contact-form-cancel\">Cancel</button><button class=\"btn btn-primary btn-sm\" id=\"contact-form-send\">Send</button></footer>"
+  },
+  {
+   "itemId": "162",
+   "html": "<h1 _item_id=\"162\">Manage Featured Content</h1>"
+  },
+  {
+   "itemId": "163",
+   "html": "<h2 _item_id=\"163\">Featured Content</h2>"
+  },
+  {
+   "itemId": "164",
+   "html": "<p _item_id=\"164\">What would you like people to see when they first view this dataset? Promote up to 3 Socrata assets that use this data, or choose to feature any relevant external resources. Think of this section as the face of your data.</p>"
+  },
+  {
+   "itemId": "165",
+   "html": "<div class=\"LinesEllipsis\" _item_id=\"165\">Search building permits</div>"
+  },
+  {
+   "itemId": "166",
+   "html": "<forge-tooltip _item_id=\"166\">Search building permits</forge-tooltip>"
+  },
+  {
+   "itemId": "167",
+   "html": "<div class=\"first\" _item_id=\"167\"><span class=\"date\">External Content</span></div>"
+  },
+  {
+   "itemId": "168",
+   "html": "<div class=\"preview-image\" _item_id=\"168\"><span class=\"aria-not-displayed\">Preview image</span></div>"
+  },
+  {
+   "itemId": "169",
+   "html": "<div class=\"entry-description\" _item_id=\"169\">Search for issued building permits by permit number or street address.</div>"
+  },
+  {
+   "itemId": "170",
+   "html": "<div class=\"featured-content-buttons btn-group-vertical\" _item_id=\"170\"><button class=\"btn btn-alternate-2 edit-button\"><span class=\"icon-edit\"></span>Change</button></div>"
+  },
+  {
+   "itemId": "171",
+   "html": "<div _item_id=\"171\"><span class=\"icon-close\"></span>Remove</div>"
+  },
+  {
+   "itemId": "172",
+   "html": "<div class=\"LinesEllipsis\" _item_id=\"172\">Apply for a building permit</div>"
+  },
+  {
+   "itemId": "173",
+   "html": "<forge-tooltip _item_id=\"173\">Apply for a building permit</forge-tooltip>"
+  },
+  {
+   "itemId": "174",
+   "html": "<div class=\"first\" _item_id=\"174\"><span class=\"date\">External Content</span></div>"
+  },
+  {
+   "itemId": "175",
+   "html": "<div class=\"preview-image\" _item_id=\"175\"><span class=\"aria-not-displayed\">Preview image</span></div>"
+  },
+  {
+   "itemId": "176",
+   "html": "<div class=\"entry-description\" _item_id=\"176\">Start a building permit application online.</div>"
+  },
+  {
+   "itemId": "177",
+   "html": "<div class=\"featured-content-buttons btn-group-vertical\" _item_id=\"177\"><button class=\"btn btn-alternate-2 edit-button\"><span class=\"icon-edit\"></span>Change</button></div>"
+  },
+  {
+   "itemId": "178",
+   "html": "<div _item_id=\"178\"><span class=\"icon-close\"></span>Remove</div>"
+  },
+  {
+   "itemId": "179",
+   "html": "<div class=\"LinesEllipsis\" _item_id=\"179\">Check building permit application status</div>"
+  },
+  {
+   "itemId": "180",
+   "html": "<forge-tooltip _item_id=\"180\">Check building permit application status</forge-tooltip>"
+  },
+  {
+   "itemId": "181",
+   "html": "<div class=\"first\" _item_id=\"181\"><span class=\"date\">External Content</span></div>"
+  },
+  {
+   "itemId": "182",
+   "html": "<div class=\"preview-image\" _item_id=\"182\"><span class=\"aria-not-displayed\">Preview image</span></div>"
+  },
+  {
+   "itemId": "183",
+   "html": "<div class=\"entry-description\" _item_id=\"183\">Check the status of a building permit application.</div>"
+  },
+  {
+   "itemId": "184",
+   "html": "<div class=\"featured-content-buttons btn-group-vertical\" _item_id=\"184\"><button class=\"btn btn-alternate-2 edit-button\"><span class=\"icon-edit\"></span>Change</button></div>"
+  },
+  {
+   "itemId": "185",
+   "html": "<div _item_id=\"185\"><span class=\"icon-close\"></span>Remove</div>"
+  },
+  {
+   "itemId": "186",
+   "html": "<div class=\"modal-footer-actions\" _item_id=\"186\"><button class=\"btn btn-primary btn-sm done-button\">Done</button></div>"
+  },
+  {
+   "itemId": "187",
+   "html": "<div class=\"LinesEllipsis-canvas\" _item_id=\"187\"><span class=\"LinesEllipsis-unit\">Search</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">building</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">permits</span></div>"
+  },
+  {
+   "itemId": "188",
+   "html": "<div class=\"LinesEllipsis-canvas\" _item_id=\"188\"><span class=\"LinesEllipsis-unit\">Apply</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">for</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">a</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">building</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">permit</span></div>"
+  },
+  {
+   "itemId": "189",
+   "html": "<div class=\"LinesEllipsis-canvas\" _item_id=\"189\"><span class=\"LinesEllipsis-unit\">Check</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">building</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">permit</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">application</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">status</span></div>"
+  },
+  {
+   "itemId": "190",
+   "html": "<div _item_id=\"190\">1-15 of 116</div>"
+  },
+  {
+   "itemId": "191",
+   "html": "<div class=\"LinesEllipsis-canvas\" _item_id=\"191\"><span class=\"LinesEllipsis-unit\">Search</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">building</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">permits</span></div>"
+  },
+  {
+   "itemId": "192",
+   "html": "<div class=\"LinesEllipsis-canvas\" _item_id=\"192\"><span class=\"LinesEllipsis-unit\">Apply</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">for</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">a</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">building</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">permit</span></div>"
+  },
+  {
+   "itemId": "193",
+   "html": "<div class=\"LinesEllipsis-canvas\" _item_id=\"193\"><span class=\"LinesEllipsis-unit\">Check</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">building</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">permit</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">application</span><span class=\"LinesEllipsis-unit\"> </span><span class=\"LinesEllipsis-unit\">status</span></div></body></html>"
+  }
+ ],
+ "labels": [
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other"
+ ]
+}

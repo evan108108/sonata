@@ -143,6 +143,16 @@ quit_app
 echo "==> swapping binary ($(stat -f '%z' "$BIN_SRC") bytes)"
 cp "$BIN_SRC" "$BIN_DST"
 
+# Resources go into BOTH bundle paths — Bundle.main.resourcePath resolves to
+# Contents/Resources/ (web assets), Bundle.module resolves to Sonata_Sonata.bundle/
+# (sonata-bridge.ts + web/*). Same discipline as deploy-scout.sh (which fixed the
+# same class of bug after 2026-05-05 / 2026-05-06 incidents). Without this the
+# binary swaps but any resource file NEW since the last install never lands —
+# 2026-07-21: pulpie-simplify.js / pulpie-markdown.js hit this exactly.
+echo "==> rsync resources → Contents/Resources/ AND Sonata_Sonata.bundle/"
+/usr/bin/rsync -a "$REPO/Sources/Sonata/Resources/" "$APP/Contents/Resources/"
+/usr/bin/rsync -a "$REPO/Sources/Sonata/Resources/" "$APP/Sonata_Sonata.bundle/"
+
 echo "==> re-sealing bundle (move resource bundle out, sign .app, move back)"
 mv "$RESOURCE_BUNDLE" "$TMP_BUNDLE"
 codesign --force --sign - "$APP"

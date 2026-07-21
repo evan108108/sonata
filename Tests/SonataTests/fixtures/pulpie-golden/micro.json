@@ -1,0 +1,77 @@
+[
+  {
+    "name": "autolink",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page."
+  },
+  {
+    "name": "blank_between_inline",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page."
+  },
+  {
+    "name": "blockquote",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><blockquote><p _item_id=\"2\">quoted paragraph one</p><p _item_id=\"3\">quoted paragraph two</p></blockquote></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\n> quoted paragraph one\n> \n> quoted paragraph two"
+  },
+  {
+    "name": "br_hr",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><p>line one<br>line two<br>line three</p><p _item_id=\"5\">after the rule there is more body text here.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\nline one  \nline two  \nline three\n\nafter the rule there is more body text here."
+  },
+  {
+    "name": "dl",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><dl _item_id=\"2\"><dt>Term one</dt><dd>Definition one</dd><dt>Term two</dt><dd>Definition two</dd></dl></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\nTerm one\n    Definition one\nTerm two\n    Definition two"
+  },
+  {
+    "name": "emphasis_adjacency",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><p>foo<em>bar</em>baz and x<strong>y</strong>z and <del _item_id=\"3\">gone</del></p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\nfoo _bar_ baz and x**y** z and ~~gone~~"
+  },
+  {
+    "name": "escapes",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><p _item_id=\"2\">1. not a list, - not a bullet, + not either, a_b_c *star* [br] (paren) \\slash</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\n1\\. not a list, - not a bullet, + not either, a_b_c *star* [br] (paren) \\slash"
+  },
+  {
+    "name": "headings",
+    "main_html": "<html><body><article><h1 _item_id=\"1\">Title here</h1><h2 _item_id=\"2\">Sub one</h2><p _item_id=\"3\">Intro paragraph that is long enough to be classified as main content on this page.</p><h3 _item_id=\"4\">Sub two</h3><p _item_id=\"5\">Another paragraph of real body text for the page.</p></article></body></html>",
+    "markdown": "# Title here\n\n## Sub one\n\nIntro paragraph that is long enough to be classified as main content on this page.\n\n### Sub two\n\nAnother paragraph of real body text for the page."
+  },
+  {
+    "name": "img",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page."
+  },
+  {
+    "name": "indented_blocks",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p>\n  <p _item_id=\"2\">Second paragraph of the article body with more words in it.</p>\n</article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\nSecond paragraph of the article body with more words in it."
+  },
+  {
+    "name": "lists",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page."
+  },
+  {
+    "name": "nbsp",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page."
+  },
+  {
+    "name": "nested_link_img",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page."
+  },
+  {
+    "name": "pre_code",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><pre _item_id=\"2\"><code>def f(x):\n    return x + 1</code></pre></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n    \n    \n    def f(x):\n        return x + 1"
+  },
+  {
+    "name": "table",
+    "main_html": "<html><body><article><p _item_id=\"1\">Intro paragraph that is long enough to be classified as main content on this page.</p><table _item_id=\"2\"><tbody><tr><th>Col A</th><th>Col B</th></tr><tr><td>one</td><td>two</td></tr><tr><td>three</td><td>four</td></tr></tbody></table></article></body></html>",
+    "markdown": "Intro paragraph that is long enough to be classified as main content on this page.\n\nCol A| Col B  \n---|---  \none| two  \nthree| four"
+  }
+]

@@ -1,0 +1,255 @@
+{
+ "page": "anthropic_newsroom",
+ "blockCount": 49,
+ "mainCount": 21,
+ "otherCount": 28,
+ "blocks": [
+  {
+   "itemId": "1",
+   "html": "<div class=\"SiteHeader-module-scss-module__zKj4Ca__skipLinks\" _item_id=\"1\"><a class=\"SiteHeader-module-scss-module__zKj4Ca__skipLink\">Skip to main content</a><a class=\"SiteHeader-module-scss-module__zKj4Ca__skipLink\">Skip to footer</a></div>"
+  },
+  {
+   "itemId": "2",
+   "html": "<div class=\"SiteHeader-module-scss-module__zKj4Ca__claudeCtaWrapper\" _item_id=\"2\"><a class=\"SiteHeader-module-scss-module__zKj4Ca__claudeCtaButton body-3\">Try Claude</a></div>"
+  },
+  {
+   "itemId": "3",
+   "html": "<h1 class=\"headline-1\" _item_id=\"3\">Newsroom</h1>"
+  },
+  {
+   "itemId": "4",
+   "html": "<li _item_id=\"4\"><span class=\"HeroTwoColumn-module-scss-module__pM-nba__listLabel body-3\">Press inquires</span></li>"
+  },
+  {
+   "itemId": "5",
+   "html": "<a class=\"ButtonTextLink-module-scss-module__q8IAwW__textLink HeroTwoColumn-module-scss-module__pM-nba__listLink\" _item_id=\"5\"><span class=\"body-3\">press@anthropic.com</span></a>"
+  },
+  {
+   "itemId": "6",
+   "html": "<li _item_id=\"6\"><span class=\"HeroTwoColumn-module-scss-module__pM-nba__listLabel body-3\">Non-media inquiries</span></li>"
+  },
+  {
+   "itemId": "7",
+   "html": "<a class=\"ButtonTextLink-module-scss-module__q8IAwW__textLink HeroTwoColumn-module-scss-module__pM-nba__listLink\" _item_id=\"7\"><span class=\"body-3\">How to get support</span></a>"
+  },
+  {
+   "itemId": "8",
+   "html": "<li _item_id=\"8\"><span class=\"HeroTwoColumn-module-scss-module__pM-nba__listLabel body-3\">Media assets</span></li>"
+  },
+  {
+   "itemId": "9",
+   "html": "<a class=\"ButtonTextLink-module-scss-module__q8IAwW__textLink HeroTwoColumn-module-scss-module__pM-nba__listLink\" _item_id=\"9\"><span class=\"body-3\">Download press kit</span></a>"
+  },
+  {
+   "itemId": "10",
+   "html": "<h2 class=\"headline-4 FeaturedGrid-module-scss-module__W1FydW__featuredTitle\" _item_id=\"10\">Inviting hard questions</h2>"
+  },
+  {
+   "itemId": "11",
+   "html": "<div class=\"FeaturedGrid-module-scss-module__W1FydW__meta\" _item_id=\"11\"><span class=\"caption bold\">Announcements</span><time class=\"FeaturedGrid-module-scss-module__W1FydW__date caption bold\">Jul 9, 2026</time></div>"
+  },
+  {
+   "itemId": "12",
+   "html": "<p class=\"body-3 serif FeaturedGrid-module-scss-module__W1FydW__body\" _item_id=\"12\">We’re asking the public for their hardest questions about AI, and committing to show our work as we address them.</p>"
+  },
+  {
+   "itemId": "13",
+   "html": "<div class=\"FeaturedGrid-module-scss-module__W1FydW__meta\" _item_id=\"13\"><span class=\"caption bold\">Features</span><time class=\"FeaturedGrid-module-scss-module__W1FydW__date caption bold\">Jul 6, 2026</time></div>"
+  },
+  {
+   "itemId": "14",
+   "html": "<h4 class=\"headline-6 FeaturedGrid-module-scss-module__W1FydW__title\" _item_id=\"14\">The Making of Claude Code</h4>"
+  },
+  {
+   "itemId": "15",
+   "html": "<p class=\"body-3 serif FeaturedGrid-module-scss-module__W1FydW__body\" _item_id=\"15\">The inside story of how Claude Code went from an internal CLI to Anthropic's coding agent, told by researchers, engineers and early users who built it.</p>"
+  },
+  {
+   "itemId": "16",
+   "html": "<div class=\"FeaturedGrid-module-scss-module__W1FydW__meta\" _item_id=\"16\"><span class=\"caption bold\">Announcements</span><time class=\"FeaturedGrid-module-scss-module__W1FydW__date caption bold\">Jun 30, 2026</time></div>"
+  },
+  {
+   "itemId": "17",
+   "html": "<h4 class=\"headline-6 FeaturedGrid-module-scss-module__W1FydW__title\" _item_id=\"17\">Redeploying Fable 5</h4>"
+  },
+  {
+   "itemId": "18",
+   "html": "<p class=\"body-3 serif FeaturedGrid-module-scss-module__W1FydW__body\" _item_id=\"18\">Fable 5 returns globally July 1. We're also proposing an industry-wide framework for scoring jailbreak severity, together with Amazon, Microsoft, Google, and other Glasswing partners. </p>"
+  },
+  {
+   "itemId": "19",
+   "html": "<div class=\"FeaturedGrid-module-scss-module__W1FydW__meta\" _item_id=\"19\"><span class=\"caption bold\">Product</span><time class=\"FeaturedGrid-module-scss-module__W1FydW__date caption bold\">Jun 30, 2026</time></div>"
+  },
+  {
+   "itemId": "20",
+   "html": "<h4 class=\"headline-6 FeaturedGrid-module-scss-module__W1FydW__title\" _item_id=\"20\">Introducing Claude Sonnet 5</h4>"
+  },
+  {
+   "itemId": "21",
+   "html": "<p class=\"body-3 serif FeaturedGrid-module-scss-module__W1FydW__body\" _item_id=\"21\">Sonnet 5 delivers frontier performance across coding, agents, and professional work at scale.</p>"
+  },
+  {
+   "itemId": "22",
+   "html": "<div class=\"FeaturedGrid-module-scss-module__W1FydW__meta\" _item_id=\"22\"><span class=\"caption bold\">Announcements</span><time class=\"FeaturedGrid-module-scss-module__W1FydW__date caption bold\">Jun 30, 2026</time></div>"
+  },
+  {
+   "itemId": "23",
+   "html": "<h4 class=\"headline-6 FeaturedGrid-module-scss-module__W1FydW__title\" _item_id=\"23\">Claude Science, an AI workbench for scientists, is now available</h4>"
+  },
+  {
+   "itemId": "24",
+   "html": "<p class=\"body-3 serif FeaturedGrid-module-scss-module__W1FydW__body\" _item_id=\"24\">Claude Science is a customizable app that integrates the tools and packages researchers most often use, produces auditable artifacts, and provides flexible access to computing resources.</p>"
+  },
+  {
+   "itemId": "25",
+   "html": "<h2 class=\"headline-4\" _item_id=\"25\">News</h2>"
+  },
+  {
+   "itemId": "26",
+   "html": "<div class=\"SearchFilter-module-scss-module__d4ijlG__container\" _item_id=\"26\"><label class=\"SearchFilter-module-scss-module__d4ijlG__srOnly\">Search</label></div>"
+  },
+  {
+   "itemId": "27",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__listHeader\" _item_id=\"27\"><span class=\"PublicationList-module-scss-module__KxYrHG__headerDate caption\">Date</span><span class=\"PublicationList-module-scss-module__KxYrHG__headerCategory caption\">Category</span><span class=\"PublicationList-module-scss-module__KxYrHG__headerTitle caption\">Title</span></div>"
+  },
+  {
+   "itemId": "28",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"28\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 20, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Announcements</span></div>"
+  },
+  {
+   "itemId": "29",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"29\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Apply for Anthropic’s AI for Science rare disease research grants</span></a>"
+  },
+  {
+   "itemId": "30",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"30\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 14, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Product</span></div>"
+  },
+  {
+   "itemId": "31",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"31\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Introducing Claude for Teachers</span></a>"
+  },
+  {
+   "itemId": "32",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"32\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 14, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Announcements</span></div>"
+  },
+  {
+   "itemId": "33",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"33\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Anthropic commits $10 million to Canadian AI research</span></a>"
+  },
+  {
+   "itemId": "34",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"34\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 9, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Case Study</span></div>"
+  },
+  {
+   "itemId": "35",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"35\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">UST is bringing Claude to physical AI</span></a>"
+  },
+  {
+   "itemId": "36",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"36\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 9, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Announcements</span></div>"
+  },
+  {
+   "itemId": "37",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"37\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Inviting hard questions</span></a>"
+  },
+  {
+   "itemId": "38",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"38\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 9, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Announcements</span></div>"
+  },
+  {
+   "itemId": "39",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"39\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Ben Bernanke appointed to Anthropic’s Long-Term Benefit Trust </span></a>"
+  },
+  {
+   "itemId": "40",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"40\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 9, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Announcements</span></div>"
+  },
+  {
+   "itemId": "41",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"41\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Introducing a way to reflect on how you use Claude</span></a>"
+  },
+  {
+   "itemId": "42",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"42\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 6, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Case Study</span></div>"
+  },
+  {
+   "itemId": "43",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"43\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Government of Alberta uses Claude to find and fix cybersecurity vulnerabilities across government systems</span></a>"
+  },
+  {
+   "itemId": "44",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"44\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jul 2, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Announcements</span></div>"
+  },
+  {
+   "itemId": "45",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"45\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">More details on Fable 5’s cyber safeguards and our jailbreak framework</span></a>"
+  },
+  {
+   "itemId": "46",
+   "html": "<div class=\"PublicationList-module-scss-module__KxYrHG__meta\" _item_id=\"46\"><time class=\"PublicationList-module-scss-module__KxYrHG__date body-3\">Jun 30, 2026</time><span class=\"PublicationList-module-scss-module__KxYrHG__subject body-3\">Product</span></div>"
+  },
+  {
+   "itemId": "47",
+   "html": "<a class=\"PublicationList-module-scss-module__KxYrHG__listItem\" _item_id=\"47\"><span class=\"PublicationList-module-scss-module__KxYrHG__title body-3\">Introducing Claude Sonnet 5</span></a>"
+  },
+  {
+   "itemId": "48",
+   "html": "<a class=\"Button-module-scss-module__f9ZZrG__button Button-module-scss-module__f9ZZrG__large Button-module-scss-module__f9ZZrG__tertiary Button-module-scss-module__f9ZZrG__iconRight PublicationList-module-scss-module__KxYrHG__seeMore\" _item_id=\"48\"><span class=\"body-3\">See more</span></a>"
+  },
+  {
+   "itemId": "49",
+   "html": "<div class=\"SiteFooter-module-scss-module__JdOqwq__socialWrapper\" _item_id=\"49\"><small class=\"body-4 SiteFooter-module-scss-module__JdOqwq__copyright\">© 2026 Anthropic PBC</small></div></body></html>"
+  }
+ ],
+ "labels": [
+  "other",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "other",
+  "main",
+  "main",
+  "main",
+  "other",
+  "other",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "main",
+  "other",
+  "other",
+  "other",
+  "other"
+ ]
+}
