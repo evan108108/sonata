@@ -172,22 +172,54 @@ plugin_status() {
         "SELECT COALESCE(status, 'not-installed') FROM plugins WHERE name='$1'" 2>/dev/null
 }
 
+# _curl_retry — wrap a curl call with retry-on-connection-error backoff.
+# The Sonata bridge can drop momentarily when a plugin state change causes
+# the app to re-bind :3211 (observed 2026-07-21: prstar disable succeeded,
+# bridge went down between calls, sonata-studio install saw exit 7 and
+# `set -e` killed the whole deploy loop mid-flight). Real HTTP errors
+# (4xx/5xx) come back as exit 22, not 7, and still surface immediately —
+# only connection-refused / DNS / timeout classes retry.
+_curl_retry() {
+    local attempt=1 max=5 sleep_s=2 exit_code=0
+    while [ "$attempt" -le "$max" ]; do
+        # Preserve stdout so callers still see the response body.
+        if /usr/bin/curl "$@"; then return 0; fi
+        exit_code=$?
+        # curl exit codes: 6=DNS fail, 7=connect fail, 28=timeout,
+        # 52=empty reply, 56=recv fail. Everything else is a real failure
+        # the caller wants to see (22 for HTTP 4xx/5xx, etc.).
+        case "$exit_code" in
+            6|7|28|52|56)
+                _log "curl transient failure (exit $exit_code), retry $attempt/$max in ${sleep_s}s"
+                sleep "$sleep_s"
+                attempt=$((attempt + 1))
+                sleep_s=$((sleep_s * 2))
+                ;;
+            *)
+                return "$exit_code"
+                ;;
+        esac
+    done
+    _log "curl retries exhausted after $max attempts (last exit $exit_code)"
+    return "$exit_code"
+}
+
 sonata_disable_plugin() {
     local name="$1"
-    /usr/bin/curl -sS --max-time 30 -X POST "$BRIDGE_URL/api/plugins/$name/disable" \
+    _curl_retry -sS --max-time 30 -X POST "$BRIDGE_URL/api/plugins/$name/disable" \
         -H "Content-Type: application/json"
 }
 
 sonata_enable_plugin() {
     local name="$1"
-    /usr/bin/curl -sS --max-time 30 -X POST "$BRIDGE_URL/api/plugins/$name/enable" \
+    _curl_retry -sS --max-time 30 -X POST "$BRIDGE_URL/api/plugins/$name/enable" \
         -H "Content-Type: application/json"
 }
 
 sonata_install_plugin() {
     local tarball="$1"
     # NB: action param is named "path" (see Sources/Actions/PluginActions.swift).
-    /usr/bin/curl -sS --max-time 120 -X POST "$BRIDGE_URL/api/plugins/install" \
+    _curl_retry -sS --max-time 120 -X POST "$BRIDGE_URL/api/plugins/install" \
         -H "Content-Type: application/json" \
         -d "{\"path\":\"$tarball\"}"
 }
