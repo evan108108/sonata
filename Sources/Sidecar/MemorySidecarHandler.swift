@@ -108,7 +108,8 @@ enum MemorySidecarHandler {
         let candidates = try await recall(
             query: query,
             limit: max(requestedLimit + alreadyInjected.count, requestedLimit),
-            recencyMode: recencyMode
+            recencyMode: recencyMode,
+            excludeSessionId: sessionId
         )
         guard !candidates.isEmpty else {
             logger.debug("memory sidecar: no candidates for event \(payload.eventId)")
@@ -198,7 +199,8 @@ enum MemorySidecarHandler {
     private static func recall(
         query: String,
         limit: Int,
-        recencyMode: SidecarUserConfig.RecencyMode
+        recencyMode: SidecarUserConfig.RecencyMode,
+        excludeSessionId: String
     ) async throws -> [Candidate] {
         var components = URLComponents(string: "http://127.0.0.1:\(sonataPort)/api/recall")!
         components.queryItems = [
@@ -234,6 +236,16 @@ enum MemorySidecarHandler {
         // where the extracted-memory layer was thin but the transcript
         // layer had the story.
         let conversationCandidates: [Candidate] = (decoded.conversations ?? []).compactMap { c in
+            // Exclude the source session's own transcript. The FTS layer
+            // otherwise ranks the current session's chunks highest for
+            // any topic we're discussing here — by construction those
+            // chunks add zero information because the reader already has
+            // them in active context. Observed 2026-07-22: on questions
+            // about Scout paranoia, the top conversation hit was
+            // consistently a snippet from THIS session (my own words back
+            // at me) rather than the older Scout-paranoia discussions we
+            // actually needed.
+            guard c.sessionId != excludeSessionId else { return nil }
             let snippet = c.snippet.replacingOccurrences(of: "\n", with: " ")
                                    .replacingOccurrences(of: "\r", with: " ")
                                    .trimmingCharacters(in: .whitespaces)
