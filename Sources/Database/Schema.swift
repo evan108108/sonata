@@ -1290,5 +1290,34 @@ extension DatabaseMigrator {
                 ON emailThreadOwners(ownerSessionKey)
                 """)
         }
+
+        // v35: sidecarHints — TTL-scoped scratch for memory-sidecar output.
+        //
+        // The memory sidecar's per-request internal agent writes hints here
+        // (one row per hint block, keyed by the source session's id). The
+        // UserPromptSubmit hook on that source session pops all rows for its
+        // id in one transaction, injects them into the next prompt, and the
+        // rows vanish. HealthMonitor's periodic sweep also DELETEs rows older
+        // than 30 minutes so a source session that never submits again — or
+        // dies before consuming — doesn't leak.
+        //
+        // Deliberately not a workerEvents.type addition: memory hints are
+        // advisory ephemera, not tracked work. workerEvents' completion
+        // machinery bought us nothing but places to fail (assigned-forever,
+        // pool fallthrough) when we tried to route hints through it.
+        registerMigration("v35_sidecar_hints") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS sidecarHints (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sessionId    TEXT NOT NULL,
+                    content      TEXT NOT NULL,
+                    writtenAtMs  INTEGER NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS sidecarHints_by_session_time
+                ON sidecarHints(sessionId, writtenAtMs)
+                """)
+        }
     }
 }

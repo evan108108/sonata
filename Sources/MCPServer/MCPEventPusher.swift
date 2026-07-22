@@ -58,7 +58,16 @@ actor MCPEventPusher {
     /// item (assigned to a specific worker, worker.status='busy',
     /// eventually completed by the worker) matches the documented
     /// contract and keeps peer DMs off arbitrary sessions.
-    private static let notificationTypes: Set<String> = []
+    ///
+    /// 2026-07-22: memory_request added. Sidecar-owned event, routed by
+    /// `SidecarRegistry.assignee(forEventType:)` to a specific sessionKey
+    /// (not fanned out). Delivered by `pushPendingWorkerEvents` on the
+    /// assigned path and auto-completed there — the sidecar's dispatcher
+    /// hands the payload to a headless internal agent that has no MCP tool
+    /// surface for `worker_event_complete`, so the completion has to
+    /// happen server-side. Fire-and-forget by design; a missed hint is
+    /// the acceptable failure.
+    static let notificationTypes: Set<String> = ["memory_request"]
 
     /// Find live workers with no assigned event and hand them pending work.
     /// "Live" = has an SSE stream in MCPConnections. "Idle" = DB says
@@ -291,6 +300,28 @@ actor MCPEventPusher {
             )
             if !delivered {
                 knownWorkerEventIds.remove(evt.id)
+                continue
+            }
+            // Notification-type events auto-complete on push. Their recipients
+            // have no completion path — either by design (memory_request's
+            // sub-agent dispatcher can't reach worker_event_complete because
+            // sonata-bridge MCP tools don't load into internal agents) or by
+            // convention (fire-and-forget notifications). Left as `assigned`
+            // they'd sit forever and pretend to be work.
+            if MCPEventPusher.notificationTypes.contains(evt.type) {
+                do {
+                    let now = nowMs()
+                    try await dbPool.write { db in
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'completed', completedAt = ?,
+                                result = 'notification delivered via SSE'
+                            WHERE id = ? AND status = 'assigned'
+                        """, arguments: [now, evt.id])
+                    }
+                } catch {
+                    logger.warning("EventPusher: failed to auto-complete notification \(evt.id): \(error)")
+                }
             }
             // In-flight state lives only in the DB (workers.currentEventId) —
             // there is no in-memory shadow to update.

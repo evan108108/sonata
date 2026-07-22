@@ -152,6 +152,21 @@ final class SidecarRegistry: @unchecked Sendable {
         return sessionKeyByName[name]
     }
 
+    /// Whether ANY registered sidecar claims `type`, regardless of whether
+    /// that sidecar has a live session key right now.
+    ///
+    /// Distinct from `assignee(forEventType:)` on purpose. `assignee` collapses
+    /// "no owner" and "owner exists but is dead" into the same nil because it
+    /// answers "who do I push to right now". Callers deciding whether to fall
+    /// through to pool routing need to tell those cases apart: an owned-but-
+    /// dead type must NOT enter the pool queue (that was the 2026-07-22 leak),
+    /// while an unowned type still should.
+    func ownsEventType(_ type: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return nameByEventType[type] != nil
+    }
+
     /// Publish (or withdraw, with nil) the live session key for a sidecar.
     /// Called by `SidecarLifecycle` on spawn and rotation.
     func setSessionKey(_ sessionKey: String?, for name: String) {

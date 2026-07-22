@@ -1609,6 +1609,10 @@ struct SonataApp: App {
                 // "Sessions" tab owns this experience now. Use ⌘1-9 or
                 // click the rail's Sessions icon.
 
+                Menu("Sidecars") {
+                    SidecarsMenuContent()
+                }
+
                 Button("Logs") {
                     LogsWindowController.shared.show()
                 }

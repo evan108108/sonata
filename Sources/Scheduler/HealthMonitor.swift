@@ -390,6 +390,14 @@ actor HealthMonitor {
             // missed (2026-07-17).
             await sweepStaleDMEvents()
 
+            // Sidecar hint TTL. Rows in `sidecarHints` are advisory: the memory
+            // sidecar's internal agent writes them, the source session's next
+            // UserPromptSubmit hook pops and consumes them. A session that
+            // never submits again — closed terminal, hard kill, or long idle —
+            // leaves rows behind. 30-min TTL: hints stale past that would
+            // reference context the session has moved on from anyway.
+            await sweepStaleSidecarHints()
+
             // Offline escalation ladder. sweepStaleWorkersForActions now only
             // MARKS workers offline (Fix #3 in dispatch-hardening-bundle) — it
             // no longer flips events or tasks. This loop reads the offline
@@ -1285,6 +1293,28 @@ actor HealthMonitor {
             } catch {
                 logger.warning("sweepStaleDMEvents: close failed for \(s.eventId): \(error)")
             }
+        }
+    }
+
+    /// Drop `sidecarHints` rows older than 30 min. Sidecar-produced memory
+    /// hints are advisory ephemera keyed by source sessionId; the source
+    /// session's UserPromptSubmit hook pops them on the next prompt. A session
+    /// that closes without ever popping leaves rows behind — this sweep
+    /// bounds accumulation regardless of session-end firing.
+    private func sweepStaleSidecarHints() async {
+        let cutoffMs = nowMs() - Int64(30 * 60 * 1000)
+        do {
+            let deleted = try await dbPool.write { db -> Int in
+                try db.execute(sql: """
+                    DELETE FROM sidecarHints WHERE writtenAtMs < ?
+                """, arguments: [cutoffMs])
+                return db.changesCount
+            }
+            if deleted > 0 {
+                logger.info("sweepStaleSidecarHints: dropped \(deleted) stale hint(s)")
+            }
+        } catch {
+            logger.warning("sweepStaleSidecarHints: sweep failed: \(error)")
         }
     }
 

@@ -937,6 +937,23 @@ let workerEventActions: [SonataAction] = [
             // read it as permanently occupied.
             let sidecarAssignee = SidecarRegistry.shared.assignee(forEventType: type)
 
+            // Fail-closed for sidecar-owned event types whose sidecar has no live
+            // session key. 2026-07-22 incident: sidecar-memory's sessionKey got
+            // withdrawn on rotation/stop and never republished, so `assignee`
+            // returned nil for memory_request, so events fell through to
+            // `status='pending'` and got picked up by opus-4-7 pool workers
+            // with no memory-sidecar instructions — ~40 full-Opus sessions of
+            // pure noise ($$$) across a night. Sidecar-owned types must NEVER
+            // enter the pool queue; refuse the enqueue instead. The caller
+            // (a hook) is fire-and-forget and treats 4xx as a dropped hint,
+            // which is the correct degraded behavior for an advisory helper.
+            if sidecarAssignee == nil && SidecarRegistry.shared.ownsEventType(type) {
+                throw ActionError.custom(
+                    "sidecar-owned event type '\(type)' has no live sessionKey; refusing pool fallthrough",
+                    .serviceUnavailable
+                )
+            }
+
             do {
                 try await ctx.dbPool.write { db in
                     if let sidecarAssignee {
