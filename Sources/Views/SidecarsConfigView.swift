@@ -219,14 +219,21 @@ struct SidecarsConfigView: View {
 
             if expandedAdvanced.contains(row.id) {
                 VStack(alignment: .leading, spacing: 6) {
-                    knob("Judge model") {
-                        Picker("", selection: binding(row.id, \.judgeModel)) {
-                            ForEach(SidecarUserConfig.JudgeModel.allCases, id: \.self) { model in
-                                Text(model.label).tag(model)
+                    // Judge model only applies when there's an LLM sub-agent
+                    // to choose the model for. In-process sidecars run as a
+                    // Swift closure — no judge, no model — so hide the row
+                    // entirely rather than show a control the user's
+                    // selection will silently be ignored on.
+                    if row.sidecar.kind == .claudeCode {
+                        knob("Judge model") {
+                            Picker("", selection: binding(row.id, \.judgeModel)) {
+                                ForEach(SidecarUserConfig.JudgeModel.allCases, id: \.self) { model in
+                                    Text(model.label).tag(model)
+                                }
                             }
+                            .labelsHidden()
+                            .frame(width: 140)
                         }
-                        .labelsHidden()
-                        .frame(width: 140)
                     }
 
                     knob("Context depth") {
@@ -278,15 +285,20 @@ struct SidecarsConfigView: View {
                         .help("How far back the sidecar remembers what it already surfaced, so the same memory isn't injected twice.")
                     }
 
-                    knob("Rotation threshold") {
-                        Picker("", selection: binding(row.id, \.rotationThreshold)) {
-                            ForEach(SidecarUserConfig.rotationThresholdChoices, id: \.self) { pct in
-                                Text("\(pct)%").tag(pct)
+                    // Rotation threshold is about a Claude Code session's
+                    // context filling up. In-process sidecars have no session
+                    // and no context to fill, so nothing to rotate.
+                    if row.sidecar.kind == .claudeCode {
+                        knob("Rotation threshold") {
+                            Picker("", selection: binding(row.id, \.rotationThreshold)) {
+                                ForEach(SidecarUserConfig.rotationThresholdChoices, id: \.self) { pct in
+                                    Text("\(pct)%").tag(pct)
+                                }
                             }
+                            .labelsHidden()
+                            .frame(width: 90)
+                            .help("Context fullness at which the sidecar asks to be replaced by a fresh session.")
                         }
-                        .labelsHidden()
-                        .frame(width: 90)
-                        .help("Context fullness at which the sidecar asks to be replaced by a fresh session.")
                     }
 
                     knob("Recency mode") {

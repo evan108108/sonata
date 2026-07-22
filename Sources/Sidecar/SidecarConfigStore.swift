@@ -141,6 +141,64 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
 
     var isEnabled: Bool { tier != .off }
 
+    /// Forwards-compatible decode: every field falls back to its default if
+    /// missing from the persisted JSON. Without this, adding a knob (like
+    /// `recencyMode` or `minRankScore` did) breaks every existing install's
+    /// config file — the synthesized `Codable` refuses to decode anything
+    /// short of a complete match, and the store never publishes `.loaded = true`,
+    /// producing the "settings haven't been loaded this launch" warning in
+    /// the panel even though the file is on disk and readable.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.tier = try c.decodeIfPresent(SidecarBudgetTier.self, forKey: .tier)
+            ?? Sidecar.Defaults.budgetTier
+        self.subscriptionCapPct = try c.decodeIfPresent(Int.self, forKey: .subscriptionCapPct)
+            ?? Sidecar.Defaults.subscriptionCapPct
+        self.judgeModel = try c.decodeIfPresent(JudgeModel.self, forKey: .judgeModel)
+            ?? Defaults.judgeModel
+        self.contextDepth = try c.decodeIfPresent(ContextDepth.self, forKey: .contextDepth)
+            ?? Defaults.contextDepth
+        self.topK = try c.decodeIfPresent(Int.self, forKey: .topK)
+            ?? Defaults.topK
+        self.triggers = try c.decodeIfPresent(Set<String>.self, forKey: .triggers)
+            ?? Defaults.triggers
+        self.dedupWindow = try c.decodeIfPresent(Int.self, forKey: .dedupWindow)
+            ?? Defaults.dedupWindow
+        self.rotationThreshold = try c.decodeIfPresent(Int.self, forKey: .rotationThreshold)
+            ?? Sidecar.Defaults.rotationThreshold
+        self.recencyMode = try c.decodeIfPresent(RecencyMode.self, forKey: .recencyMode)
+            ?? Defaults.recencyMode
+        self.minRankScore = try c.decodeIfPresent(Double.self, forKey: .minRankScore)
+            ?? Defaults.minRankScore
+    }
+
+    /// Explicit member init since `init(from:)` above suppresses the compiler's
+    /// synthesized memberwise. Signature matches the previous synthesized one so
+    /// the `.default` initializer and `seeded(from:)` don't change shape.
+    init(
+        tier: SidecarBudgetTier,
+        subscriptionCapPct: Int,
+        judgeModel: JudgeModel,
+        contextDepth: ContextDepth,
+        topK: Int,
+        triggers: Set<String>,
+        dedupWindow: Int,
+        rotationThreshold: Int,
+        recencyMode: RecencyMode,
+        minRankScore: Double
+    ) {
+        self.tier = tier
+        self.subscriptionCapPct = subscriptionCapPct
+        self.judgeModel = judgeModel
+        self.contextDepth = contextDepth
+        self.topK = topK
+        self.triggers = triggers
+        self.dedupWindow = dedupWindow
+        self.rotationThreshold = rotationThreshold
+        self.recencyMode = recencyMode
+        self.minRankScore = minRankScore
+    }
+
     static let `default` = SidecarUserConfig(
         tier: Sidecar.Defaults.budgetTier,
         subscriptionCapPct: Sidecar.Defaults.subscriptionCapPct,
