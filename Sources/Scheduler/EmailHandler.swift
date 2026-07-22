@@ -201,6 +201,15 @@ actor EmailHandler {
             return
         }
 
+        // Every cycle: sweep any emails that got stuck as 'unread' — either
+        // this session missed them on the initial pass (rare), or a prior
+        // dispatch attempt failed (the pre-2026-07-21 URLSession self-call
+        // could raise on a not-yet-ready HTTPServer during the boot race).
+        // Cheap query — WHERE status='unread' is indexed and most polls find
+        // nothing. Runs BEFORE the new-email dispatch below so a batch of
+        // long-stuck emails doesn't get piggybacked into every fresh event.
+        await dispatchPendingUnreadEmails()
+
         let totalNew = newEmailsByInbox.values.reduce(0) { $0 + $1.count }
         if totalNew > 0 {
             logger.info("EmailHandler: \(totalNew) new email(s) detected across \(newEmailsByInbox.count) inbox(es)")
@@ -685,18 +694,34 @@ actor EmailHandler {
         var toDispatch: [String: [EmailRecord]] = [:]  // keyed by inbox address
 
         for row in unreadRows {
-            // Safety check 1: is there already a pending worker event for this email?
+            // Safety check 1: is there already an undispatched-or-in-flight
+            // worker event for this email?
+            //
+            // 'assigned' belongs in this list. This sweep used to run only at
+            // init, where every 'assigned' event was stale by definition (the
+            // process that owned it had just died), so ignoring that status was
+            // how a restart recovered orphaned work. Now that it runs on every
+            // poll, 'assigned' means the opposite — a live worker is holding
+            // the event right now — and the email row stays status='unread'
+            // for that worker's whole run (complete_event is what marks it
+            // replied). Re-dispatching on that window puts a second worker on
+            // the same thread, which is the duplicate-reply bug.
+            //
+            // Genuinely stranded 'assigned' events are not ours to recover:
+            // HealthMonitor.reclaimStrandedEvents already requeues them to
+            // 'pending' after checking worker heartbeat liveness, which is a
+            // signal this query cannot see.
             let hasPendingEvent: Bool = (try? await dbPool.read { db in
                 let count = try Int.fetchOne(db, sql: """
                     SELECT COUNT(*) FROM workerEvents
-                    WHERE type = 'email' AND status IN ('pending', 'claimed')
+                    WHERE type = 'email' AND status IN ('pending', 'claimed', 'assigned')
                     AND payload LIKE ?
                 """, arguments: ["%\(row.messageId)%"]) ?? 0
                 return count > 0
             }) ?? false
 
             if hasPendingEvent {
-                logger.info("EmailHandler: skipping \(row.subject) — pending worker event exists")
+                logger.info("EmailHandler: skipping \(row.subject) — worker event already pending or in flight")
                 continue
             }
 
@@ -797,24 +822,37 @@ actor EmailHandler {
             let payloadJSON = try JSONSerialization.data(withJSONObject: eventPayload)
             let payloadStr = String(data: payloadJSON, encoding: .utf8) ?? "{}"
 
-            var req = URLRequest(url: URL(string: "http://localhost:3211/api/worker/events/enqueue")!)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: [
-                "type": "email",
-                "payload": payloadStr,
-                "priority": 8,
-            ])
-
-            let (data, response) = try await URLSession.shared.data(for: req)
-            let httpRes = response as? HTTPURLResponse
-            if httpRes?.statusCode == 200 || httpRes?.statusCode == 201 {
-                logger.info("EmailHandler: email event enqueued to worker channel")
-            } else {
-                let body = String(data: data, encoding: .utf8) ?? "?"
-                logger.error("EmailHandler: enqueue failed — HTTP \(httpRes?.statusCode ?? 0): \(body)")
+            // Direct in-process enqueue rather than a POST to the HTTP self at
+            // localhost:3211/api/worker/events/enqueue. The HTTP round-trip
+            // through our own bridge threw connection-refused on the first
+            // post-deploy poll — the HTTPServer hadn't finished binding when
+            // EmailHandler's 5-second startup delay elapsed, the URLSession
+            // call raised, sendFailureAlert fired, and the emails stayed
+            // status='unread' in the DB with no automatic retry. This mirrors
+            // what worker_event_enqueue (WorkerActions.swift:908) does at the
+            // action layer — SidecarRegistry lookup for the routing seam,
+            // then INSERT INTO workerEvents with idempotencyKey to protect
+            // against a retry landing twice. No transport, no race.
+            let sidecarAssignee = SidecarRegistry.shared.assignee(forEventType: "email")
+            let id = newUUID()
+            let now = nowMs()
+            let idemKey = WorkerEventIdempotency.key(type: "email", payloadJSON: payloadStr)
+            try await dbPool.write { db in
+                if let sidecarAssignee {
+                    try db.execute(sql: """
+                        INSERT INTO workerEvents (id, type, payload, priority, assignedTo, status, createdAt, assignedAt, idempotencyKey)
+                        VALUES (?, 'email', ?, 8, ?, 'assigned', ?, ?, ?)
+                        ON CONFLICT(idempotencyKey) DO NOTHING
+                    """, arguments: [id, payloadStr, sidecarAssignee, now, now, idemKey])
+                } else {
+                    try db.execute(sql: """
+                        INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
+                        VALUES (?, 'email', ?, 8, 'pending', ?, ?)
+                        ON CONFLICT(idempotencyKey) DO NOTHING
+                    """, arguments: [id, payloadStr, now, idemKey])
+                }
             }
-
+            logger.info("EmailHandler: email event enqueued directly (\(id))")
         } catch {
             logger.error("EmailHandler: dispatch threw: \(error)")
             try? await sendFailureAlert(emails: emails, inbox: inbox)
