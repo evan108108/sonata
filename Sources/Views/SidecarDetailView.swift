@@ -60,7 +60,26 @@ struct SidecarDetailView: View {
             let averageLatencyMs: Int?
             let mostRecentCompletedAt: Int64?
         }
+
+        /// Only populated for `.inProcess` sidecars — everything shown here is
+        /// derived from what the handler configures itself with plus what it's
+        /// actually produced. `.claudeCode` sidecars leave this nil; their
+        /// story lives in the Session card instead.
+        struct HandlerSummary: Equatable {
+            let recencyMode: String
+            let minRankScore: Double
+            let topKCap: Int
+            /// Rows currently sitting in `sidecarHints` — written by this
+            /// sidecar's handler and not yet popped by a UserPromptSubmit
+            /// hook. Usually 0 in a healthy loop (hooks pop on the next
+            /// prompt), but a non-zero count is normal too if you look
+            /// between an event and the source session's next prompt.
+            let hintsInFlight: Int
+            let mostRecentHintAt: Int64?
+        }
     }
+
+    @State private var handler: Snapshot.HandlerSummary? = nil
 
     var body: some View {
         ScrollView {
@@ -74,6 +93,9 @@ struct SidecarDetailView: View {
                 } else if let snapshot {
                     configSection(snapshot.config)
                     workerSection(snapshot.worker, contextWindowTokens: snapshot.config.contextWindowTokens, isInProcess: snapshot.config.kind == .inProcess)
+                    if let handler {
+                        handlerSection(handler)
+                    }
                     eventsSection(snapshot.events)
                     spendSection
                     footer(loadedAt: snapshot.loadedAt)
@@ -147,6 +169,17 @@ struct SidecarDetailView: View {
                     .foregroundStyle(.tertiary)
                     .font(.caption)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func handlerSection(_ handler: Snapshot.HandlerSummary) -> some View {
+        sectionCard(title: "Handler") {
+            gridRow("Recency mode", handler.recencyMode)
+            gridRow("Min rank score", String(format: "%.2f", handler.minRankScore))
+            gridRow("Top-K cap", "\(handler.topKCap)")
+            gridRow("Hints in flight", "\(handler.hintsInFlight)")
+            gridRow("Most recent hint", handler.mostRecentHintAt.map(relativeTime) ?? "—")
         }
     }
 
@@ -334,6 +367,39 @@ struct SidecarDetailView: View {
 
         let s = await SidecarSpendRegistry.shared.spendSnapshot(for: sidecarName)
         spend = s
+
+        // Handler section is only meaningful for in-process sidecars. Top-K
+        // cap is the handler's own hardcoded max — 3 for the memory sidecar
+        // (a wider fan-out is noise without a judge), threaded through the
+        // display so a reader who tunes topK understands why 10 doesn't
+        // actually produce 10.
+        if sidecar.kind == .inProcess {
+            var hintsInFlight = 0
+            var mostRecent: Int64? = nil
+            if let dbPool = SonataApp.sharedDbPool {
+                do {
+                    let read = try await dbPool.read { db -> (Int, Int64?) in
+                        let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sidecarHints") ?? 0
+                        let latest = try Int64.fetchOne(db, sql: "SELECT MAX(writtenAtMs) FROM sidecarHints")
+                        return (count, latest)
+                    }
+                    hintsInFlight = read.0
+                    mostRecent = read.1
+                } catch {
+                    // Non-fatal — leave stats at 0/nil.
+                }
+            }
+            handler = Snapshot.HandlerSummary(
+                recencyMode: userConfig.recencyMode.label,
+                minRankScore: userConfig.minRankScore,
+                topKCap: 3,
+                hintsInFlight: hintsInFlight,
+                mostRecentHintAt: mostRecent
+            )
+        } else {
+            handler = nil
+        }
+
         snapshot = Snapshot(
             config: configView,
             worker: workerSummary,
