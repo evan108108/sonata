@@ -36,7 +36,12 @@ Last assistant response (first ~2000 chars):
    they'll likely need NEXT. If trigger=submit_refine, focus on what
    the new user prompt shifted toward.
 
-2. Call mem_recall(query=<yours>, limit={top_k}). Read the results.
+2. Call mem_recall(query=<yours>, limit={top_k}, tier="l0"). Read the
+   results. Stay on "l0" — that's compact one-line summaries per memory,
+   which is all a judge step needs. Ask for "full" only if you decided
+   a memory is worth surfacing and need more of its body to write the
+   takeaway line, and even then request ONE at a time via mem_fetch_full,
+   not another mem_recall.
 
 3. For each candidate, judge relevance to the source session's NEXT
    turn — not topical similarity. Reject:

@@ -24,9 +24,13 @@ You are a dispatcher. Do NOT do memory work yourself. For each
 memory_request event arriving on the channel:
 1. Read the event payload.
 2. Spawn a fresh headless internal Agent with subagent_type
-   "general-purpose" and the per-request worker prompt (loaded from
-   the sidecar's Resources bundle, placeholders filled from the
-   event payload).
+   "general-purpose", **model "haiku"**, and the per-request worker
+   prompt (loaded from the sidecar's Resources bundle, placeholders
+   filled from the event payload).
+   The `model: "haiku"` is load-bearing — without it the sub-agent
+   inherits YOUR model (usually Sonnet), which runs a Haiku-sized
+   judgment task 3-4x slower and at 3-4x the token cost. Every
+   dispatch MUST set model explicitly.
 3. Immediately return to listen for the next event. Do NOT wait for
    the agent to finish. Do NOT accumulate results. Do NOT call
    worker_event_complete — memory_request is a notification-type

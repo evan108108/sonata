@@ -188,6 +188,44 @@ actor MCPEventPusher {
 
         guard !notifs.isEmpty else { return }
 
+        // Split off sidecar-owned notifs. These landed as `pending` only
+        // because they raced the sidecar's registration at boot, or because
+        // the sidecar was never registered on this launch. In either case,
+        // fan-out delivery is wrong: dropping the raw JSON blob on a random
+        // pool worker's SSE (as this function historically did for sonar_dm
+        // broadcasts) delivers a message meant for the sidecar's dispatcher
+        // to an uninstructed worker, which is exactly the "SILENT." + 40-Opus-
+        // sessions-of-noise failure mode the 2026-07-22 redesign closed. Mark
+        // these failed here so the pending queue clears; if a sidecar spawns
+        // and starts owning the type moments later, new events will route to
+        // it via the assigned path — the failed ones are stale by then anyway.
+        var orphanedSidecar: [PendingNotification] = []
+        var fanOut: [PendingNotification] = []
+        for notif in notifs {
+            if SidecarRegistry.shared.ownsEventType(notif.type) {
+                orphanedSidecar.append(notif)
+            } else {
+                fanOut.append(notif)
+            }
+        }
+        for notif in orphanedSidecar {
+            let now = nowMs()
+            do {
+                try await dbPool.write { db in
+                    try db.execute(sql: """
+                        UPDATE workerEvents
+                        SET status = 'failed', completedAt = ?,
+                            result = 'sidecar-owned notification with no live sessionKey; refusing pool fan-out'
+                        WHERE id = ? AND status = 'pending'
+                    """, arguments: [now, notif.id])
+                }
+                logger.warning("EventPusher: dropped orphan sidecar-owned notification \(notif.id) (type \(notif.type))")
+            } catch {
+                logger.warning("EventPusher: failed to mark orphan notification \(notif.id) as failed: \(error)")
+            }
+        }
+        guard !fanOut.isEmpty else { return }
+
         // Live worker sessionKeys (workerId is the MCP session key — see
         // MCPHTTPRouter's /mcp/:sessionKey). Skip 'supervisor'; DMs to
         // supervisor are a separate path.
@@ -199,7 +237,7 @@ actor MCPEventPusher {
             return
         }
 
-        for notif in notifs {
+        for notif in fanOut {
             let content = renderWorkerEventContent(payload: notif.payload)
             var delivered = false
             for key in workerKeys {
