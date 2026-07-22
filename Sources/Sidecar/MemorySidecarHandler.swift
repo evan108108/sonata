@@ -123,6 +123,7 @@ enum MemorySidecarHandler {
             logger.debug("memory sidecar: no candidates for event \(payload.eventId) cleared floor \(minRankScore) after dedup")
             return
         }
+        _ = filtered  // keep local for clarity; consumed via combined below
 
         let hint = formatHint(candidates: Array(filtered))
         guard !hint.isEmpty else { return }
@@ -166,9 +167,32 @@ enum MemorySidecarHandler {
         }
     }
 
+    /// One hit from the conversations layer of mem_recall — a chunk of a
+    /// past Claude Code session transcript that matched the query text.
+    ///
+    /// Conversations don't come with a `_rankScore` field (they're ordered
+    /// by the FTS engine that produced them), so we synthesize a
+    /// respectable-looking score for the score-floor filter. `.transcript`
+    /// score of 0.70 puts them above the default 0.60 floor without
+    /// pretending to be top-tier memories.
+    private struct ConversationHit: Decodable {
+        let sessionId: String
+        let chunk: String?
+        let snippet: String
+        let project: String?
+    }
+
     private struct RecallResponse: Decodable {
         let memories: [Candidate]?
+        let conversations: [ConversationHit]?
     }
+
+    /// Score we assign to conversation hits so they can pass through the
+    /// same rank-floor filter as memories without needing a real ranking
+    /// signal. Above the tested default floor (0.60) so at-default settings
+    /// still surface them; not so high that a user tightening to 0.75+
+    /// can't tune them out.
+    private static let conversationSynthesizedRank: Double = 0.70
 
     private static func recall(
         query: String,
@@ -195,7 +219,36 @@ enum MemorySidecarHandler {
         }
 
         let decoded = try JSONDecoder().decode(RecallResponse.self, from: data)
-        return decoded.memories ?? []
+        let memories = decoded.memories ?? []
+
+        // Merge conversation hits into the memory candidate stream. Every
+        // conversation gets a synthetic id (`conv-<session>-<chunk>`) so
+        // the already_injected ledger and the hint markdown's `[memory:
+        // <id>]` link work uniformly. Snippets get trimmed to 180 chars
+        // so a single injected hint line stays readable.
+        //
+        // Conversations were being silently dropped in the original decode
+        // — sidecar tests on 2026-07-22 showed 5 conversation hits, 5
+        // email hits and 3 wiki hits all being thrown out on a Scout topic
+        // where the extracted-memory layer was thin but the transcript
+        // layer had the story.
+        let conversationCandidates: [Candidate] = (decoded.conversations ?? []).compactMap { c in
+            let snippet = c.snippet.replacingOccurrences(of: "\n", with: " ")
+                                   .replacingOccurrences(of: "\r", with: " ")
+                                   .trimmingCharacters(in: .whitespaces)
+            guard !snippet.isEmpty else { return nil }
+            let takeaway = String(snippet.prefix(180))
+            let sid = c.sessionId.replacingOccurrences(of: "-", with: "").prefix(12)
+            let chunk = c.chunk ?? "?"
+            return Candidate(
+                id: "conv-\(sid)-\(chunk)",
+                rankScore: conversationSynthesizedRank,
+                l0: "past session · \(takeaway)",
+                l1: nil
+            )
+        }
+
+        return memories + conversationCandidates
     }
 
     // MARK: - Format
