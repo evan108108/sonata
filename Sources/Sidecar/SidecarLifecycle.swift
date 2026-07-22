@@ -176,6 +176,29 @@ actor SidecarLifecycle {
             let key = SidecarInProcessKey.sessionKey(forName: sidecar.name)
             SidecarRegistry.shared.setSessionKey(key, for: sidecar.name)
             rotateRequested[sidecar.name] = nil
+
+            // Sweep any stale `workers` row left by a previous life as a
+            // Claude Code sidecar. Without this, HealthMonitor sees the
+            // orphaned row heartbeating stale, tries to cycle it every
+            // minute, and logs "no longer tracked — skipping" indefinitely.
+            // The row's `sessionLabel` matches the sidecar name so it's
+            // impossible to conflict with pool workers, whose names GLOB
+            // `sona-worker-*`.
+            let sidecarName = sidecar.name
+            let dbPool = self.dbPool
+            let sweepLogger = logger
+            Task.detached { [dbPool, sweepLogger] in
+                do {
+                    try await dbPool.write { db in
+                        try db.execute(sql: """
+                            DELETE FROM workers WHERE workerId = ?
+                        """, arguments: [sidecarName])
+                    }
+                } catch {
+                    sweepLogger.warning("sidecar '\(sidecarName)' inproc: failed to sweep stale workers row: \(error)")
+                }
+            }
+
             logger.info("sidecar '\(sidecar.name)' registered as in-process handler (\(key))")
             return
         }
