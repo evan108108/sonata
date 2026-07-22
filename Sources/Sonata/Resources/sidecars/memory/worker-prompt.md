@@ -50,9 +50,9 @@ Last assistant response (first ~2000 chars):
      the reader would think "oh right, I forgot that" upon reading.
    - A [memory: <slug>] pointer.
 
-5. If you have at least one useful hint, write to:
-     ~/.sonata/scratch/pending-memory-{source_session_id}.md
-   Use this exact format:
+5. If you have at least one useful hint, POST it to the hint endpoint
+   with the Bash tool. The content field is this exact markdown format
+   (escape newlines as \n inside the JSON string):
 
      <!-- Sidecar · {isoTimestamp} · judge={judge_model} · N hints -->
      ## Possibly relevant
@@ -62,18 +62,24 @@ Last assistant response (first ~2000 chars):
 
      <!-- /end -->
 
-   If you have zero useful hints, write nothing. An empty file is
-   worse than no file. Silence beats noise.
+   The curl command:
 
-6. Call worker_event_complete with event_id={eventId} and a short
-   result summary: "wrote {N} hints" | "no relevant memories" |
-   "error: {reason}".
+     curl -sS -X POST http://127.0.0.1:3211/api/sidecar/hint/write \
+       -H 'Content-Type: application/json' \
+       -d '{"sessionId":"{source_session_id}","content":"<!-- Sidecar · {isoTimestamp} · judge={judge_model} · 2 hints -->\n## Possibly relevant\n\n- **{one-line takeaway}** — [memory: {slug}]\n- **{one-line takeaway}** — [memory: {slug}]\n\n<!-- /end -->"}'
+
+   If you have zero useful hints, do NOT call the endpoint — empty
+   content is rejected with 400. Silence beats noise.
+
+6. Return your one-line summary to the parent as your final response.
+   There is no worker event to complete — the server completed it when
+   the event was pushed.
 
 ## Your final response to the parent
 
 One line only. The parent is a dispatcher and only records the summary.
-Format: "{sourceSessionId}: wrote N hints" | "{sourceSessionId}: skip" |
-"{sourceSessionId}: error {reason}".
+Format: "{source_session_id}: wrote N hints" | "{source_session_id}: skip" |
+"{source_session_id}: error {reason}".
 
 Do NOT return any other output. The parent's context is small on
 purpose.
@@ -81,7 +87,9 @@ purpose.
 ## Rules of the road
 
 - Precision over recall. Zero hints is a correct answer.
-- Do NOT store new memories. You have no mem_store access.
-- Do NOT modify code. You have no Edit/Write outside the scratch dir.
-- Do NOT read files outside ~/.sonata/scratch/ and the wiki via
-  mem_wiki_read. Anything else is out of scope.
+- Do NOT store new memories.
+- Do NOT modify code.
+- You have Bash for the one curl call to the hint endpoint. Do NOT
+  use Bash for anything else.
+- Do NOT read files. The wiki via mem_wiki_read is the only document
+  surface in scope.
