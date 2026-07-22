@@ -69,6 +69,20 @@ actor MCPEventPusher {
     /// the acceptable failure.
     static let notificationTypes: Set<String> = ["memory_request"]
 
+    /// Types that are always owned by a sidecar, by contract, regardless of
+    /// whether `SidecarRegistry.register` has run yet. Belt for the boot race:
+    /// `MCPEventPusher.start` fires ~350 lines before `bootSidecars` in
+    /// `SonataApp`, and that ordering is intentional (worker-pool slots claim
+    /// first). During the gap, `SidecarRegistry.ownsEventType` answers false
+    /// for types that the sidecar is about to claim, so a memory_request that
+    /// arrived in that window would fan out to a random pool worker. Adding
+    /// the type here closes the race without disturbing boot ordering.
+    ///
+    /// Keep in sync with the sidecar registrations in `bootSidecars`. A stale
+    /// entry here just means "we refuse to fan-out a type nobody claims" —
+    /// harmless; a missing entry means the boot-race leak comes back.
+    private static let sidecarOwnedFallbacks: Set<String> = ["memory_request"]
+
     /// Find live workers with no assigned event and hand them pending work.
     /// "Live" = has an SSE stream in MCPConnections. "Idle" = DB says
     /// status='idle', currentEventId IS NULL, sessionLabel is a valid pool
@@ -202,7 +216,9 @@ actor MCPEventPusher {
         var orphanedSidecar: [PendingNotification] = []
         var fanOut: [PendingNotification] = []
         for notif in notifs {
-            if SidecarRegistry.shared.ownsEventType(notif.type) {
+            let owned = SidecarRegistry.shared.ownsEventType(notif.type)
+                || MCPEventPusher.sidecarOwnedFallbacks.contains(notif.type)
+            if owned {
                 orphanedSidecar.append(notif)
             } else {
                 fanOut.append(notif)
