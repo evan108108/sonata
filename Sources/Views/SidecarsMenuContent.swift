@@ -3,34 +3,43 @@ import SwiftUI
 /// The dynamic body of the Window ▸ Sidecars submenu.
 ///
 /// One nested `Menu` per REGISTERED sidecar (from `SidecarRegistry.shared.all()`),
-/// each carrying "Show terminal" and "Show stats" entries. Reading from the
-/// registry (configured-and-immutable-after-boot) rather than
-/// `SidecarWindowController.shared.runningNames()` (in-memory dict, no
-/// observable subject) sidesteps the SwiftUI reactivity gap: the Menu body
-/// wasn't re-evaluating on spawn/rotation, producing an "empty menu even though
-/// the sidecar is running" bug (2026-07-22).
+/// each carrying "Show terminal" and "Show stats" entries.
 ///
-/// Semantic shift worth naming: a sidecar is a service, not a task, so "what's
-/// currently spawned" is the wrong question for a menu. "What's registered in
-/// this build" is what a user actually wants to click. `show(name:)` still
-/// no-ops gracefully when there's no live window to bring forward.
+/// Reactivity: SwiftUI evaluates this view's body once when the `CommandGroup`
+/// is first built, which is BEFORE `bootSidecars()` finishes populating the
+/// registry. Reading `SidecarRegistry.shared.all()` directly in `body` would
+/// therefore cache "no sidecars registered" forever — the empty-menu bug
+/// hit 2026-07-22 post-deploy. Fix is a small polling `@State`: refresh the
+/// snapshot every 2s, only rewrite state when it actually differs so SwiftUI
+/// doesn't rebuild the whole menu on ticks that don't change anything.
+///
+/// Registry membership only changes at boot and (in the future) at hot-add,
+/// both extremely rare, so a 2s tick is cheap enough to be invisible.
 @MainActor
 struct SidecarsMenuContent: View {
+    @State private var names: [String] = SidecarRegistry.shared.all().map(\.name).sorted()
+    private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
     var body: some View {
-        let names = SidecarRegistry.shared.all().map(\.name).sorted()
-        if names.isEmpty {
-            Text("No sidecars registered")
-        } else {
-            ForEach(names, id: \.self) { name in
-                Menu(name) {
-                    Button("Show terminal") {
-                        _ = SidecarWindowController.shared.show(name: name)
-                    }
-                    Button("Show stats") {
-                        SidecarDetailWindowController.shared.show(name: name)
+        Group {
+            if names.isEmpty {
+                Text("No sidecars registered")
+            } else {
+                ForEach(names, id: \.self) { name in
+                    Menu(name) {
+                        Button("Show terminal") {
+                            _ = SidecarWindowController.shared.show(name: name)
+                        }
+                        Button("Show stats") {
+                            SidecarDetailWindowController.shared.show(name: name)
+                        }
                     }
                 }
             }
+        }
+        .onReceive(ticker) { _ in
+            let latest = SidecarRegistry.shared.all().map(\.name).sorted()
+            if latest != names { names = latest }
         }
     }
 }
