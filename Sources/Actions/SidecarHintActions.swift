@@ -19,7 +19,75 @@ private struct HintPopResponse: Encodable {
     let content: String
 }
 
+/// Response shape for `sidecar_hint_noise` — one flag inserted.
+private struct HintNoiseResponse: Encodable {
+    let ok = true
+    let recorded: Int
+}
+
 let sidecarHintActions: [SonataAction] = [
+
+    // POST /api/sidecar/hint/noise — record receiver-side noise flags
+    //
+    // Called by the session that received a hint block after judging the
+    // hints. Negative-only feedback: silence is presumed OK. Recording only
+    // for now — a future recall-time join will downweight memory ids with
+    // repeated flags for similar queries.
+    SonataAction(
+        name: "sidecar_hint_noise",
+        description: """
+            Flag one or more memory ids from a recently-injected hint block as noise. Called by the
+            receiving Claude session (the one whose UserPromptSubmit hook popped the hint) after
+            judging the block. Negative-only feedback — silence means the hint was fine. The
+            optional `reason` narrows why: "self-ref" (chunk from this same session), "unrelated"
+            (topically off), "stale" (dated / superseded), "recirculation" (same memory keeps
+            firing). Optional `queryHash` groups flags by the query shape that produced the hint —
+            leave blank if you don't have it handy.
+            """,
+        group: "/api/sidecar",
+        path: "/hint/noise",
+        method: .post,
+        params: [
+            ActionParam("sessionId", .string, required: true, description: "Session id that received the noise"),
+            ActionParam("memoryIds", .string, required: true, description: "Memory ids to flag, JSON array of strings"),
+            ActionParam("reason", .string, description: "Optional reason label (self-ref | unrelated | stale | recirculation | other)"),
+            ActionParam("queryHash", .string, description: "Optional query-shape hash to group flags by prompt pattern"),
+        ],
+        handler: { ctx in
+            let sessionId = try ctx.params.require("sessionId")
+            let idsJSON = try ctx.params.require("memoryIds")
+            let reason = ctx.params.string("reason")
+            let queryHash = ctx.params.string("queryHash")
+
+            let ids: [String]
+            do {
+                let data = Data(idsJSON.utf8)
+                ids = try JSONDecoder().decode([String].self, from: data)
+            } catch {
+                throw ActionError.invalidParam("memoryIds", "must be a JSON array of strings, got: \(idsJSON.prefix(80))")
+            }
+            let cleanIds = ids.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !cleanIds.isEmpty else {
+                throw ActionError.invalidParam("memoryIds", "array must contain at least one non-empty id")
+            }
+
+            let now = nowMs()
+            do {
+                try await ctx.dbPool.write { db in
+                    for id in cleanIds {
+                        try db.execute(sql: """
+                            INSERT INTO sidecarHintNoise (sessionId, memoryId, reason, queryHash, recordedAtMs)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, arguments: [sessionId, id, reason, queryHash, now])
+                    }
+                }
+                return HintNoiseResponse(recorded: cleanIds.count)
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
 
     // POST /api/sidecar/hint/write — store one hint block for a session
     SonataAction(

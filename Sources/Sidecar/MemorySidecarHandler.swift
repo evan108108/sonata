@@ -127,7 +127,7 @@ enum MemorySidecarHandler {
         }
         _ = filtered  // keep local for clarity; consumed via combined below
 
-        let hint = formatHint(candidates: Array(filtered))
+        let hint = formatHint(candidates: Array(filtered), sessionId: sessionId)
         guard !hint.isEmpty else { return }
         try await writeHint(sessionId: sessionId, content: hint)
         logger.info("memory sidecar: wrote \(filtered.count) hint(s) for session \(sessionId) on event \(payload.eventId)")
@@ -276,7 +276,7 @@ enum MemorySidecarHandler {
     /// (short summary) if only that landed. Never inlines the full body —
     /// that would explode the hint block past what a reader will actually
     /// read.
-    private static func formatHint(candidates: [Candidate]) -> String {
+    private static func formatHint(candidates: [Candidate], sessionId: String) -> String {
         let now = ISO8601DateFormatter().string(from: Date())
         var lines: [String] = []
         lines.append("<!-- Sidecar · \(now) · judge=none · \(candidates.count) hint\(candidates.count == 1 ? "" : "s") -->")
@@ -292,6 +292,13 @@ enum MemorySidecarHandler {
             lines.append("- **\(oneLine)** — [memory: \(c.id)]")
         }
         lines.append("")
+        // Persistent nudge for the receiver. Any hint the receiver judges as
+        // noise gets flagged via sidecar_hint_noise. Batched by hint block
+        // — one tool call, list all noise ids. Silence means the block
+        // was fine. Repeated here in every hint so the reader is prompted
+        // without needing to remember a global rule.
+        let ids = candidates.map { "\"\($0.id)\"" }.joined(separator: ", ")
+        lines.append("<!-- feedback: if any of these were noise, call sidecar_hint_noise(sessionId=\"\(sessionId)\", memoryIds=[\(ids)]) with just the noise ids -->")
         lines.append("<!-- /end -->")
         return lines.joined(separator: "\n")
     }

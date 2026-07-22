@@ -76,6 +76,14 @@ struct SidecarDetailView: View {
             /// between an event and the source session's next prompt.
             let hintsInFlight: Int
             let mostRecentHintAt: Int64?
+            /// Noise flags recorded in the last 24 hours — the receiver
+            /// session called sidecar_hint_noise on this many hints. Zero
+            /// is either "hints have been great" or "reader hasn't been
+            /// flagging" (equally plausible until we see baseline). Displayed
+            /// as a rolling count rather than a rate because the denominator
+            /// (hints delivered) doesn't have a stable window.
+            let noiseFlagsLast24h: Int
+            let mostRecentNoiseAt: Int64?
         }
     }
 
@@ -180,6 +188,8 @@ struct SidecarDetailView: View {
             gridRow("Top-K cap", "\(handler.topKCap)")
             gridRow("Hints in flight", "\(handler.hintsInFlight)")
             gridRow("Most recent hint", handler.mostRecentHintAt.map(relativeTime) ?? "—")
+            gridRow("Noise flags (24h)", "\(handler.noiseFlagsLast24h)")
+            gridRow("Most recent noise", handler.mostRecentNoiseAt.map(relativeTime) ?? "—")
         }
     }
 
@@ -376,15 +386,22 @@ struct SidecarDetailView: View {
         if sidecar.kind == .inProcess {
             var hintsInFlight = 0
             var mostRecent: Int64? = nil
+            var noiseFlags = 0
+            var mostRecentNoise: Int64? = nil
             if let dbPool = SonataApp.sharedDbPool {
                 do {
-                    let read = try await dbPool.read { db -> (Int, Int64?) in
+                    let read = try await dbPool.read { db -> (Int, Int64?, Int, Int64?) in
                         let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sidecarHints") ?? 0
                         let latest = try Int64.fetchOne(db, sql: "SELECT MAX(writtenAtMs) FROM sidecarHints")
-                        return (count, latest)
+                        let cutoff = nowMs() - Int64(24 * 60 * 60 * 1000)
+                        let noiseCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sidecarHintNoise WHERE recordedAtMs >= ?", arguments: [cutoff]) ?? 0
+                        let noiseLatest = try Int64.fetchOne(db, sql: "SELECT MAX(recordedAtMs) FROM sidecarHintNoise")
+                        return (count, latest, noiseCount, noiseLatest)
                     }
                     hintsInFlight = read.0
                     mostRecent = read.1
+                    noiseFlags = read.2
+                    mostRecentNoise = read.3
                 } catch {
                     // Non-fatal — leave stats at 0/nil.
                 }
@@ -394,7 +411,9 @@ struct SidecarDetailView: View {
                 minRankScore: userConfig.minRankScore,
                 topKCap: 3,
                 hintsInFlight: hintsInFlight,
-                mostRecentHintAt: mostRecent
+                mostRecentHintAt: mostRecent,
+                noiseFlagsLast24h: noiseFlags,
+                mostRecentNoiseAt: mostRecentNoise
             )
         } else {
             handler = nil

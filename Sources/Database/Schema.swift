@@ -1291,6 +1291,30 @@ extension DatabaseMigrator {
                 """)
         }
 
+        // v36: sidecarHintNoise — receiver-side feedback that a specific
+        // hint was noise. The receiving Claude session (the one that got the
+        // hint injected) calls `sidecar_hint_noise` after judging the block.
+        // Negative-only feedback: silence is presumed OK, so we build a
+        // "spam corpus" of memory ids that consistently get flagged for a
+        // given query shape. Consumed later at recall time to downweight
+        // repeat offenders — for now, recording only.
+        registerMigration("v36_sidecar_hint_noise") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS sidecarHintNoise (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sessionId    TEXT NOT NULL,
+                    memoryId     TEXT NOT NULL,
+                    reason       TEXT,
+                    queryHash    TEXT,
+                    recordedAtMs INTEGER NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS sidecarHintNoise_by_memory
+                ON sidecarHintNoise(memoryId, recordedAtMs)
+                """)
+        }
+
         // v35: sidecarHints — TTL-scoped scratch for memory-sidecar output.
         //
         // The memory sidecar's per-request internal agent writes hints here
