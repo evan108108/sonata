@@ -64,7 +64,232 @@ enum MemorySidecarHandler {
         }
     }
 
-    // MARK: - Core
+    // MARK: - Synchronous synthesize path (UserPromptSubmit hook)
+
+    /// Produce a hint block for the current turn synchronously — the design
+    /// this file is pivoting to as of 2026-07-22. The bash UserPromptSubmit
+    /// hook POSTs Claude Code's raw hook input JSON to
+    /// `/api/sidecar/hint/synthesize`; that endpoint calls this function and
+    /// returns the wrapped block as the hook's stdout, which Claude Code
+    /// prepends to the user's prompt.
+    ///
+    /// Returns nil when we chose silence (anchor rule / floor filter /
+    /// empty candidate set / distillation produced no query). Returns a
+    /// non-empty string ready to be printed as-is, wrapped in
+    /// `<user-prompt-submit-hook>` tags.
+    ///
+    /// The old Stop-hook + `sidecarHints` table path (`run(payload:logger:)`
+    /// below) is left in place for now but no longer fed by any hook. It
+    /// can be removed once we're confident the synchronous path is right.
+    static func synthesize(sessionId: String, prompt: String, logger: Logger) async -> String? {
+        guard !sessionId.isEmpty else { return nil }
+
+        // Distill distinctive tokens from the raw prompt. Casual prose
+        // dilutes FTS scoring on curated surfaces (wiki, memories); a
+        // distilled query gives BM25 a chance to weight the tokens that
+        // actually identify the topic. Observed 2026-07-22: verbose
+        // prompt like "tell me about the social-platform idea using the
+        // tool Agent-Reach and the new pilot plan you have created"
+        // failed to surface the Agent-Reach wiki page directly, while
+        // the bare token "Agent-Reach" surfaced it as #1.
+        let distilled = distill(prompt: prompt)
+        guard !distilled.isEmpty else {
+            logger.debug("memory sidecar: no distinctive tokens in prompt; staying silent")
+            return nil
+        }
+
+        let userConfig = SidecarConfigStore.shared.config(forName: "memory")
+        if userConfig.tier == .off {
+            logger.debug("memory sidecar: tier=off; staying silent")
+            return nil
+        }
+        let recencyMode = userConfig.recencyMode
+        let minRankScore = userConfig.minRankScore
+        let requestedLimit = 3
+
+        let candidates: [Candidate]
+        do {
+            candidates = try await recall(
+                query: distilled,
+                limit: max(requestedLimit + 5, requestedLimit),
+                recencyMode: recencyMode,
+                excludeSessionId: sessionId
+            )
+        } catch {
+            logger.debug("memory sidecar: recall failed: \(error); staying silent")
+            return nil
+        }
+        guard !candidates.isEmpty else {
+            logger.debug("memory sidecar: no candidates for prompt; staying silent")
+            return nil
+        }
+
+        let ranked = candidates
+            .filter { ($0.rankScore ?? 0) >= minRankScore }
+            .sorted { ($0.rankScore ?? 0) > ($1.rankScore ?? 0) }
+
+        // Anchor rule (see notes on the event-driven path below).
+        func isAnchor(_ id: String) -> Bool {
+            !id.hasPrefix("conv-") && !id.hasPrefix("email-")
+        }
+        let anchorHits = ranked.filter { isAnchor($0.id) }
+        let rideAlongHits = ranked.filter { !isAnchor($0.id) }
+        let filtered: [Candidate]
+        if anchorHits.isEmpty {
+            filtered = []
+        } else {
+            let rideAlongFill = max(0, requestedLimit - anchorHits.count)
+            filtered = Array(anchorHits.prefix(requestedLimit))
+                + Array(rideAlongHits.prefix(rideAlongFill))
+        }
+        guard !filtered.isEmpty else {
+            logger.debug("memory sidecar: no anchor hit for prompt; staying silent")
+            return nil
+        }
+
+        let hint = formatHint(candidates: filtered, sessionId: sessionId)
+        guard !hint.isEmpty else { return nil }
+        // Wrap in the same tag the previous JS hook wrote, so Claude
+        // Code's existing UserPromptSubmit rendering treats it uniformly.
+        return "<user-prompt-submit-hook>\n\(hint)\n</user-prompt-submit-hook>"
+    }
+
+    // MARK: - Distillation
+
+    /// Extract distinctive tokens from a raw user prompt. The goal is a
+    /// short high-signal query for FTS + vector recall.
+    ///
+    /// Kept tokens:
+    /// - Words with an internal capital or a hyphen (`Agent-Reach`, `iOS`).
+    /// - Quoted strings (single and double), verbatim contents.
+    /// - Capitalized words that aren't at a sentence start.
+    /// - Any token ≥ 6 chars that isn't in the stopword list.
+    ///
+    /// Dropped tokens:
+    /// - Stopwords ("that", "them", "which", …).
+    /// - Numbers-only tokens.
+    /// - Punctuation and single characters.
+    ///
+    /// Output is the distinct tokens joined by spaces, preserving
+    /// first-seen order. Caller decides what to do with an empty result
+    /// (typically: stay silent).
+    private static let distillStopwords: Set<String> = [
+        "the", "and", "for", "with", "that", "this", "these", "those", "them",
+        "they", "there", "then", "than", "have", "has", "had", "was", "were",
+        "been", "being", "will", "would", "could", "should", "shall", "must",
+        "your", "yours", "our", "ours", "their", "theirs", "his", "her", "him",
+        "she", "some", "any", "each", "every", "what", "when", "where", "why",
+        "how", "who", "which", "whose", "into", "onto", "from", "about", "over",
+        "under", "again", "before", "after", "while", "until", "unless", "though",
+        "although", "because", "since", "still", "just", "only", "even", "also",
+        "very", "much", "many", "more", "most", "less", "least", "such", "same",
+        "here", "does", "doing", "done", "make", "made", "using", "used", "give",
+        "gave", "know", "knew", "think", "thought", "want", "wanted", "need",
+        "please", "yeah", "okay", "hello", "let", "lets", "gonna", "wanna",
+        "kind", "sort", "type", "thing", "things", "stuff", "point", "part",
+        "case", "cases", "detail", "details", "idea", "ideas", "plan", "plans",
+    ]
+
+    static func distill(prompt: String) -> String {
+        guard !prompt.isEmpty else { return "" }
+        var seen = Set<String>()
+        var out: [String] = []
+
+        // First pass: extract quoted spans verbatim; keep them intact.
+        let quoted = extractQuotedSpans(prompt)
+        for span in quoted {
+            let key = span.lowercased()
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            out.append(span)
+        }
+
+        // Tokenize by whitespace + basic punctuation; keep hyphens inside
+        // tokens so `Agent-Reach` and `slot-auto-1` stay one token.
+        let scanned = tokenize(prompt)
+        var index = 0
+        for tok in scanned {
+            defer { index += 1 }
+            let cleaned = tok.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?()[]{}\"'"))
+            guard cleaned.count > 1 else { continue }
+            if isPureNumber(cleaned) { continue }
+            let lower = cleaned.lowercased()
+            if distillStopwords.contains(lower) { continue }
+
+            let keep: Bool
+            if hasInternalCapitalOrHyphen(cleaned) {
+                keep = true
+            } else if isCapitalized(cleaned) && index > 0 {
+                keep = true
+            } else if cleaned.count >= 6 {
+                keep = true
+            } else {
+                keep = false
+            }
+            guard keep else { continue }
+            guard seen.insert(lower).inserted else { continue }
+            out.append(cleaned)
+        }
+        // Cap at ~200 chars so pathological prompts don't blow up
+        // the FTS query. Tokens are ordered by first appearance, so
+        // truncation drops the tail (less-important) first.
+        var joined = out.joined(separator: " ")
+        if joined.count > 200 {
+            joined = String(joined.prefix(200))
+        }
+        return joined
+    }
+
+    private static func extractQuotedSpans(_ text: String) -> [String] {
+        var spans: [String] = []
+        let quoteChars: [Character] = ["\"", "'", "`"]
+        var i = text.startIndex
+        while i < text.endIndex {
+            let ch = text[i]
+            if quoteChars.contains(ch) {
+                let start = text.index(after: i)
+                if let end = text[start...].firstIndex(of: ch) {
+                    let span = String(text[start..<end]).trimmingCharacters(in: .whitespaces)
+                    if !span.isEmpty && span.count <= 60 { spans.append(span) }
+                    i = text.index(after: end)
+                    continue
+                }
+            }
+            i = text.index(after: i)
+        }
+        return spans
+    }
+
+    private static func tokenize(_ text: String) -> [String] {
+        // Split on whitespace and a small punctuation set; keep hyphens
+        // and dots inside tokens so URLs and hyphenated names survive.
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(CharacterSet(charactersIn: ",;:!?()[]{}\"'"))
+        return text.components(separatedBy: separators).filter { !$0.isEmpty }
+    }
+
+    private static func isPureNumber(_ s: String) -> Bool {
+        return !s.isEmpty && s.allSatisfy { $0.isNumber || $0 == "." || $0 == "," || $0 == "-" }
+    }
+
+    private static func hasInternalCapitalOrHyphen(_ s: String) -> Bool {
+        guard s.count > 1 else { return false }
+        if s.contains("-") { return true }
+        // Internal capital: capital letter after the first character.
+        let after = s.dropFirst()
+        return after.contains(where: { $0.isUppercase })
+    }
+
+    private static func isCapitalized(_ s: String) -> Bool {
+        guard let first = s.first else { return false }
+        return first.isUppercase
+    }
+
+    // MARK: - Core (event-driven, deprecated as of 2026-07-22)
+    //
+    // Retained for now so the sidecar event delivery path keeps compiling
+    // and any not-yet-drained memory_request events don't hard-crash.
+    // Once the synchronous synthesize path is proven and hooks are cut
+    // over, this and its supporting Request struct can go.
 
     private static func run(payload: SidecarEventPayload, logger: Logger) async throws {
         guard let data = payload.payloadJSON.data(using: .utf8) else {
@@ -121,29 +346,36 @@ enum MemorySidecarHandler {
             .filter { ($0.rankScore ?? 0) >= minRankScore }
             .sorted { ($0.rankScore ?? 0) > ($1.rankScore ?? 0) }
 
-        // Memory-anchor rule. Conversations amplify a memory answer;
-        // they don't stand alone. mem_recall's conv layer is raw FTS on
-        // session transcripts with no rank floor of its own — for a
-        // casual prompt like "what did we find out about scouts
-        // paranoia" it will happily return the best word-matched chunks
-        // even when they're generic developer chatter. Without a memory
-        // hit above the score floor to anchor the topic, those conv
-        // hits are almost always noise. Observed 2026-07-22: casual
-        // prompts routinely surfaced 3 unrelated conv chunks and zero
-        // memory hits — silence would have been more useful. So: if no
-        // memory hit clears the floor, drop the conv hits too.
-        let memoryHits = ranked.filter { !$0.id.hasPrefix("conv-") }
-        let conversationHits = ranked.filter { $0.id.hasPrefix("conv-") }
+        // Anchor rule. Anchor-qualifying hits are memories and wiki
+        // pages — both are curated / structured surfaces where a
+        // present hit is a strong topic signal. Conv chunks and emails
+        // are ride-along only: raw FTS on session transcripts / inbox
+        // with no floor of their own, prone to returning "best
+        // word-matched thing" for casual queries. Without an anchoring
+        // hit above the score floor, ride-alongs are almost always
+        // noise, so we drop them too and stay silent.
+        //
+        // Observed 2026-07-22: casual prompts routinely surfaced 3
+        // unrelated conv chunks and zero memory hits — silence would
+        // have been more useful. Initial anchor rule counted only
+        // memory rows; refined shortly after to include wiki pages
+        // because a wiki hit on Agent-Reach was being silenced despite
+        // being the correct answer.
+        func isAnchor(_ id: String) -> Bool {
+            !id.hasPrefix("conv-") && !id.hasPrefix("email-")
+        }
+        let anchorHits = ranked.filter { isAnchor($0.id) }
+        let rideAlongHits = ranked.filter { !isAnchor($0.id) }
         let filtered: [Candidate]
-        if memoryHits.isEmpty {
+        if anchorHits.isEmpty {
             filtered = []
         } else {
-            let convFill = max(0, requestedLimit - memoryHits.count)
-            filtered = Array(memoryHits.prefix(requestedLimit))
-                + Array(conversationHits.prefix(convFill))
+            let rideAlongFill = max(0, requestedLimit - anchorHits.count)
+            filtered = Array(anchorHits.prefix(requestedLimit))
+                + Array(rideAlongHits.prefix(rideAlongFill))
         }
         guard !filtered.isEmpty else {
-            logger.debug("memory sidecar: no memory anchor for event \(payload.eventId); staying silent (memory-anchor rule)")
+            logger.debug("memory sidecar: no anchor hit for event \(payload.eventId); staying silent (anchor rule)")
             return
         }
 
@@ -226,17 +458,50 @@ enum MemorySidecarHandler {
         let project: String?
     }
 
+    /// One hit from the emails layer of mem_recall — a past inbound or
+    /// outbound email whose FTS matched the query. Same synthetic-rank
+    /// treatment as conversations: no `_rankScore` in the response.
+    private struct EmailHit: Decodable {
+        let id: String
+        let subject: String?
+        let snippet: String?
+        let fromAddr: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id = "_id"
+            case subject, snippet, fromAddr
+        }
+    }
+
+    /// One hit from the wiki layer of mem_recall — a page in the local
+    /// wiki tree. The `slug` (e.g. "sonata/backlog") is stable enough to
+    /// use as the synthetic id.
+    private struct WikiHit: Decodable {
+        let slug: String
+        let title: String?
+        let snippet: String?
+    }
+
     private struct RecallResponse: Decodable {
         let memories: [Candidate]?
         let conversations: [ConversationHit]?
+        let emails: [EmailHit]?
+        let wikiPages: [WikiHit]?
     }
 
-    /// Score we assign to conversation hits so they can pass through the
-    /// same rank-floor filter as memories without needing a real ranking
-    /// signal. Above the tested default floor (0.60) so at-default settings
-    /// still surface them; not so high that a user tightening to 0.75+
-    /// can't tune them out.
+    /// Score we assign to non-memory hits (conversations, emails, wiki)
+    /// so they can pass through the same rank-floor filter as memories
+    /// without needing a real ranking signal. Above the tested default
+    /// floor (0.60) so at-default settings still surface them; not so
+    /// high that a user tightening to 0.75+ can't tune them out.
+    ///
+    /// Note: these hits only surface when a real memory anchor clears
+    /// the floor (see the memory-anchor rule in `run`), so this constant
+    /// controls whether they can ride along at all rather than whether
+    /// they can beat memories on their own.
     private static let conversationSynthesizedRank: Double = 0.70
+    private static let emailSynthesizedRank: Double = 0.70
+    private static let wikiSynthesizedRank: Double = 0.70
 
     private static func recall(
         query: String,
@@ -303,7 +568,125 @@ enum MemorySidecarHandler {
             )
         }
 
-        return memories + conversationCandidates
+        // Emails: subject + one-line snippet takeaway. Prefix ids with
+        // `email-` so the memory-anchor rule treats them as non-memory
+        // hits (they only surface when a real memory anchor exists).
+        let emailCandidates: [Candidate] = (decoded.emails ?? []).compactMap { e in
+            let subject = (e.subject ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = (e.snippet ?? "").replacingOccurrences(of: "\n", with: " ")
+                                       .replacingOccurrences(of: "\r", with: " ")
+                                       .trimmingCharacters(in: .whitespaces)
+            let snippet = String(raw.prefix(160))
+            let head = subject.isEmpty ? snippet : subject
+            guard !head.isEmpty else { return nil }
+            let takeaway = subject.isEmpty
+                ? "past email · \(head)"
+                : "past email · \(head)\(snippet.isEmpty ? "" : " — \(snippet)")"
+            return Candidate(
+                id: "email-\(e.id)",
+                rankScore: emailSynthesizedRank,
+                l0: takeaway,
+                l1: nil
+            )
+        }
+
+        // Wiki pages: title + snippet takeaway. Prefix ids with `wiki-`
+        // for the same anchor-rule reason as emails and conversations.
+        let wikiCandidates: [Candidate] = (decoded.wikiPages ?? []).compactMap { w in
+            let title = (w.title ?? w.slug).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { return nil }
+            let raw = (w.snippet ?? "").replacingOccurrences(of: "\n", with: " ")
+                                       .replacingOccurrences(of: "\r", with: " ")
+                                       .trimmingCharacters(in: .whitespaces)
+            let snippet = String(raw.prefix(160))
+            let takeaway = snippet.isEmpty ? "wiki · \(title)" : "wiki · \(title) — \(snippet)"
+            return Candidate(
+                id: "wiki-\(w.slug)",
+                rankScore: wikiSynthesizedRank,
+                l0: takeaway,
+                l1: nil
+            )
+        }
+
+        let all = memories + conversationCandidates + emailCandidates + wikiCandidates
+        return await applyNoiseDownweight(all)
+    }
+
+    /// Look up how many times each candidate id has been flagged as
+    /// noise in the last 7 days and multiply the rank score by a
+    /// per-flag penalty. Noise is hint-specific — we deliberately do
+    /// not apply this in `/api/recall` itself, since a memory that's
+    /// noise for an auto-injected hint block can still be the right
+    /// answer for a deliberate chat recall. Applying it here keeps the
+    /// feedback loop scoped to the sidecar.
+    ///
+    /// **Split-penalty curve.** Anchors (memories, wiki pages) get a
+    /// gentle penalty, ride-alongs (conv chunks, emails) get an
+    /// aggressive one. The two classes represent different failure
+    /// modes:
+    ///
+    /// - Ride-along noise = "this specific chunk / email is spammy /
+    ///   generic and shouldn't ride along" → we WANT to silence it fast.
+    ///   `penalty = min(0.50, n × 0.15)` — 15% off after 1 flag, kills
+    ///   at ~3 flags (0.70 base × 0.55 = 0.385, below default floor).
+    ///
+    /// - Anchor noise = "this curated page came up wrong for THIS query"
+    ///   → doesn't mean the page is generally noisy; the topic mismatch
+    ///   might be one-off. `penalty = min(0.10, n × 0.02)` — capped at
+    ///   10% regardless of flag count, enough to be a tiebreaker but
+    ///   never enough to push a legit anchor below the 0.60 floor.
+    ///
+    /// Rationale for the split: today's failure mode was that flagging
+    /// wiki pages as noise for irrelevant queries would eventually kill
+    /// them for direct-topic queries where they ARE the right answer.
+    /// Uniform penalty punished anchors as harshly as ride-alongs; the
+    /// split preserves anchor visibility while retiring bad ride-alongs.
+    private static let noiseWindowMs: Int64 = 7 * 24 * 60 * 60 * 1000
+
+    private static func applyNoiseDownweight(_ candidates: [Candidate]) async -> [Candidate] {
+        guard !candidates.isEmpty else { return candidates }
+        guard let dbPool = SonataApp.sharedDbPool else { return candidates }
+        let ids = candidates.map { $0.id }
+        let cutoff = nowMs() - noiseWindowMs
+        let counts: [String: Int]
+        do {
+            counts = try await dbPool.read { db -> [String: Int] in
+                let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+                let sql = """
+                    SELECT memoryId, COUNT(*) AS n
+                    FROM sidecarHintNoise
+                    WHERE recordedAtMs >= ?
+                      AND memoryId IN (\(placeholders))
+                    GROUP BY memoryId
+                """
+                var arguments: [DatabaseValueConvertible] = [cutoff]
+                arguments.append(contentsOf: ids)
+                let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
+                var out: [String: Int] = [:]
+                for row in rows {
+                    let mid: String = row["memoryId"] ?? ""
+                    let n: Int = row["n"] ?? 0
+                    if !mid.isEmpty { out[mid] = n }
+                }
+                return out
+            }
+        } catch {
+            return candidates
+        }
+        return candidates.map { c in
+            let n = counts[c.id] ?? 0
+            guard n > 0, let base = c.rankScore else { return c }
+            let isRideAlong = c.id.hasPrefix("conv-") || c.id.hasPrefix("email-")
+            let penalty: Double = isRideAlong
+                ? min(0.50, Double(n) * 0.15)
+                : min(0.10, Double(n) * 0.02)
+            return Candidate(
+                id: c.id,
+                rankScore: base * (1.0 - penalty),
+                l0: c.l0,
+                l1: c.l1
+            )
+        }
     }
 
     // MARK: - Format

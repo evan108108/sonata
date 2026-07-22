@@ -444,8 +444,18 @@ func ensureBundledHooks() {
         let timeoutSeconds: Int  // per Claude Code hook config
     }
     let hooks: [HookInstall] = [
-        HookInstall(filename: "sidecar-stop-hook.js", event: "Stop", timeoutSeconds: 3),
-        HookInstall(filename: "sidecar-user-prompt-submit-hook.js", event: "UserPromptSubmit", timeoutSeconds: 3),
+        HookInstall(filename: "sidecar-user-prompt-submit-hook.sh", event: "UserPromptSubmit", timeoutSeconds: 3),
+    ]
+
+    // Hooks we've shipped in the past and now want removed from users'
+    // settings.json. Kept intentionally as a name-only list — we don't
+    // want dangling entries pointing at files we no longer bundle to
+    // stay around forever. Only touches settings.json; the physical
+    // files under ~/.claude/hooks/ are left alone (harmless leftovers,
+    // no code path invokes them once settings.json stops referencing them).
+    let retiredHookFilenames: Set<String> = [
+        "sidecar-stop-hook.js",
+        "sidecar-user-prompt-submit-hook.js",
     ]
 
     let fm = FileManager.default
@@ -465,7 +475,7 @@ func ensureBundledHooks() {
         try? fm.removeItem(at: destFile)
         do {
             try fm.copyItem(at: sourceURL, to: destFile)
-            // Node hooks need to be executable when Claude Code spawns them.
+            // Hook files (JS, bash, whatever) need +x when Claude Code spawns them.
             _ = try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destFile.path)
             installedPaths.append((hook, destFile.path))
             sonataFileLog("Hook setup: deployed \(hook.filename) to ~/.claude/hooks/")
@@ -485,6 +495,39 @@ func ensureBundledHooks() {
     }
     var hooksSection = (settings["hooks"] as? [String: Any]) ?? [:]
     var dirty = false
+
+    // Purge retired hook entries — settings.json entries whose command's
+    // basename is in `retiredHookFilenames`. Prunes empty inner arrays and
+    // empty groups as it goes so we don't leave dangling husks.
+    for eventKey in Array(hooksSection.keys) {
+        guard let groups = hooksSection[eventKey] as? [[String: Any]] else { continue }
+        var groupChanged = false
+        var newGroups: [[String: Any]] = []
+        for group in groups {
+            guard var inner = group["hooks"] as? [[String: Any]] else {
+                newGroups.append(group); continue
+            }
+            let originalCount = inner.count
+            inner.removeAll { entry in
+                guard let cmd = entry["command"] as? String else { return false }
+                return retiredHookFilenames.contains((cmd as NSString).lastPathComponent)
+            }
+            if inner.count != originalCount { groupChanged = true }
+            if inner.isEmpty { continue } // drop the empty group entirely
+            var updated = group
+            updated["hooks"] = inner
+            newGroups.append(updated)
+        }
+        if groupChanged {
+            if newGroups.isEmpty {
+                hooksSection.removeValue(forKey: eventKey)
+            } else {
+                hooksSection[eventKey] = newGroups
+            }
+            dirty = true
+        }
+    }
+
     for (install, path) in installedPaths {
         var groups = (hooksSection[install.event] as? [[String: Any]]) ?? []
         let alreadyRegistered = groups.contains { group in

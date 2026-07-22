@@ -26,17 +26,27 @@ Right shape when Sonata's own machinery does the work. The memory sidecar is `.i
 
 ## The memory sidecar concretely
 
-**Event source.** A stop hook in `~/.claude/hooks/sidecar-stop-hook.js` (bundled to `Sources/Sonata/Resources/hooks/`, installed to `~/.claude/hooks/` at boot by `ensureBundledHooks`) fires a `memory_request` event on every user-role session's turn completion. Worker/supervisor/sidecar sessions no-op via a `role=user` gate — nothing else on the machine should be asking for memory hints.
+The memory sidecar is now driven from `UserPromptSubmit` — synchronous, one HTTP round trip per user turn, all logic in Swift. The `Stop`-hook + `sidecarHints`-table + injected-memory-ledger + query-expansion path from earlier the same day is retired (settings.json entries are purged by `ensureBundledHooks` on boot); the previous approach tried to predict what the next turn would need before the user typed it, and every knob we added — dedup window, ledger, query expansion, noise dedup — was patching around the prediction being unreliable. The synchronous path just answers what the user actually asked.
 
-**Delivery.** `WorkerActions.worker_event_enqueue` looks up the sidecar's assignee. For sidecar-owned event types (types the registry owns), a nil assignee means fail-closed with a 503 — this prevents fan-out to pool workers when the sidecar is registered but not yet spawned. `MCPEventPusher.pushPendingNotifications` has a belt-and-suspenders check with `sidecarOwnedFallbacks` for the boot-race window between HTTP server up and `bootSidecars` completing.
+**Event source.** A dumb-pipe bash hook, `~/.claude/hooks/sidecar-user-prompt-submit-hook.sh` (bundled to `Sources/Sonata/Resources/hooks/`, installed at boot). Reads Claude Code's raw hook input JSON from stdin, `curl`s it verbatim to `/api/sidecar/hint/synthesize` with a 2-second cap, prints the returned `content` field to stdout via `jq -r '.content // ""'`. Claude Code prepends stdout to the user's prompt. Fail-silent by construction: any curl / jq / Sonata failure emits nothing and exits 0.
 
-**Handler.** `MemorySidecarHandler.run` decodes the payload, builds a query from `last_user_prompt + "\n\n" + last_assistant_head` (capped at 3000 chars — the assistant head carries distinctive topic nouns forward across casual continuation prompts like "what did we find out?"), calls `/api/recall` (loopback HTTP with `tier=l0`, `recencyMode` from settings), filters the response against `already_injected`, applies the `minRankScore` floor, caps at `top_k` (max 3), formats a hint markdown block, and INSERTs to `sidecarHints`.
+**Handler.** `MemorySidecarHandler.synthesize(sessionId:prompt:logger:)`:
+1. **Role gate** — `SONATA_SESSION_ROLE != "user"` or `cwd` under `~/.sonata/worker|sidecar-|supervisor` → empty.
+2. **Distill** — extract distinctive tokens from the prompt (capitalized proper nouns, hyphenated compounds like `Agent-Reach`, quoted strings, ≥6-char non-stopwords). Discard the rest. Empty distilled query → empty response.
+3. **Recall** — `GET /api/recall` on the distilled query with `tier=l0`, `recencyMode` from settings.
+4. **Filter** — score floor (`minRankScore`); apply noise downweight from `sidecarHintNoise`.
+5. **Anchor rule** (below) → up to `top_k` (max 3) candidates.
+6. **Format** — the same `- **{takeaway}** — [memory: {id}]` block the sub-agent used to write, wrapped in `<user-prompt-submit-hook>` tags so Claude Code renders it consistently.
 
-**Memory-anchor rule.** Conversation-layer hits (synthetic id prefix `conv-`) only surface when at least one memory-layer hit clears the score floor. `mem_recall`'s conversation layer is raw FTS on session transcripts with no floor of its own — for a weak-signal query it will return the best word-matched chunks even when they're generic developer chatter. Without a memory hit to anchor the topic, those conv hits are almost always noise, so we drop them and stay silent. When a memory anchor exists, memories take the first slots and conv hits fill the remainder up to `top_k`.
+Total wall-time is dominated by recall itself — under 500ms typical, capped at 2s by curl.
 
-**Consumption.** A `UserPromptSubmit` hook (`sidecar-user-prompt-submit-hook.js`) calls `/api/sidecar/hint/pop` for the current session id — read-and-delete in one transaction — and prepends the returned content as a `<user-prompt-submit-hook>` block. It also extracts memory ids from the popped content and appends to `~/.sonata/scratch/injected-memory-<sessionId>.jsonl`, which the stop hook reads on the next fire to populate `already_injected`.
+**Why distillation matters.** Meili BM25 on the wiki + memory layers is dominated by total-token-match density: verbose prose with 20 common-word matches on generic pages outranks a distinctive-token match on the correct page. Observed 2026-07-22: query "tell me about the social-platform idea using the tool Agent-Reach and the new pilot plan you have created" failed to surface the Agent-Reach wiki page; bare token "Agent-Reach" surfaced it as #1. Distillation gives BM25 a chance to weight the tokens that actually identify the topic.
 
-**Cleanup.** A `HealthMonitor` sweep line drops `sidecarHints` rows older than 30 minutes. Session-end handling would eventually retire the ledger file too; that's not in place yet, but the file is bounded by the dedup window so it doesn't grow unbounded within a session.
+**Anchor rule.** Hits from `mem_recall` fall into two classes. **Anchor-qualifying** — memories and wiki pages (curated / structured surfaces, present-hit implies strong topic signal). **Ride-along** — conversation chunks (synthetic id prefix `conv-`) and emails (`email-`), raw FTS on transcripts / inbox with no floor of their own. Ride-alongs only surface when at least one anchor-qualifying hit clears the score floor; without an anchor, ride-alongs are almost always noise for weak-signal queries and are dropped along with the block (silence beats noise). When an anchor exists, anchors take the first slots and ride-alongs fill the remainder up to `top_k`.
+
+**Noise feedback (receiver-side).** A hint block the reader judges noisy gets flagged via `POST /api/sidecar/hint/noise` (MCP alias `sidecar_hint_noise`) with the memory ids. Flags are stored in `sidecarHintNoise` (v36 migration) and downweight the affected ids at future recall time via a per-flag penalty applied inside `MemorySidecarHandler.applyNoiseDownweight` with a 7-day rolling window. Negative-only feedback: silence means the block was fine.
+
+**Cleanup.** `HealthMonitor.sweepStaleSidecarHints()` drops `sidecarHints` rows older than 30 minutes (legacy table from the retired async path; kept to drain in-flight rows and left in the schema so a future sidecar can use it). No scratch files, no injected-memory ledger, nothing to reap between sessions.
 
 ## Framework surfaces
 
@@ -52,22 +62,23 @@ Right shape when Sonata's own machinery does the work. The memory sidecar is `.i
 
 **`SidecarDetailView`** (SwiftUI). Per-sidecar stats window. Session card renders "In-process handler" for `.inProcess`. A Handler card shows recencyMode / minRankScore / topKCap / hintsInFlight / mostRecentHint for `.inProcess` sidecars.
 
-**`SidecarHintActions`** (SonataAction). Two HTTP endpoints, `POST /api/sidecar/hint/write` and `POST /api/sidecar/hint/pop`, used by the handler and the UserPromptSubmit hook respectively. Empty content rejected on write.
+**`SidecarHintActions`** (SonataAction). HTTP endpoints, all under `/api/sidecar/hint/`:
+- `POST /synthesize` — the synchronous UserPromptSubmit path; takes Claude Code's hook input JSON, returns `{content: string}`.
+- `POST /noise` — receiver-side noise feedback; records to `sidecarHintNoise`.
+- `POST /write`, `POST /pop` — legacy from the retired async path; still registered so any in-flight sidecarHints rows drain cleanly, and available for future non-memory sidecars.
 
 ## Knobs, mapped to consumers
 
+The knob surface shrank significantly with the pivot — most of the stop-hook-era knobs (context depth, top-K, triggers, dedup window) no longer have consumers. The handler caps `top_k` at 3 internally; the legacy stop-hook-only knobs are still stored in `SidecarUserConfig` for forward-compat but are ignored by the synthesize path.
+
 | Knob | Kind | Consumer | Applied when |
 |---|---|---|---|
-| Tier | both | `SidecarLifecycle.spawn` / `.stop` | Immediately (live-config commit `3011ed3`) |
+| Tier | both | `SidecarLifecycle.spawn` / `.stop` and `synthesize` role gate | Immediately |
 | Subscription cap | `.claudeCode` | `SidecarSpendTracker` | On next spend record |
 | Judge model | `.claudeCode` | SKILL.md prompt template | On next spawn |
-| Context depth | both | stop hook payload construction | On next hook fire |
-| Top-K | both | stop hook payload; handler caps at 3 | On next hook fire |
-| Triggers | both | stop hook + UserPromptSubmit hook | On next hook fire |
-| Dedup window | both | stop hook reads last N ledger entries | On next hook fire |
 | Rotation threshold | `.claudeCode` | `SidecarLifecycle.tick` | On next monitor tick |
-| Recency mode | `.inProcess` (memory) | `MemorySidecarHandler.recall` | On next event |
-| Min rank score | `.inProcess` (memory) | `MemorySidecarHandler.run` | On next event |
+| Recency mode | `.inProcess` (memory) | `MemorySidecarHandler.recall` | On next hook fire |
+| Min rank score | `.inProcess` (memory) | `MemorySidecarHandler.synthesize` | On next hook fire |
 
 ## Adding a new sidecar
 

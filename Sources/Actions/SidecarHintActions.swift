@@ -1,7 +1,8 @@
 import Foundation
 import GRDB
+import Logging
 
-// MARK: - Sidecar Hint Actions (write, pop)
+// MARK: - Sidecar Hint Actions (synthesize, write, pop, noise)
 //
 // The memory sidecar's per-request internal agent writes hints for a source
 // session here (via curl — sonata-bridge MCP tools don't load into
@@ -25,7 +26,84 @@ private struct HintNoiseResponse: Encodable {
     let recorded: Int
 }
 
+/// Response shape for `sidecar_hint_synthesize` — the bash
+/// UserPromptSubmit hook prints `content` verbatim to stdout, which
+/// Claude Code prepends to the user's next prompt. Empty content =
+/// no injection (silence beats noise).
+private struct HintSynthesizeResponse: Encodable {
+    let content: String
+}
+
+private let synthesizeLogger = Logger(label: "sonata.sidecar.synthesize")
+
+/// True when this Claude Code hook invocation is a human-facing session.
+/// Non-user sessions (worker, sidecar, supervisor scratch dirs) get the
+/// same hook chain installed but must no-op. Symmetric with the check
+/// in the retired JS UserPromptSubmit hook.
+private func isUserSession(cwd: String, role: String?) -> Bool {
+    if let role = role, role != "user" { return false }
+    let home = NSHomeDirectory()
+    let nonUserPrefixes = [
+        "\(home)/.sonata/worker",
+        "\(home)/.sonata/sidecar-",
+        "\(home)/.sonata/supervisor",
+    ]
+    if nonUserPrefixes.contains(where: { cwd.hasPrefix($0) }) { return false }
+    return true
+}
+
 let sidecarHintActions: [SonataAction] = [
+
+    // POST /api/sidecar/hint/synthesize — synchronous UserPromptSubmit path
+    //
+    // The bash hook (`sidecar-user-prompt-submit-hook.sh`) posts Claude
+    // Code's raw hook input JSON here. We run recall + filter + format
+    // synchronously and return `{content: "<user-prompt-submit-hook>...
+    // </user-prompt-submit-hook>"}` for the hook to print to stdout,
+    // which Claude Code prepends to the user's prompt.
+    //
+    // Empty content on any of: role gate fails, tier=off, distillation
+    // finds no distinctive tokens, no anchor hit clears the floor.
+    // Fail-silent on errors — a bad turn is better than a broken prompt.
+    SonataAction(
+        name: "sidecar_hint_synthesize",
+        description: """
+            Synchronous handler for the UserPromptSubmit hook. Takes Claude Code's raw hook
+            input JSON (session_id + prompt + cwd), distills distinctive tokens, calls
+            mem_recall, applies the anchor rule, and returns a formatted hint block to
+            prepend. Empty content = intentional silence.
+            """,
+        group: "/api/sidecar",
+        path: "/hint/synthesize",
+        method: .post,
+        params: [
+            ActionParam("session_id", .string, required: true, description: "Claude Code session id"),
+            ActionParam("prompt", .string, description: "The prompt the user just submitted"),
+            ActionParam("cwd", .string, description: "Working directory (for role gate)"),
+            ActionParam("hook_event_name", .string, description: "Should be UserPromptSubmit"),
+        ],
+        handler: { ctx in
+            let sessionId = try ctx.params.require("session_id")
+            let prompt = ctx.params.string("prompt") ?? ""
+            let cwd = ctx.params.string("cwd") ?? ""
+            let role = ProcessInfo.processInfo.environment["SONATA_SESSION_ROLE"]
+
+            guard isUserSession(cwd: cwd, role: role) else {
+                return HintSynthesizeResponse(content: "")
+            }
+            guard !prompt.isEmpty else {
+                return HintSynthesizeResponse(content: "")
+            }
+
+            let content = await MemorySidecarHandler.synthesize(
+                sessionId: sessionId,
+                prompt: prompt,
+                logger: synthesizeLogger
+            ) ?? ""
+            return HintSynthesizeResponse(content: content)
+        }
+    ),
+
 
     // POST /api/sidecar/hint/noise — record receiver-side noise flags
     //
