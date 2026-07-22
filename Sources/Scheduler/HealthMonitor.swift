@@ -69,14 +69,35 @@ actor HealthMonitor {
     /// Per-check alert dedup state, keyed by check name. An alert fires
     /// immediately when the condition is NEW or its signature CHANGES; an
     /// unchanged condition is throttled with exponential backoff.
-    private struct AlertState {
+    private struct AlertState: Codable {
         var signature: String        // count-free fingerprint of the condition
         var firstSentAt: Date
         var lastSentAt: Date
         var sentCount: Int           // emails actually sent for this signature
         var suppressedSinceLast: Int // checks observed since the last email
     }
-    private var alertStates: [String: AlertState] = [:]
+    private var alertStates: [String: AlertState] = [:] {
+        didSet { persistAlertStates(alertStates) }
+    }
+
+    /// Where `alertStates` survives a process restart.
+    ///
+    /// Recovery notices used to be lost on exactly the incidents that most
+    /// needed them. `noteRecovery` only emails when it finds an AlertState to
+    /// remove, and that map lived purely in memory — so the ordinary fix for a
+    /// wedged Sonata (quit + relaunch) wiped the record that we had ever been
+    /// alerting. Evan got the alarms and never got the all-clear: 2026-07-17
+    /// on .17, again 2026-07-21 on this Mac. Persisting the map closes it: the
+    /// first healthy cycle after a restart finds the loaded state and sends the
+    /// RECOVERED email the old process never got to send.
+    private var alertStateFile: String {
+        "\(SonataInstance.dataDirectory)/health-alert-state.json"
+    }
+
+    /// Alert state older than this is dropped at load rather than resurrected.
+    /// Guards against a machine that sat powered off for a week booting into a
+    /// "RECOVERED after 6d" email for a condition nobody remembers.
+    private let alertStateMaxAge: TimeInterval = 24 * 3600
 
     /// A worker is considered "stuck" if it's been on the same event without
     /// progress for this long. The bridge heartbeats every 15s, so any worker
@@ -229,6 +250,7 @@ actor HealthMonitor {
             return
         }
         isRunning = true
+        loadAlertStates()
         logger.info("HealthMonitor started (interval: \(Int(checkInterval))s)")
 
         monitorTask = Task { [weak self] in
@@ -861,6 +883,46 @@ actor HealthMonitor {
             signature: sig, firstSentAt: now, lastSentAt: now, sentCount: 1, suppressedSinceLast: 0
         )
         await deliverAlert(check: check, message: message)
+    }
+
+    /// Write `alertStates` to disk. Best-effort: a failure here must never
+    /// break the monitor loop, it only costs us an all-clear across a restart.
+    private func persistAlertStates(_ states: [String: AlertState]) {
+        let path = alertStateFile
+        do {
+            let enc = JSONEncoder()
+            enc.dateEncodingStrategy = .iso8601
+            let data = try enc.encode(states)
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            logger.warning("HealthMonitor: could not persist alert state to \(path): \(error)")
+        }
+    }
+
+    /// Restore `alertStates` from disk, dropping anything past
+    /// `alertStateMaxAge`. Called once at `start()`, before the first cycle, so
+    /// a check that recovered while we were down still produces an all-clear.
+    private func loadAlertStates() {
+        let path = alertStateFile
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+            let loaded = try dec.decode([String: AlertState].self, from: data)
+            let cutoff = Date().addingTimeInterval(-alertStateMaxAge)
+            let fresh = loaded.filter { $0.value.lastSentAt >= cutoff }
+            let dropped = loaded.count - fresh.count
+            if !fresh.isEmpty || dropped > 0 {
+                let staleNote = dropped > 0 ? ", dropped \(dropped) stale" : ""
+                logger.info(
+                    "HealthMonitor: restored \(fresh.count) pending alert state(s)\(staleNote) — an all-clear will follow for any that now pass"
+                )
+            }
+            alertStates = fresh
+        } catch {
+            logger.warning("HealthMonitor: could not read alert state from \(path): \(error)")
+        }
     }
 
     /// One-shot "recovered" notice when a check that we'd alerted on goes

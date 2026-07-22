@@ -649,6 +649,91 @@ private let rlimInfinity: rlim_t = (rlim_t(1) << 63) - 1
 /// transient fd spike and should surface as a fatal log rather than hot-loop.
 enum HTTPServerSupervisorError: Error {
     case restartBudgetExhausted(Int)
+    case livenessLost(Int)
+}
+
+/// Poll `/api/ping` until the server stops answering, then throw.
+///
+/// The 2026-07-17 supervisor only reacts when SwiftNIO's ServiceGroup reports
+/// the HTTP service finished. That misses the failure mode we have actually hit
+/// twice: the listener binds, logs "Server started and listening", and then
+/// refuses every connection for the rest of the process's life while
+/// `runService()` sits there never returning. On 2026-07-21 that cost 11
+/// minutes — no worker registered, EmailHandler could not enqueue its own
+/// alert — and only a manual quit+relaunch fixed it. Racing the server against
+/// an active liveness probe turns that silent death into an ordinary restart.
+///
+/// Deliberately tolerant: a `graceSeconds` warmup before the first probe, and
+/// `failuresBeforeRestart` consecutive misses required, so a slow boot or one
+/// dropped connection never bounces a healthy server.
+func httpLivenessWatchdog(
+    port: Int,
+    graceSeconds: TimeInterval = 30,
+    probeInterval: TimeInterval = 15,
+    failuresBeforeRestart: Int = 3
+) async throws {
+    try await Task.sleep(for: .seconds(graceSeconds))
+    let url = URL(string: "http://127.0.0.1:\(port)/api/ping")!
+    var consecutiveFailures = 0
+    while !Task.isCancelled {
+        var alive = false
+        do {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 5
+            let (data, response) = try await URLSession(configuration: config).data(from: url)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               json["pong"] as? Bool == true {
+                alive = true
+            }
+        } catch {
+            alive = false
+        }
+        if Task.isCancelled { return }
+        if alive {
+            consecutiveFailures = 0
+        } else {
+            consecutiveFailures += 1
+            sonataFileLog("HTTP liveness: /api/ping unanswered (\(consecutiveFailures)/\(failuresBeforeRestart))")
+            if consecutiveFailures >= failuresBeforeRestart {
+                throw HTTPServerSupervisorError.livenessLost(consecutiveFailures)
+            }
+        }
+        try await Task.sleep(for: .seconds(probeInterval))
+    }
+}
+
+/// Block until nothing holds `port`, or `attempts` seconds elapse.
+///
+/// Rebinding after a wedge races the outgoing listener's teardown; without this
+/// the fresh `Application` can hit EADDRINUSE and burn a restart from the
+/// budget for no reason. Extracted from the one-shot startup probe so the
+/// restart path gets the same courtesy.
+@discardableResult
+func waitForPortFree(_ port: Int, attempts: Int = 10) async -> Bool {
+    for attempt in 1...attempts {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var optval: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, socklen_t(MemoryLayout<Int32>.size))
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        close(sock)
+        if bindResult == 0 {
+            if attempt > 1 { sonataFileLog("HTTP port \(port) free after \(attempt) attempts") }
+            return true
+        }
+        sonataFileLog("HTTP port \(port) busy, waiting... (attempt \(attempt)/\(attempts))")
+        try? await Task.sleep(for: .seconds(1))
+    }
+    return false
 }
 
 @discardableResult
@@ -1055,28 +1140,7 @@ struct SonataApp: App {
                 }
 
                 // Wait for port to be free (previous instance may still be releasing)
-                for attempt in 1...10 {
-                    let sock = socket(AF_INET, SOCK_STREAM, 0)
-                    guard sock >= 0 else { break }
-                    var addr = sockaddr_in()
-                    addr.sin_family = sa_family_t(AF_INET)
-                    addr.sin_port = UInt16(port).bigEndian
-                    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-                    var optval: Int32 = 1
-                    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, socklen_t(MemoryLayout<Int32>.size))
-                    let bindResult = withUnsafePointer(to: &addr) { ptr in
-                        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                            Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                        }
-                    }
-                    close(sock)
-                    if bindResult == 0 {
-                        if attempt > 1 { sonataFileLog("HTTP port \(port) free after \(attempt) attempts") }
-                        break
-                    }
-                    sonataFileLog("HTTP port \(port) busy, waiting... (attempt \(attempt)/10)")
-                    try? await Task.sleep(for: .seconds(1))
-                }
+                await waitForPortFree(port)
 
                 // WebSocket upgrade removed with the SonataMCPHandler cleanup
                 // above (2026-07-16). Plain HTTP1 now — nothing this server
@@ -1113,16 +1177,34 @@ struct SonataApp: App {
                             setCloseOnExecOnListenSockets(port: port)
                         }
                         do {
-                            let app = Application(
-                                router: router,
-                                server: .http1(),
-                                configuration: .init(address: .hostname("127.0.0.1", port: port)),
-                                logger: logger
-                            )
-                            try await app.runService()
+                            // Race the server against an active /api/ping probe.
+                            // Whichever finishes first ends the group: normally
+                            // that is the watchdog throwing `livenessLost`, which
+                            // cancels `runService()` and drops us into the restart
+                            // path below. A server that dies the SwiftNIO way
+                            // still works exactly as it did before.
+                            try await withThrowingTaskGroup(of: Void.self) { group in
+                                group.addTask {
+                                    let app = Application(
+                                        router: router,
+                                        server: .http1(),
+                                        configuration: .init(address: .hostname("127.0.0.1", port: port)),
+                                        logger: logger
+                                    )
+                                    try await app.runService()
+                                }
+                                group.addTask {
+                                    try await httpLivenessWatchdog(port: port)
+                                }
+                                try await group.next()
+                                group.cancelAll()
+                            }
                             cloexecSweep.cancel()
                             if Task.isCancelled { break }
                             sonataFileLog("HTTP server: runService returned unexpectedly — restarting")
+                        } catch is CancellationError {
+                            cloexecSweep.cancel()
+                            break
                         } catch {
                             cloexecSweep.cancel()
                             if Task.isCancelled { break }
@@ -1138,6 +1220,9 @@ struct SonataApp: App {
                         }
                         let backoff = min(Double(attempt), 5.0)
                         try? await Task.sleep(for: .seconds(backoff))
+                        // The outgoing listener may still be tearing down; give
+                        // it a moment rather than burning a restart on EADDRINUSE.
+                        await waitForPortFree(port)
                         sonataFileLog("HTTP server: restart attempt \(attempt)/\(maxRestarts)")
                     }
                 }
