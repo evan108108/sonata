@@ -439,8 +439,17 @@ struct SidecarsConfigView: View {
     }
 
     /// Persist a config and reflect the normalized result back into the row.
+    ///
+    /// Also kicks `SidecarLifecycle` so tier / cap / rotation-threshold changes
+    /// take effect immediately, not on the next Sonata restart. Without this
+    /// the panel's own header comment used to be accurate — "records intent
+    /// only" — and every UX cycle went: flip a knob, watch nothing happen,
+    /// relaunch the app. The throttle handler in `bootSidecars` already knows
+    /// how to do the config→registry→lifecycle three-step; the UI now mirrors
+    /// it for user-initiated changes.
     private func save(_ config: SidecarUserConfig, for name: String) {
         guard let index = rows.firstIndex(where: { $0.id == name }) else { return }
+        let oldConfig = rows[index].config
         do {
             try SidecarConfigStore.shared.setConfig(config, forName: name)
             lastError = nil
@@ -450,5 +459,53 @@ struct SidecarsConfigView: View {
             lastError = "Couldn't save sidecar settings: \(error.localizedDescription)"
         }
         rows[index].config = SidecarConfigStore.shared.config(for: rows[index].sidecar)
+        applyLifecycleChange(name: name, old: oldConfig, new: rows[index].config)
+    }
+
+    /// Update the registered `Sidecar` with framework-carried knobs and kick
+    /// the lifecycle if the tier transition needs one.
+    ///
+    /// Transitions:
+    /// - `.off → non-off`: spawn (nothing to rotate from).
+    /// - `non-off → .off`: stop.
+    /// - Both non-off, tier changed: rotate so a fresh session picks up the
+    ///   new tier in its prompts (the tier is only read at session build).
+    /// - Tier unchanged, other knobs changed: no lifecycle action; `capPct`
+    ///   and `rotationThreshold` are read on every relevant tick, so the
+    ///   registry update on its own is enough.
+    private func applyLifecycleChange(
+        name: String, old: SidecarUserConfig, new: SidecarUserConfig
+    ) {
+        guard let sidecar = SidecarRegistry.shared.lookup(byName: name) else { return }
+        let updated = Sidecar(
+            name: sidecar.name,
+            skillPath: sidecar.skillPath,
+            eventTypes: sidecar.eventTypes,
+            budgetTier: new.tier,
+            subscriptionCapPct: new.subscriptionCapPct,
+            triggers: sidecar.triggers,
+            rotationThreshold: new.rotationThreshold,
+            contextWindowTokens: sidecar.contextWindowTokens
+        )
+        do {
+            try SidecarRegistry.shared.update(updated)
+        } catch {
+            lastError = "Couldn't update sidecar registration: \(error.localizedDescription)"
+            return
+        }
+
+        let lifecycle = SidecarRuntime.shared.lifecycle
+        Task { [updated, old, new] in
+            switch (old.tier, new.tier) {
+            case (.off, let target) where target != .off:
+                try? await lifecycle?.spawn(updated)
+            case (let source, .off) where source != .off:
+                await lifecycle?.stop(updated)
+            case (let source, let target) where source != target:
+                await lifecycle?.rotate(updated)
+            default:
+                break
+            }
+        }
     }
 }
