@@ -413,6 +413,107 @@ func bootSidecars(dbPool: DatabasePool, logger: Logger) async {
     }
 }
 
+/// Deploy Sona's bundled Claude Code hooks to `~/.claude/hooks/` and register
+/// them in `~/.claude/settings.json` if not already present.
+///
+/// Hooks are shipped as sources rather than user config so a fresh install
+/// works out of the box: the memory sidecar's stop hook fires memory_requests,
+/// its UserPromptSubmit hook pops hints from the `sidecarHints` table — both
+/// stop working entirely without these files on disk AND without their entries
+/// in settings.json. The bundle-and-install pattern mirrors `ensureBundledSkills`.
+///
+/// Add new hooks here by:
+///   1. Drop the JS file into `Sources/Sonata/Resources/hooks/`.
+///   2. Append a HookInstall entry to `hooks` below with its target event and
+///      the desired hook config (timeout, etc.).
+///
+/// Idempotent by construction: the file copy always overwrites, but the
+/// settings.json edit only adds an entry when there isn't already one whose
+/// command path ends with the same filename. A user who has ever deleted the
+/// entry deliberately would still see it come back — deliberate here, since
+/// deleting the entry breaks the sidecar silently; if a user really wants to
+/// opt out, the sidecar tier setting is the intended surface.
+func ensureBundledHooks() {
+    struct HookInstall {
+        let filename: String
+        let event: String        // "Stop", "UserPromptSubmit", etc.
+        let timeoutSeconds: Int  // per Claude Code hook config
+    }
+    let hooks: [HookInstall] = [
+        HookInstall(filename: "sidecar-stop-hook.js", event: "Stop", timeoutSeconds: 3),
+        HookInstall(filename: "sidecar-user-prompt-submit-hook.js", event: "UserPromptSubmit", timeoutSeconds: 3),
+    ]
+
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+    let hooksRoot = home.appendingPathComponent(".claude/hooks")
+    try? fm.createDirectory(at: hooksRoot, withIntermediateDirectories: true)
+
+    var installedPaths: [(hook: HookInstall, path: String)] = []
+    for hook in hooks {
+        guard let sourceURL = Bundle.module.url(
+            forResource: hook.filename, withExtension: nil, subdirectory: "hooks"
+        ) else {
+            sonataFileLog("Hook setup: \(hook.filename) not found in bundle")
+            continue
+        }
+        let destFile = hooksRoot.appendingPathComponent(hook.filename)
+        try? fm.removeItem(at: destFile)
+        do {
+            try fm.copyItem(at: sourceURL, to: destFile)
+            // Node hooks need to be executable when Claude Code spawns them.
+            _ = try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destFile.path)
+            installedPaths.append((hook, destFile.path))
+            sonataFileLog("Hook setup: deployed \(hook.filename) to ~/.claude/hooks/")
+        } catch {
+            sonataFileLog("Hook setup: failed to copy \(hook.filename) — \(error)")
+        }
+    }
+
+    // Register any newly-installed hook that isn't already in settings.json.
+    // Preserves every existing entry — the goal is additive, not overriding.
+    guard !installedPaths.isEmpty else { return }
+    let settingsURL = home.appendingPathComponent(".claude/settings.json")
+    let settingsData = (try? Data(contentsOf: settingsURL)) ?? Data("{}".utf8)
+    guard var settings = (try? JSONSerialization.jsonObject(with: settingsData)) as? [String: Any] else {
+        sonataFileLog("Hook setup: settings.json not JSON-parseable; refusing to touch it")
+        return
+    }
+    var hooksSection = (settings["hooks"] as? [String: Any]) ?? [:]
+    var dirty = false
+    for (install, path) in installedPaths {
+        var groups = (hooksSection[install.event] as? [[String: Any]]) ?? []
+        let alreadyRegistered = groups.contains { group in
+            guard let inner = group["hooks"] as? [[String: Any]] else { return false }
+            return inner.contains { entry in
+                guard let cmd = entry["command"] as? String else { return false }
+                return (cmd as NSString).lastPathComponent == install.filename
+            }
+        }
+        if alreadyRegistered { continue }
+        groups.append([
+            "hooks": [[
+                "type": "command",
+                "command": path,
+                "timeout": install.timeoutSeconds,
+            ]],
+        ])
+        hooksSection[install.event] = groups
+        dirty = true
+    }
+    guard dirty else { return }
+    settings["hooks"] = hooksSection
+    do {
+        let output = try JSONSerialization.data(
+            withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]
+        )
+        try output.write(to: settingsURL, options: .atomic)
+        sonataFileLog("Hook setup: registered new hook entries in ~/.claude/settings.json")
+    } catch {
+        sonataFileLog("Hook setup: failed to write settings.json — \(error)")
+    }
+}
+
 /// Deploy Sona's bundled Claude Code skills to ~/.claude/skills/. Currently
 /// just the `/afk` skill because that's the one tied directly to Sonata
 /// runtime (channel-push from EmailHandler). Always overwrites so the skill
@@ -940,10 +1041,17 @@ struct SonataApp: App {
 
             // Deploy bundled Claude Code skills (currently just /afk) to ~/.claude/skills/
             ensureBundledSkills()
+
+            // Deploy bundled Claude Code hooks to ~/.claude/hooks/ and register
+            // them in settings.json. The memory sidecar's two hooks live here
+            // because they need to be part of the same install artifact as the
+            // Sonata endpoints they call — a repo checkout without them can't
+            // exercise the sidecar at all.
+            ensureBundledHooks()
         } else {
             sonataFileLog(
                 "Sonata init: secondary instance — skipping global config writes "
-                + "(~/.claude.json, ~/.claude/mcp.json, ~/.zshrc, ~/.claude/skills)")
+                + "(~/.claude.json, ~/.claude/mcp.json, ~/.zshrc, ~/.claude/skills, ~/.claude/hooks)")
         }
 
         // Role directories live under this instance's data dir, so a secondary
