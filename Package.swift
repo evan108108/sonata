@@ -35,7 +35,6 @@ let package = Package(
                 .copy("Sonata/Resources/worker"),
                 .copy("Sonata/Resources/supervisor"),
                 .copy("Sonata/Resources/skills"),
-                .copy("Sonata/Resources/sidecars"),
                 .copy("Sonata/Resources/hooks"),
                 .copy("Sonata/Resources/shaders"),
             ],

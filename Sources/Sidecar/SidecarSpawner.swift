@@ -170,59 +170,17 @@ enum MemorySidecarRegistration {
 
     static let name = "memory"
 
-    /// Routing key, `workers.workerId`, and MCP session key — deliberately one
-    /// value.
-    ///
-    /// `SidecarLifecycle` reads both context usage and drain state with
-    /// `SELECT ... FROM workers WHERE workerId = <handle.sessionKey>`. A
-    /// spawner that registered the session under one identifier and routed to
-    /// another would leave the monitor permanently blind: no usage readings, no
-    /// rotation, and a drain that always reports idle.
-    static let sessionKey = "sidecar-memory"
-
-    /// Pool membership is decided by `sessionLabel GLOB 'sona-worker-*'`. This
-    /// label sits outside that glob on purpose, so the generic dispatchers
-    /// never hand the sidecar unrelated work. See the matching guards in
-    /// `MCPEventPusher`, `SonataChannelServer`, and `TaskDispatcher`.
-    static let sessionLabel = sessionKey
-
     static let eventTypes = ["memory_request"]
 
-    /// Model backing the dispatcher loop. Matches the supervisor's rather than
-    /// introducing a second model id: the dispatcher does almost no reasoning —
-    /// it fills a template and spawns an agent — and the judge model that does
-    /// the actual work is chosen per-request from the event payload.
-    static let dispatcherModel = "claude-sonnet-4-6"
-
-    /// Bundle subdirectory holding `SKILL.md` and `worker-prompt.md`.
-    static let bundleSubdirectory = "sidecars/memory"
-
-    /// Per-request prompt template, copied beside the instructions so the
-    /// dispatcher can read it from its own working directory.
-    static let workerPromptResource = "worker-prompt.md"
-
-    /// Absolute path to the bundled `SKILL.md`, or nil when the app bundle is
-    /// incomplete. Nil is surfaced as a refusal to register rather than a
-    /// sidecar that fails later at spawn time.
-    static func bundledSkillPath() -> String? {
-        Bundle.module.url(
-            forResource: "SKILL", withExtension: "md", subdirectory: bundleSubdirectory
-        )?.path
-    }
-
     /// Build the registration, folding the user's stored config over the
-    /// defaults so a tuned tier or cap survives relaunch.
-    ///
-    /// Kind is `.inProcess`: the handler lives in `MemorySidecarHandler` and
-    /// runs `mem_recall` server-side in Swift. `skillPath` is now vestigial
-    /// (empty string) — kept in the initializer signature so the Claude Code
-    /// spawn path stays the framework's default without touching every call
-    /// site. `skillFileExists` guards in `SidecarLifecycle.spawn` only run
-    /// for `.claudeCode`, so an empty path is safe here.
-    static func sidecar(skillPath: String, config: SidecarUserConfig) -> Sidecar {
+    /// defaults so a tuned tier or cap survives relaunch. `.inProcess`
+    /// kind — the handler in `MemorySidecarHandler` is the whole runtime;
+    /// there's no Claude Code session, so `skillPath` is empty (never
+    /// checked for `.inProcess` sidecars).
+    static func sidecar(config: SidecarUserConfig) -> Sidecar {
         Sidecar(
             name: name,
-            skillPath: skillPath,
+            skillPath: "",
             eventTypes: eventTypes,
             budgetTier: config.tier,
             subscriptionCapPct: config.subscriptionCapPct,
@@ -604,31 +562,27 @@ final class SidecarRuntime: @unchecked Sendable {
 /// sidecar that isn't actually running.
 enum SidecarSpawnerFactory {
 
+    /// Default model for any `.claudeCode` sidecar the factory spawns. No
+    /// per-sidecar override yet — when a real Claude-Code sidecar shows up
+    /// with a different model need, promote this to a field on `Sidecar`.
+    /// Until then a single constant beats a per-name switch.
+    static let defaultDispatcherModel = "claude-sonnet-4-6"
+
     static func make(logger: Logger) -> SidecarLifecycle.Spawner {
         return { @Sendable sidecar in
             try SidecarLaunchEnvironment.validatePreconditions()
 
-            // Only the memory sidecar exists today. Resolving its extras here
-            // rather than in the framework keeps `Sidecar` free of per-sidecar
-            // knowledge; a second sidecar adds a case, not a protocol.
-            let bundleSubdirectory: String
-            let extraResources: [String]
-            let model: String
-            let sessionKey: String
-            let sessionLabel: String
-            if sidecar.name == MemorySidecarRegistration.name {
-                bundleSubdirectory = MemorySidecarRegistration.bundleSubdirectory
-                extraResources = [MemorySidecarRegistration.workerPromptResource]
-                model = MemorySidecarRegistration.dispatcherModel
-                sessionKey = MemorySidecarRegistration.sessionKey
-                sessionLabel = MemorySidecarRegistration.sessionLabel
-            } else {
-                bundleSubdirectory = "sidecars/\(sidecar.name)"
-                extraResources = []
-                model = MemorySidecarRegistration.dispatcherModel
-                sessionKey = "sidecar-\(sidecar.name)"
-                sessionLabel = sessionKey
-            }
+            // Generic Claude-Code sidecar convention: SKILL.md lives at
+            // `Sonata/Resources/sidecars/<name>/SKILL.md` in the bundle, the
+            // session key and label are both `sidecar-<name>`, extra
+            // resources are none by default. A future sidecar with more
+            // shape than this needs a per-sidecar hook — add it here when
+            // you have a second `.claudeCode` sidecar to consult.
+            let bundleSubdirectory = "sidecars/\(sidecar.name)"
+            let extraResources: [String] = []
+            let model = defaultDispatcherModel
+            let sessionKey = "sidecar-\(sidecar.name)"
+            let sessionLabel = sessionKey
 
             try SidecarProvisioning.provision(
                 sidecar,

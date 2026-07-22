@@ -291,20 +291,11 @@ func bootSidecars(dbPool: DatabasePool, logger: Logger) async {
         logger.error("Sidecar config failed to load (\(error)) — continuing on defaults")
     }
 
-    guard let skillPath = MemorySidecarRegistration.bundledSkillPath() else {
-        logger.error("""
-            Sidecar 'memory' not registered: SKILL.md missing from the app \
-            bundle. Check that Package.swift still copies \
-            Sonata/Resources/sidecars.
-            """)
-        return
-    }
-
     // Two-step so `config(for:)` can seed from the registration's own defaults
     // when the user has never opened the panel, then fold the result back in.
-    let baseline = MemorySidecarRegistration.sidecar(skillPath: skillPath, config: .default)
+    let baseline = MemorySidecarRegistration.sidecar(config: .default)
     let config = SidecarConfigStore.shared.config(for: baseline)
-    let memorySidecar = MemorySidecarRegistration.sidecar(skillPath: skillPath, config: config)
+    let memorySidecar = MemorySidecarRegistration.sidecar(config: config)
 
     do {
         try SidecarRegistry.shared.register(memorySidecar)
