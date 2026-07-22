@@ -82,6 +82,13 @@ struct Sidecar: Sendable, Identifiable, Equatable {
     /// Percent of the context window at which the monitor posts `rotate_me`.
     let rotationThreshold: Int
 
+    /// Whether this sidecar runs as a full-fat Claude Code session or as a
+    /// Swift closure in Sonata's own process. See `SidecarKind` for the
+    /// distinction. Default `.claudeCode` — the framework has been that
+    /// shape from Phase 0, so every existing call site keeps its shape
+    /// with a default value here.
+    let kind: SidecarKind
+
     /// Size of this sidecar's model context window, in tokens — the denominator
     /// the context monitor divides by.
     ///
@@ -106,7 +113,8 @@ struct Sidecar: Sendable, Identifiable, Equatable {
         subscriptionCapPct: Int = Defaults.subscriptionCapPct,
         triggers: Set<String> = [],
         rotationThreshold: Int = Defaults.rotationThreshold,
-        contextWindowTokens: Int64 = Defaults.contextWindowTokens
+        contextWindowTokens: Int64 = Defaults.contextWindowTokens,
+        kind: SidecarKind = .claudeCode
     ) {
         self.name = name
         self.skillPath = skillPath
@@ -116,6 +124,7 @@ struct Sidecar: Sendable, Identifiable, Equatable {
         self.triggers = triggers
         self.rotationThreshold = rotationThreshold
         self.contextWindowTokens = contextWindowTokens
+        self.kind = kind
     }
 
     /// Whether `skillPath` resolves on disk right now.

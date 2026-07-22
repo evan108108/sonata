@@ -39,6 +39,7 @@ struct SidecarDetailView: View {
             let rotationThreshold: Int
             let eventTypes: [String]
             let contextWindowTokens: Int64
+            let kind: SidecarKind
         }
 
         struct WorkerSummary: Equatable {
@@ -72,7 +73,7 @@ struct SidecarDetailView: View {
                         .padding(.top, 20)
                 } else if let snapshot {
                     configSection(snapshot.config)
-                    workerSection(snapshot.worker, contextWindowTokens: snapshot.config.contextWindowTokens)
+                    workerSection(snapshot.worker, contextWindowTokens: snapshot.config.contextWindowTokens, isInProcess: snapshot.config.kind == .inProcess)
                     eventsSection(snapshot.events)
                     spendSection
                     footer(loadedAt: snapshot.loadedAt)
@@ -122,9 +123,15 @@ struct SidecarDetailView: View {
     }
 
     @ViewBuilder
-    private func workerSection(_ worker: Snapshot.WorkerSummary?, contextWindowTokens: Int64) -> some View {
+    private func workerSection(_ worker: Snapshot.WorkerSummary?, contextWindowTokens: Int64, isInProcess: Bool) -> some View {
         sectionCard(title: "Session") {
-            if let worker {
+            if isInProcess {
+                Text("In-process handler")
+                    .font(.callout)
+                Text("This sidecar runs as a Swift closure inside Sonata — no Claude Code session, no context window, no rotation. Events are dispatched directly to the handler by MCPEventPusher.")
+                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+            } else if let worker {
                 gridRow("Worker id", worker.workerId).monospaced()
                 gridRow("Session id", worker.sessionId ?? "—").monospaced()
                 gridRow("Status", worker.status)
@@ -256,7 +263,8 @@ struct SidecarDetailView: View {
             capPct: userConfig.subscriptionCapPct,
             rotationThreshold: userConfig.rotationThreshold,
             eventTypes: sidecar.eventTypes,
-            contextWindowTokens: sidecar.contextWindowTokens
+            contextWindowTokens: sidecar.contextWindowTokens,
+            kind: sidecar.kind
         )
 
         var workerSummary: Snapshot.WorkerSummary? = nil

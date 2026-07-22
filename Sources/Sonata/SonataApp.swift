@@ -313,6 +313,19 @@ func bootSidecars(dbPool: DatabasePool, logger: Logger) async {
         return
     }
 
+    // Register the in-process handler ONCE at boot. `SidecarLifecycle.spawn`
+    // for `.inProcess` sidecars only publishes the sessionKey — it doesn't
+    // touch the handler registry — so a fresh handler wouldn't get installed
+    // on a tier flip. Doing it here means the handler survives tier toggles
+    // (which is what we want: the code is fixed; only its accessibility to
+    // routing changes with `.off`).
+    if memorySidecar.kind == .inProcess {
+        SidecarInProcessRegistry.shared.register(
+            name: memorySidecar.name,
+            handler: MemorySidecarHandler.handler(logger: logger)
+        )
+    }
+
     let tracker = SidecarSpendTracker()
     SidecarSpendRegistry.shared.install(tracker)
 

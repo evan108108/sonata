@@ -212,6 +212,13 @@ enum MemorySidecarRegistration {
 
     /// Build the registration, folding the user's stored config over the
     /// defaults so a tuned tier or cap survives relaunch.
+    ///
+    /// Kind is `.inProcess`: the handler lives in `MemorySidecarHandler` and
+    /// runs `mem_recall` server-side in Swift. `skillPath` is now vestigial
+    /// (empty string) — kept in the initializer signature so the Claude Code
+    /// spawn path stays the framework's default without touching every call
+    /// site. `skillFileExists` guards in `SidecarLifecycle.spawn` only run
+    /// for `.claudeCode`, so an empty path is safe here.
     static func sidecar(skillPath: String, config: SidecarUserConfig) -> Sidecar {
         Sidecar(
             name: name,
@@ -220,7 +227,8 @@ enum MemorySidecarRegistration {
             budgetTier: config.tier,
             subscriptionCapPct: config.subscriptionCapPct,
             triggers: config.triggers,
-            rotationThreshold: config.rotationThreshold
+            rotationThreshold: config.rotationThreshold,
+            kind: .inProcess
         )
     }
 }

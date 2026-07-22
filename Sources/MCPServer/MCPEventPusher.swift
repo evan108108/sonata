@@ -327,6 +327,17 @@ actor MCPEventPusher {
 
         for evt in rows where !knownWorkerEventIds.contains(evt.id) {
             knownWorkerEventIds.insert(evt.id)
+
+            // In-process sidecar events don't push over SSE — dispatch to
+            // the registered Swift handler directly, then auto-complete on
+            // return (or auto-fail on throw). The `inproc-` prefix is set
+            // by `SidecarInProcessKey`; nothing else in Sonata publishes
+            // a session key with that shape, so it's an unambiguous signal.
+            if SidecarInProcessKey.isInProcess(evt.assignedTo) {
+                await dispatchInProcess(event: evt)
+                continue
+            }
+
             let baseContent = renderWorkerEventContent(payload: evt.payload)
             // Inline the current handling contract for cache-busting event
             // types. MCPInstructionsBody is only sent at MCP handshake; a
@@ -379,6 +390,71 @@ actor MCPEventPusher {
             }
             // In-flight state lives only in the DB (workers.currentEventId) —
             // there is no in-memory shadow to update.
+        }
+    }
+
+    /// Run an in-process sidecar's handler for one event, then transition the
+    /// event row to `completed` (or `failed` on throw). Detached from the tick
+    /// so a slow handler doesn't stall the queue — the tick's job is to
+    /// dispatch, not to wait.
+    ///
+    /// If the handler is missing (sidecar was unregistered between enqueue and
+    /// tick, e.g. tier flipped mid-flight), the event is left `assigned`.
+    /// A subsequent tick with the handler re-registered will pick it up; if
+    /// none ever comes, `HealthMonitor.reclaimStrandedEvents` won't touch it
+    /// (assigned-with-no-busy-worker is exactly the shape it ignores) so we
+    /// don't churn — the row just sits until a manual clean-up or the next
+    /// deploy. Acceptable for a helper path.
+    private func dispatchInProcess(event evt: PendingWorkerEvent) async {
+        guard let name = SidecarInProcessKey.name(fromSessionKey: evt.assignedTo) else {
+            logger.warning("EventPusher: malformed inproc sessionKey \(evt.assignedTo) on event \(evt.id)")
+            return
+        }
+        guard let handler = SidecarInProcessRegistry.shared.handler(forName: name) else {
+            // Sidecar was unregistered between enqueue and delivery. Leave
+            // assigned; the next tick with a re-registered handler will pick
+            // it up. Take it out of `knownWorkerEventIds` so we retry.
+            knownWorkerEventIds.remove(evt.id)
+            return
+        }
+
+        let payload = SidecarEventPayload(
+            eventId: evt.id, type: evt.type, payloadJSON: evt.payload
+        )
+        let dbPool = self.dbPool
+        let logger = self.logger
+
+        Task.detached { [dbPool, logger] in
+            let now = nowMs()
+            do {
+                try await handler(payload)
+                do {
+                    try await dbPool.write { db in
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'completed', completedAt = ?,
+                                result = 'in-process handler returned'
+                            WHERE id = ? AND status = 'assigned'
+                        """, arguments: [now, evt.id])
+                    }
+                } catch {
+                    logger.warning("EventPusher: failed to mark in-process event \(evt.id) completed: \(error)")
+                }
+            } catch {
+                logger.warning("EventPusher: in-process handler for '\(name)' threw on event \(evt.id): \(error)")
+                do {
+                    try await dbPool.write { db in
+                        try db.execute(sql: """
+                            UPDATE workerEvents
+                            SET status = 'failed', completedAt = ?,
+                                result = ?
+                            WHERE id = ? AND status = 'assigned'
+                        """, arguments: [now, "in-process handler threw: \(error.localizedDescription)", evt.id])
+                    }
+                } catch {
+                    logger.warning("EventPusher: failed to mark in-process event \(evt.id) failed: \(error)")
+                }
+            }
         }
     }
 

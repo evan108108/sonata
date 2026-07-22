@@ -157,10 +157,29 @@ actor SidecarLifecycle {
     // MARK: - Spawn
 
     /// Start a session for `sidecar` and publish its key so routing can find it.
+    ///
+    /// Two paths depending on `sidecar.kind`:
+    /// - `.claudeCode`: spawn a Claude Code process, register a `workers` row,
+    ///   publish the process's sessionKey. Existing behavior.
+    /// - `.inProcess`: no process to spawn — publish the synthetic
+    ///   `inproc-<name>` sessionKey, and the handler was registered with
+    ///   `SidecarInProcessRegistry` at boot registration. `MCPEventPusher`
+    ///   dispatches events by looking up that handler.
     func spawn(_ sidecar: Sidecar) async throws {
         guard handles[sidecar.name] == nil else {
             throw LifecycleError.alreadyRunning(sidecar.name)
         }
+
+        if sidecar.kind == .inProcess {
+            // Nothing to run — the handler is already registered. Just
+            // publish the synthetic session key so routing picks it up.
+            let key = SidecarInProcessKey.sessionKey(forName: sidecar.name)
+            SidecarRegistry.shared.setSessionKey(key, for: sidecar.name)
+            rotateRequested[sidecar.name] = nil
+            logger.info("sidecar '\(sidecar.name)' registered as in-process handler (\(key))")
+            return
+        }
+
         guard sidecar.skillFileExists else {
             // Fail loudly per the spec's launch behavior — no silent failures.
             throw LifecycleError.skillMissing(sidecar: sidecar.name, path: sidecar.skillPath)
@@ -196,6 +215,14 @@ actor SidecarLifecycle {
     /// follow-up phase that wires `SidecarRegistry.assignee(forEventType:)`
     /// into the enqueue path.
     func rotate(_ sidecar: Sidecar) async {
+        // In-process sidecars have no session to rotate — the handler is a
+        // Swift closure that lives across every event. Rotation is a
+        // Claude-Code-only concept (context fills, session needs replacing).
+        if sidecar.kind == .inProcess {
+            logger.debug("sidecar '\(sidecar.name)' is in-process; rotate is a no-op")
+            return
+        }
+
         guard !rotating.contains(sidecar.name) else {
             logger.debug("sidecar '\(sidecar.name)' is already rotating; ignoring duplicate request")
             return
@@ -252,6 +279,17 @@ actor SidecarLifecycle {
         // failed.
         SidecarRegistry.shared.setSessionKey(nil, for: sidecar.name)
         rotateRequested[sidecar.name] = nil
+
+        // In-process sidecars have nothing to terminate. The handler was
+        // registered with `SidecarInProcessRegistry` at boot and would be
+        // dead code without a live session key — but leave it registered
+        // so a subsequent tier-flip back on (spawn) is fast. Any
+        // memory_request that arrives during the .off window fails closed
+        // in WorkerActions because the session key has been withdrawn.
+        if sidecar.kind == .inProcess {
+            logger.info("sidecar '\(sidecar.name)' in-process handler stood down")
+            return
+        }
 
         guard let handle = handles.removeValue(forKey: sidecar.name) else {
             logger.debug("sidecar '\(sidecar.name)' has no live session to stop")
@@ -318,6 +356,10 @@ actor SidecarLifecycle {
     func tick() async {
         for sidecar in SidecarRegistry.shared.all() {
             guard sidecar.budgetTier != .off else { continue }
+            // In-process sidecars have no Claude Code session and no context
+            // to monitor. Skip them entirely rather than pattern-match every
+            // check below on `handle == nil`.
+            guard sidecar.kind == .claudeCode else { continue }
             guard let handle = handles[sidecar.name] else { continue }
             guard !rotating.contains(sidecar.name) else { continue }
 
