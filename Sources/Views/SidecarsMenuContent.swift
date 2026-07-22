@@ -17,29 +17,51 @@ import SwiftUI
 /// both extremely rare, so a 2s tick is cheap enough to be invisible.
 @MainActor
 struct SidecarsMenuContent: View {
-    @State private var names: [String] = SidecarRegistry.shared.all().map(\.name).sorted()
+    /// One row per registered sidecar, snapshotted so the menu body can read
+    /// both name and kind without hitting the registry lock per-item on
+    /// every tick. Sorted by name for stable display order.
+    private struct Row: Equatable {
+        let name: String
+        let kind: SidecarKind
+    }
+
+    @State private var rows: [Row] = Self.snapshot()
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
-            if names.isEmpty {
+            if rows.isEmpty {
                 Text("No sidecars registered")
             } else {
-                ForEach(names, id: \.self) { name in
-                    Menu(name) {
-                        Button("Show terminal") {
-                            _ = SidecarWindowController.shared.show(name: name)
+                ForEach(rows, id: \.name) { row in
+                    Menu(row.name) {
+                        // Terminal only exists for Claude-Code-backed sidecars.
+                        // In-process sidecars run as a Swift closure — there's
+                        // no NSWindow, no terminal view, nothing to show. Hide
+                        // the button entirely rather than showing a disabled
+                        // one; a greyed-out entry reads as "broken", but
+                        // "in-process has no terminal" is by design.
+                        if row.kind == .claudeCode {
+                            Button("Show terminal") {
+                                _ = SidecarWindowController.shared.show(name: row.name)
+                            }
                         }
                         Button("Show stats") {
-                            SidecarDetailWindowController.shared.show(name: name)
+                            SidecarDetailWindowController.shared.show(name: row.name)
                         }
                     }
                 }
             }
         }
         .onReceive(ticker) { _ in
-            let latest = SidecarRegistry.shared.all().map(\.name).sorted()
-            if latest != names { names = latest }
+            let latest = Self.snapshot()
+            if latest != rows { rows = latest }
         }
+    }
+
+    private static func snapshot() -> [Row] {
+        SidecarRegistry.shared.all()
+            .map { Row(name: $0.name, kind: $0.kind) }
+            .sorted { $0.name < $1.name }
     }
 }
