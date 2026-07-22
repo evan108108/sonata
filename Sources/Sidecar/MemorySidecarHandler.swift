@@ -91,13 +91,25 @@ enum MemorySidecarHandler {
             return
         }
 
+        // Read the two tunables from the settings-panel-owned config. Every
+        // invocation reads afresh — the SidecarConfigStore lock is cheap
+        // and it means a user tweaking the knobs sees them apply on the
+        // very next event.
+        let userConfig = SidecarConfigStore.shared.config(forName: "memory")
+        let recencyMode = userConfig.recencyMode
+        let minRankScore = userConfig.minRankScore
+
         let alreadyInjected = Set(request.already_injected ?? [])
         // Cap top_k at 3. The tier-1 design's default was 10 with a judge step
         // that trimmed hard; here there's no judge, so a wide fan-out would
         // inject noise. Three high-confidence hints beat ten mixed-quality ones.
         let requestedLimit = request.top_k.map { max(1, min(3, $0)) } ?? 3
 
-        let candidates = try await recall(query: query, limit: max(requestedLimit + alreadyInjected.count, requestedLimit))
+        let candidates = try await recall(
+            query: query,
+            limit: max(requestedLimit + alreadyInjected.count, requestedLimit),
+            recencyMode: recencyMode
+        )
         guard !candidates.isEmpty else {
             logger.debug("memory sidecar: no candidates for event \(payload.eventId)")
             return
@@ -105,9 +117,10 @@ enum MemorySidecarHandler {
 
         let filtered = candidates
             .filter { !alreadyInjected.contains($0.id) }
+            .filter { ($0.rankScore ?? 0) >= minRankScore }
             .prefix(requestedLimit)
         guard !filtered.isEmpty else {
-            logger.debug("memory sidecar: all candidates were already injected for event \(payload.eventId)")
+            logger.debug("memory sidecar: no candidates for event \(payload.eventId) cleared floor \(minRankScore) after dedup")
             return
         }
 
@@ -135,18 +148,19 @@ enum MemorySidecarHandler {
 
     // MARK: - Recall
 
-    /// One hit from `mem_recall`, extracted from the JSON response. Only the
-    /// fields the hint formatter uses land here — everything else the endpoint
-    /// returns (`_scoreComponents`, `_rankScore`, `updatedAt`, tags, …) is
-    /// dropped on decode. Kept intentionally lean so a shape change on the
-    /// server side only breaks fields we actually rely on.
+    /// One hit from `mem_recall`. `rankScore` is the ranking signal we filter
+    /// by (the score floor); `l0` / `l1` are the abstract lines the hint
+    /// formatter uses. Every other field the endpoint returns
+    /// (`_scoreComponents`, `updatedAt`, tags, …) is dropped on decode.
     private struct Candidate: Decodable {
         let id: String
+        let rankScore: Double?
         let l0: String?
         let l1: String?
 
         enum CodingKeys: String, CodingKey {
             case id = "_id"
+            case rankScore = "_rankScore"
             case l0
             case l1
         }
@@ -156,12 +170,17 @@ enum MemorySidecarHandler {
         let memories: [Candidate]?
     }
 
-    private static func recall(query: String, limit: Int) async throws -> [Candidate] {
+    private static func recall(
+        query: String,
+        limit: Int,
+        recencyMode: SidecarUserConfig.RecencyMode
+    ) async throws -> [Candidate] {
         var components = URLComponents(string: "http://127.0.0.1:\(sonataPort)/api/recall")!
         components.queryItems = [
             URLQueryItem(name: "topic", value: query),
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "tier", value: "l0"),
+            URLQueryItem(name: "recencyMode", value: recencyMode.rawValue),
         ]
         guard let url = components.url else { return [] }
 

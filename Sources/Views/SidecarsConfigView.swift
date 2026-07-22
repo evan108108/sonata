@@ -288,6 +288,30 @@ struct SidecarsConfigView: View {
                         .frame(width: 90)
                         .help("Context fullness at which the sidecar asks to be replaced by a fresh session.")
                     }
+
+                    knob("Recency mode") {
+                        Picker("", selection: binding(row.id, \.recencyMode)) {
+                            ForEach(SidecarUserConfig.RecencyMode.allCases, id: \.self) { mode in
+                                Text(mode.label).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 190)
+                        .help("How mem_recall weights recency. 'Recent' (48h half-life) favors memories from the current work window; 'Linear' spreads weight across 30 days.")
+                    }
+
+                    knob("Min rank score") {
+                        Stepper(
+                            value: binding(row.id, \.minRankScore),
+                            in: SidecarUserConfig.Bounds.minRankScore,
+                            step: 0.05
+                        ) {
+                            Text(String(format: "%.2f", row.config.minRankScore))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 70, alignment: .leading)
+                        }
+                        .help("Reject candidates below this rank. Lower = more hints (noisier); higher = fewer hints (higher signal). 0.6 is the tested default.")
+                    }
                 }
                 .padding(.leading, 4)
                 .disabled(!row.config.isEnabled)

@@ -41,6 +41,27 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
         }
     }
 
+    /// How `mem_recall` weights recency. Passed through to the endpoint as
+    /// the `recencyMode` query parameter. `recent` (48h half-life) favors
+    /// memories tied to the current work window; `linear` (30-day gentle
+    /// decay) is closer to "topically match everything and let ranking
+    /// sort it out."
+    ///
+    /// In-process memory sidecar consumes this. Other sidecars can ignore
+    /// it — knobs on `SidecarUserConfig` are read a la carte by whichever
+    /// sidecar's implementation cares.
+    enum RecencyMode: String, Codable, Sendable, CaseIterable {
+        case linear
+        case recent
+
+        var label: String {
+            switch self {
+            case .linear: return "Linear (30-day decay)"
+            case .recent: return "Recent (48h half-life)"
+            }
+        }
+    }
+
     /// Trigger identifiers. These strings cross into event payloads and SKILL.md
     /// prompts, so they are named once here rather than spelled inline.
     enum Trigger {
@@ -69,6 +90,18 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
         static let topK = 10
         static let dedupWindow = 20
         static let triggers: Set<String> = [Trigger.stopHook]
+
+        /// Two knobs that only the in-process memory sidecar reads today.
+        /// Adding them to the settings panel lets the user tune "signal vs.
+        /// noise" without a code change: `.recent` + a 0.6 floor produced
+        /// noticeably better hits than the raw ranking in dry-run tests
+        /// (2026-07-22).
+        static let recencyMode: RecencyMode = .recent
+        /// `mem_recall._rankScore` floor. Below this, don't inject a hint —
+        /// the reader has to consider every hint even if they dismiss most,
+        /// so a low bar burns their attention. 0.6 was where the dry-run
+        /// signal-to-noise crossed over.
+        static let minRankScore = 0.6
     }
 
     /// Bounds for the numeric knobs. Enforced by `normalized()` rather than by
@@ -80,6 +113,10 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
         /// Below ~50% a sidecar would rotate constantly; above ~95% it risks
         /// filling its window before the 30s monitor tick notices.
         static let rotationThreshold = 50...95
+        /// Score is `_rankScore` from `mem_recall`, roughly 0.0-1.0 (uncapped
+        /// on the top end but rarely above 1 for well-tuned queries). Anything
+        /// below ~0.5 is mostly noise; anything above ~0.8 is a strong hit.
+        static let minRankScore = 0.0...1.0
     }
 
     /// Discrete choices the panel offers for rotation threshold, from the
@@ -99,6 +136,8 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
     var triggers: Set<String>
     var dedupWindow: Int
     var rotationThreshold: Int
+    var recencyMode: RecencyMode
+    var minRankScore: Double
 
     var isEnabled: Bool { tier != .off }
 
@@ -110,7 +149,9 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
         topK: Defaults.topK,
         triggers: Defaults.triggers,
         dedupWindow: Defaults.dedupWindow,
-        rotationThreshold: Sidecar.Defaults.rotationThreshold
+        rotationThreshold: Sidecar.Defaults.rotationThreshold,
+        recencyMode: Defaults.recencyMode,
+        minRankScore: Defaults.minRankScore
     )
 
     /// The config a sidecar starts life with: the shared defaults, overlaid
@@ -140,6 +181,7 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
         copy.topK = Self.clamp(topK, to: Bounds.topK)
         copy.dedupWindow = Self.clamp(dedupWindow, to: Bounds.dedupWindow)
         copy.rotationThreshold = Self.clamp(rotationThreshold, to: Bounds.rotationThreshold)
+        copy.minRankScore = Self.clampDouble(minRankScore, to: Bounds.minRankScore)
         if tier != .high {
             copy.triggers.remove(Trigger.submitRefine)
         }
@@ -147,6 +189,10 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
     }
 
     private static func clamp(_ value: Int, to range: ClosedRange<Int>) -> Int {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    private static func clampDouble(_ value: Double, to range: ClosedRange<Double>) -> Double {
         min(max(value, range.lowerBound), range.upperBound)
     }
 }
