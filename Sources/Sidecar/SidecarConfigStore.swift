@@ -88,7 +88,14 @@ struct SidecarUserConfig: Codable, Sendable, Equatable {
         static let judgeModel: JudgeModel = .haiku
         static let contextDepth: ContextDepth = .plusAssistantHead
         static let topK = 10
-        static let dedupWindow = 20
+        /// 100-turn window across-session dedup. Was 20 originally, matched
+        /// the design spec's suggestion — but at 3 hints/event that rolled
+        /// past faster than a session's actual attention span, so recurring
+        /// topical memories re-injected every ~7 events. 100 is roughly a
+        /// half-hour's worth of turns at normal cadence, which lines up with
+        /// "how long a reader keeps a specific hint in memory before it's
+        /// worth resurfacing."
+        static let dedupWindow = 100
         static let triggers: Set<String> = [Trigger.stopHook]
 
         /// Two knobs that only the in-process memory sidecar reads today.

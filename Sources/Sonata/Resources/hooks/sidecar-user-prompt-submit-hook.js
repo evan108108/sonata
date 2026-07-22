@@ -70,8 +70,16 @@ function popHintsThenExit(sessionId, hookInput, config) {
 
   postJSON("/api/sidecar/hint/pop", { sessionId }, 1500, (err, body) => {
     if (!err && body && typeof body.content === "string" && body.content.trim()) {
-      const wrapped = `<user-prompt-submit-hook>\n${body.content.trim()}\n</user-prompt-submit-hook>`;
+      const content = body.content.trim();
+      const wrapped = `<user-prompt-submit-hook>\n${content}\n</user-prompt-submit-hook>`;
       try { process.stdout.write(wrapped); } catch {}
+      // Record the memory ids that just got injected so the next stop-hook
+      // can pass them as `already_injected`. Without this the whole dedup
+      // pathway is dead — the stop hook reads this ledger by design, but
+      // the previous tier-2 rewrite of this hook dropped the append. That
+      // silently defeated the `dedupWindow` setting: turning it up made no
+      // difference because `already_injected` was always empty.
+      recordInjections(sessionId, content);
     }
     popped = true;
     tryFinish();
@@ -127,6 +135,38 @@ function postJSON(pathStr, body, timeoutMs, cb) {
   req.on("timeout", () => { try { req.destroy(); } catch {} cb(new Error("timeout")); });
   req.write(data);
   req.end();
+}
+
+function recordInjections(sessionId, content) {
+  const slug = sanitizeSession(sessionId);
+  const ledgerPath = path.join(
+    SONATA_DATA_DIR, "scratch", `injected-memory-${slug}.jsonl`
+  );
+  const ids = extractMemoryIds(content);
+  if (ids.length === 0) return;
+  const now = Date.now();
+  try {
+    fs.mkdirSync(path.join(SONATA_DATA_DIR, "scratch"), { recursive: true });
+    const lines = ids
+      .map(id => JSON.stringify({ memoryId: id, injectedAtMs: now }))
+      .join("\n") + "\n";
+    fs.appendFileSync(ledgerPath, lines);
+  } catch {}
+}
+
+function extractMemoryIds(content) {
+  // `- **{takeaway}** — [memory: {id}]` — same regex the tier-1 hook used;
+  // memory ids from mem_recall are 32-char hex, but memories written by
+  // hand can be arbitrary slugs, so keep the character class broad.
+  const re = /\[memory:\s*([A-Za-z0-9._:-]+)\s*\]/g;
+  const ids = [];
+  let m;
+  while ((m = re.exec(content)) !== null) ids.push(m[1]);
+  return ids;
+}
+
+function sanitizeSession(id) {
+  return String(id).replace(/[^A-Za-z0-9._-]/g, "");
 }
 
 function readConfig() {
