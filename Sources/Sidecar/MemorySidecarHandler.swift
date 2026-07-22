@@ -118,6 +118,7 @@ enum MemorySidecarHandler {
         let filtered = candidates
             .filter { !alreadyInjected.contains($0.id) }
             .filter { ($0.rankScore ?? 0) >= minRankScore }
+            .sorted { ($0.rankScore ?? 0) > ($1.rankScore ?? 0) }
             .prefix(requestedLimit)
         guard !filtered.isEmpty else {
             logger.debug("memory sidecar: no candidates for event \(payload.eventId) cleared floor \(minRankScore) after dedup")
