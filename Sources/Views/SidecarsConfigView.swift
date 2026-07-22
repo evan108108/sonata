@@ -513,6 +513,16 @@ struct SidecarsConfigView: View {
         name: String, old: SidecarUserConfig, new: SidecarUserConfig
     ) {
         guard let sidecar = SidecarRegistry.shared.lookup(byName: name) else { return }
+        // Every field of the existing Sidecar must survive the rebuild,
+        // INCLUDING `kind`. Missing it here made SidecarKind default back
+        // to `.claudeCode` on every settings save, which then caused the
+        // spawn path to hit the skillFileExists guard (skillPath is empty
+        // for an in-process sidecar), throw skillMissing, and get swallowed
+        // by `try?` silently — leaving the sessionKey withdrawn from the
+        // preceding stop() with no republish to follow. Symptom (observed
+        // 2026-07-22): toggling Off then back to Standard leaves the
+        // sidecar unrouted; every subsequent memory_request 503s in
+        // WorkerActions' fail-closed check.
         let updated = Sidecar(
             name: sidecar.name,
             skillPath: sidecar.skillPath,
@@ -521,7 +531,8 @@ struct SidecarsConfigView: View {
             subscriptionCapPct: new.subscriptionCapPct,
             triggers: sidecar.triggers,
             rotationThreshold: new.rotationThreshold,
-            contextWindowTokens: sidecar.contextWindowTokens
+            contextWindowTokens: sidecar.contextWindowTokens,
+            kind: sidecar.kind
         )
         do {
             try SidecarRegistry.shared.update(updated)
