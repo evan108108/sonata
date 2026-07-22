@@ -116,18 +116,38 @@ enum MemorySidecarHandler {
             return
         }
 
-        let filtered = candidates
+        let ranked = candidates
             .filter { !alreadyInjected.contains($0.id) }
             .filter { ($0.rankScore ?? 0) >= minRankScore }
             .sorted { ($0.rankScore ?? 0) > ($1.rankScore ?? 0) }
-            .prefix(requestedLimit)
+
+        // Memory-anchor rule. Conversations amplify a memory answer;
+        // they don't stand alone. mem_recall's conv layer is raw FTS on
+        // session transcripts with no rank floor of its own — for a
+        // casual prompt like "what did we find out about scouts
+        // paranoia" it will happily return the best word-matched chunks
+        // even when they're generic developer chatter. Without a memory
+        // hit above the score floor to anchor the topic, those conv
+        // hits are almost always noise. Observed 2026-07-22: casual
+        // prompts routinely surfaced 3 unrelated conv chunks and zero
+        // memory hits — silence would have been more useful. So: if no
+        // memory hit clears the floor, drop the conv hits too.
+        let memoryHits = ranked.filter { !$0.id.hasPrefix("conv-") }
+        let conversationHits = ranked.filter { $0.id.hasPrefix("conv-") }
+        let filtered: [Candidate]
+        if memoryHits.isEmpty {
+            filtered = []
+        } else {
+            let convFill = max(0, requestedLimit - memoryHits.count)
+            filtered = Array(memoryHits.prefix(requestedLimit))
+                + Array(conversationHits.prefix(convFill))
+        }
         guard !filtered.isEmpty else {
-            logger.debug("memory sidecar: no candidates for event \(payload.eventId) cleared floor \(minRankScore) after dedup")
+            logger.debug("memory sidecar: no memory anchor for event \(payload.eventId); staying silent (memory-anchor rule)")
             return
         }
-        _ = filtered  // keep local for clarity; consumed via combined below
 
-        let hint = formatHint(candidates: Array(filtered), sessionId: sessionId)
+        let hint = formatHint(candidates: filtered, sessionId: sessionId)
         guard !hint.isEmpty else { return }
         try await writeHint(sessionId: sessionId, content: hint)
         logger.info("memory sidecar: wrote \(filtered.count) hint(s) for session \(sessionId) on event \(payload.eventId)")
@@ -135,17 +155,39 @@ enum MemorySidecarHandler {
 
     // MARK: - Query
 
-    /// The query text passed to `mem_recall`. Last user prompt is the primary
-    /// signal; the assistant head is a fallback when the prompt itself is
-    /// empty (e.g. a session that just resumed and stop-hooked with no user
-    /// input yet). Trimmed to ~2000 chars — beyond that, mem_recall's own
-    /// tokenizer starts truncating and the tail signal is lost anyway.
+    /// The query text passed to `mem_recall`. Prompt + assistant head
+    /// concatenated when both are present.
+    ///
+    /// Continuation prompts ("what did we find out?", "keep going", "same but
+    /// simpler") are casual by construction — the distinctive topic nouns
+    /// live in the assistant's previous reply, not the user's short follow-up.
+    /// Concatenating both lets mem_recall's FTS + vector layers pick up those
+    /// nouns and rank the right memories.
+    ///
+    /// Observed 2026-07-22: with prompt only, "okay so what did we find out
+    /// about scouts paranoia" ranked the target memory c59e17db off the top
+    /// 10 entirely (top hit dropped to 0.555, below default floor 0.60). The
+    /// same day's dense-noun rephrasing ("Scout paranoia protocol-seam prompt
+    /// injection") pulled c59e17db to rank 0.833. Assistant head carries the
+    /// dense nouns forward across the casual follow-up.
+    ///
+    /// Tradeoff: on a true topic shift, the previous head's nouns pollute the
+    /// query. mem_recall's vector layer leans toward the user prompt in that
+    /// case because the topic-shift prompt clusters near its own memories
+    /// semantically, so this usually degrades gracefully rather than
+    /// misrouting.
+    ///
+    /// Capped at 3000 chars — mem_recall's tokenizer truncates beyond ~2k
+    /// anyway, and the prompt gets first-position priority.
     private static func queryText(from request: Request) -> String {
         let prompt = request.recent_context.last_user_prompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let head = request.recent_context.last_assistant_head?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !prompt.isEmpty && !head.isEmpty {
+            return String((prompt + "\n\n" + head).prefix(3000))
+        }
         if !prompt.isEmpty {
             return String(prompt.prefix(2000))
         }
-        let head = request.recent_context.last_assistant_head?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return String(head.prefix(2000))
     }
 
