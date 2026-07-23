@@ -1,0 +1,405 @@
+#!/bin/bash
+# mem — Sonata Memory CLI
+# Thin wrapper around Sonata HTTP API (localhost:3211) for terminal use.
+# The real interface is the MCP server. This is for debugging.
+#
+# Source of truth: Sonata/Sources/Sonata/Resources/bin/mem (this file, versioned).
+# Installed copy:  /Applications/Sonata.app/Contents/Resources/bin/mem — updated by
+# scripts/deploy-local.sh at the next deploy, never edited in place (the app bundle
+# is signed; live edits invalidate the seal under every running worker).
+
+set -euo pipefail
+API="${MEM_API:-http://localhost:3211}"
+
+# Every request below MUST be bounded. These curls hit Sonata's OWN HTTP API, and the
+# scheduler runs `mem` as a shell job under a 300s budget — an unbounded curl against a
+# busy or wedged Sonata pins that job until SIGTERM fires, which is the trigger side of
+# the scheduler self-deadlock that crashed Sonata on .17 on 2026-07-18. Keep MEM_MAX_TIME
+# comfortably under that 300s job budget so the curl fails before the job is killed.
+MEM_CONNECT_TIMEOUT="${MEM_CONNECT_TIMEOUT:-5}"
+MEM_MAX_TIME="${MEM_MAX_TIME:-120}"
+MEM_PING_MAX_TIME="${MEM_PING_MAX_TIME:-5}"
+_CURL=(curl -sf --connect-timeout "$MEM_CONNECT_TIMEOUT" --max-time "$MEM_MAX_TIME")
+
+_urlencode() { jq -Rr @uri <<< "$1"; }
+
+_post() { "${_CURL[@]}" "$API$1" -X POST -H "Content-Type: application/json" -d "$2" 2>/dev/null; }
+_get()  { "${_CURL[@]}" "$API$1" 2>/dev/null; }
+_del()  { "${_CURL[@]}" "$API$1" -X DELETE ${2:+-H "Content-Type: application/json" -d "$2"} 2>/dev/null; }
+
+_check_api() {
+  if ! curl -sf --connect-timeout "$MEM_CONNECT_TIMEOUT" --max-time "$MEM_PING_MAX_TIME" \
+       "$API/api/ping" >/dev/null 2>&1; then
+    echo "Error: Sonata is not running on $API" >&2; exit 1
+  fi
+}
+
+# Guard: treat `--help`/`-h` in ANY position as a request for help, so a bare
+# flag can never land in a positional content slot and get stored as a junk
+# memory (e.g. `mem store --help` used to create a "--help" memory). 2026-07-03.
+for _arg in "$@"; do
+  if [[ "$_arg" == "--help" || "$_arg" == "-h" ]]; then set -- help; break; fi
+done
+
+case "${1:-help}" in
+
+  # ── Recall & Search ──
+
+  recall)
+    shift; _check_api
+    local_topic="$1"; shift || true
+    local_params="topic=$(_urlencode "$local_topic")"
+    local_budget="8000"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --budget|-b) local_budget="$2"; shift 2;;
+        --project|-p) local_params="$local_params&project=$(_urlencode "$2")"; shift 2;;
+        *) echo "Error: unknown argument '$1' for 'mem recall' (try 'mem help')" >&2; exit 1;;
+      esac
+    done
+    local_params="$local_params&budget=$local_budget"
+    _get "/api/recall?$local_params" | jq -r '
+      "── Recall [\(.tokenUsage.memoriesIncluded)/" + (.tokenUsage.memoriesTotal|tostring) + " memories, ~" + (.tokenUsage.used|tostring) + "/" + (.tokenUsage.budget|tostring) + " tokens] ──",
+      (.memories[]? | "  \(._tier // "full" | .[0:4]) │ \(if ._tier == "l0" then (.l0 // "?") elif ._tier == "l1" then (.l1 // .l0 // "?") else (.content // "?") | .[0:120] end) │ imp=\(.importance)"),
+      "",
+      (if (.entities | length) > 0 then "── Entities ──\n" + (.entities[]? | "  \(.name) (\(.type)): \(.description | .[0:80])") else empty end),
+      (if (.documents | length) > 0 then "── Documents ──\n" + (.documents[]? | "  \(.title // .path)") else empty end)
+    ' 2>/dev/null
+    ;;
+
+  search)
+    shift; _check_api
+    local_q="$(_urlencode "$1")"; shift || true
+    local_params="q=$local_q&limit=10"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type|-t) local_params="$local_params&type=$(_urlencode "$2")"; shift 2;;
+        --limit|-l) local_params="$local_params&limit=$2"; shift 2;;
+        *) echo "Error: unknown argument '$1' for 'mem search' (try 'mem help')" >&2; exit 1;;
+      esac
+    done
+    _get "/api/memory/search?$local_params" | jq '.'
+    ;;
+
+  recent)
+    shift; _check_api
+    local_limit="${1:-10}"; shift || true
+    local_params="limit=$local_limit"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type|-t) local_params="$local_params&type=$(_urlencode "$2")"; shift 2;;
+        --source|-s) local_params="$local_params&source=$(_urlencode "$2")"; shift 2;;
+        *) echo "Error: unknown argument '$1' for 'mem recent' (try 'mem help')" >&2; exit 1;;
+      esac
+    done
+    _get "/api/memory/recent?$local_params" | jq '.'
+    ;;
+
+  # ── Store ──
+
+  store)
+    shift; _check_api
+    # Content comes positionally OR via --file. A flag-looking token can never be
+    # stored as content, and an unknown flag errors instead of being swallowed —
+    # a swallowed flag stores junk while looking like success.
+    local_content=""; local_have_content=0
+    local_type="observation"; local_tags="[]"; local_source=""; local_imp=5
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --file|-f)
+          [[ $# -ge 2 ]] || { echo "Error: $1 requires a path" >&2; exit 1; }
+          [[ -f "$2" && -r "$2" ]] || { echo "Error: cannot read file: $2" >&2; exit 1; }
+          local_content="$(cat "$2")"; local_have_content=1; shift 2;;
+        --type|-t) local_type="$2"; shift 2;;
+        --tags) local_tags=$(echo "$2" | tr ',' '\n' | jq -R . | jq -s .); shift 2;;
+        --source|-s) local_source="$2"; shift 2;;
+        --importance|-i) local_imp="$2"; shift 2;;
+        --*) echo "Error: unknown option '$1' for 'mem store' (try 'mem help')" >&2; exit 1;;
+        *)
+          if [[ "$local_have_content" -eq 1 ]]; then
+            echo "Error: content given more than once (positional + --file, or a stray argument): '$1'" >&2; exit 1
+          fi
+          local_content="$1"; local_have_content=1; shift;;
+      esac
+    done
+    if [[ "$local_have_content" -eq 0 || -z "$local_content" ]]; then
+      echo "Error: nothing to store — pass content as the first argument or via --file <path>" >&2; exit 1
+    fi
+    # Surface API rejections. _post's `-f ... 2>/dev/null | jq` turns an HTTP 400
+    # (e.g. an invalid --type) into empty output and a bare exit 22 — a store that
+    # fails without saying why, or that a caller ignoring exit codes reads as done.
+    local_body="{\"content\":$(jq -n --arg c "$local_content" '$c'),\"type\":\"$local_type\",\"tags\":$local_tags,\"source\":\"$local_source\",\"importance\":$local_imp}"
+    local_resp=$(curl -s --connect-timeout "$MEM_CONNECT_TIMEOUT" --max-time "$MEM_MAX_TIME" \
+      "$API/api/memory/" -X POST -H "Content-Type: application/json" -d "$local_body" \
+      -w $'\n%{http_code}') || { echo "Error: store request to $API failed (curl exit $?)" >&2; exit 1; }
+    local_code="${local_resp##*$'\n'}"
+    local_out="${local_resp%$'\n'*}"
+    if [[ "$local_code" != 2?? ]]; then
+      echo "Error: store rejected (HTTP $local_code): $local_out" >&2; exit 1
+    fi
+    echo "$local_out" | jq '.'
+    ;;
+
+  # ── Checkpoints ──
+
+  checkpoint)
+    shift
+    case "${1:-restore}" in
+      save)
+        shift; _check_api
+        local_state="$1"; shift || true
+        local_skills=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --skills) local_skills="$2"; shift 2;;
+            *) echo "Error: unknown argument '$1' for 'mem checkpoint save' (try 'mem help')" >&2; exit 1;;
+          esac
+        done
+        _post "/api/checkpoint" "{\"state\":$(jq -n --arg s "$local_state" '$s'),\"skills\":\"$local_skills\",\"project\":\"\"}" | jq '.'
+        # Local backup
+        mkdir -p ~/.sonata/scratch
+        echo "## State"$'\n'"$local_state" > ~/.sonata/scratch/active-checkpoint.md
+        [[ -n "$local_skills" ]] && echo "$local_skills" > ~/.sonata/scratch/active-checkpoint-skills.txt
+        ;;
+      restore)
+        shift; _check_api
+        _get "/api/checkpoint" | jq -r '
+          (if .skills and (.skills | length) > 0 then "## Active Skills\n- /" + (.skills | split(",") | join("\n- /")) + "\n" else empty end),
+          "## State",
+          .state
+        ' 2>/dev/null || {
+          [[ -f ~/.sonata/scratch/active-checkpoint.md ]] && cat ~/.sonata/scratch/active-checkpoint.md || echo "No checkpoint found"
+        }
+        ;;
+      clear)
+        _del "/api/checkpoint" > /dev/null 2>&1
+        rm -f ~/.sonata/scratch/active-checkpoint.md ~/.sonata/scratch/active-checkpoint-skills.txt ~/.sonata/scratch/active-checkpoint-project.txt
+        echo "Checkpoint cleared"
+        ;;
+    esac
+    ;;
+
+  # ── Tasks ──
+
+  task)
+    shift
+    case "${1:-list}" in
+      add)
+        shift; _check_api
+        local_title="${1:-}"
+        if [[ -z "$local_title" || "$local_title" == --* ]]; then
+          echo "Error: 'mem task add' needs a title as its first argument (got '${local_title:-nothing}')" >&2; exit 1
+        fi
+        shift
+        local_body="\"title\":$(jq -n --arg t "$local_title" '$t'),\"source\":\"live\",\"status\":\"pending\",\"priority\":\"normal\",\"tags\":[]"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --prompt) local_body="$local_body,\"prompt\":$(jq -n --arg p "$2" '$p')"; shift 2;;
+            --project) local_body="$local_body,\"project\":\"$2\""; shift 2;;
+            --priority) local_body="$local_body,\"priority\":\"$2\""; shift 2;;
+            --assigned-to) local_body="$local_body,\"assignedTo\":\"$2\""; shift 2;;
+            --blocked-by) local_body="$local_body,\"blockedBy\":$(echo "$2" | tr ',' '\n' | jq -R . | jq -s .)"; shift 2;;
+            --dir) local_body="$local_body,\"workingDir\":\"$2\""; shift 2;;
+            --model) local_body="$local_body,\"model\":\"$2\""; shift 2;;
+            --turns) local_body="$local_body,\"maxTurns\":$2"; shift 2;;
+            --tags) local_body="$local_body,\"tags\":$(echo "$2" | tr ',' '\n' | jq -R . | jq -s .)"; shift 2;;
+            *) echo "Error: unknown argument '$1' for 'mem task add' (try 'mem help')" >&2; exit 1;;
+          esac
+        done
+        _post "/api/task/" "{$local_body}" | jq '.'
+        ;;
+      sub)
+        shift; _check_api
+        local_parent="$1"; shift
+        local_title="${1:-}"
+        if [[ -z "$local_title" || "$local_title" == --* ]]; then
+          echo "Error: 'mem task sub' needs a title after the parent id (got '${local_title:-nothing}')" >&2; exit 1
+        fi
+        shift
+        local_body="\"title\":$(jq -n --arg t "$local_title" '$t'),\"parentTask\":\"$local_parent\",\"source\":\"live\",\"status\":\"pending\",\"priority\":\"normal\",\"tags\":[]"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --prompt) local_body="$local_body,\"prompt\":$(jq -n --arg p "$2" '$p')"; shift 2;;
+            --assigned-to) local_body="$local_body,\"assignedTo\":\"$2\""; shift 2;;
+            --blocked-by) local_body="$local_body,\"blockedBy\":$(echo "$2" | tr ',' '\n' | jq -R . | jq -s .)"; shift 2;;
+            --dir) local_body="$local_body,\"workingDir\":\"$2\""; shift 2;;
+            --model) local_body="$local_body,\"model\":\"$2\""; shift 2;;
+            --turns) local_body="$local_body,\"maxTurns\":$2"; shift 2;;
+            *) echo "Error: unknown argument '$1' for 'mem task sub' (try 'mem help')" >&2; exit 1;;
+          esac
+        done
+        _post "/api/task/" "{$local_body}" | jq '.'
+        ;;
+      list)
+        shift; _check_api
+        local_params="limit=20"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --status) local_params="$local_params&status=$2"; shift 2;;
+            --project) local_params="$local_params&project=$2"; shift 2;;
+            --limit|-l) local_params="$local_params&limit=$2"; shift 2;;
+            *) echo "Error: unknown argument '$1' for 'mem task list' (try 'mem help')" >&2; exit 1;;
+          esac
+        done
+        _get "/api/task/list?$local_params" | jq -r '.[] | "[\(.status)] \(.title) (\(._id))"'
+        ;;
+      get)   shift; _get "/api/task/get?id=$1" | jq '.';;
+      done)  shift; _post "/api/task/complete" "{\"id\":\"$1\",\"result\":\"${2:-}\"}" | jq '.';;
+      fail)  shift; _post "/api/task/fail" "{\"id\":\"$1\",\"lastError\":\"${2:-Failed}\"}" | jq '.';;
+      cancel) shift; _post "/api/task/cancel" "{\"id\":\"$1\"}" | jq '.';;
+      progress)
+        shift; _check_api
+        local_id="$1"
+        echo "━━━ Task $local_id ━━━"
+        _get "/api/task/get?id=$local_id" | jq -r '"Status: \(.status) | \(.title)"'
+        echo "Subtasks:"
+        _get "/api/task/subtasks?parentTask=$local_id" | jq -r '.[] | "  \(if .status == "completed" then "✓" elif .status == "active" then "▶" elif .status == "failed" then "✗" else "○" end) \(.title) [\(.status)]"'
+        ;;
+      audit)
+        shift; _check_api
+        _get "/api/task/list?limit=200" | jq -r '
+          [.[] | select(.status == "pending")] as $pending |
+          [.[] | select(.status == "active")] as $active |
+          "━━━ TASK AUDIT ━━━",
+          "Pending: \($pending | length), Active: \($active | length)"
+        '
+        ;;
+      dispatch-all)
+        shift; _check_api
+        local_parent="$1"
+        _get "/api/task/subtasks?parentTask=$local_parent" | jq -r '.[] | select(.status == "pending") | ._id' | while read -r tid; do
+          _post "/api/task/activate" "{\"id\":\"$tid\"}" > /dev/null && echo "Dispatched: $tid"
+        done
+        ;;
+      *) echo "Usage: mem task [add|sub|list|get|done|fail|cancel|progress|audit|dispatch-all]";;
+    esac
+    ;;
+
+  # ── Entity ──
+
+  entity)
+    shift
+    case "${1:-search}" in
+      upsert) shift; _post "/api/entity/" "{\"name\":$(jq -n --arg n "$1" '$n'),\"type\":\"${2:-concept}\",\"description\":\"${3:-}\"}" | jq '.';;
+      search) shift; _get "/api/entity/search?q=$(_urlencode "$1")" | jq '.';;
+      *) echo "Usage: mem entity [upsert|search]";;
+    esac
+    ;;
+
+  # ── System ──
+
+  health)
+    _check_api
+    echo "Sonata: OK ($API)"
+    _get "/api/stats" | jq '"Memories: \(.totalMemories), Entities: \(.entityCount), Relations: \(.relationCount)"' -r
+    ;;
+
+  stats) _check_api; _get "/api/stats" | jq '.';;
+
+  status)
+    _check_api
+    echo "── Scheduled Jobs ──"
+    _get "/api/cron/list" | jq -r '.[] | "  \(if .enabled == 1 then "●" else "○" end) \(.name)"'
+    echo ""
+    echo "── Active Tasks ──"
+    _get "/api/task/list?status=active&limit=10" | jq -r '.[] | "  ▶ \(.title)"' 2>/dev/null || echo "  (none)"
+    echo ""
+    echo "── Workers ──"
+    _get "/api/worker/list" | jq -r '.[] | select(.status != "offline") | "  \(if .status == "busy" then "▶" else "○" end) \(.sessionLabel) [\(.status)]"' 2>/dev/null || echo "  (none)"
+    ;;
+
+  # ── Core ──
+
+  core)
+    shift
+    case "${1:-list}" in
+      list) _get "/api/core/list" | jq -r '.[] | "[\(.category // "general")] \(.key) (p=\(.priority)): \(.content | .[0:80])..."';;
+      get)  shift; _get "/api/core/get?key=$(_urlencode "$1")" | jq '.';;
+      set)  shift; local_key="$1"; shift; _post "/api/core/" "{\"key\":\"$local_key\",\"content\":$(jq -n --arg c "$1" '$c'),\"category\":\"${2:-general}\",\"priority\":${3:-50}}" | jq '.';;
+      *) echo "Usage: mem core [list|get|set]";;
+    esac
+    ;;
+
+  # ── Wiki ──
+
+  wiki)
+    shift
+    case "${1:---pages}" in
+      --pages) _get "/api/wiki/pages" | jq -r '.[] | "  \(.slug) — \(.title // "?") (\(.memoryCount // 0) memories)"';;
+      --read)  shift; cat "/Users/evan/memory/wiki/$1.md" 2>/dev/null || echo "Page not found: $1";;
+      *) echo "Usage: mem wiki [--pages|--read <slug>]";;
+    esac
+    ;;
+
+  # ── Doc ──
+
+  doc)
+    shift
+    case "${1:-search}" in
+      search) shift; _get "/api/doc/search?q=$(_urlencode "$1")" | jq -r '.[] | "  \(.title // .path) [\(.project // "?")]"';;
+      *) echo "Usage: mem doc [search]";;
+    esac
+    ;;
+
+  # ── Handoff ──
+
+  handoff)
+    shift; _check_api
+    _post "/api/handoff" "{\"content\":$(jq -n --arg c "$1" '$c')}" | jq '.'
+    mkdir -p ~/.sonata/scratch
+    echo "$1" > ~/.sonata/scratch/active-handoff.md
+    ;;
+
+  wake)
+    _check_api
+    echo "── Morning Briefing ──"
+    local_handoff=$(_get "/api/handoff" 2>/dev/null)
+    if [[ -n "$local_handoff" ]] && echo "$local_handoff" | jq -e '.content' >/dev/null 2>&1; then
+      echo ""
+      echo "## Last Handoff"
+      echo "$local_handoff" | jq -r '.content'
+    fi
+    echo ""
+    echo "## Recent (5)"
+    _get "/api/memory/recent?limit=5" | jq -r '.[] | "  [\(.type)] \(.content | .[0:100])"'
+    echo ""
+    _get "/api/stats" | jq -r '"## System: \(.totalMemories) memories, \(.entityCount) entities"'
+    ;;
+
+  # ── Private ──
+
+  private)
+    shift
+    case "${1:-}" in
+      read) cat ~/.sonata/private/journal.md 2>/dev/null || echo "No journal entries";;
+      *)
+        mkdir -p ~/.sonata/private
+        echo -e "\n---\n*$(date -Iseconds)*\n\n$1\n" >> ~/.sonata/private/journal.md
+        echo "Entry saved"
+        ;;
+    esac
+    ;;
+
+  # ── Revise / Archive ──
+
+  revise) shift; _post "/api/memory/revise" "{\"id\":\"$1\",\"content\":$(jq -n --arg c "$2" '$c')}" | jq '.';;
+  archive) shift; _post "/api/memory/archive" "{\"id\":\"$1\"}" | jq '.';;
+
+  help|--help|-h)
+    echo "mem — Sonata Memory CLI"
+    echo ""
+    echo "Retrieval:   recall <topic> | search <q> | recent [n]"
+    echo "Storage:     store <content>|--file <path> --type TYPE --tags a,b --importance N"
+    echo "Editing:     revise <id> <content> | archive <id>"
+    echo "Checkpoint:  checkpoint save/restore/clear"
+    echo "Tasks:       task add/sub/list/get/done/fail/cancel/progress/audit/dispatch-all"
+    echo "Entities:    entity upsert/search"
+    echo "Wiki:        wiki --pages | wiki --read <slug>"
+    echo "Core:        core list/get/set"
+    echo "Docs:        doc search <q>"
+    echo "Lifecycle:   handoff <letter> | wake | private [read]"
+    echo "System:      health | stats | status"
+    ;;
+
+  *) echo "Unknown command: $1 (try 'mem help')";;
+esac

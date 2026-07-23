@@ -170,6 +170,15 @@ echo "==> rsync resources → Contents/Resources/ AND Sonata_Sonata.bundle/ (pru
   "$REPO/Sources/Sonata/Resources/" "$APP/Contents/Resources/"
 /usr/bin/rsync -a --delete "$REPO/Sources/Sonata/Resources/" "$APP/Sonata_Sonata.bundle/"
 
+# bin/ is merge-not-mirror: the repo ships some of Contents/Resources/bin/ (mem,
+# versioned 2026-07-22) but NOT all of it (meilisearch is installed from outside
+# this repo). The 'bin/' exclude above keeps the --delete pass away from those
+# unversioned neighbors; this separate non-delete pass installs/updates the
+# repo-shipped files. A file removed from the repo's bin/ must be deleted from
+# the installed app by hand — that is the price of sharing the dir.
+echo "==> rsync repo bin/ → Contents/Resources/bin/ (merge, no delete)"
+/usr/bin/rsync -a "$REPO/Sources/Sonata/Resources/bin/" "$APP/Contents/Resources/bin/"
+
 echo "==> re-sealing bundle (move resource bundle out, sign .app, move back)"
 mv "$RESOURCE_BUNDLE" "$TMP_BUNDLE"
 codesign --force --sign - "$APP"

@@ -31,6 +31,7 @@ let package = Package(
             ],
             path: "Sources",
             resources: [
+                .copy("Sonata/Resources/bin"),
                 .copy("Sonata/Resources/web"),
                 .copy("Sonata/Resources/worker"),
                 .copy("Sonata/Resources/supervisor"),
