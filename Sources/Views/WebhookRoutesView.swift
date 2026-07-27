@@ -229,6 +229,9 @@ private struct WebhookRouteEditSheet: View {
     @State private var destKind = "action"
     @State private var destTarget = ""
     @State private var actionFilter = ""
+    @State private var promptTemplate = ""
+    @State private var workerPool = ""
+    @State private var dispatchFilter = ""
     @State private var saving = false
 
     private var isEditing: Bool { route != nil }
@@ -331,13 +334,41 @@ private struct WebhookRouteEditSheet: View {
                             }
                         }
                     case "worker":
-                        TextField("Worker pool or id", text: $destTarget)
+                        TextField("Slug (event type suffix)", text: $destTarget)
+                            .help("Used as workerEvents.type = webhook_<destTarget> when no template is set.")
+                        TextField("Pool hint (optional)", text: $workerPool)
+                            .help("Which worker pool the dispatched task should target. Blank → dispatcher default.")
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Prompt template")
+                                .font(.subheadline)
+                            TextEditor(text: $promptTemplate)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(minHeight: 100)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                                )
+                            Text("Rendered against payload; result becomes the worker's prompt. Supports {{ path.to.value }} substitutions, plus {{ payload }} for the whole envelope. Objects/arrays render as fenced JSON. Blank → raw workerEvents enqueue (backward compat).")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     case "dm":
                         TextField("DM target (session id, worker id, or name)", text: $destTarget)
                     default:
                         Text("Deliveries are recorded in the audit log without further dispatch.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+
+                    // Applies to all destinations that dispatch (action/worker/dm).
+                    if destKind != "log" {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField("Dispatch filter (optional)", text: $dispatchFilter)
+                                .font(.system(.body, design: .monospaced))
+                            Text("Shape: <json.path>=<v1>|<v2>|<v3>. Only dispatch when the resolved payload value matches one of the allowed values. Example: body.action=opened|synchronize|reopened for GitHub PRs. Blank → always dispatch.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -371,6 +402,9 @@ private struct WebhookRouteEditSheet: View {
                 authHeaderName = r.authHeaderName ?? ""
                 destKind = r.destKind
                 destTarget = r.destTarget
+                promptTemplate = r.promptTemplate ?? ""
+                workerPool = r.workerPool ?? ""
+                dispatchFilter = r.dispatchFilter ?? ""
                 // Secret is never echoed back — blank means "keep the stored one".
             }
         }
@@ -393,6 +427,9 @@ private struct WebhookRouteEditSheet: View {
             authScheme: authScheme,
             authSecretRef: secretRef,
             authHeaderName: authScheme == "hmacSha256" ? authHeaderName : nil,
+            promptTemplate: destKind == "worker" ? promptTemplate : nil,
+            workerPool: destKind == "worker" ? workerPool : nil,
+            dispatchFilter: destKind == "log" ? nil : (dispatchFilter.isEmpty ? nil : dispatchFilter),
             enabled: enabled
         )
     }

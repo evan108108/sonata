@@ -10,6 +10,9 @@ struct WebhookRouteItem: Identifiable, Hashable, Equatable {
     let authScheme: String      // "none", "bearer", "hmacSha256", "svix"
     let authSecretRef: String?
     let authHeaderName: String?
+    let promptTemplate: String?     // for destKind='worker': rendered against payload for the dispatched task's prompt
+    let workerPool: String?         // for destKind='worker': optional pool hint
+    let dispatchFilter: String?     // optional gate "<path>=<v1>|<v2>|..."; mismatch → skipped audit, no dispatch
     let enabled: Bool
     let createdAt: Date
 
@@ -76,6 +79,9 @@ class WebhookRoutesViewModel: ObservableObject {
                 authScheme: row["authScheme"] as? String ?? "none",
                 authSecretRef: row["authSecretRef"] as? String,
                 authHeaderName: row["authHeaderName"] as? String,
+                promptTemplate: row["promptTemplate"] as? String,
+                workerPool: row["workerPool"] as? String,
+                dispatchFilter: row["dispatchFilter"] as? String,
                 enabled: Self.boolValue(row["enabled"]),
                 createdAt: Date(timeIntervalSince1970: Double(Self.msValue(row["createdAtMs"]) ?? 0) / 1000)
             )
@@ -140,6 +146,9 @@ class WebhookRoutesViewModel: ObservableObject {
         authScheme: String,
         authSecretRef: String?,
         authHeaderName: String?,
+        promptTemplate: String?,
+        workerPool: String?,
+        dispatchFilter: String?,
         enabled: Bool
     ) async -> Bool {
         var args: [String: Any] = [
@@ -152,6 +161,9 @@ class WebhookRoutesViewModel: ObservableObject {
         ]
         if let r = authSecretRef, !r.isEmpty { args["authSecretRef"] = r }
         if let h = authHeaderName, !h.isEmpty { args["authHeaderName"] = h }
+        if let t = promptTemplate, !t.isEmpty { args["promptTemplate"] = t }
+        if let p = workerPool, !p.isEmpty { args["workerPool"] = p }
+        if let f = dispatchFilter, !f.isEmpty { args["dispatchFilter"] = f }
 
         let call = await callAction("webhook_route_upsert", args)
         if call.ok {
@@ -171,6 +183,9 @@ class WebhookRoutesViewModel: ObservableObject {
             authScheme: route.authScheme,
             authSecretRef: route.authSecretRef,
             authHeaderName: route.authHeaderName,
+            promptTemplate: route.promptTemplate,
+            workerPool: route.workerPool,
+            dispatchFilter: route.dispatchFilter,
             enabled: enabled
         )
     }

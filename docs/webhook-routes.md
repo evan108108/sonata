@@ -105,9 +105,25 @@ No verification. **Only appropriate for low-stakes signals where the URL secrecy
 - Sonata-internal signals from your own Workers/scripts hitting the URL
 - Testing
 
+## Dispatch filter (optional, all destinations)
+
+Every route can define a `dispatchFilter` — a compact gate that runs AFTER signature verification but BEFORE the destination fires. Shape: `<json.path>=<v1>|<v2>|<v3>`. If set and the resolved payload value doesn't match one of the allowed values, the delivery is audited as `skipped: filter miss (path=... value=... expected=[...])` and no destination is invoked. Blank → always dispatch.
+
+**Examples**:
+
+| Service | Filter | Effect |
+|---|---|---|
+| GitHub PRs | `body.action=opened\|synchronize\|reopened` | Skip labeled, closed, review_requested, edited, etc. |
+| Linear | `body.type=Issue` | Skip Comment / Reaction / Project events |
+| Stripe | `body.type=invoice.payment_failed\|charge.refunded` | Only escalate the ones that matter |
+| AgentMail | `body.event_type=message.received` | Skip .spam / .blocked / .unauthenticated variants |
+| GitHub ping | (any filter) | Skips the initial ping event GitHub sends when you first add a webhook |
+
+Malformed filters (no `=`, empty allowlist) are treated as no-filter — the audit trail would silently blackhole otherwise.
+
 ## Destinations
 
-What happens when a delivery is verified.
+What happens when a delivery is verified AND passes the dispatch filter.
 
 ### `action`
 
@@ -129,7 +145,45 @@ Existing built-in action for AgentMail: `email_process_agentmail_webhook`. To ad
 
 ### `worker`
 
-Dispatches a `workerEvents` row of type `webhook_<slug>` with a JSON-serialized payload. Routed via the existing sidecar-owned / pool assignment rules. Useful when you want a Claude turn to reason about the webhook (e.g. "GitHub PR event → wake fixer session with this context").
+The generic "make a webhook trigger a Claude turn" destination. **The whole point of this destination is that a route configures a *prompt template* — new integrations are route configurations, not new Sonata code.**
+
+Two modes:
+
+**With a `promptTemplate`** (recommended): the template is rendered against the webhook payload; the rendered text becomes a worker's prompt. Dispatched via `mem_task_create` with title `webhook: <slug>` and source `webhook:<slug>`. Optional `workerPool` hint on the route routes the task to a specific pool.
+
+Template substitution is intentionally dumb — no logic, no conditionals, no filters — just JSON-path lookup:
+
+- `{{ path.to.value }}` walks the payload's JSON along the dotted path. Scalars (string/number/bool) render as text; objects and arrays render as pretty-printed JSON in a fenced code block.
+- `{{ payload }}` (or `{{ . }}`) renders the entire webhook envelope — headers, body, slug, receivedAtMs, sourceIp — as JSON. Escape hatch for "give the worker the whole webhook for reference."
+- Unknown paths render as empty string AND append a warning to the delivery's `error` column, so silent template typos surface in the audit trail.
+
+**Example — GitHub PR review** (destKind=`worker`, promptTemplate=):
+
+```
+/prstar-review {{ body.pull_request.number }}
+
+Repo: {{ body.repository.full_name }}
+Head: {{ body.pull_request.head.ref }}
+Author: {{ body.pull_request.user.login }}
+Action: {{ body.action }}
+
+Full event for reference:
+{{ payload }}
+```
+
+The worker session receives a task with the rendered prompt, invokes `/prstar-review` on the specific PR number, and has the full event JSON to consult.
+
+Add Linear later? Different template, same shape:
+```
+Research this issue: {{ body.data.title }}
+Team: {{ body.data.team.key }}
+State: {{ body.data.state.name }}
+{{ payload }}
+```
+
+Zero Sonata code per service. Just a route with an appropriate template.
+
+**Without a `promptTemplate`** (backward compat): dispatches a raw `workerEvents` row of type `webhook_<slug>` with the payload as JSON. A downstream handler must know what to do with events of that type. Rarely useful — prefer the templated mode.
 
 ### `dm`
 

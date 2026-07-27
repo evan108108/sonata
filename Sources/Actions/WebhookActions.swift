@@ -38,6 +38,16 @@ private struct WebhookRouteRow: Encodable {
     let authHeaderName: String?
     let enabled: Bool
     let createdAtMs: Int64
+    /// Prompt template rendered against the webhook payload when destKind='worker'.
+    /// Nil → fall back to raw workerEvents enqueue (backward compat).
+    let promptTemplate: String?
+    /// Optional worker pool hint (which pool the dispatched task should target).
+    /// Nil → dispatcher default.
+    let workerPool: String?
+    /// Optional dispatch filter. Shape `<path>=<v1>|<v2>|...`. Evaluated against
+    /// payload before dispatch — mismatch → audit as "skipped: filter miss",
+    /// no dispatch. Nil → always dispatch.
+    let dispatchFilter: String?
 
     init(row: Row) {
         id = row["id"]
@@ -50,6 +60,9 @@ private struct WebhookRouteRow: Encodable {
         authHeaderName = row["authHeaderName"]
         enabled = (row["enabled"] as Int64? ?? 0) != 0
         createdAtMs = row["createdAtMs"]
+        promptTemplate = row["promptTemplate"]
+        workerPool = row["workerPool"]
+        dispatchFilter = row["dispatchFilter"]
     }
 
     /// The SecretStore key holding this route's third-party secret.
@@ -126,6 +139,29 @@ private func sha256Hex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
+/// Evaluate a dispatch filter of the shape `<json.path>=<v1>|<v2>|...` against
+/// the payload. Returns nil on a match (dispatch proceeds) or a human-readable
+/// reason when the filter blocks dispatch (audited on the delivery row).
+///
+/// A malformed filter (no `=`, empty allowlist) is treated as no-filter to
+/// keep the audit trail sane; the misconfiguration would be too easy to hit
+/// silently otherwise.
+private func evaluateDispatchFilter(_ filter: String, payload: [String: Any]) -> String? {
+    guard let eqIdx = filter.firstIndex(of: "=") else { return nil }
+    let path = String(filter[..<eqIdx]).trimmingCharacters(in: .whitespaces)
+    let rhs = String(filter[filter.index(after: eqIdx)...])
+    let allowed = rhs.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard !path.isEmpty, !allowed.isEmpty else { return nil }
+
+    // Reuse the template renderer's resolution logic via a single-expression
+    // template. Warnings are ignored — a missing path renders empty, which
+    // just means the filter fails (which is the correct behavior).
+    let render = renderTemplate("{{ \(path) }}", payload: payload)
+    let actual = render.rendered.trimmingCharacters(in: .whitespaces)
+    if allowed.contains(actual) { return nil }
+    return "filter miss: path='\(path)' value='\(actual)' expected=[\(allowed.joined(separator: "|"))]"
+}
+
 /// Encode a handler's `any Encodable` result for the audit row, truncated so
 /// a chatty destination can't bloat the deliveries table.
 private func encodeHandlerResult(_ result: any Encodable) -> String {
@@ -190,6 +226,9 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             ActionParam("authScheme", .string, required: true, description: "Signature scheme: none | bearer | hmacSha256"),
             ActionParam("authSecretRef", .string, description: "SecretStore key holding the third-party secret (default webhook_secret_<slug>)"),
             ActionParam("authHeaderName", .string, description: "Header carrying the signature/bearer (required for hmacSha256)"),
+            ActionParam("promptTemplate", .string, description: "For destKind='worker': template rendered against payload; result becomes the worker's prompt. Supports {{ path.to.value }} substitutions, plus {{ payload }} for the whole envelope. Null → raw workerEvents enqueue (backward compat)."),
+            ActionParam("workerPool", .string, description: "For destKind='worker': optional pool hint the dispatched task should target."),
+            ActionParam("dispatchFilter", .string, description: "Optional filter: '<json.path>=<v1>|<v2>|...'. Dispatch only when the resolved payload value matches one of the allowed values. Example: 'body.action=opened|synchronize|reopened' for GitHub PRs."),
             ActionParam("enabled", .boolean, description: "Route enabled (default true)"),
         ],
         handler: { ctx in
@@ -215,6 +254,9 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
                 throw ActionError.invalidParam("authHeaderName", "required for hmacSha256 (e.g. X-Hub-Signature-256)")
             }
             let authSecretRef = ctx.params.string("authSecretRef")
+            let promptTemplate = ctx.params.string("promptTemplate")
+            let workerPool = ctx.params.string("workerPool")
+            let dispatchFilter = ctx.params.string("dispatchFilter")
             let enabled = ctx.params.bool("enabled") ?? true
             let id = newUUID()
             let now = nowMs()
@@ -222,8 +264,8 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             try await ctx.dbPool.write { db in
                 try db.execute(sql: """
                     INSERT INTO webhookRoutes
-                        (id, slug, name, destKind, destTarget, authScheme, authSecretRef, authHeaderName, enabled, createdAtMs)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, slug, name, destKind, destTarget, authScheme, authSecretRef, authHeaderName, enabled, createdAtMs, promptTemplate, workerPool, dispatchFilter)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(slug) DO UPDATE SET
                         name = excluded.name,
                         destKind = excluded.destKind,
@@ -231,10 +273,14 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
                         authScheme = excluded.authScheme,
                         authSecretRef = excluded.authSecretRef,
                         authHeaderName = excluded.authHeaderName,
-                        enabled = excluded.enabled
+                        enabled = excluded.enabled,
+                        promptTemplate = excluded.promptTemplate,
+                        workerPool = excluded.workerPool,
+                        dispatchFilter = excluded.dispatchFilter
                     """, arguments: [
                         id, slug, name, destKind, destTarget, authScheme,
                         authSecretRef, authHeaderName, enabled ? 1 : 0, now,
+                        promptTemplate, workerPool, dispatchFilter,
                     ])
             }
             guard let saved = try await fetchRoute(slug: slug, dbPool: ctx.dbPool) else {
@@ -464,8 +510,29 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
                 "receivedAtMs": Int(receivedAtMs),
                 "wrapEventId": wrapEventId,
             ]
-            if let utf8 = String(data: rawBody, encoding: .utf8) { payloadParams["body"] = utf8 }
+            // Parse the body as JSON when it's a JSON-object body so template/
+            // filter expressions can reach into it (e.g. body.pull_request.number).
+            // Falls back to the raw utf8 string when the body isn't JSON.
+            if let bodyData = rawBody as Data?,
+               let bodyJson = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                payloadParams["body"] = bodyJson
+            } else if let utf8 = String(data: rawBody, encoding: .utf8) {
+                payloadParams["body"] = utf8
+            }
             if let sourceIp { payloadParams["sourceIp"] = sourceIp }
+
+            // (e.1) Dispatch filter. Applied AFTER signature verify but BEFORE
+            // dispatch. Mismatch → audit as skipped, no dispatch, no error.
+            if let filter = route.dispatchFilter, !filter.isEmpty,
+               let reason = evaluateDispatchFilter(filter, payload: payloadParams) {
+                webhookLogger.info("webhook_deliver: skipped by filter for slug \(slug): \(reason)")
+                await recordDelivery(id: deliveryId, verified: true,
+                    handlerResult: "skipped: \(reason)", error: nil, dbPool: ctx.dbPool)
+                return DeliverResponse(
+                    deliveryId: deliveryId, duplicate: false, verified: true,
+                    dispatched: false, error: nil
+                )
+            }
 
             switch route.destKind {
             case "action":
@@ -486,7 +553,42 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
                     dispatchError = "no action named '\(route.destTarget)' in registry"
                 }
             case "worker":
-                if let enqueue = registry.action(named: "worker_event_enqueue") {
+                if let template = route.promptTemplate, !template.isEmpty {
+                    // Templated path: render prompt from payload, dispatch a
+                    // task with the rendered text. Template warnings (unknown
+                    // paths, unclosed braces) land in the delivery's error
+                    // column so silent typos in production show up in audit.
+                    let result = renderTemplate(template, payload: payloadParams)
+                    if !result.warnings.isEmpty {
+                        dispatchError = "template warnings: \(result.warnings.joined(separator: "; "))"
+                    }
+                    if let create = registry.action(named: "mem_task_create") {
+                        do {
+                            var taskParams: [String: Any] = [
+                                "title": "webhook: \(slug)",
+                                "prompt": result.rendered,
+                                "source": "webhook:\(slug)",
+                            ]
+                            if let pool = route.workerPool, !pool.isEmpty {
+                                taskParams["assignedTo"] = pool
+                            }
+                            let createCtx = ActionContext(
+                                params: ActionParams(taskParams),
+                                dbPool: ctx.dbPool,
+                                scheduler: ctx.scheduler,
+                                search: ctx.search,
+                                emailHandler: ctx.emailHandler
+                            )
+                            handlerResult = encodeHandlerResult(try await create.handler(createCtx))
+                        } catch {
+                            let msg = "mem_task_create threw: \(error.localizedDescription)"
+                            dispatchError = dispatchError.map { "\($0); \(msg)" } ?? msg
+                        }
+                    } else {
+                        dispatchError = "mem_task_create not in registry"
+                    }
+                } else if let enqueue = registry.action(named: "worker_event_enqueue") {
+                    // Backward compat: no template → raw workerEvents enqueue.
                     do {
                         let payloadJSON = String(
                             data: try JSONSerialization.data(withJSONObject: payloadParams, options: [.sortedKeys]),

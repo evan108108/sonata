@@ -1385,5 +1385,38 @@ extension DatabaseMigrator {
                 ON webhookDeliveries(routeId, receivedAtMs DESC)
                 """)
         }
+
+        // v38: promptTemplate + workerPool on webhookRoutes. When destKind='worker'
+        // and promptTemplate is set, webhook_deliver renders the template against
+        // the payload and dispatches a task with the rendered text as the prompt
+        // — the "no per-service Sonata code" primitive that shipped underspecified
+        // in v37. Backward-compat: null promptTemplate falls back to the old
+        // raw-event enqueue behavior.
+        registerMigration("v38_webhook_route_prompt_template") { db in
+            do {
+                try db.execute(sql: "ALTER TABLE webhookRoutes ADD COLUMN promptTemplate TEXT")
+            } catch {
+                // column may already exist on partial-migration retry
+            }
+            do {
+                try db.execute(sql: "ALTER TABLE webhookRoutes ADD COLUMN workerPool TEXT")
+            } catch {
+                // idem
+            }
+        }
+
+        // v39: dispatchFilter on webhookRoutes. Compact shape "<path>=<v1>|<v2>|...".
+        // When set, evaluated against the webhook payload before dispatch — if the
+        // resolved value isn't in the allowlist, delivery is audited as
+        // "skipped: filter miss" with no dispatch. Simple gate that keeps
+        // GitHub ping / issue_comment / etc. from triggering PR-review tasks
+        // when the route is configured for pull_request events only.
+        registerMigration("v39_webhook_route_dispatch_filter") { db in
+            do {
+                try db.execute(sql: "ALTER TABLE webhookRoutes ADD COLUMN dispatchFilter TEXT")
+            } catch {
+                // column may already exist on partial-migration retry
+            }
+        }
     }
 }
