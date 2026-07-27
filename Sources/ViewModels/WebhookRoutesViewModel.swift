@@ -13,6 +13,7 @@ struct WebhookRouteItem: Identifiable, Hashable, Equatable {
     let promptTemplate: String?     // for destKind='worker': rendered against payload for the dispatched task's prompt
     let workerPool: String?         // for destKind='worker': optional pool hint
     let dispatchFilter: String?     // optional gate "<path>=<v1>|<v2>|..."; mismatch → skipped audit, no dispatch
+    let actionParams: String?       // for destKind='action': JSON template rendered against payload, parsed, and spread into target action's params
     let enabled: Bool
     let createdAt: Date
 
@@ -82,6 +83,7 @@ class WebhookRoutesViewModel: ObservableObject {
                 promptTemplate: row["promptTemplate"] as? String,
                 workerPool: row["workerPool"] as? String,
                 dispatchFilter: row["dispatchFilter"] as? String,
+                actionParams: row["actionParams"] as? String,
                 enabled: Self.boolValue(row["enabled"]),
                 createdAt: Date(timeIntervalSince1970: Double(Self.msValue(row["createdAtMs"]) ?? 0) / 1000)
             )
@@ -149,6 +151,7 @@ class WebhookRoutesViewModel: ObservableObject {
         promptTemplate: String?,
         workerPool: String?,
         dispatchFilter: String?,
+        actionParams: String?,
         enabled: Bool
     ) async -> Bool {
         var args: [String: Any] = [
@@ -164,6 +167,7 @@ class WebhookRoutesViewModel: ObservableObject {
         if let t = promptTemplate, !t.isEmpty { args["promptTemplate"] = t }
         if let p = workerPool, !p.isEmpty { args["workerPool"] = p }
         if let f = dispatchFilter, !f.isEmpty { args["dispatchFilter"] = f }
+        if let a = actionParams, !a.isEmpty { args["actionParams"] = a }
 
         let call = await callAction("webhook_route_upsert", args)
         if call.ok {
@@ -186,6 +190,7 @@ class WebhookRoutesViewModel: ObservableObject {
             promptTemplate: route.promptTemplate,
             workerPool: route.workerPool,
             dispatchFilter: route.dispatchFilter,
+            actionParams: route.actionParams,
             enabled: enabled
         )
     }

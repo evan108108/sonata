@@ -1418,5 +1418,19 @@ extension DatabaseMigrator {
                 // column may already exist on partial-migration retry
             }
         }
+
+        // v40: actionParams on webhookRoutes. When destKind=action, this JSON
+        // template is rendered against the payload, parsed, and spread into
+        // the target action's ActionParams — so plugin-registered actions
+        // (prstar_review, linear_process_issue, …) receive their expected
+        // arg shape without an intermediate dispatcher worker. Nullable —
+        // routes with no template fall back to passing the full envelope.
+        registerMigration("v40_webhook_route_action_params") { db in
+            do {
+                try db.execute(sql: "ALTER TABLE webhookRoutes ADD COLUMN actionParams TEXT")
+            } catch {
+                // column may already exist on partial-migration retry
+            }
+        }
     }
 }

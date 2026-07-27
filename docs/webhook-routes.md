@@ -127,7 +127,21 @@ What happens when a delivery is verified AND passes the dispatch filter.
 
 ### `action`
 
-Invokes a named action in Sonata's `ActionRegistry`. The action receives a payload:
+Invokes a named action in Sonata's `ActionRegistry`. Plugin-registered actions (e.g. `prstar_review`, `linear_process_issue`) are included in the same registry, so the destination dropdown lists them alongside core actions — no per-plugin Sonata code.
+
+Two modes:
+
+**With `actionParams`** (recommended for plugin actions): a JSON template rendered against the payload, parsed, and spread into the target action's params. Lets a plugin action receive its expected arg shape directly — no dispatcher worker in the middle, no `/skill-run-review` chain that spawns a second worker.
+
+```
+{"pr":"{{ body.pull_request.number }}","repo":"{{ body.repository.full_name }}"}
+```
+
+Rendered against a GitHub PR webhook, this becomes `{"pr":"483","repo":"enginable/adaptengine-monorepo"}` and is passed straight to `prstar_review`. One turn, one worker.
+
+The template must be valid JSON up front (substitutions live inside string values, so it must tokenize before rendering). Malformed JSON is rejected at upsert time.
+
+**Without `actionParams`** (backward compat): the action receives the raw envelope:
 
 ```
 {
@@ -141,7 +155,7 @@ Invokes a named action in Sonata's `ActionRegistry`. The action receives a paylo
 }
 ```
 
-Existing built-in action for AgentMail: `email_process_agentmail_webhook`. To add a destination for another service, write a new `SonataAction` that expects the payload above and register it in the `ActionRegistry`.
+Existing built-in action for AgentMail (`email_process_agentmail_webhook`) uses this shape.
 
 ### `worker`
 

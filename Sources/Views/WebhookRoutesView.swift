@@ -232,6 +232,7 @@ private struct WebhookRouteEditSheet: View {
     @State private var promptTemplate = ""
     @State private var workerPool = ""
     @State private var dispatchFilter = ""
+    @State private var actionParams = ""
     @State private var saving = false
 
     private var isEditing: Bool { route != nil }
@@ -333,6 +334,20 @@ private struct WebhookRouteEditSheet: View {
                                 Text(name).tag(name)
                             }
                         }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Action params (JSON template)")
+                                .font(.subheadline)
+                            TextEditor(text: $actionParams)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(minHeight: 90)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                                )
+                            Text("JSON rendered against payload, parsed, and spread into the action's params. Example for prstar_review: {\"pr\":\"{{ body.pull_request.number }}\",\"repo\":\"{{ body.repository.full_name }}\"}. Blank → pass the raw envelope (backward compat).")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     case "worker":
                         TextField("Slug (event type suffix)", text: $destTarget)
                             .help("Used as workerEvents.type = webhook_<destTarget> when no template is set.")
@@ -405,6 +420,7 @@ private struct WebhookRouteEditSheet: View {
                 promptTemplate = r.promptTemplate ?? ""
                 workerPool = r.workerPool ?? ""
                 dispatchFilter = r.dispatchFilter ?? ""
+                actionParams = r.actionParams ?? ""
                 // Secret is never echoed back — blank means "keep the stored one".
             }
         }
@@ -430,6 +446,7 @@ private struct WebhookRouteEditSheet: View {
             promptTemplate: destKind == "worker" ? promptTemplate : nil,
             workerPool: destKind == "worker" ? workerPool : nil,
             dispatchFilter: destKind == "log" ? nil : (dispatchFilter.isEmpty ? nil : dispatchFilter),
+            actionParams: destKind == "action" ? (actionParams.isEmpty ? nil : actionParams) : nil,
             enabled: enabled
         )
     }

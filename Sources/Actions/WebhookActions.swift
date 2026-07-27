@@ -48,6 +48,12 @@ private struct WebhookRouteRow: Encodable {
     /// payload before dispatch — mismatch → audit as "skipped: filter miss",
     /// no dispatch. Nil → always dispatch.
     let dispatchFilter: String?
+    /// For destKind='action': JSON template rendered against the payload,
+    /// parsed, and spread into the target action's ActionParams. Lets
+    /// plugin-registered actions (prstar_review, linear_process_issue, …)
+    /// receive their expected arg shape without an intermediate worker.
+    /// Nil → pass the raw envelope (backward compat).
+    let actionParams: String?
 
     init(row: Row) {
         id = row["id"]
@@ -63,6 +69,7 @@ private struct WebhookRouteRow: Encodable {
         promptTemplate = row["promptTemplate"]
         workerPool = row["workerPool"]
         dispatchFilter = row["dispatchFilter"]
+        actionParams = row["actionParams"]
     }
 
     /// The SecretStore key holding this route's third-party secret.
@@ -229,6 +236,7 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             ActionParam("promptTemplate", .string, description: "For destKind='worker': template rendered against payload; result becomes the worker's prompt. Supports {{ path.to.value }} substitutions, plus {{ payload }} for the whole envelope. Null → raw workerEvents enqueue (backward compat)."),
             ActionParam("workerPool", .string, description: "For destKind='worker': optional pool hint the dispatched task should target."),
             ActionParam("dispatchFilter", .string, description: "Optional filter: '<json.path>=<v1>|<v2>|...'. Dispatch only when the resolved payload value matches one of the allowed values. Example: 'body.action=opened|synchronize|reopened' for GitHub PRs."),
+            ActionParam("actionParams", .string, description: "For destKind='action': JSON template rendered against payload, parsed, and spread into the target action's ActionParams. Supports {{ path.to.value }}. Example for prstar_review: {\"pr\":\"{{ body.pull_request.number }}\",\"repo\":\"{{ body.repository.full_name }}\"}. Null → pass the raw envelope (backward compat)."),
             ActionParam("enabled", .boolean, description: "Route enabled (default true)"),
         ],
         handler: { ctx in
@@ -257,6 +265,17 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             let promptTemplate = ctx.params.string("promptTemplate")
             let workerPool = ctx.params.string("workerPool")
             let dispatchFilter = ctx.params.string("dispatchFilter")
+            let actionParams = ctx.params.string("actionParams")
+            if let tpl = actionParams, !tpl.isEmpty,
+               tpl.data(using: .utf8).flatMap({ try? JSONSerialization.jsonObject(with: $0) }) == nil {
+                // Reject malformed templates at upsert time — a template that isn't
+                // valid JSON post-render would silently drop args at delivery.
+                // Substitutions are `{{ path }}` placeholders, which never break
+                // JSON tokenization (they sit inside string values), so the raw
+                // template must already parse. This catches typos like missing
+                // quotes and mismatched braces without needing a payload.
+                throw ActionError.invalidParam("actionParams", "must be valid JSON (substitutions live inside string values)")
+            }
             let enabled = ctx.params.bool("enabled") ?? true
             let id = newUUID()
             let now = nowMs()
@@ -264,8 +283,8 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             try await ctx.dbPool.write { db in
                 try db.execute(sql: """
                     INSERT INTO webhookRoutes
-                        (id, slug, name, destKind, destTarget, authScheme, authSecretRef, authHeaderName, enabled, createdAtMs, promptTemplate, workerPool, dispatchFilter)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, slug, name, destKind, destTarget, authScheme, authSecretRef, authHeaderName, enabled, createdAtMs, promptTemplate, workerPool, dispatchFilter, actionParams)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(slug) DO UPDATE SET
                         name = excluded.name,
                         destKind = excluded.destKind,
@@ -276,11 +295,12 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
                         enabled = excluded.enabled,
                         promptTemplate = excluded.promptTemplate,
                         workerPool = excluded.workerPool,
-                        dispatchFilter = excluded.dispatchFilter
+                        dispatchFilter = excluded.dispatchFilter,
+                        actionParams = excluded.actionParams
                     """, arguments: [
                         id, slug, name, destKind, destTarget, authScheme,
                         authSecretRef, authHeaderName, enabled ? 1 : 0, now,
-                        promptTemplate, workerPool, dispatchFilter,
+                        promptTemplate, workerPool, dispatchFilter, actionParams,
                     ])
             }
             guard let saved = try await fetchRoute(slug: slug, dbPool: ctx.dbPool) else {
@@ -537,9 +557,29 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             switch route.destKind {
             case "action":
                 if let dest = registry.action(named: route.destTarget) {
+                    // Two shapes:
+                    // - actionParams set → render as JSON, parse, and spread into
+                    //   ActionParams. Lets plugin actions (prstar_review,
+                    //   linear_process_issue, …) receive their expected args
+                    //   without a dispatcher worker in the middle.
+                    // - actionParams nil → pass the raw envelope (backward compat).
+                    var argParams = payloadParams
+                    if let template = route.actionParams, !template.isEmpty {
+                        let result = renderTemplate(template, payload: payloadParams)
+                        if !result.warnings.isEmpty {
+                            dispatchError = "template warnings: \(result.warnings.joined(separator: "; "))"
+                        }
+                        if let data = result.rendered.data(using: .utf8),
+                           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            argParams = parsed
+                        } else {
+                            let msg = "actionParams template did not render to a JSON object"
+                            dispatchError = dispatchError.map { "\($0); \(msg)" } ?? msg
+                        }
+                    }
                     do {
                         let destCtx = ActionContext(
-                            params: ActionParams(payloadParams),
+                            params: ActionParams(argParams),
                             dbPool: ctx.dbPool,
                             scheduler: ctx.scheduler,
                             search: ctx.search,
