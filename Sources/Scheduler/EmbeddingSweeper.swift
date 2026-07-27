@@ -40,7 +40,11 @@ actor EmbeddingSweeper {
 
     func start() {
         task?.cancel()
-        task = Task {
+        // Background priority: the boot-time backlog drain is CPU-heavy
+        // (embedding inference) and must never starve default-priority HTTP
+        // route tasks — including the liveness /api/ping — on the shared
+        // cooperative pool. Best-effort work yields to real requests.
+        task = Task(priority: .background) {
             while !Task.isCancelled {
                 let processed = await self.tick()
                 // Full batch ⇒ backlog remains ⇒ go straight to the next one.

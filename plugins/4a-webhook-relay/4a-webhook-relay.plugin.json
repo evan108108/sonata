@@ -1,0 +1,22 @@
+{
+  "name": "4a-webhook-relay",
+  "version": "0.1.0",
+  "description": "Inbound webhook relay — tails the 4A gateway's per-pubkey inbox stream, decrypts hook gift-wraps, and forwards them to Sonata's webhook dispatcher.",
+  "author": "evan108108",
+  "sonata_version": ">= 3.0",
+  "port": 4300,
+  "arch": "arm64",
+  "start_command": "bin/4a-webhook-relay",
+  "capabilities": {
+    "webhookReceiver": true
+  },
+  "actions": [
+    {
+      "name": "4a_pubkey_get",
+      "description": "Return the plugin's operational pubkey — the identity the inbox stream is authenticated with and the pubkey to embed in webhook URLs (https://api.4a4.ai/v0/hook/<pubkey>/<slug>).",
+      "method": "get",
+      "path": "/api/pubkey",
+      "params": []
+    }
+  ]
+}

@@ -1187,6 +1187,8 @@ struct SonataApp: App {
                 registry.register(statsActions)
                 registry.register(compositeActions)
                 registry.register(whatHappenedActions)
+                registry.register(makeWebhookActions(registry: registry))
+                registry.register(emailWebhookActions)
                 registerInternalWhatHappenedDomains(dbPool: pool)
 
                 // No registry to publish. MCPConnections.shared and MCPAuth.shared are

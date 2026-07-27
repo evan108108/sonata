@@ -35,6 +35,10 @@ struct PluginManifest: Codable {
 /// manifests still parse.
 struct PluginCapabilities: Codable {
     let whathappened: PluginWhatHappenedCapability?
+    /// Plugin receives third-party webhooks (via the 4a relay) and forwards
+    /// them to POST /api/webhook/deliver. Declaring it makes spawnPlugin
+    /// inject the shared bearer as SONATA_WEBHOOK_BEARER.
+    let webhookReceiver: Bool?
 }
 
 struct PluginWhatHappenedCapability: Codable {
@@ -158,10 +162,19 @@ final class PluginManager: @unchecked Sendable {
 
     /// Tail a spawned plugin's stdout/stderr pipe into `plugin.log` in the plugin
     /// directory, prefixing each line with an ISO8601 timestamp and `[name/stream]`.
-    /// Runs as a detached task; exits when the pipe hits EOF (process exited).
+    /// Exits when the pipe hits EOF (process exited).
+    ///
+    /// Runs on a GCD utility-QoS thread — NOT the Swift cooperative pool. The pipe's
+    /// `availableData` is a blocking `read(2)` that would pin whatever thread it ran on
+    /// for the life of the plugin process. With N plugins × 2 pipes each on Swift's
+    /// cooperative pool (~ncores threads), enough plugins would starve the pool: HTTP
+    /// handler continuations couldn't schedule, `dbPool.read` awaits blocked on
+    /// `Pool.get`'s semaphore forever, and NIO's `channelActive` would deinit its
+    /// `NIOAsyncWriter` without `finish()` → SIGTRAP crash. GCD's global queues are
+    /// designed for blocking I/O and don't share the cooperative pool.
     private func tailPluginPipe(_ pipe: Pipe, pluginName: String, stream: String, logPath: String) {
         let handle = pipe.fileHandleForReading
-        Task.detached {
+        DispatchQueue.global(qos: .utility).async {
             while true {
                 let data = handle.availableData
                 if data.isEmpty { break }
@@ -296,6 +309,14 @@ final class PluginManager: @unchecked Sendable {
         env["PORT"] = String(manifest.port)
         env["SONATA_PLUGIN_DATA_DIR"] = pluginPath
         env["SONATA_HOST"] = "http://127.0.0.1:\(sonataPort)"
+
+        // Webhook-receiver plugins authenticate to POST /api/webhook/deliver
+        // with a shared bearer. Generated-or-loaded here, before launch, so
+        // the very first spawn already carries it — no post-hoc respawn.
+        if manifest.capabilities?.webhookReceiver == true {
+            env["SONATA_WEBHOOK_BEARER"] =
+                SecretStore.getOrSet("4a_webhook_shared_secret") { UUID().uuidString }
+        }
 
         let prefix = runtime.name.uppercased()
         if let configData = configJson.data(using: .utf8),

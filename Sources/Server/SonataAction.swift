@@ -262,19 +262,25 @@ struct ActionContext: @unchecked Sendable {
     /// The live email handler, so out-of-band approval actions (e.g.
     /// contact_set_email_flags) can re-dispatch a sender's quarantined mail.
     let emailHandler: EmailHandler?
+    /// Lowercased request header names → values for HTTP-served invocations.
+    /// Empty for MCP-served calls. Exists so httpOnly endpoints can check
+    /// header-carried credentials (webhook_deliver's plugin bearer).
+    let requestHeaders: [String: String]
 
     init(
         params: ActionParams,
         dbPool: DatabasePool,
         scheduler: SchedulerActor? = nil,
         search: (any SearchService)? = nil,
-        emailHandler: EmailHandler? = nil
+        emailHandler: EmailHandler? = nil,
+        requestHeaders: [String: String] = [:]
     ) {
         self.params = params
         self.dbPool = dbPool
         self.scheduler = scheduler
         self.search = search
         self.emailHandler = emailHandler
+        self.requestHeaders = requestHeaders
     }
 }
 

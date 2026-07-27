@@ -43,6 +43,17 @@ enum SecretStore {
         saveEntries(entries)
     }
 
+    /// Return the existing value for `name`, or persist and return a
+    /// freshly-made one. Used for lazily-generated shared secrets (e.g. the
+    /// plugin webhook bearer) so first boot and every later boot take the
+    /// same code path.
+    static func getOrSet(_ name: String, _ make: () -> String) -> String {
+        if let existing = get(name) { return existing }
+        let value = make()
+        set(name: name, value: value)
+        return value
+    }
+
     static func delete(_ name: String) -> Bool {
         var entries = loadEntries()
         let before = entries.count

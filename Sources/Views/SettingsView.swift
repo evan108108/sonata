@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var ownerEmailSaved = false
     @State private var secretsExpanded = false
     @State private var emailExpanded = true
+    @State private var webhookRoutesExpanded = false
     @State private var mcpExpanded = false
     @State private var workerExpanded = false
     @State private var supervisorExpanded = false
@@ -240,6 +241,11 @@ struct SettingsView: View {
                     // MARK: - Email Inboxes Section
                     collapsibleSection("Email Inboxes", icon: "envelope.fill", expanded: $emailExpanded) {
                         EmailConfigView()
+                    }
+
+                    // MARK: - Webhook Routes Section
+                    collapsibleSection("Webhook Routes", icon: "link.circle.fill", expanded: $webhookRoutesExpanded) {
+                        WebhookRoutesView()
                     }
 
                     // MARK: - MCP Servers Section

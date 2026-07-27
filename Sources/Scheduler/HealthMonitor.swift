@@ -398,6 +398,13 @@ actor HealthMonitor {
             // reference context the session has moved on from anyway.
             await sweepStaleSidecarHints()
 
+            // Webhook delivery audit retention: 7 days, matching the DO-side
+            // hook-wrap sweep on the 4a gateway. The rows are audit-only
+            // (bodyHash, verified flag, handler result) — dedup only needs
+            // wrapEventId uniqueness inside the replay window, which is far
+            // shorter than a week.
+            await sweepOldWebhookDeliveries()
+
             // Offline escalation ladder. sweepStaleWorkersForActions now only
             // MARKS workers offline (Fix #3 in dispatch-hardening-bundle) — it
             // no longer flips events or tasks. This loop reads the offline
@@ -1315,6 +1322,24 @@ actor HealthMonitor {
             }
         } catch {
             logger.warning("sweepStaleSidecarHints: sweep failed: \(error)")
+        }
+    }
+
+    /// Drop `webhookDeliveries` audit rows older than 7 days.
+    private func sweepOldWebhookDeliveries() async {
+        let cutoffMs = nowMs() - Int64(7 * 24 * 3600 * 1000)
+        do {
+            let deleted = try await dbPool.write { db -> Int in
+                try db.execute(sql: """
+                    DELETE FROM webhookDeliveries WHERE receivedAtMs < ?
+                """, arguments: [cutoffMs])
+                return db.changesCount
+            }
+            if deleted > 0 {
+                logger.info("sweepOldWebhookDeliveries: dropped \(deleted) delivery row(s)")
+            }
+        } catch {
+            logger.warning("sweepOldWebhookDeliveries: sweep failed: \(error)")
         }
     }
 

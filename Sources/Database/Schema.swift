@@ -1343,5 +1343,47 @@ extension DatabaseMigrator {
                 ON sidecarHints(sessionId, writtenAtMs)
                 """)
         }
+
+        // v37: webhook relay — user-configured inbound webhook routes and a
+        // per-delivery audit log. Routes map a public slug (the tail of the 4a
+        // hook URL) to a destination: a registry action, a worker event, a DM,
+        // or log-only. Deliveries record every attempt the 4a plugin forwards
+        // to /api/webhook/deliver; wrapEventId is UNIQUE so an SSE reconnect
+        // replay or plugin retry dedups via INSERT OR IGNORE (at-least-once
+        // transport, exactly-once dispatch). bodyHash not body: raw payloads
+        // may carry secrets and are not stored at rest.
+        registerMigration("v37_webhook_routes") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS webhookRoutes (
+                    id             TEXT PRIMARY KEY,
+                    slug           TEXT UNIQUE NOT NULL,
+                    name           TEXT NOT NULL,
+                    destKind       TEXT NOT NULL,
+                    destTarget     TEXT NOT NULL,
+                    authScheme     TEXT NOT NULL,
+                    authSecretRef  TEXT,
+                    authHeaderName TEXT,
+                    enabled        INTEGER NOT NULL DEFAULT 1,
+                    createdAtMs    INTEGER NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS webhookDeliveries (
+                    id            TEXT PRIMARY KEY,
+                    routeId       TEXT NOT NULL,
+                    wrapEventId   TEXT UNIQUE,
+                    receivedAtMs  INTEGER NOT NULL,
+                    sourceIp      TEXT,
+                    bodyHash      TEXT,
+                    verified      INTEGER NOT NULL,
+                    handlerResult TEXT,
+                    error         TEXT
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_webhookDeliveries_route_time
+                ON webhookDeliveries(routeId, receivedAtMs DESC)
+                """)
+        }
     }
 }

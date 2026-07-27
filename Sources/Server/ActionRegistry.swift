@@ -107,9 +107,12 @@ final class ActionRegistry: @unchecked Sendable {
     ) -> @Sendable (Request, Context) async throws -> Response {
         let scheduler = self.scheduler
         let search = self.search
-        let emailHandler = self.emailHandler
+        // Read `emailHandler` at request time, NOT capture time — the registry's
+        // emailHandler is assigned AFTER mountHTTP runs (SonataApp boot order),
+        // so capturing here gives us nil forever.
         let registry = self
         return { request, context in
+            let emailHandler = registry.emailHandler
             guard let pluginName = context.parameters.get("name", as: String.self) else {
                 return errorResponse("Missing plugin name in path", status: .badRequest)
             }
@@ -159,7 +162,8 @@ final class ActionRegistry: @unchecked Sendable {
                     dbPool: dbPool,
                     scheduler: scheduler,
                     search: search,
-                    emailHandler: emailHandler
+                    emailHandler: emailHandler,
+                    requestHeaders: Self.headerDict(request)
                 )
                 let result = try await action.handler(ctx)
                 return jsonResponse(AnyEncodable(result))
@@ -172,6 +176,15 @@ final class ActionRegistry: @unchecked Sendable {
                 )
             }
         }
+    }
+
+    /// Lowercased header name → value for ActionContext. First value wins on
+    /// duplicates — fine for the credential headers this exists to carry.
+    private static func headerDict(_ request: Request) -> [String: String] {
+        Dictionary(
+            request.headers.map { ($0.name.canonicalName, $0.value) },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     /// Find the plugin action registered under `/api/plugins/<plugin>` whose
@@ -226,8 +239,12 @@ final class ActionRegistry: @unchecked Sendable {
     ) -> @Sendable (Request, Context) async throws -> Response {
         let scheduler = self.scheduler
         let search = self.search
-        let emailHandler = self.emailHandler
+        // Read `emailHandler` at request time, NOT capture time — the registry's
+        // emailHandler is assigned AFTER mountHTTP runs (SonataApp boot order),
+        // so capturing here gives us nil forever.
+        let registry = self
         return { request, context in
+            let emailHandler = registry.emailHandler
             do {
                 // Extract parameters based on HTTP method and param source
                 let params = try await Self.extractHTTPParams(
@@ -259,7 +276,8 @@ final class ActionRegistry: @unchecked Sendable {
                     dbPool: dbPool,
                     scheduler: scheduler,
                     search: search,
-                    emailHandler: emailHandler
+                    emailHandler: emailHandler,
+                    requestHeaders: Self.headerDict(request)
                 )
                 let result = try await action.handler(ctx)
                 return jsonResponse(AnyEncodable(result))

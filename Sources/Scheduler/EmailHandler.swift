@@ -12,6 +12,11 @@ actor EmailHandler {
     /// Poll interval: 2 minutes.
     static let pollIntervalSeconds: TimeInterval = 120
 
+    /// How long a webhook delivery quiets the poller for its inbox. While the
+    /// webhook path is feeding an inbox, polling it is redundant; if the
+    /// webhook path silently breaks, polling resumes after this window.
+    static let webhookQuietWindowMs: Int64 = 5 * 60 * 1000
+
     // MARK: - State
 
     private let dbPool: DatabasePool
@@ -36,6 +41,11 @@ actor EmailHandler {
     /// Inboxes as of the last successful load from the `emailInboxes` table.
     /// Refreshed at each poll cycle so UI changes take effect within one cycle.
     private var currentInboxes: [InboxConfig] = []
+
+    /// Per-inbox wall-clock of the last successful webhook ingest. Inboxes the
+    /// webhook path fed within `webhookQuietWindowMs` are skipped by `poll()`
+    /// — the poller is the backstop there, not the primary.
+    private var lastWebhookAtMs: [String: Int64] = [:]
 
     /// Whether a session is currently connected and able to consume a channel
     /// push. Injected so tests can drive both branches of owned-thread routing
@@ -115,6 +125,11 @@ actor EmailHandler {
         var pendingApprovalByInbox: [String: [EmailRecord]] = [:]
 
         for inbox in currentInboxes {
+            // A webhook delivery fed this inbox within the quiet window —
+            // polling it now is redundant; skip until the window lapses.
+            if nowMs() - (lastWebhookAtMs[inbox.address] ?? 0) < Self.webhookQuietWindowMs {
+                continue
+            }
             let provider = resolver.provider(for: inbox)
             guard provider.isConfigured else {
                 logger.info("EmailHandler: skipping \(inbox.address) — provider '\(inbox.provider)' not configured")
@@ -243,6 +258,71 @@ actor EmailHandler {
             guard let inbox = currentInboxes.first(where: { $0.address == inboxAddress }) else { continue }
             await sendApprovalRequest(emails: pending, inbox: inbox)
         }
+    }
+
+    // MARK: - Webhook Ingest
+
+    /// Ingest one email delivered by the webhook relay path
+    /// (`email_process_agentmail_webhook`), sharing the poll path's chain so
+    /// both paths land in identical downstream state: sender allowlist, store,
+    /// AFK / owned-thread / approval routing, then worker dispatch via
+    /// `processNewEmails`.
+    func ingestWebhookEmail(_ record: EmailRecord, inbox: InboxConfig) async {
+        // Already seen by the poller (or an earlier webhook delivery). The
+        // subject/timestamp a webhook rebuild produces can differ from what
+        // the poll path stored, so re-dispatching here would slip past the
+        // workerEvents idempotency key — skip outright instead.
+        if knownEmailIds.contains(record.messageId) { return }
+
+        // Skip messages this inbox sent itself, mirroring poll().
+        if record.from.contains(inbox.address) {
+            knownEmailIds.insert(record.messageId)
+            return
+        }
+
+        // Sender allowlist — the webhook path must not become a bypass around
+        // blocked or quarantined senders.
+        let fromAddr = Self.extractEmailAddress(from: record.from).lowercased()
+        let decision = await classifySender(
+            fromAddr: fromAddr, inboxAddrLower: inbox.address.lowercased())
+        switch decision {
+        case .blocked:
+            logger.info("EmailHandler: webhook dropped \(record.messageId) — sender \(fromAddr) is blocked")
+            try? await storeEmail(record, status: "approval_rejected")
+            knownEmailIds.insert(record.messageId)
+            return
+        case .pending:
+            try? await storeEmail(record, status: "pending_approval")
+            knownEmailIds.insert(record.messageId)
+            await sendApprovalRequest(emails: [record], inbox: inbox)
+            return
+        case .allowed:
+            break
+        }
+
+        knownEmailIds.insert(record.messageId)
+        try? await storeEmail(record, status: "unread")
+
+        let afterAFK = await routeAFKReplies([record])
+        let afterOwned = await routeOwnedThreadEmails(afterAFK)
+        let afterApproval = await routeApprovalReplies(afterOwned)
+        guard !afterApproval.isEmpty else { return }
+        await processNewEmails(afterApproval, inbox: inbox)
+    }
+
+    /// Record that the webhook path just delivered mail for `inbox`, quieting
+    /// the poller for `webhookQuietWindowMs`. Callers must invoke this ONLY
+    /// after a successful ingest — a failed delivery has to leave the poller
+    /// running at full cadence so it catches the missed message.
+    func noteWebhookSeen(inbox: String) async {
+        lastWebhookAtMs[inbox] = nowMs()
+    }
+
+    /// The configured inbox for `address`, if any. Used by the webhook action
+    /// to map AgentMail's inbox_id (the inbox address) onto the config the
+    /// routing chain needs.
+    func inboxConfig(for address: String) async -> InboxConfig? {
+        currentInboxes.first(where: { $0.address == address })
     }
 
     // MARK: - AFK Routing
@@ -1121,6 +1201,7 @@ struct EmailRecord: Sendable {
 enum EmailError: Error, LocalizedError {
     case apiFailed(String, Int)
     case noApiKey
+    case malformed(String)
 
     var errorDescription: String? {
         switch self {
@@ -1128,6 +1209,8 @@ enum EmailError: Error, LocalizedError {
             return "AgentMail API '\(endpoint)' failed with status \(code)"
         case .noApiKey:
             return "AGENTMAIL_API_KEY not set"
+        case .malformed(let what):
+            return "AgentMail response malformed: \(what)"
         }
     }
 }

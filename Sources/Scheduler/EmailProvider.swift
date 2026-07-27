@@ -120,6 +120,19 @@ struct EmailMessage: Sendable {
     let timestamp: String?
 }
 
+/// A message fetched by id for the webhook ingest path. Unlike `EmailMessage`,
+/// this carries `threadId`: the poll loop learns the thread from the listing it
+/// walked to find the message, but a webhook delivery starts from a bare
+/// message id and must recover the whole `EmailRecord` from one response.
+struct RawMessage: Sendable {
+    let messageId: String
+    let threadId: String
+    let from: String
+    let subject: String?
+    let body: String
+    let timestamp: String?
+}
+
 // MARK: - AgentMailProvider
 
 /// `EmailProvider` backed by the AgentMail HTTP API (api.agentmail.to/v0). This is
@@ -193,6 +206,29 @@ struct AgentMailProvider: EmailProvider {
             ?? json["extractedText"] as? String
             ?? ""
         return EmailMessage(
+            from: json["from"] as? String ?? "",
+            subject: json["subject"] as? String,
+            body: body,
+            timestamp: json["timestamp"] as? String
+        )
+    }
+
+    /// A single message by id, including its thread id — used by the webhook
+    /// ingest path (`email_process_agentmail_webhook`) to rebuild a full
+    /// `EmailRecord` from AgentMail's `message.received` envelope. Not part of
+    /// the `EmailProvider` protocol: webhook delivery is AgentMail-specific.
+    func getMessage(inboxId: String, messageId: String) async throws -> RawMessage {
+        let json = try await getJSON("/inboxes/\(inboxId)/messages/\(messageId)", endpointLabel: "message")
+        guard let threadId = (json["thread_id"] ?? json["threadId"]) as? String, !threadId.isEmpty else {
+            throw EmailError.malformed("message \(messageId) has no thread_id")
+        }
+        let body = json["text"] as? String
+            ?? json["extracted_text"] as? String
+            ?? json["extractedText"] as? String
+            ?? ""
+        return RawMessage(
+            messageId: ((json["message_id"] ?? json["messageId"]) as? String) ?? messageId,
+            threadId: threadId,
             from: json["from"] as? String ?? "",
             subject: json["subject"] as? String,
             body: body,
