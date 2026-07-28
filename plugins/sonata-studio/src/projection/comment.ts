@@ -131,7 +131,7 @@ function readPending(attrs: Record<string, unknown>): PendingRelation[] {
 async function findTargetEntity(
   client: ProjectionContext["client"],
   eventId: string,
-): Promise<{ id: string; type: string } | null> {
+): Promise<{ id: string; type: string; attributes?: string | null } | null> {
   for (const type of ["studio_card", "studio_question", "studio_answer"]) {
     const list = await client.entity.list({ type });
     for (const e of list) {
@@ -140,7 +140,9 @@ async function findTargetEntity(
         typeof attrs["event_id"] === "string" &&
         attrs["event_id"].toLowerCase() === eventId
       ) {
-        return { id: e.id, type: e.type };
+        // Return the raw attributes too — the status_change path re-parses
+        // them to merge the new status without dropping sibling fields.
+        return { id: e.id, type: e.type, attributes: e.attributes };
       }
     }
   }

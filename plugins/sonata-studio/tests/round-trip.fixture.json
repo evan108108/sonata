@@ -1,17 +1,17 @@
 {
-  "ts": "2026-07-28T18:07:27.159Z",
+  "ts": "2026-07-28T18:18:57.782Z",
   "gateway": "https://api.4a4.ai",
-  "plugin_pub": "de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1",
+  "plugin_pub": "7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2",
   "responses": {
     "room_create": {
       "ok": true,
       "result": {
-        "audience_address": "30520:a5e580659ce3d777c0b5ec5478029cd64b12a5718b6361eff8cdf4886a7093e1:rt-test",
-        "room_event_id": "4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303",
-        "declaration_event_id": "ca8e5ac1097cb984f86e41aac7cce84929a7fc16c73aabd78954fc89a88a16b2",
-        "founding_grant_event_id": "7951add85de507a06ced6a944f89913898a0a915f7bfdbc949ff949b60fb406f",
+        "audience_address": "30520:357c35c92df8ea30e4fa4ee6fd33e050a2c25108e2aa70eb73bcced2177159d1:rt-test",
+        "room_event_id": "0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7",
+        "declaration_event_id": "db4fe981824956e4ffab64bb4caf7baf02ac636c6b18d50e7ba2c2c28e49f31c",
+        "founding_grant_event_id": "97f04f72b6dc33d8b2dfe69383a3efffd2c00ae0f9cd463497cd5c864024bbfc",
         "members": [
-          "de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1"
+          "7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2"
         ],
         "epoch": 1,
         "default_tracks": [
@@ -22,9 +22,9 @@
     "card_post_inbox": {
       "ok": true,
       "result": {
-        "rumor_event_id": "e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8",
-        "audience_address": "30520:a5e580659ce3d777c0b5ec5478029cd64b12a5718b6361eff8cdf4886a7093e1:rt-test",
-        "d_tag": "hello-c8231e24"
+        "rumor_event_id": "a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2",
+        "audience_address": "30520:357c35c92df8ea30e4fa4ee6fd33e050a2c25108e2aa70eb73bcced2177159d1:rt-test",
+        "d_tag": "hello-8597349a"
       }
     },
     "card_list_all": {
@@ -32,15 +32,15 @@
       "result": {
         "cards": [
           {
-            "event_id": "e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8",
-            "d_tag": "hello-c8231e24",
+            "event_id": "a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2",
+            "d_tag": "hello-8597349a",
             "track": "inbox",
             "kind": "note",
             "title": "hello",
             "body": "hi",
             "summary": "hi",
-            "created_by": "de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1",
-            "created_at": 1785262038000,
+            "created_by": "7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2",
+            "created_at": 1785262728000,
             "blocks": [
               {
                 "type": "text",
@@ -62,12 +62,12 @@
       "result": {
         "rooms": [
           {
-            "audience_address": "30520:a5e580659ce3d777c0b5ec5478029cd64b12a5718b6361eff8cdf4886a7093e1:rt-test",
+            "audience_address": "30520:357c35c92df8ea30e4fa4ee6fd33e050a2c25108e2aa70eb73bcced2177159d1:rt-test",
             "slug": "rt-test",
             "title": "Round-trip",
             "epoch": 1,
             "members": [
-              "de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1"
+              "7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2"
             ],
             "pending_invites": 0,
             "state": "active"
@@ -78,16 +78,16 @@
     "track_create_staging": {
       "ok": true,
       "result": {
-        "rumor_event_id": "8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c",
+        "rumor_event_id": "7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0",
         "d_tag": "staging"
       }
     },
     "card_post_staging": {
       "ok": true,
       "result": {
-        "rumor_event_id": "f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f",
-        "audience_address": "30520:a5e580659ce3d777c0b5ec5478029cd64b12a5718b6361eff8cdf4886a7093e1:rt-test",
-        "d_tag": "stage-only-cbbe0d17"
+        "rumor_event_id": "cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e",
+        "audience_address": "30520:357c35c92df8ea30e4fa4ee6fd33e050a2c25108e2aa70eb73bcced2177159d1:rt-test",
+        "d_tag": "stage-only-53ee5ddb"
       }
     },
     "card_list_inbox": {
@@ -95,15 +95,15 @@
       "result": {
         "cards": [
           {
-            "event_id": "e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8",
-            "d_tag": "hello-c8231e24",
+            "event_id": "a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2",
+            "d_tag": "hello-8597349a",
             "track": "inbox",
             "kind": "note",
             "title": "hello",
             "body": "hi",
             "summary": "hi",
-            "created_by": "de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1",
-            "created_at": 1785262038000,
+            "created_by": "7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2",
+            "created_at": 1785262728000,
             "blocks": [
               {
                 "type": "text",
@@ -125,15 +125,15 @@
       "result": {
         "cards": [
           {
-            "event_id": "f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f",
-            "d_tag": "stage-only-cbbe0d17",
+            "event_id": "cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e",
+            "d_tag": "stage-only-53ee5ddb",
             "track": "staging",
             "kind": "note",
             "title": "stage-only",
             "body": "from staging",
             "summary": "from staging",
-            "created_by": "de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1",
-            "created_at": 1785262044000,
+            "created_by": "7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2",
+            "created_at": 1785262735000,
             "blocks": [
               {
                 "type": "text",
@@ -152,54 +152,54 @@
     }
   },
   "plugin_log_tail": [
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.161Z] sonata-studio booting {\"pid\":51698,\"port\":61478}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.168Z] Sonata reachable {\"host\":\"http://127.0.0.1:61477\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.180Z] Generating plugin keypair on first run {\"plugin_pub\":\"de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.182Z] Config loaded {\"plugin_pub\":\"de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61477\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.183Z] [auto-run] watcher started {\"poll_ms\":10000}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.186Z] [sse] manager started {\"rooms\":0}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:14.187Z] HTTP server listening {\"port\":61478,\"actions\":34}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.347Z] DEBUG: [sse] opened client {\"room\":\"rt-test\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.451Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"b0b1d1c7b963040ebcc350ba695986703285ff40fa59b5dc405ecefcd2b3b073\",\"rumor_id\":\"4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303\",\"rumor_kind\":30536}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.452Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303\",\"epoch\":1}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.455Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.461Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"9605858fa77265a6c7ca7406e6675f39142317b46a57c43deeeffe5b074af4bb\",\"rumor_id\":\"f9d06f59d02bea7ce63ceec117b203645e3d4047c0345d7111c55bef9ac81c10\",\"rumor_kind\":30531}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.461Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"f9d06f59d02bea7ce63ceec117b203645e3d4047c0345d7111c55bef9ac81c10\",\"epoch\":1}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.464Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"f9d06f59d02bea7ce63ceec117b203645e3d4047c0345d7111c55bef9ac81c10\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:16.468Z] [sse] key-grant landed {\"room\":\"rt-test\",\"epoch\":1,\"promoted\":false}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:20.499Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"1c684837608807740a41ab94f82901e1f1de3c429166b89e0dc2d91a8ff47f45\",\"rumor_id\":\"e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8\",\"rumor_kind\":30530}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:20.500Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8\",\"epoch\":1}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:20.502Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:26.608Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"f2c1a3dedaaebbaf7c1ded33021c55b84b0ef61554f59c93afa9e83381aa05e4\",\"rumor_id\":\"8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c\",\"rumor_kind\":30531}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:26.608Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c\",\"epoch\":1}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:26.612Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c\"}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:26.617Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"ac303ce92b300f39d38dd982baf655983bba97f7e76e3e2c925a80a9849d0699\",\"rumor_id\":\"f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f\",\"rumor_kind\":30530}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:26.617Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f\",\"epoch\":1}",
-    "[stdout] [sonata-studio 2026-07-28T18:07:26.619Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.161Z\",\"level\":\"info\",\"msg\":\"sonata-studio booting\",\"pid\":51698,\"port\":61478}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.168Z\",\"level\":\"info\",\"msg\":\"Sonata reachable\",\"host\":\"http://127.0.0.1:61477\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.180Z\",\"level\":\"info\",\"msg\":\"Generating plugin keypair on first run\",\"plugin_pub\":\"de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.182Z\",\"level\":\"info\",\"msg\":\"Config loaded\",\"plugin_pub\":\"de5b297b51b65bb2172d8ee25522ecaccfc7c6020a20bf0b1a9e13732e3291e1\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61477\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.183Z\",\"level\":\"info\",\"msg\":\"[auto-run] watcher started\",\"poll_ms\":10000}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.186Z\",\"level\":\"info\",\"msg\":\"[sse] manager started\",\"rooms\":0}",
-    "[log] {\"ts\":\"2026-07-28T18:07:14.187Z\",\"level\":\"info\",\"msg\":\"HTTP server listening\",\"port\":61478,\"actions\":34}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.347Z\",\"level\":\"debug\",\"msg\":\"[sse] opened client\",\"room\":\"rt-test\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.451Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"b0b1d1c7b963040ebcc350ba695986703285ff40fa59b5dc405ecefcd2b3b073\",\"rumor_id\":\"4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303\",\"rumor_kind\":30536}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.452Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303\",\"epoch\":1}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.455Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"4250e8f588a460702d4dad6b65a58ee84fa73b2e79c80b4dc70073c8c33fc303\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.461Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"9605858fa77265a6c7ca7406e6675f39142317b46a57c43deeeffe5b074af4bb\",\"rumor_id\":\"f9d06f59d02bea7ce63ceec117b203645e3d4047c0345d7111c55bef9ac81c10\",\"rumor_kind\":30531}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.461Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"f9d06f59d02bea7ce63ceec117b203645e3d4047c0345d7111c55bef9ac81c10\",\"epoch\":1}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.464Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"f9d06f59d02bea7ce63ceec117b203645e3d4047c0345d7111c55bef9ac81c10\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:16.468Z\",\"level\":\"info\",\"msg\":\"[sse] key-grant landed\",\"room\":\"rt-test\",\"epoch\":1,\"promoted\":false}",
-    "[log] {\"ts\":\"2026-07-28T18:07:20.499Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"1c684837608807740a41ab94f82901e1f1de3c429166b89e0dc2d91a8ff47f45\",\"rumor_id\":\"e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8\",\"rumor_kind\":30530}",
-    "[log] {\"ts\":\"2026-07-28T18:07:20.500Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8\",\"epoch\":1}",
-    "[log] {\"ts\":\"2026-07-28T18:07:20.502Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"e2ad57534b834d9347e83ce8bb283317774eec17f2e1d94fd7a4a8256bf2f0d8\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:26.608Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"f2c1a3dedaaebbaf7c1ded33021c55b84b0ef61554f59c93afa9e83381aa05e4\",\"rumor_id\":\"8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c\",\"rumor_kind\":30531}",
-    "[log] {\"ts\":\"2026-07-28T18:07:26.608Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c\",\"epoch\":1}",
-    "[log] {\"ts\":\"2026-07-28T18:07:26.612Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"8437eb25b3fb80905ce5b0a2c1c32809d954cf691128d33799bd39ea3e3efe7c\"}",
-    "[log] {\"ts\":\"2026-07-28T18:07:26.617Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"ac303ce92b300f39d38dd982baf655983bba97f7e76e3e2c925a80a9849d0699\",\"rumor_id\":\"f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f\",\"rumor_kind\":30530}",
-    "[log] {\"ts\":\"2026-07-28T18:07:26.617Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f\",\"epoch\":1}",
-    "[log] {\"ts\":\"2026-07-28T18:07:26.619Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"f5d307551e334d8b306a8009d4758cddce74af5f70d112eb4285aa139ca4595f\"}"
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.883Z] sonata-studio booting {\"pid\":63063,\"port\":61805}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.891Z] Sonata reachable {\"host\":\"http://127.0.0.1:61804\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.904Z] Generating plugin keypair on first run {\"plugin_pub\":\"7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.905Z] Config loaded {\"plugin_pub\":\"7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61804\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.906Z] [auto-run] watcher started {\"poll_ms\":10000}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.909Z] [sse] manager started {\"rooms\":0}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:43.909Z] HTTP server listening {\"port\":61805,\"actions\":34}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.486Z] DEBUG: [sse] opened client {\"room\":\"rt-test\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.550Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"b61f01e81318ed4d6d39e9e4f4ebe2b538d729bf00f92b19049b4d9ab46304aa\",\"rumor_id\":\"0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7\",\"rumor_kind\":30536}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.550Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.553Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.559Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"2199e9a2cd5629cd0f67fdf3f7c91fc08c0ee8d9b6ef2ab0e464880666b9789a\",\"rumor_id\":\"acd6ae94bd6d373bece232f345ecafac6171fdc43f92742c8f9b536e5b85606b\",\"rumor_kind\":30531}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.559Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"acd6ae94bd6d373bece232f345ecafac6171fdc43f92742c8f9b536e5b85606b\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.561Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"acd6ae94bd6d373bece232f345ecafac6171fdc43f92742c8f9b536e5b85606b\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:46.564Z] [sse] key-grant landed {\"room\":\"rt-test\",\"epoch\":1,\"promoted\":false}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:50.688Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"fec9a4f7df66038dc343b71f8af8b6169085409ff3e3bcc25928c7c6a8b5af35\",\"rumor_id\":\"a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:50.688Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:50.691Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:56.764Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"5fc21a79eda83233f08a9480914212290be07815c0b1297f2ab6cf936e72853c\",\"rumor_id\":\"7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0\",\"rumor_kind\":30531}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:56.765Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:56.770Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0\"}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:56.776Z] [sse-trace] gift-wrap unwrapped {\"room\":\"rt-test\",\"wrap_id\":\"3692eb6ae5101130eb0190761cc529d8dae301b94e1e5db82c050f63232bb4d3\",\"rumor_id\":\"cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e\",\"rumor_kind\":30530}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:56.776Z] [sse-trace] gift-wrap decrypting-and-projecting {\"room\":\"rt-test\",\"rumor_id\":\"cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e\",\"epoch\":1}",
+    "[stdout] [sonata-studio 2026-07-28T18:18:56.778Z] [sse-trace] gift-wrap projected-ok {\"room\":\"rt-test\",\"rumor_id\":\"cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.883Z\",\"level\":\"info\",\"msg\":\"sonata-studio booting\",\"pid\":63063,\"port\":61805}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.891Z\",\"level\":\"info\",\"msg\":\"Sonata reachable\",\"host\":\"http://127.0.0.1:61804\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.904Z\",\"level\":\"info\",\"msg\":\"Generating plugin keypair on first run\",\"plugin_pub\":\"7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.905Z\",\"level\":\"info\",\"msg\":\"Config loaded\",\"plugin_pub\":\"7e6bc095c938a32e9ec0717ee770199efe0f921e4bc33481929486144218b5f2\",\"gateway\":\"https://api.4a4.ai\",\"sonata_host\":\"http://127.0.0.1:61804\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.906Z\",\"level\":\"info\",\"msg\":\"[auto-run] watcher started\",\"poll_ms\":10000}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.909Z\",\"level\":\"info\",\"msg\":\"[sse] manager started\",\"rooms\":0}",
+    "[log] {\"ts\":\"2026-07-28T18:18:43.909Z\",\"level\":\"info\",\"msg\":\"HTTP server listening\",\"port\":61805,\"actions\":34}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.486Z\",\"level\":\"debug\",\"msg\":\"[sse] opened client\",\"room\":\"rt-test\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.550Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"b61f01e81318ed4d6d39e9e4f4ebe2b538d729bf00f92b19049b4d9ab46304aa\",\"rumor_id\":\"0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7\",\"rumor_kind\":30536}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.550Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.553Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"0357a90e9fe3ff2e3472f89a02c61385f9ef0e93dfe23772241f400018fe3bc7\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.559Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"2199e9a2cd5629cd0f67fdf3f7c91fc08c0ee8d9b6ef2ab0e464880666b9789a\",\"rumor_id\":\"acd6ae94bd6d373bece232f345ecafac6171fdc43f92742c8f9b536e5b85606b\",\"rumor_kind\":30531}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.559Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"acd6ae94bd6d373bece232f345ecafac6171fdc43f92742c8f9b536e5b85606b\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.561Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"acd6ae94bd6d373bece232f345ecafac6171fdc43f92742c8f9b536e5b85606b\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:46.564Z\",\"level\":\"info\",\"msg\":\"[sse] key-grant landed\",\"room\":\"rt-test\",\"epoch\":1,\"promoted\":false}",
+    "[log] {\"ts\":\"2026-07-28T18:18:50.688Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"fec9a4f7df66038dc343b71f8af8b6169085409ff3e3bcc25928c7c6a8b5af35\",\"rumor_id\":\"a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-07-28T18:18:50.688Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-07-28T18:18:50.691Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"a5bf667e47e8cee5e4232a8902f557d6624ff960b68087f589c1cba4670083e2\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:56.764Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"5fc21a79eda83233f08a9480914212290be07815c0b1297f2ab6cf936e72853c\",\"rumor_id\":\"7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0\",\"rumor_kind\":30531}",
+    "[log] {\"ts\":\"2026-07-28T18:18:56.765Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-07-28T18:18:56.770Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"7ea3f1865348bae44d4a5f285e8879d2e1645b0bda87a2de731ebfe7293e71d0\"}",
+    "[log] {\"ts\":\"2026-07-28T18:18:56.776Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap unwrapped\",\"room\":\"rt-test\",\"wrap_id\":\"3692eb6ae5101130eb0190761cc529d8dae301b94e1e5db82c050f63232bb4d3\",\"rumor_id\":\"cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e\",\"rumor_kind\":30530}",
+    "[log] {\"ts\":\"2026-07-28T18:18:56.776Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap decrypting-and-projecting\",\"room\":\"rt-test\",\"rumor_id\":\"cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e\",\"epoch\":1}",
+    "[log] {\"ts\":\"2026-07-28T18:18:56.778Z\",\"level\":\"info\",\"msg\":\"[sse-trace] gift-wrap projected-ok\",\"room\":\"rt-test\",\"rumor_id\":\"cbf22544e510603ae64501fd551f911c5558bffefb5c7d21482104462b89524e\"}"
   ],
   "attempts": 1
 }

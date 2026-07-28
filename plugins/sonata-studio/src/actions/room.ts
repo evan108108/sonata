@@ -331,15 +331,19 @@ export async function createRoom(
   // SSEManager only opened streams for rooms it had at boot — and the
   // join action at line ~500 calls sseManager.open while create did not.)
   // Idempotent; safe if SSEManager already had a client for this slug.
-  try {
-    await ctx.sseManager.open(slug);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[room.create] sseManager.open("${slug}") failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+  // Guarded like join/leave/delete — ctx.sseManager is optional (tests and
+  // non-SSE callers construct ActionCtx without it).
+  if (ctx.sseManager) {
+    try {
+      await ctx.sseManager.open(slug);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[room.create] sseManager.open("${slug}") failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   return {
