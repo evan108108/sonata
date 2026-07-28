@@ -7,6 +7,7 @@
 // `ActionCtx`, and serializes the result.
 
 import { room_admit } from "./admit";
+import { artifact } from "./artifact";
 import { card } from "./card";
 import { cardStatus } from "./cardStatus";
 import { comment } from "./comment";
@@ -337,6 +338,72 @@ const STORAGE_DEFAULT_SET_PARAMS: ActionParam[] = [
 
 const STORAGE_DEFAULT_GET_PARAMS: ActionParam[] = [];
 
+const ARTIFACT_PUBLISH_PARAMS: ActionParam[] = [
+  {
+    name: "file_path",
+    type: "string",
+    description: "Absolute path to the payload file (symlinks rejected). Mutually exclusive with data.",
+  },
+  { name: "data", type: "string", description: "Inline payload. Mutually exclusive with file_path." },
+  {
+    name: "data_encoding",
+    type: "string",
+    description: '"utf8" (default) or "base64" — how to decode data.',
+  },
+  {
+    name: "content_type",
+    type: "string",
+    required: true,
+    description:
+      "MIME type. v1 allowlist: text/html, text/plain, application/json, image/png, image/jpeg, image/gif, image/webp, image/svg+xml.",
+  },
+  { name: "title", type: "string", description: "Display title (≤200 chars). Also seeds the derived d_tag." },
+  {
+    name: "d_tag",
+    type: "string",
+    description:
+      "Explicit slug matching ^[A-Za-z0-9_-]{1,64}$. Supplying it means 'republish this artifact' and reuses its key; omitted → derived from title with collision suffixing.",
+  },
+  {
+    name: "room_id",
+    type: "string",
+    description: "v2 placeholder — any value is rejected with 400 roomId_v2 (personal-only v1).",
+  },
+];
+
+const ARTIFACT_LIST_PARAMS: ActionParam[] = [
+  {
+    name: "filter",
+    type: "string",
+    description: '"personal" (default) or "room" (v1: returns [] with v2_marker=room-filter-v2).',
+  },
+  { name: "limit", type: "integer", description: "Page size, default 50, max 200." },
+  { name: "offset", type: "integer", description: "Rows to skip after publishedAtMs DESC sort." },
+  {
+    name: "include_revoked",
+    type: "boolean",
+    description: "Default true; false filters out revoked rows.",
+  },
+];
+
+const ARTIFACT_REVOKE_PARAMS: ActionParam[] = [
+  {
+    name: "sha256",
+    type: "string",
+    description: "Frozen version to revoke (version-level e-tag). At least one of sha256 / d_tag is required.",
+  },
+  {
+    name: "d_tag",
+    type: "string",
+    description: "Slug to revoke (address-level a-tag; NIP-09 time semantics — a later republish un-revokes).",
+  },
+  {
+    name: "reason",
+    type: "string",
+    description: "Optional note (≤500 chars); stored locally and sent as the kind:5 content.",
+  },
+];
+
 // ── Action definitions ──────────────────────────────────────────────────────
 
 export const ACTIONS: ActionDef[] = [
@@ -508,7 +575,7 @@ export const ACTIONS: ActionDef[] = [
   {
     name: "studio_image_attach",
     description:
-      "Encrypt + upload an image to Blossom under the room's current audience epoch key. Returns an image-block payload for embedding in a card's blocks[].",
+      "Encrypt + upload an image under the room's current audience epoch key. Backend resolved from per-room storage_config → user default → hosted Blossom. Returns an image-block payload for embedding in a card's blocks[].",
     method: "post",
     path: "/api/image/attach",
     params: IMAGE_ATTACH_PARAMS,
@@ -516,7 +583,7 @@ export const ACTIONS: ActionDef[] = [
   {
     name: "studio_file_attach",
     description:
-      "Encrypt + upload an arbitrary file to Blossom via hybrid encryption (random ChaCha20-Poly1305 file_key, NIP-44-wrapped to the room's current audience-epoch). Returns a file-block payload for embedding in a card's blocks[]. 256 MiB hard cap.",
+      "Encrypt + upload an arbitrary file via hybrid encryption (random ChaCha20-Poly1305 file_key, NIP-44-wrapped to the room's current audience-epoch). Backend resolved from per-room storage_config → user default → hosted Blossom. Returns a file-block payload for embedding in a card's blocks[]. 256 MiB hard cap.",
     method: "post",
     path: "/api/file/attach",
     params: FILE_ATTACH_PARAMS,
@@ -524,7 +591,7 @@ export const ACTIONS: ActionDef[] = [
   {
     name: "studio_file_fetch",
     description:
-      "Receive-side symmetric to studio_file_attach: given a file-block's fields (sha256, wrapped_key, epoch_n, mirror_url, author_pubkey), download the ciphertext, verify integrity, NIP-44-unwrap the file_key, ChaCha20-Poly1305 decrypt, and write plaintext to a scoped scratch dir. Returns {file_path, size_bytes, mime_type, sha256_verified, blake3_verified}. 256 MiB hard cap enforced on the download.",
+      "Receive-side symmetric to studio_file_attach: given a file-block's fields (sha256, wrapped_key, epoch_n, mirror_url, author_pubkey), download the ciphertext, verify integrity, NIP-44-unwrap the file_key, ChaCha20-Poly1305 decrypt, and write plaintext to a scoped scratch dir under ~/.sonata/plugins/sonata-studio/scratch/<sha256>/. Returns {file_path, size_bytes, mime_type, sha256_verified, blake3_verified}. 256 MiB hard cap enforced on the download.",
     method: "post",
     path: "/api/file/fetch",
     params: FILE_FETCH_PARAMS,
@@ -576,6 +643,30 @@ export const ACTIONS: ActionDef[] = [
     method: "get",
     path: "/api/storage/default/get",
     params: STORAGE_DEFAULT_GET_PARAMS,
+  },
+  {
+    name: "studio_artifact_publish",
+    description:
+      "Publish a file or inline payload as a public artifact: AES-256-GCM encrypt client-side, upload ciphertext to Blossom, publish a kind:30540 manifest to the 4a gateway. Returns frozen + latest URLs carrying the decryption key in the #k= fragment (never sent to any server). Personal-only in v1 (signed by the plugin pubkey).",
+    method: "post",
+    path: "/api/artifact/publish",
+    params: ARTIFACT_PUBLISH_PARAMS,
+  },
+  {
+    name: "studio_artifact_list",
+    description:
+      "List public artifacts this Sonata has published, newest first. URLs are composed from the local per-dTag key store; rows whose key secret is missing set key_missing=true with null URLs.",
+    method: "get",
+    path: "/api/artifact/list",
+    params: ARTIFACT_LIST_PARAMS,
+  },
+  {
+    name: "studio_artifact_revoke",
+    description:
+      "Revoke a published artifact via a signed kind:5 (NIP-09): sha256 → version-level e-tag, d_tag → address-level a-tag. Marks matching local rows revoked; the gateway serves 410 within ~30s of edge cache.",
+    method: "post",
+    path: "/api/artifact/revoke",
+    params: ARTIFACT_REVOKE_PARAMS,
   },
 ];
 
@@ -712,8 +803,20 @@ export const ROUTES: Record<string, { method: "get" | "post"; handler: ActionHan
     method: "get",
     handler: async (_b, _q, ctx) => storage.getDefault({}, ctx),
   },
+  "/api/artifact/publish": {
+    method: "post",
+    handler: async (body, _q, ctx) => artifact.publish(body, ctx),
+  },
+  "/api/artifact/list": {
+    method: "get",
+    handler: async (_b, query, ctx) => artifact.list(query, ctx),
+  },
+  "/api/artifact/revoke": {
+    method: "post",
+    handler: async (body, _q, ctx) => artifact.revoke(body, ctx),
+  },
 };
 
 // Re-export the action namespaces for consumers that want to call handlers
 // directly (used by tests).
-export { card, cardStatus, comment, dispatch, fileAttach, fileFetch, imageAttach, member, qa, room, room_admit, storage, track };
+export { artifact, card, cardStatus, comment, dispatch, fileAttach, fileFetch, imageAttach, member, qa, room, room_admit, storage, track };

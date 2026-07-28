@@ -177,6 +177,29 @@ export interface DeclarationByInvitePubResponse {
   declaration: NostrEventLike;
 }
 
+// ── Public artifacts (kind:30540 manifest + kind:5 revocation) ──────────────
+
+export interface PublishArtifactManifestRequest {
+  event: NostrEventLike;
+}
+
+export interface PublishArtifactManifestResponse {
+  ok: true;
+  superseded: false;
+  frozen_url: string;
+  latest_url: string;
+}
+
+export interface RevokeArtifactRequest {
+  event: NostrEventLike;
+}
+
+export interface RevokeArtifactResponse {
+  /** Tags the gateway accepted and stored (["e", id] / ["a", address]). */
+  revoked: string[][];
+  skipped: { tag: string[]; reason: string }[];
+}
+
 export interface OpenStreamArgs {
   audience_slug: string;
   /** Required by the gateway to disambiguate slug → declaration. */
@@ -272,6 +295,23 @@ export class GatewayClient {
     req: RawPublishDeclarationRequest,
   ): Promise<RawPublishDeclarationResponse> {
     return this.post("/v0/audience/raw/publish-declaration", req);
+  }
+
+  /**
+   * Publish a kind:30540 public-artifact manifest. The signed event IS the
+   * auth on this route (the NIP-98 header `post` attaches goes along for the
+   * ride, unchecked — harmless). 409 `superseded` / `blob_already_bound`
+   * surface as GatewayError via fetchWithRetry's 4xx path.
+   */
+  publishArtifactManifest(
+    req: PublishArtifactManifestRequest,
+  ): Promise<PublishArtifactManifestResponse> {
+    return this.post("/v0/artifacts/manifest", req);
+  }
+
+  /** Publish a kind:5 artifact revocation (NIP-09; per-tag resolution). */
+  revokeArtifact(req: RevokeArtifactRequest): Promise<RevokeArtifactResponse> {
+    return this.post("/v0/artifacts/revoke", req);
   }
 
   /** Public read — no NIP-98 auth needed; declarations are public. */

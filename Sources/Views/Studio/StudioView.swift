@@ -8,29 +8,42 @@ struct StudioView: View {
     @ObservedObject private var deepLink = StudioDeepLinkRouter.shared
 
     @State private var selectedRoom: StudioRoom?
+    @State private var showingArtifacts: Bool = false
     @State private var pendingInviteJoined: (slug: String, state: String)?
+
+    /// Detail pane resolves in priority: Artifacts (a personal, room-independent
+    /// surface) → the currently selected room → placeholder. Selecting artifacts
+    /// and selecting a room are mutually exclusive; sidebar handlers clear the
+    /// other on click. Extracted from `body` because inlining tripped SwiftUI's
+    /// expression-complexity ceiling.
+    @ViewBuilder
+    private var detailPane: some View {
+        if showingArtifacts {
+            StudioArtifactsPane()
+        } else if let selected = selectedRoom,
+                  let current = store.rooms.first(where: { $0.id == selected.id }) {
+            // Resolve `selectedRoom` through the live `store.rooms` array on every
+            // render — otherwise the detail pane keeps the snapshot captured at
+            // click time and post-admit changes only land after clicking away and
+            // back. The id-based lookup keeps SwiftUI's identity stable across
+            // observation ticks.
+            StudioRoomDetail(room: current, store: store)
+                .id(current.id)
+        } else {
+            StudioPickRoomPlaceholder()
+        }
+    }
 
     var body: some View {
         NavigationSplitView {
             StudioRoomList(
                 store: store,
-                selectedRoom: $selectedRoom
+                selectedRoom: $selectedRoom,
+                showingArtifacts: $showingArtifacts
             )
             .sonataSidebar()
         } detail: {
-            // Resolve `selectedRoom` through the live `store.rooms` array on
-            // every render — without this, the detail pane keeps the snapshot
-            // captured at click time, so post-admit changes (members count,
-            // pending pill, refreshed title) only land after the user clicks
-            // off-and-back. The id-based lookup keeps SwiftUI's identity stable
-            // across observation ticks.
-            if let selected = selectedRoom,
-               let current = store.rooms.first(where: { $0.id == selected.id }) {
-                StudioRoomDetail(room: current, store: store)
-                    .id(current.id)
-            } else {
-                StudioPickRoomPlaceholder()
-            }
+            detailPane
         }
         .navigationSplitViewStyle(.balanced)
         .onAppear {
@@ -85,6 +98,32 @@ struct StudioView: View {
             selectedRoom = room
             pendingInviteJoined = nil
         }
+    }
+}
+
+/// Detail-pane wrapper for `StudioArtifactsView` — the view itself was designed
+/// to sit inside a Settings section, so this adds a lightweight title strip so
+/// the pane matches `StudioRoomDetail`'s presentation weight.
+private struct StudioArtifactsPane: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox")
+                    .foregroundStyle(.secondary)
+                Text("Public Artifacts")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Text("api.4a4.ai")
+                    .font(.system(size: 11).monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            Divider()
+            ScrollView { StudioArtifactsView() }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.Color.bgDeep)
     }
 }
 

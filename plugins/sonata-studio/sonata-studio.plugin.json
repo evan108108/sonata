@@ -23,11 +23,11 @@
     },
     {
       "name": "studio_room_join",
-      "description": "Join a Studio room from a 4a:// or https:// invite URL.",
+      "description": "Join a Studio room from a s4a:// or https:// invite URL.",
       "method": "post",
       "path": "/api/room/join",
       "params": [
-        { "name": "invite_url", "type": "string", "required": true, "description": "4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token." },
+        { "name": "invite_url", "type": "string", "required": true, "description": "s4a:// or https://… invite URL containing slug, epoch, invite_pub, and ?priv= bech32 token." },
         { "name": "profile", "type": "object", "description": "Optional volunteered profile preview {nickname?: string, bio?: string} embedded in the claim event content so the founder can identify the joiner before admitting. PRIVACY: anyone holding the invite URL can read claim content — joiner is opting into exposing these strings to invite holders. Avatar is deliberately excluded (no room epoch key yet to encrypt against)." }
       ]
     },
@@ -77,6 +77,43 @@
       ]
     },
     {
+      "name": "studio_room_leave",
+      "description": "Federated self-removal: publish a kind:30522 with fa:status=left so peers see this Sonata depart the audience. Founders cannot leave their own room — they close it instead. Local state flips to 'left' (or 'removed' if the gateway reports we were already booted).",
+      "method": "post",
+      "path": "/api/room/leave",
+      "params": [
+        { "name": "slug", "type": "string", "required": true, "description": "Slug of the room to leave (member-only; founders close instead)." }
+      ]
+    },
+    {
+      "name": "studio_room_close",
+      "description": "Founder-only. Republish kind:30520 with fa:status=closed; freezes the audience to mutating operations gateway-side. Local state flips to 'closed' immediately so the UI reflects the founder's intent; if the gateway POST fails, the signed declaration is queued for retry.",
+      "method": "post",
+      "path": "/api/room/close",
+      "params": [
+        { "name": "slug", "type": "string", "required": true, "description": "Slug of the room to close (founder-only)." }
+      ]
+    },
+    {
+      "name": "studio_room_reopen",
+      "description": "Founder-only. Republish kind:30520 with fa:status=active; lifts the gateway-side freeze on a previously-closed room.",
+      "method": "post",
+      "path": "/api/room/reopen",
+      "params": [
+        { "name": "slug", "type": "string", "required": true, "description": "Slug of the room to reopen (founder-only)." }
+      ]
+    },
+    {
+      "name": "studio_room_boot",
+      "description": "Founder-only. Remove a member from the audience roster by republishing kind:30520 without their pubkey. Does NOT rotate the epoch; the booted member keeps their current epoch key (v0 acceptance; see room-lifecycle §11). Rejected with 403 closed_room while the room is closed.",
+      "method": "post",
+      "path": "/api/room/boot",
+      "params": [
+        { "name": "slug", "type": "string", "required": true, "description": "Slug of the room to boot a member from (founder-only)." },
+        { "name": "member_pubkey", "type": "string", "required": true, "description": "64-hex pubkey of the member to remove." }
+      ]
+    },
+    {
       "name": "studio_card_post",
       "description": "Post a card (kind 30530) to a room/track.",
       "method": "post",
@@ -84,7 +121,7 @@
       "params": [
         { "name": "room", "type": "string", "required": true, "description": "Room slug." },
         { "name": "track", "type": "string", "required": true, "description": "Track slug within the room." },
-        { "name": "kind", "type": "string", "required": true, "description": "Card kind (lead | review | finding | observation | task | note | document | other)." },
+        { "name": "kind", "type": "string", "required": true, "description": "Card kind (\"lead\" | \"review\" | \"finding\" | \"observation\" | \"task\" | \"note\" | \"document\" | other)." },
         { "name": "title", "type": "string", "required": true, "description": "Title (≤200 chars)." },
         { "name": "body", "type": "string", "required": true, "description": "Long-form markdown body (≤10000 chars)." },
         { "name": "summary", "type": "string", "description": "DEPRECATED alias for `body`. Accepted for one cutover release past 2026-05-12; new clients should send `body`." },
@@ -171,7 +208,8 @@
         { "name": "room", "type": "string", "required": true, "description": "Room slug." },
         { "name": "target", "type": "string", "required": true, "description": "64-hex event id, nostr: URI, or 4A address of the comment target." },
         { "name": "body", "type": "string", "required": true, "description": "Comment body (≤4000 chars)." },
-        { "name": "intent", "type": "string", "description": "Optional intent tag: agree | disagree | question | verify | dispatch | note | other." }
+        { "name": "intent", "type": "string", "description": "Optional intent tag: agree | disagree | question | verify | dispatch | note | other." },
+        { "name": "blocks", "type": "array", "description": "Optional array of structured content blocks, each {type: <string>, ...}. Same shape as card blocks — image/file blocks come from studio_image_attach / studio_file_attach." }
       ]
     },
     {
@@ -265,7 +303,7 @@
     },
     {
       "name": "studio_identity",
-      "description": "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI without waiting on optimistic-reconcile heuristics.",
+      "description": "Return the plugin's signing pubkey (lowercase hex). Renderer uses this to gate author-only UI (Delete/Edit) without waiting on optimistic-reconcile heuristics.",
       "method": "get",
       "path": "/api/identity",
       "params": []
@@ -291,7 +329,7 @@
     },
     {
       "name": "studio_storage_test",
-      "description": "Test a storage_config by uploading and retrieving a probe object. For s3, requires credentials in the body. Probe is deleted after a successful round-trip.",
+      "description": "Test a storage_config by uploading and retrieving a 19-byte probe object. For s3, requires credentials in the body. Probe is deleted after a successful round-trip.",
       "method": "post",
       "path": "/api/storage/test",
       "params": [
@@ -314,6 +352,44 @@
       "method": "get",
       "path": "/api/storage/default/get",
       "params": []
+    },
+    {
+      "name": "studio_artifact_publish",
+      "description": "Publish a file or inline payload as a public artifact: AES-256-GCM encrypt client-side, upload ciphertext to Blossom, publish a kind:30540 manifest to the 4a gateway. Returns frozen + latest URLs carrying the decryption key in the #k= fragment (never sent to any server). Personal-only in v1 (signed by the plugin pubkey).",
+      "method": "post",
+      "path": "/api/artifact/publish",
+      "params": [
+        { "name": "file_path", "type": "string", "description": "Absolute path to the payload file (symlinks rejected). Mutually exclusive with data." },
+        { "name": "data", "type": "string", "description": "Inline payload. Mutually exclusive with file_path." },
+        { "name": "data_encoding", "type": "string", "description": "\"utf8\" (default) or \"base64\" — how to decode data." },
+        { "name": "content_type", "type": "string", "required": true, "description": "MIME type. v1 allowlist: text/html, text/plain, application/json, image/png, image/jpeg, image/gif, image/webp, image/svg+xml." },
+        { "name": "title", "type": "string", "description": "Display title (≤200 chars). Also seeds the derived d_tag." },
+        { "name": "d_tag", "type": "string", "description": "Explicit slug matching ^[A-Za-z0-9_-]{1,64}$. Supplying it means 'republish this artifact' and reuses its key; omitted → derived from title with collision suffixing." },
+        { "name": "room_id", "type": "string", "description": "v2 placeholder — any value is rejected with 400 roomId_v2 (personal-only v1)." }
+      ]
+    },
+    {
+      "name": "studio_artifact_list",
+      "description": "List public artifacts this Sonata has published, newest first. URLs are composed from the local per-dTag key store; rows whose key secret is missing set key_missing=true with null URLs.",
+      "method": "get",
+      "path": "/api/artifact/list",
+      "params": [
+        { "name": "filter", "type": "string", "description": "\"personal\" (default) or \"room\" (v1: returns [] with v2_marker=room-filter-v2)." },
+        { "name": "limit", "type": "integer", "description": "Page size, default 50, max 200." },
+        { "name": "offset", "type": "integer", "description": "Rows to skip after publishedAtMs DESC sort." },
+        { "name": "include_revoked", "type": "boolean", "description": "Default true; false filters out revoked rows." }
+      ]
+    },
+    {
+      "name": "studio_artifact_revoke",
+      "description": "Revoke a published artifact via a signed kind:5 (NIP-09): sha256 → version-level e-tag, d_tag → address-level a-tag. Marks matching local rows revoked; the gateway serves 410 within ~30s of edge cache.",
+      "method": "post",
+      "path": "/api/artifact/revoke",
+      "params": [
+        { "name": "sha256", "type": "string", "description": "Frozen version to revoke (version-level e-tag). At least one of sha256 / d_tag is required." },
+        { "name": "d_tag", "type": "string", "description": "Slug to revoke (address-level a-tag; NIP-09 time semantics — a later republish un-revokes)." },
+        { "name": "reason", "type": "string", "description": "Optional note (≤500 chars); stored locally and sent as the kind:5 content." }
+      ]
     }
   ]
 }

@@ -4,6 +4,7 @@ import SwiftUI
 struct StudioRoomList: View {
     @ObservedObject var store: StudioStore
     @Binding var selectedRoom: StudioRoom?
+    @Binding var showingArtifacts: Bool
 
     @State private var showCreateSheet: Bool = false
     @State private var showJoinSheet: Bool = false
@@ -24,6 +25,8 @@ struct StudioRoomList: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            personalSection
+            Divider()
             header
             Divider()
             list
@@ -73,6 +76,33 @@ struct StudioRoomList: View {
             }
         } message: { _ in
             Text("Removes the local copy and its keys. Other members keep their copies.")
+        }
+    }
+
+    /// Sidebar entries that aren't rooms — for now just Public Artifacts.
+    /// Selecting an entry here clears the room selection so the detail pane
+    /// swaps to the personal surface.
+    private var personalSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Personal")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .textCase(.uppercase)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+            StudioPersonalRow(
+                label: "Public Artifacts",
+                systemImage: "shippingbox",
+                isSelected: showingArtifacts
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                showingArtifacts = true
+                selectedRoom = nil
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 6)
         }
     }
 
@@ -202,6 +232,7 @@ struct StudioRoomList: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         selectedRoom = room
+                        showingArtifacts = false
                         store.markRoomSeen(room.slug)
                     }
                     .contextMenu {
@@ -262,6 +293,39 @@ struct StudioRoomList: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+    }
+}
+
+/// Sidebar row for a top-level "Personal" entry — sibling of `StudioRoomRow`
+/// but without the state dot / unread pill, since these entries are
+/// singletons (Public Artifacts, and future personal surfaces).
+private struct StudioPersonalRow: View {
+    let label: String
+    let systemImage: String
+    let isSelected: Bool
+
+    @State private var isHovering: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .frame(width: 18, alignment: .center)
+            Text(label)
+                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected
+                    ? Color.accentColor.opacity(0.18)
+                    : (isHovering ? Color.secondary.opacity(0.10) : Color.clear))
+        )
+        .onHover { isHovering = $0 }
     }
 }
 
