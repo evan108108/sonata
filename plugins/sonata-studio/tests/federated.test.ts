@@ -218,7 +218,12 @@ function startMemoryShim(): Promise<{
         };
         const ent = body.id ? state.entities.get(String(body.id)) : null;
         if (!ent) return send(res, 404, { error: "not_found" });
-        ent.attributes = body.attributes ?? ent.attributes;
+        // Real Sonata's PATCH merges attribute keys (RFC 7396 via SQLite
+        // json_patch — only sent keys are updated; missing keys retained).
+        // Mirror that here so partial patches don't wipe sibling fields.
+        if (body.attributes && typeof body.attributes === "object") {
+          ent.attributes = { ...ent.attributes, ...body.attributes };
+        }
         ent.updatedAt = Date.now();
         return send(res, 200, { id: ent.id });
       }
