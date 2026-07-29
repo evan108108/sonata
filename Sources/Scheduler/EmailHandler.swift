@@ -77,7 +77,8 @@ actor EmailHandler {
                 fromAddr: email.from,
                 subject: email.subject,
                 messageId: email.messageId,
-                replyText: email.body
+                replyText: email.body,
+                attachments: email.attachments
             )
         }
     }
@@ -166,7 +167,8 @@ actor EmailHandler {
                         subject: subject,
                         body: body,
                         timestamp: timestamp,
-                        inboxAddress: inbox.address
+                        inboxAddress: inbox.address,
+                        attachments: message.attachments
                     )
 
                     if !initialized {
@@ -360,7 +362,8 @@ actor EmailHandler {
                 fromAddr: email.from,
                 subject: email.subject,
                 messageId: email.messageId,
-                replyText: email.body
+                replyText: email.body,
+                attachments: email.attachments
             )
             if pushed {
                 logger.info("EmailHandler: routed AFK reply to session \(resolved.sessionKey) (subject sessionId=\(target), msg \(email.messageId))")
@@ -672,7 +675,7 @@ actor EmailHandler {
         do {
             let rows: [Row] = try dbPool.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT messageId, threadId, fromAddr, toAddr, subject, body, receivedAt
+                    SELECT messageId, threadId, fromAddr, toAddr, subject, body, receivedAt, attachments
                     FROM emails
                     WHERE status = 'pending_approval' AND LOWER(fromAddr) LIKE ? AND toAddr = ?
                     ORDER BY receivedAt ASC
@@ -698,7 +701,8 @@ actor EmailHandler {
                     subject: row["subject"],
                     body: row["body"] as? String ?? "",
                     timestamp: ISO8601DateFormatter().string(from: Date()),
-                    inboxAddress: row["toAddr"]
+                    inboxAddress: row["toAddr"],
+                    attachments: EmailAttachment.decodeList(row["attachments"] as? String)
                 )
             }
             guard let inboxConfig = currentInboxes.first(where: { $0.address == inbox }) else {
@@ -750,11 +754,11 @@ actor EmailHandler {
     private func dispatchPendingUnreadEmails() async {
         // Find unread emails in DB, max 24h old
         let cutoffMs = Int64((Date().timeIntervalSince1970 - 86400) * 1000)
-        let unreadRows: [(messageId: String, threadId: String, from: String, subject: String, body: String, inboxAddress: String)]
+        let unreadRows: [(messageId: String, threadId: String, from: String, subject: String, body: String, inboxAddress: String, attachments: [EmailAttachment])]
         do {
             unreadRows = try await dbPool.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT messageId, threadId, fromAddr, toAddr, subject, body
+                    SELECT messageId, threadId, fromAddr, toAddr, subject, body, attachments
                     FROM emails
                     WHERE status = 'unread' AND receivedAt > ?
                     ORDER BY receivedAt ASC
@@ -766,7 +770,8 @@ actor EmailHandler {
                     from: row["fromAddr"] as String,
                     subject: row["subject"] as String,
                     body: row["body"] as? String ?? "",
-                    inboxAddress: row["toAddr"] as String
+                    inboxAddress: row["toAddr"] as String,
+                    attachments: EmailAttachment.decodeList(row["attachments"] as? String)
                 )}
             }
         } catch {
@@ -843,7 +848,8 @@ actor EmailHandler {
                 subject: row.subject,
                 body: row.body,
                 timestamp: ISO8601DateFormatter().string(from: Date()),
-                inboxAddress: row.inboxAddress
+                inboxAddress: row.inboxAddress,
+                attachments: row.attachments
             )
             toDispatch[row.inboxAddress, default: []].append(record)
         }
@@ -875,13 +881,16 @@ actor EmailHandler {
         isProcessing = true
         defer { isProcessing = false }
 
-        let emailDetails = emails.map { email in
-            """
+        let emailDetails = emails.map { email -> String in
+            let attachmentLine = email.attachments.isEmpty ? "" : "\n**Attachments:** " + email.attachments.map { a in
+                "\(a.filename ?? "unnamed") (\(a.contentType ?? "unknown type"), attachment_id=\(a.attachmentId))"
+            }.joined(separator: "; ")
+            return """
             ### From: \(email.from)
             **Subject:** \(email.subject)
             **Thread ID:** \(email.threadId)
             **Message ID:** \(email.messageId)
-            **Received:** \(email.timestamp)
+            **Received:** \(email.timestamp)\(attachmentLine)
 
             \(email.body.prefix(8000))
             """
@@ -1020,9 +1029,9 @@ actor EmailHandler {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         try await dbPool.write { db in
             try db.execute(sql: """
-                INSERT OR IGNORE INTO emails (messageId, threadId, fromAddr, toAddr, subject, body, status, receivedAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, arguments: [email.messageId, email.threadId, email.from, email.inboxAddress, email.subject, email.body, status, nowMs])
+                INSERT OR IGNORE INTO emails (messageId, threadId, fromAddr, toAddr, subject, body, status, receivedAt, attachments)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [email.messageId, email.threadId, email.from, email.inboxAddress, email.subject, email.body, status, nowMs, EmailAttachment.encodeList(email.attachments)])
         }
     }
 
@@ -1200,6 +1209,8 @@ struct EmailRecord: Sendable {
     let body: String
     let timestamp: String
     let inboxAddress: String
+    /// Attachment metadata (no bytes) — see `EmailAttachment`.
+    var attachments: [EmailAttachment] = []
 }
 
 // MARK: - Errors

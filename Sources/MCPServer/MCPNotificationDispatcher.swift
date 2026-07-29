@@ -58,21 +58,40 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
         fromAddr: String,
         subject: String,
         messageId: String,
-        replyText: String
+        replyText: String,
+        attachments: [EmailAttachment] = []
     ) async -> Bool {
+        // Metadata only, never bytes — attachments can be MBs; the receiving
+        // session fetches content on demand (AgentMail get_attachment with
+        // this message_id + attachment_id).
+        var attachmentBlock = ""
+        if !attachments.isEmpty {
+            let lines = attachments.map { a in
+                "- \(a.filename ?? "unnamed") (\(a.contentType ?? "unknown type"), \(a.size.map { "\($0) bytes" } ?? "size unknown"), attachment_id=\(a.attachmentId))"
+            }.joined(separator: "\n")
+            attachmentBlock = """
+
+
+                Attachments (\(attachments.count)) — fetch via AgentMail get_attachment with message_id=\(messageId):
+                \(lines)
+                """
+        }
         let content = """
             [AFK reply]
             From: \(fromAddr)
             Subject: \(subject)
 
-            \(replyText)
+            \(replyText)\(attachmentBlock)
             """
-        let meta: [String: String] = [
+        var meta: [String: String] = [
             "event_type": "afk_reply",
             "message_id": messageId,
             "from_addr": fromAddr,
             "subject": subject,
         ]
+        if let json = EmailAttachment.encodeList(attachments) {
+            meta["attachments"] = json
+        }
         return await pushChannel(sessionKey: sessionKey, content: content, meta: meta)
     }
 
