@@ -120,7 +120,8 @@ let emailWebhookActions: [SonataAction] = [
                 subject: raw.subject ?? "",
                 body: raw.body,
                 timestamp: raw.timestamp ?? ISO8601DateFormatter().string(from: Date()),
-                inboxAddress: inbox.address
+                inboxAddress: inbox.address,
+                attachments: raw.attachments
             )
 
             await emailHandler.ingestWebhookEmail(record, inbox: inbox)
