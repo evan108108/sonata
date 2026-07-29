@@ -111,6 +111,51 @@ struct EmailThreadSummary: Sendable {
     let subject: String?
 }
 
+/// Attachment metadata carried alongside a message. Metadata only — the bytes
+/// stay at the provider; a consumer that wants the content fetches it by
+/// `attachmentId` (e.g. AgentMail's get_attachment). Never inline file bytes
+/// into these records: they flow into channel events, which must stay lean.
+struct EmailAttachment: Codable, Sendable {
+    let attachmentId: String
+    let filename: String?
+    let size: Int?
+    let contentType: String?
+    let contentDisposition: String?
+
+    /// Parse a provider `attachments` array (AgentMail sends snake_case keys;
+    /// camelCase accepted too). Entries without an id are skipped.
+    static func fromProviderList(_ raw: Any?) -> [EmailAttachment] {
+        guard let list = raw as? [[String: Any]] else { return [] }
+        return list.compactMap { a in
+            guard let id = (a["attachment_id"] ?? a["attachmentId"]) as? String, !id.isEmpty else {
+                return nil
+            }
+            return EmailAttachment(
+                attachmentId: id,
+                filename: a["filename"] as? String,
+                size: a["size"] as? Int,
+                contentType: (a["content_type"] ?? a["contentType"]) as? String,
+                contentDisposition: (a["content_disposition"] ?? a["contentDisposition"]) as? String
+            )
+        }
+    }
+
+    /// Encode a list as a JSON string for storage / channel meta. `nil` when
+    /// empty so absent attachments cost nothing downstream.
+    static func encodeList(_ attachments: [EmailAttachment]) -> String? {
+        guard !attachments.isEmpty,
+              let data = try? JSONEncoder().encode(attachments) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Decode a JSON string produced by `encodeList`. Tolerant: nil/garbage → [].
+    static func decodeList(_ json: String?) -> [EmailAttachment] {
+        guard let json, let data = json.data(using: .utf8),
+              let list = try? JSONDecoder().decode([EmailAttachment].self, from: data) else { return [] }
+        return list
+    }
+}
+
 /// A fetched message reduced to what the poll loop needs. `body` is already the
 /// best available plain text (provider resolves any text/extracted-text fallback).
 struct EmailMessage: Sendable {
@@ -118,6 +163,7 @@ struct EmailMessage: Sendable {
     let subject: String?
     let body: String
     let timestamp: String?
+    var attachments: [EmailAttachment] = []
 }
 
 /// A message fetched by id for the webhook ingest path. Unlike `EmailMessage`,
@@ -131,6 +177,7 @@ struct RawMessage: Sendable {
     let subject: String?
     let body: String
     let timestamp: String?
+    var attachments: [EmailAttachment] = []
 }
 
 // MARK: - AgentMailProvider
@@ -209,7 +256,8 @@ struct AgentMailProvider: EmailProvider {
             from: json["from"] as? String ?? "",
             subject: json["subject"] as? String,
             body: body,
-            timestamp: json["timestamp"] as? String
+            timestamp: json["timestamp"] as? String,
+            attachments: EmailAttachment.fromProviderList(json["attachments"])
         )
     }
 
@@ -232,7 +280,8 @@ struct AgentMailProvider: EmailProvider {
             from: json["from"] as? String ?? "",
             subject: json["subject"] as? String,
             body: body,
-            timestamp: json["timestamp"] as? String
+            timestamp: json["timestamp"] as? String,
+            attachments: EmailAttachment.fromProviderList(json["attachments"])
         )
     }
 
@@ -256,7 +305,8 @@ struct AgentMailProvider: EmailProvider {
                 from: m["from"] as? String ?? "",
                 subject: m["subject"] as? String,
                 body: body ?? "",
-                timestamp: m["timestamp"] as? String
+                timestamp: m["timestamp"] as? String,
+                attachments: EmailAttachment.fromProviderList(m["attachments"])
             ))
         }
         return result
