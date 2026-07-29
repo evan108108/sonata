@@ -118,7 +118,8 @@ func createSchema(in db: Database) throws {
             body        TEXT NOT NULL,
             status      TEXT NOT NULL DEFAULT 'unread',
             receivedAt  INTEGER NOT NULL,
-            repliedAt   INTEGER
+            repliedAt   INTEGER,
+            attachments TEXT
         )
     """)
 
@@ -1428,6 +1429,21 @@ extension DatabaseMigrator {
         registerMigration("v40_webhook_route_action_params") { db in
             do {
                 try db.execute(sql: "ALTER TABLE webhookRoutes ADD COLUMN actionParams TEXT")
+            } catch {
+                // column may already exist on partial-migration retry
+            }
+        }
+
+        // v41: attachments on emails. JSON array of attachment metadata
+        // ({attachmentId, filename, size, contentType, contentDisposition})
+        // captured at ingest so AFK replies and re-dispatched rows can tell
+        // the receiving session what files rode along. Metadata only — the
+        // bytes stay at the provider and are fetched on demand by
+        // attachmentId. NULL = no attachments (or pre-v41 row). Also present
+        // in the fresh-DB DDL, so this only fires on existing databases.
+        registerMigration("v41_email_attachments") { db in
+            do {
+                try db.execute(sql: "ALTER TABLE emails ADD COLUMN attachments TEXT")
             } catch {
                 // column may already exist on partial-migration retry
             }
