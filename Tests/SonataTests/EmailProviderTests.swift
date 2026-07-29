@@ -69,4 +69,58 @@ final class EmailProviderTests: XCTestCase {
         XCTAssertNil(EmailProviderResolver.imapSmtpConfig(
             from: inbox(provider: "imap", providerConfig: nil)))
     }
+
+    // MARK: attachments
+
+    func testAttachmentParsingMatchesAgentMailShape() {
+        // Verbatim shape from GET /inboxes/<id>/messages/<mid> on 2026-07-28
+        // (the AFK screenshot reply that exposed the metadata drop).
+        let raw: [[String: Any]] = [[
+            "attachment_id": "95c719ad-4e09-4b01-ad0b-f94c22ab475c",
+            "filename": "1000021535.jpg",
+            "size": 150010,
+            "content_type": "image/jpeg",
+            "content_disposition": "inline",
+            "content_id": "<ii_19fab29785b43249f1a1>",
+        ]]
+        let parsed = EmailAttachment.fromProviderList(raw)
+        XCTAssertEqual(parsed.count, 1)
+        XCTAssertEqual(parsed[0].attachmentId, "95c719ad-4e09-4b01-ad0b-f94c22ab475c")
+        XCTAssertEqual(parsed[0].filename, "1000021535.jpg")
+        XCTAssertEqual(parsed[0].size, 150010)
+        XCTAssertEqual(parsed[0].contentType, "image/jpeg")
+        XCTAssertEqual(parsed[0].contentDisposition, "inline")
+    }
+
+    func testAttachmentParsingToleratesCamelCaseAndSkipsIdless() {
+        let raw: [[String: Any]] = [
+            ["attachmentId": "att-1", "contentType": "application/pdf"],
+            ["filename": "no-id.png"],  // no id → skipped
+        ]
+        let parsed = EmailAttachment.fromProviderList(raw)
+        XCTAssertEqual(parsed.count, 1)
+        XCTAssertEqual(parsed[0].attachmentId, "att-1")
+        XCTAssertEqual(parsed[0].contentType, "application/pdf")
+        XCTAssertNil(parsed[0].filename)
+        // Non-array input → [] (message had no attachments field).
+        XCTAssertTrue(EmailAttachment.fromProviderList(nil).isEmpty)
+        XCTAssertTrue(EmailAttachment.fromProviderList("junk").isEmpty)
+    }
+
+    func testAttachmentListRoundTripsThroughJSON() {
+        let list = [EmailAttachment(
+            attachmentId: "att-1", filename: "shot.jpg", size: 42,
+            contentType: "image/jpeg", contentDisposition: "inline")]
+        let json = EmailAttachment.encodeList(list)
+        XCTAssertNotNil(json)
+        let decoded = EmailAttachment.decodeList(json)
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].attachmentId, "att-1")
+        XCTAssertEqual(decoded[0].filename, "shot.jpg")
+        XCTAssertEqual(decoded[0].size, 42)
+        // Empty list encodes to nil (no DB/meta cost), and nil/garbage decode to [].
+        XCTAssertNil(EmailAttachment.encodeList([]))
+        XCTAssertTrue(EmailAttachment.decodeList(nil).isEmpty)
+        XCTAssertTrue(EmailAttachment.decodeList("not json").isEmpty)
+    }
 }
