@@ -11,6 +11,10 @@ struct CheckpointRow: FetchableRecord, Codable {
     var skills: String?
     var project: String?
     var createdAt: Int64
+    /// Added by v31; decoded here (EFB-48) so a restore can report *whose*
+    /// checkpoint it returned. Without it a caller had no way to tell an
+    /// inherited checkpoint from its own.
+    var sessionId: String?
 }
 
 struct HandoffRow: FetchableRecord, Codable {
@@ -34,6 +38,10 @@ struct CheckpointResponse: Encodable {
     let skills: String?
     let project: String?
     let createdAt: Int64
+    /// Owning session, when the checkpoint was saved with one. Lets a caller
+    /// machine-check that a restore returned its own state instead of relying
+    /// on reading the prose to notice.
+    let sessionId: String?
 }
 
 struct SaveHandoffRequest: Decodable {

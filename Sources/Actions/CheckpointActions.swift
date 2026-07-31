@@ -7,7 +7,9 @@ import Hummingbird
 
 // MARK: - Schema Bootstrap
 
-private func ensureCheckpointTablesForAction(_ db: Database) throws {
+// Internal rather than private so tests build their fixture from the real
+// schema instead of a hand-copied CREATE TABLE that can drift away from it.
+func ensureCheckpointTablesForAction(_ db: Database) throws {
     try db.execute(sql: """
         CREATE TABLE IF NOT EXISTS checkpoints (
             id TEXT PRIMARY KEY,
@@ -118,6 +120,84 @@ private func clearActiveCheckpointFileForAction(sessionId: String?) {
     }
 }
 
+// MARK: - Lookup (EFB-48)
+//
+// Session scoping (v31) fixed *writes* but left restore with exactly one key:
+// "newest row, maybe filtered by session." A session that dispatches three
+// workers in the same minute saves three checkpoints — SQLite keeps all three,
+// but only the newest is addressable, so two dispatches are silently
+// unreachable. The clobber was never in storage; it was a missing read key.
+//
+// `byId` is that key. `mem_checkpoint_save` already returns the row id, so a
+// dispatcher can hand each worker the exact checkpoint it should restore.
+//
+// Ordering is `createdAt DESC, rowid DESC` everywhere: createdAt is
+// millisecond-resolution and a dispatch burst can produce ties, which would
+// otherwise resolve arbitrarily.
+
+/// Which checkpoint a restore call is asking for.
+enum CheckpointLookup: Equatable {
+    /// Exact checkpoint by its save-time id. Never falls back — a miss is a miss.
+    case byId(String)
+    /// Most recent checkpoint saved by one session.
+    /// `allowLegacyFallback` opts into reading the pre-v31 NULL-sessionId
+    /// bucket when the session owns no rows of its own.
+    case bySession(String, allowLegacyFallback: Bool)
+    /// Globally most recent row — the pre-scoping behavior.
+    case latest
+}
+
+/// Decide what an incoming restore request is actually asking for.
+///
+/// Split out from the handler so the precedence rules are testable without a
+/// live server: `checkpointId` wins over `sessionId` (an exact key should never
+/// be weakened by a coarser one), and blank strings are treated as absent
+/// because MCP callers routinely send `""` for an unset optional.
+func resolveCheckpointLookup(
+    checkpointId: String?,
+    sessionId: String?,
+    allowLegacyFallback: Bool
+) -> CheckpointLookup {
+    if let checkpointId, !checkpointId.isEmpty { return .byId(checkpointId) }
+    if let sessionId, !sessionId.isEmpty {
+        return .bySession(sessionId, allowLegacyFallback: allowLegacyFallback)
+    }
+    return .latest
+}
+
+/// Run a resolved lookup. Shared by the handler and its tests so the two can't
+/// drift apart on ordering or fallback semantics.
+func fetchCheckpoint(_ db: Database, _ lookup: CheckpointLookup) throws -> CheckpointRow? {
+    switch lookup {
+    case .byId(let id):
+        return try CheckpointRow.fetchOne(
+            db,
+            sql: "SELECT * FROM checkpoints WHERE id = ?",
+            arguments: [id]
+        )
+
+    case .bySession(let sessionId, let allowLegacyFallback):
+        if let scoped = try CheckpointRow.fetchOne(
+            db,
+            sql: "SELECT * FROM checkpoints WHERE sessionId = ? ORDER BY createdAt DESC, rowid DESC LIMIT 1",
+            arguments: [sessionId]
+        ) {
+            return scoped
+        }
+        guard allowLegacyFallback else { return nil }
+        return try CheckpointRow.fetchOne(
+            db,
+            sql: "SELECT * FROM checkpoints WHERE sessionId IS NULL ORDER BY createdAt DESC, rowid DESC LIMIT 1"
+        )
+
+    case .latest:
+        return try CheckpointRow.fetchOne(
+            db,
+            sql: "SELECT * FROM checkpoints ORDER BY createdAt DESC, rowid DESC LIMIT 1"
+        )
+    }
+}
+
 // MARK: - Actions
 
 let checkpointActions: [SonataAction] = [
@@ -172,7 +252,8 @@ let checkpointActions: [SonataAction] = [
                 state: state,
                 skills: skills,
                 project: project,
-                createdAt: now
+                createdAt: now,
+                sessionId: sessionId
             )
         }
     ),
@@ -180,48 +261,49 @@ let checkpointActions: [SonataAction] = [
     // GET /api/checkpoint — get latest checkpoint
     SonataAction(
         name: "mem_checkpoint_restore",
-        description: "Return the most recent checkpoint. Pass sessionId to scope the lookup to your session — without it, you get the globally-most-recent row and risk restoring another session's state.",
+        description: "Return a checkpoint. Pass checkpointId for an exact one (the id mem_checkpoint_save returned) — that is the only lookup immune to parallel dispatches from one session. Otherwise pass sessionId for the most recent that session saved. With neither, you get the globally-most-recent row and risk restoring another session's state.",
         group: "/api",
         path: "/checkpoint",
         method: .get,
         params: [
-            ActionParam("sessionId", .string, description: "Caller's session id. When set, returns the most-recent checkpoint saved by that session (falling back to legacy NULL-sessionId rows if none matches). When omitted, returns the globally-most-recent row — the pre-scoping behavior."),
+            ActionParam("checkpointId", .string, description: "Exact checkpoint id, as returned by mem_checkpoint_save. Takes precedence over sessionId and never falls back — if it does not exist you get not-found, not someone else's state. Use this when a dispatcher hands you a specific checkpoint."),
+            ActionParam("sessionId", .string, description: "Caller's session id. Returns the most-recent checkpoint saved by that session. If the session has none, this is not-found — it will NOT silently hand back a legacy or foreign checkpoint unless you also pass allowLegacyFallback."),
+            ActionParam("allowLegacyFallback", .boolean, description: "Opt in to reading the pre-scoping NULL-sessionId bucket when sessionId matches no rows. Default false. Only set this if you specifically want pre-v31 checkpoints; it can return a checkpoint that is not yours."),
         ],
         handler: { ctx in
+            let checkpointId = ctx.params.string("checkpointId")
             let sessionId = ctx.params.string("sessionId")
+            let allowLegacyFallback = ctx.params.bool("allowLegacyFallback") ?? false
+            let lookup = resolveCheckpointLookup(
+                checkpointId: checkpointId,
+                sessionId: sessionId,
+                allowLegacyFallback: allowLegacyFallback
+            )
             do {
                 let row = try await ctx.dbPool.read { db -> CheckpointRow? in
                     try ensureCheckpointTablesForAction(db)
-                    if let sessionId, !sessionId.isEmpty {
-                        // Prefer session-scoped rows; fall through to legacy
-                        // NULL-sessionId rows so pre-migration checkpoints
-                        // remain reachable for the caller that owns them.
-                        if let scoped = try CheckpointRow.fetchOne(
-                            db,
-                            sql: "SELECT * FROM checkpoints WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1",
-                            arguments: [sessionId]
-                        ) {
-                            return scoped
-                        }
-                        return try CheckpointRow.fetchOne(
-                            db,
-                            sql: "SELECT * FROM checkpoints WHERE sessionId IS NULL ORDER BY createdAt DESC LIMIT 1"
-                        )
-                    }
-                    return try CheckpointRow.fetchOne(
-                        db,
-                        sql: "SELECT * FROM checkpoints ORDER BY createdAt DESC LIMIT 1"
-                    )
+                    return try fetchCheckpoint(db, lookup)
                 }
                 guard let row else {
-                    throw ActionError.notFound("No active checkpoint")
+                    // Say which key missed. "No active checkpoint" sent callers
+                    // hunting for a save bug when the real answer was usually
+                    // "you asked with the wrong key."
+                    switch lookup {
+                    case .byId(let id):
+                        throw ActionError.notFound("No checkpoint with id \(id)")
+                    case .bySession(let sid, _):
+                        throw ActionError.notFound("No checkpoint saved by session \(sid)")
+                    case .latest:
+                        throw ActionError.notFound("No active checkpoint")
+                    }
                 }
                 return CheckpointResponse(
                     id: row.id,
                     state: row.state,
                     skills: row.skills,
                     project: row.project,
-                    createdAt: row.createdAt
+                    createdAt: row.createdAt,
+                    sessionId: row.sessionId
                 )
             } catch let e as ActionError {
                 throw e
