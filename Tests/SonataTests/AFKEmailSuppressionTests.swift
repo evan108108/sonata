@@ -275,9 +275,13 @@ final class AFKEmailSuppressionTests: XCTestCase {
         XCTAssertEqual(entries.first?.messageId, "MSG-9")
     }
 
-    /// The backward-safety guarantee. AFK off → identical behavior to before
-    /// this change, even for a thread that has a recorded owner.
-    func testAFKOffFallsThroughToWorkerDispatch() async throws {
+    /// The ownership record IS the opt-in. AFK global off + owner live → still
+    /// route to the owning session. The old behavior (fall through to worker
+    /// dispatch when AFK was off) defeated the whole point of the ownership
+    /// row — at-keyboard owners saw a pool worker answer THEIR thread, which
+    /// is the exact "two Sonas on one thread" hazard the record exists to
+    /// prevent.
+    func testAFKOffOwnedThreadStillRoutesToLiveOwner() async throws {
         let h = try harness()
         defer { h.teardown() }
         try await setGlobalAFK(false, h.dbPool)
@@ -290,9 +294,11 @@ final class AFKEmailSuppressionTests: XCTestCase {
         let leftover = await handler.routeOwnedThreadEmails(
             [record(threadId: "THREAD-1", messageId: "MSG-9")])
 
-        XCTAssertEqual(leftover.count, 1, "AFK off must not suppress anything")
-        let count = await pushed.count
-        XCTAssertEqual(count, 0)
+        XCTAssertTrue(leftover.isEmpty, "owned + live owner routes regardless of AFK state")
+        let entries = await pushed.entries
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.key, "session-abc")
+        XCTAssertEqual(entries.first?.messageId, "MSG-9")
     }
 
     /// A dead owner must fall through. Suppressing here would strand the user's
