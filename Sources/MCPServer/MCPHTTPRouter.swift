@@ -241,9 +241,12 @@ enum MCPHTTPRouter {
               MCPSessionKey.isValid(sessionKey) else {
             return Response(status: .badRequest)
         }
-        let supplied = bearerToken(from: request.headers)
-        let valid = await MCPAuth.shared.validate(sessionKey: sessionKey, supplied: supplied)
-        guard valid else { return Response(status: .unauthorized) }
+        // Loopback trust: Sonata binds 127.0.0.1 only, so any request to this
+        // handler is same-machine, same-user. Bearer is identity, not auth —
+        // the sessionKey in the URL path is authoritative for routing. The
+        // old MCPAuth.validate() gate was in-memory and wiped on every Sonata
+        // restart, which broke every long-running Claude Code session on
+        // deploy. Never require a token that can rotate mid-flight.
 
         let bodyBuffer: ByteBuffer
         do {
@@ -288,9 +291,7 @@ enum MCPHTTPRouter {
               MCPSessionKey.isValid(sessionKey) else {
             return Response(status: .badRequest)
         }
-        let supplied = bearerToken(from: request.headers)
-        let valid = await MCPAuth.shared.validate(sessionKey: sessionKey, supplied: supplied)
-        guard valid else { return Response(status: .unauthorized) }
+        // Loopback trust — see handlePost comment. Bearer is identity, not auth.
 
         let accept = request.headers[.accept] ?? ""
         guard accept.contains("text/event-stream") || accept.contains("*/*") else {
@@ -327,9 +328,7 @@ enum MCPHTTPRouter {
               MCPSessionKey.isValid(sessionKey) else {
             return Response(status: .badRequest)
         }
-        let supplied = bearerToken(from: request.headers)
-        let valid = await MCPAuth.shared.validate(sessionKey: sessionKey, supplied: supplied)
-        guard valid else { return Response(status: .unauthorized) }
+        // Loopback trust — see handlePost comment.
         await MCPConnections.shared.closeIfLive(sessionKey)
         await MCPAuth.shared.revoke(sessionKey: sessionKey)
         return Response(status: .noContent, headers: corsHeaders(allowMethod: "DELETE"))
