@@ -393,16 +393,22 @@ actor EmailHandler {
     /// never have been handed. Guarding that in worker prose failed three times
     /// in one day; the event simply must not be created.
     ///
-    /// Deliberately narrow. All three conditions must hold:
-    ///   1. Global AFK is on — the only mode where a session is holding an
-    ///      email conversation rather than working the inbox as a queue.
-    ///   2. The thread has a recorded owner (see `emailThreadOwners`).
-    ///   3. That owner is live and can consume a channel push.
-    /// Any of them false and the email falls through completely untouched, so
-    /// normal inbox handling is bit-for-bit unchanged when AFK is off.
+    /// Deliberately narrow. Both conditions must hold:
+    ///   1. The thread has a recorded owner (see `emailThreadOwners`). The
+    ///      ownership row IS the opt-in — a session recorded it by sending a
+    ///      reply, which is a first-class "route follow-ups to me" signal
+    ///      regardless of whether global AFK is on.
+    ///   2. That owner is live and can consume a channel push.
+    /// Either false and the email falls through completely untouched, so
+    /// unowned threads and dead-owner threads still land in normal dispatch.
+    ///
+    /// Historical note: this used to also require global AFK to be on. That
+    /// gate defeated the whole point of the ownership fix — at-keyboard owners
+    /// still got their thread follow-ups dispatched to a pool worker,
+    /// reproducing the "two Sonas on one thread" hazard the ownership record
+    /// exists to prevent.
     func routeOwnedThreadEmails(_ emails: [EmailRecord]) async -> [EmailRecord] {
         guard !emails.isEmpty else { return emails }
-        guard await globalAFKEnabled(dbPool: dbPool) else { return emails }
 
         var leftover: [EmailRecord] = []
         for email in emails {
@@ -424,7 +430,7 @@ actor EmailHandler {
             // Loud on purpose. A suppression nobody can see in the log is worse
             // than the bug it fixes — this line is how you tell "routed to the
             // owner" apart from "silently dropped".
-            logger.info("EmailHandler: global AFK on, thread \(email.threadId) owned by session \(owner) — email \(email.messageId) suppressed to notification instead of worker dispatch")
+            logger.info("EmailHandler: thread \(email.threadId) owned by live session \(owner) — email \(email.messageId) routed to owner instead of worker dispatch")
             try? await markEmailProcessed(messageId: email.messageId, success: true)
         }
         return leftover
