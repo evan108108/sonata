@@ -89,6 +89,17 @@ private struct WorkerListItem: Encodable {
     let status: String
     let capabilities: String  // raw JSON string, matching existing route behaviour
     let lastHeartbeat: Int64
+    /// Last sweep at which this worker completed a model turn — NOT the same
+    /// question as `lastHeartbeat`, which only says its SSE stream was open.
+    ///
+    /// Exposed 2026-08-03. It was in the table but not in this projection, so
+    /// the supervisor — the one consumer whose whole job is judging worker
+    /// liveness — could not see it, and hand-rolled "identical token counts for
+    /// 3 cycles" instead. Token counters flatten legitimately during minutes of
+    /// IO, so that heuristic escalated a healthy worker as frozen. Reading
+    /// stale progress here is a reason to DM the worker, never on its own a
+    /// reason to kill it.
+    let lastProgressAt: Int64?
     let currentEventId: String
     let registeredAt: Int64
     let currentTask: String?
@@ -107,6 +118,7 @@ private struct WorkerListItem: Encodable {
         try c.encode(status, forKey: .status)
         try c.encode(capabilities, forKey: .capabilities)
         try c.encode(lastHeartbeat, forKey: .lastHeartbeat)
+        try c.encodeIfPresent(lastProgressAt, forKey: .lastProgressAt)
         try c.encode(currentEventId, forKey: .currentEventId)
         try c.encode(registeredAt, forKey: .registeredAt)
         try c.encodeIfPresent(currentTask, forKey: .currentTask)
@@ -120,7 +132,7 @@ private struct WorkerListItem: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case _id, workerId, sessionLabel, status, capabilities
-        case lastHeartbeat, currentEventId, registeredAt, currentTask, assignedAt
+        case lastHeartbeat, lastProgressAt, currentEventId, registeredAt, currentTask, assignedAt
         case currentEventTokens, currentSlug, currentCacheReadTokens, currentInputTokens
         case currentContextTokens
     }
@@ -564,6 +576,7 @@ let workerActions: [SonataAction] = [
                         status: row["status"] as? String ?? "offline",
                         capabilities: row["capabilities"] as? String ?? "[]",
                         lastHeartbeat: row["lastHeartbeat"] as? Int64 ?? 0,
+                        lastProgressAt: row["lastProgressAt"] as? Int64,
                         currentEventId: row["currentEventId"] as? String ?? "",
                         registeredAt: row["registeredAt"] as? Int64 ?? 0,
                         currentTask: row["currentTask"] as? String,

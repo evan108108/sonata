@@ -99,15 +99,29 @@ actor HealthMonitor {
     /// "RECOVERED after 6d" email for a condition nobody remembers.
     private let alertStateMaxAge: TimeInterval = 24 * 3600
 
-    /// A worker is considered "stuck" if it's been on the same event without
-    /// progress for this long. The bridge heartbeats every 15s, so any worker
-    /// here is alive — but its state machine isn't progressing the work. Evan
-    /// observed this pattern repeatedly on 2026-06-22: workers completing
-    /// tasks but never flipping status from 'busy', or claiming events but
-    /// never starting them. A "Continue" DM nudges the underlying agent loop
-    /// back into action without touching state in the DB (which is the cheap,
-    /// correct response — let the worker drive its own state machine).
-    private let workerStuckThreshold: TimeInterval = 5 * 60   // 5 min no progress
+    /// How long an event must have been assigned before its holder is judged
+    /// at all — the assign→deliver→first-turn gap, with room to spare. Purely
+    /// an event-age grace window now; the "is it working" question moved to
+    /// `workerProgressStaleThreshold` when `lastProgressAt` became honest.
+    private let workerStuckThreshold: TimeInterval = 5 * 60   // 5 min since assignment
+    /// How long `lastProgressAt` may sit still before a worker is treated as
+    /// not-working. Distinct from `workerStuckThreshold`, which measures how
+    /// long an EVENT has been assigned.
+    ///
+    /// This had to grow when `lastProgressAt` became honest (2026-08-03). While
+    /// it was stamped on every sweep that a worker held an event, it could not
+    /// go stale, so 5 minutes was a threshold on a signal that never tripped.
+    /// Now it means "no model turn completed in this long", and a healthy
+    /// worker legitimately goes quiet for the length of one tool call.
+    ///
+    /// 45 min is sized off the pool's own transcripts: across 36,199 measured
+    /// tool-wait gaps, p99 was 1.1 min and p99.9 was 8.1 min, but 34 gaps
+    /// exceeded 10 min and 16 exceeded 20 min — real builds, test suites and
+    /// long web fetches. At 5 min every one of those 41 would have been a false
+    /// positive. The handful above 45 min are session suspensions, which no
+    /// progress-based signal can tell from a hang anyway; that case is settled
+    /// by DMing the worker, not by this clock.
+    private let workerProgressStaleThreshold: TimeInterval = 45 * 60
     /// Worker must have heartbeated this recently to still be "alive" and
     /// worth nudging. Past this it's the reaper's job, not the nudger's.
     private let workerHeartbeatFreshness: TimeInterval = 90   // 90s
@@ -1030,11 +1044,25 @@ actor HealthMonitor {
     /// loop re-engages. No DB state change: the worker drives its own state
     /// machine. The first call after process start acts as the on-boot sweep
     /// (`lastWorkerNudgeAt` starts empty), which is intentional.
+    ///
+    /// The pattern this answers (Evan, 2026-06-22): workers that had finished a
+    /// task but never flipped off 'busy', or claimed an event and never started
+    /// it. A "Continue" is the cheap correct response to both.
+    ///
+    /// Note this sweep was effectively dead until 2026-08-03: it requires a
+    /// fresh `lastHeartbeat` alongside a stale `lastProgressAt`, and the sweeper
+    /// wrote both from the same clock, so the two conditions could not hold at
+    /// once. It became reachable when `lastProgressAt` started tracking real
+    /// model work — which is also why it now waits
+    /// `workerProgressStaleThreshold` rather than 5 minutes, so a long build
+    /// doesn't get a "Continue" injected mid-tool-call.
     private func nudgeStuckWorkers() async {
         let now = Date()
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
-        let stuckBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+        // Progress-staleness, not event age: this sweep asks "has the agent
+        // loop gone quiet", and a "Continue" DM is the cheap probe for it.
+        let stuckBeforeMs = nowMs - Int64(workerProgressStaleThreshold * 1000)
 
         struct StuckWorker {
             let workerId: String
@@ -1131,26 +1159,38 @@ actor HealthMonitor {
     /// (MCP disconnect/reconnect, or a cycle in the assign→deliver gap): the
     /// agent never saw the event so never completes it, yet the bridge keeps
     /// heartbeating, so no heartbeat-based sweep ever fires. The discriminator
-    /// is `lastProgressAt` — a stranded worker's stops advancing while
-    /// `lastHeartbeat` stays fresh.
+    /// is `lastProgressAt`, compared against the moment the event was handed
+    /// over: a worker that has completed no model turn SINCE its event was
+    /// assigned never read the event.
     ///
-    /// `lastProgressAt` is bumped from two paths, both driven by
-    /// `workers.currentEventId != NULL`:
-    ///   • `MCPSessionSweeper` — every SSE keepalive tick (~15s), for workers
-    ///     with a live SSE stream in `MCPConnections`.
-    ///   • `worker_heartbeat` (POST /api/worker/heartbeat) — every daemon
-    ///     heartbeat, INDEPENDENT of SSE state. This is the fallback for
-    ///     brief SSE reconnects mid-tool-call, added 2026-07-06 to close a
-    ///     false-positive class (see plan reclaim-stranded-events-fix.md +
-    ///     studio card 0d079c2d… in project-sonata/bugs).
+    /// ## Why "since assignment" and not "in the last N minutes"
     ///
-    /// A genuinely-working worker gets `lastProgressAt` bumps from either
-    /// path and is never caught here. This fires only for the true stranded
-    /// case: worker sits 'busy' with a currentEventId, heartbeats keep coming,
-    /// but the agent never received the event so no tool call is running
-    /// against it. (Previously this fired ALSO on live workers whose SSE
-    /// briefly dropped mid-tool-call — the HTTP-heartbeat auto-bump above
-    /// closes that gap.)
+    /// This used to ask whether progress was older than `workerStuckThreshold`,
+    /// which was safe only because `MCPSessionSweeper` stamped `lastProgressAt`
+    /// on every tick that a worker held an event — the column could not go
+    /// stale, so this reaper was dormant. Making that signal honest
+    /// (2026-08-03) would have woken it straight onto healthy workers: any
+    /// build or test run longer than the threshold reads as "no progress", and
+    /// re-enqueueing there duplicates work — the exact failure this function
+    /// caused in July (plan reclaim-stranded-events-fix.md, studio card
+    /// 0d079c2d… in project-sonata/bugs).
+    ///
+    /// Keyed on `assignedAt` instead, the predicate says what "stranded"
+    /// actually means and stops depending on a duration at all. A worker that
+    /// received its event answered it with at least one model turn, so its
+    /// `lastProgressAt` is at or after `assignedAt` and it is immune no matter
+    /// how long its tool call runs. A worker that never received it has
+    /// progress frozen at some point before assignment, forever.
+    ///
+    /// `assignedAt < stuckBeforeMs` remains as a grace window, so an event in
+    /// the normal assign→deliver→first-turn gap is not judged before it has
+    /// had a chance to start.
+    ///
+    /// One case is deliberately NOT caught: a worker whose transcript cannot be
+    /// read at all. `shouldStampProgress` stamps on a missing reading rather
+    /// than assert a hang, so such a worker keeps a fresh `lastProgressAt` and
+    /// is never reclaimed here. Recovering a false negative costs a supervisor
+    /// pass; a false positive costs duplicated work.
     ///
     /// Recovery: re-enqueue the event to 'pending' for another worker and reset
     /// the worker to idle, so the slot self-heals within one monitor cycle
@@ -1176,8 +1216,8 @@ actor HealthMonitor {
                       AND w.currentEventId IS NOT NULL AND w.currentEventId != ''
                       AND e.status = 'assigned'
                       AND e.assignedAt IS NOT NULL AND e.assignedAt < ?
-                      AND (w.lastProgressAt IS NULL OR w.lastProgressAt < ?)
-                    """, arguments: [aliveSinceMs, stuckBeforeMs, stuckBeforeMs])
+                      AND (w.lastProgressAt IS NULL OR w.lastProgressAt < e.assignedAt)
+                    """, arguments: [aliveSinceMs, stuckBeforeMs])
                     .compactMap { row -> Stranded? in
                         guard let wid = row["workerId"] as? String,
                               let eid = row["eventId"] as? String else { return nil }
@@ -1239,7 +1279,7 @@ actor HealthMonitor {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let ttlBeforeMs = nowMs - Int64(sonarDMTtl * 1000)
         let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
-        let progressStaleBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+        let progressStaleBeforeMs = nowMs - Int64(workerProgressStaleThreshold * 1000)
 
         struct StaleDM { let eventId: String; let workerId: String? }
         let stale: [StaleDM]

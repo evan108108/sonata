@@ -96,6 +96,15 @@ actor MCPSessionSweeper {
             )
         }
 
+        // Whether this sweep counts as progress, decided against the previous
+        // sample BEFORE it is overwritten below.
+        let stampProgress = shouldStampProgress(
+            previous: lastProgressSample[workerId], sessionId: sessionId, usage: usage
+        )
+        if let usage {
+            lastProgressSample[workerId] = (sessionId, usage.totalTokens)
+        }
+
         do {
             try await dbPool.write { db in
                 try db.execute(sql: """
@@ -109,7 +118,7 @@ actor MCPSessionSweeper {
                     WHERE workerId = ?
                 """, arguments: [
                     heartbeatAt,
-                    inFlight == nil ? nil : heartbeatAt,
+                    (inFlight == nil || !stampProgress) ? nil : heartbeatAt,
                     inFlight == nil ? nil : usage?.totalTokens,
                     inFlight == nil ? nil : usage?.inputTokens,
                     inFlight == nil ? nil : usage?.cacheReadTokens,
@@ -121,6 +130,12 @@ actor MCPSessionSweeper {
             logger.warning("Sweeper worker-heartbeat write failed for \(workerId): \(error)")
         }
     }
+
+    /// Previous transcript reading per worker, for deciding whether this sweep
+    /// saw any new model work. In-memory for the same reason `lastSpendSample`
+    /// is: a fresh process rebuilds it from the next sweep, and the one tick of
+    /// "no baseline" that costs is handled explicitly in `shouldStampProgress`.
+    private var lastProgressSample: [String: (sessionId: String?, total: Int64)] = [:]
 
     // MARK: - Sidecar spend
 
@@ -355,6 +370,68 @@ struct TranscriptUsage: Equatable, Sendable {
     let cacheReadTokens: Int64
     /// Last non-sidechain assistant turn's `input + cacheCreate + cacheRead`.
     let contextTokens: Int64
+}
+
+/// Whether this sweep should advance `workers.lastProgressAt`.
+///
+/// ## Why this exists
+///
+/// `lastProgressAt` used to be stamped with the sweep clock whenever a worker
+/// merely HELD an event. A column that cannot go stale while an event is held
+/// has no ⊥ — it cannot express "no progress" — so every reader keyed on it was
+/// dead, and a genuinely hung worker was indistinguishable from a busy one. The
+/// supervisor was left comparing token counters by hand, which flatten
+/// legitimately during minutes of `npm install`, and escalated a healthy worker
+/// as frozen (2026-08-03, sona-worker-2).
+///
+/// Post-fix the two columns answer two different questions:
+///   • `lastHeartbeat`  — the worker's SSE stream was open at the last sweep.
+///   • `lastProgressAt` — the worker actually did model work since then.
+///
+/// A heavy-IO worker now reads as stale-progress + live-connection + answers a
+/// DM; a real hang reads as stale-progress + live-connection + no DM answer.
+/// Separable for the first time — but only if callers remember that stale
+/// progress alone is NOT a hang. See `HealthMonitor.reclaimStrandedEvents`.
+///
+/// ## Why `totalTokens`
+///
+/// All three cumulative fields move only when a new assistant turn is appended,
+/// so any of them would mostly work. `totalTokens` is chosen because it is the
+/// only one that includes `output_tokens`, and output is the unambiguous
+/// signature of a model turn that actually completed — the others are all
+/// input-side and describe what was SENT.
+///
+/// `contextTokens` is explicitly wrong here and would be the tempting pick: it
+/// is the last turn only, so it holds steady when consecutive turns happen to
+/// size alike and DROPS after a compaction. A decrease is not "no progress".
+///
+/// Cache-read moving "without real progress" is not a hazard in either
+/// direction: `cacheReadTokens` accrues only as part of a turn, and a turn IS
+/// model work. It is folded into `totalTokens` rather than consulted alone.
+///
+/// ## The three cases
+///
+/// - **No reading at all** (`usage == nil`): stamp. A missing or unresolvable
+///   transcript means we cannot observe work, NOT that none happened, and this
+///   function's answer feeds a reaper. Degrading to the old transport-clock
+///   behaviour is the conservative failure mode; asserting a hang is not.
+/// - **No baseline** (`previous == nil`): do NOT stamp. The first sample after
+///   process start has nothing to compare against. Stamping would hand a
+///   genuinely stranded worker a fresh progress timestamp every time Sonata
+///   restarts, which is exactly the blindness being removed here. Costs a
+///   legitimate worker at most one 15s tick of staleness.
+/// - **Otherwise**: changed session id or changed total. `!=` rather than `>`
+///   deliberately — a shrunken total means a replaced or truncated transcript,
+///   i.e. a different run, which is evidence of activity rather than of
+///   stalling. Same reading as `sidecarSpendDelta` takes.
+func shouldStampProgress(
+    previous: (sessionId: String?, total: Int64)?,
+    sessionId: String?,
+    usage: TranscriptUsage?
+) -> Bool {
+    guard let usage else { return true }
+    guard let previous else { return false }
+    return previous.sessionId != sessionId || previous.total != usage.totalTokens
 }
 
 /// Spend to attribute to a sidecar for one sweep, given the previous sample.
