@@ -107,7 +107,34 @@ actor HealthMonitor {
     /// never starting them. A "Continue" DM nudges the underlying agent loop
     /// back into action without touching state in the DB (which is the cheap,
     /// correct response — let the worker drive its own state machine).
-    private let workerStuckThreshold: TimeInterval = 5 * 60   // 5 min no progress
+    ///
+    /// ## Why 15 minutes, and why this constant MUST move with the signal
+    ///
+    /// This is coupled to the `lastProgressAt` honesty fix, and shipping that
+    /// fix without this change would be a regression rather than a repair.
+    ///
+    /// `lastProgressAt` used to be re-stamped every 15s for any worker holding
+    /// an event, so it could never go stale and none of the three consumers
+    /// below could ever fire. The field now advances only when a worker's
+    /// transcript token reading actually moves — so for the first time these
+    /// thresholds are live, including `reclaimStrandedEvents`, which re-enqueues
+    /// the event and frees the worker. Against the old 5 min that net would
+    /// start firing on HEALTHY workers.
+    ///
+    /// The bound is set by what the signal measures. A transcript only grows
+    /// when a TURN LANDS, so the quantity to clear is the longest healthy
+    /// turn gap — not the longest tool call. A worker inside one long model
+    /// call or one long `swift build` correctly reads as "no progress" for the
+    /// duration of that turn. Measured 2026-07-22 (n=24): median 88s, max
+    /// healthy 4m47s — 13 seconds of headroom under the old value. 15 min is
+    /// ~3× the measured healthy max.
+    ///
+    /// If a future measurement shows 15 min is still tight, that is a threshold
+    /// tuning question. It is not a reason to make the signal dishonest again.
+    /// Internal rather than private so `LastProgressAtHonestyTests` can pin it:
+    /// the whole point of the coupling is that lowering this silently re-breaks
+    /// the fix, and a constant nobody asserts on is a constant somebody tunes.
+    let workerStuckThreshold: TimeInterval = 15 * 60  // 15 min no progress
     /// Worker must have heartbeated this recently to still be "alive" and
     /// worth nudging. Past this it's the reaper's job, not the nudger's.
     private let workerHeartbeatFreshness: TimeInterval = 90   // 90s
@@ -1134,23 +1161,34 @@ actor HealthMonitor {
     /// is `lastProgressAt` — a stranded worker's stops advancing while
     /// `lastHeartbeat` stays fresh.
     ///
-    /// `lastProgressAt` is bumped from two paths, both driven by
-    /// `workers.currentEventId != NULL`:
+    /// `lastProgressAt` is bumped from two paths. Both require the worker to
+    /// hold an event AND its transcript token reading to have MOVED since the
+    /// last write:
     ///   • `MCPSessionSweeper` — every SSE keepalive tick (~15s), for workers
     ///     with a live SSE stream in `MCPConnections`.
     ///   • `worker_heartbeat` (POST /api/worker/heartbeat) — every daemon
-    ///     heartbeat, INDEPENDENT of SSE state. This is the fallback for
-    ///     brief SSE reconnects mid-tool-call, added 2026-07-06 to close a
-    ///     false-positive class (see plan reclaim-stranded-events-fix.md +
-    ///     studio card 0d079c2d… in project-sonata/bugs).
+    ///     heartbeat, INDEPENDENT of SSE state. Dormant today: nothing has
+    ///     POSTed this endpoint since the sonata-bridge stdio proxy was
+    ///     retired.
     ///
-    /// A genuinely-working worker gets `lastProgressAt` bumps from either
-    /// path and is never caught here. This fires only for the true stranded
-    /// case: worker sits 'busy' with a currentEventId, heartbeats keep coming,
-    /// but the agent never received the event so no tool call is running
-    /// against it. (Previously this fired ALSO on live workers whose SSE
-    /// briefly dropped mid-tool-call — the HTTP-heartbeat auto-bump above
-    /// closes that gap.)
+    /// The "token reading moved" half is what makes this check mean anything.
+    /// Until it was added, both writers stamped on `currentEventId != NULL`
+    /// alone — "holds an event", which is a fact about assignment rather than
+    /// about work. A wedged worker keeps its SSE stream open, so the sweeper
+    /// re-stamped it every 15s and this query's `lastProgressAt < stuckBefore`
+    /// clause could never be true while an event was held. The net was
+    /// structurally incapable of firing on the case it was written for.
+    ///
+    /// Note what the signal does and does not prove, because it bounds
+    /// `workerStuckThreshold`: a transcript grows when a TURN LANDS, so a
+    /// worker inside one long turn reads as "no progress" for that turn's
+    /// duration. That is correct — but it means the threshold must clear the
+    /// longest healthy turn gap. See `workerStuckThreshold` for the numbers.
+    ///
+    /// (Historical: this once fired on live workers whose SSE briefly dropped
+    /// mid-tool-call. The HTTP-heartbeat path above was added 2026-07-06 to
+    /// close that window — see plan reclaim-stranded-events-fix.md + studio
+    /// card 0d079c2d… in project-sonata/bugs.)
     ///
     /// Recovery: re-enqueue the event to 'pending' for another worker and reset
     /// the worker to idle, so the slot self-heals within one monitor cycle
@@ -1158,7 +1196,10 @@ actor HealthMonitor {
     /// double-processing: nobody was working the event, and a later stale
     /// completion from the original worker is rejected by the complete/fail
     /// owner-guard.
-    private func reclaimStrandedEvents() async {
+    /// Internal rather than private so the honesty tests can drive the real
+    /// recovery path — threshold, predicate and all — instead of asserting
+    /// against a re-typed copy of its WHERE clause.
+    func reclaimStrandedEvents() async {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
         let stuckBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)

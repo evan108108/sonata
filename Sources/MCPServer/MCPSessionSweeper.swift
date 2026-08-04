@@ -96,26 +96,22 @@ actor MCPSessionSweeper {
             )
         }
 
+        // The one reading that decides whether anything actually happened.
+        // Event-scoped like its neighbours below, so an idle worker never
+        // advances progress.
+        let progressTokens: Int64? = inFlight == nil ? nil : usage?.totalTokens
+
         do {
             try await dbPool.write { db in
-                try db.execute(sql: """
-                    UPDATE workers
-                    SET lastHeartbeat = ?,
-                        lastProgressAt = COALESCE(?, lastProgressAt),
-                        currentEventTokens = COALESCE(?, currentEventTokens),
-                        currentInputTokens = COALESCE(?, currentInputTokens),
-                        currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
-                        currentContextTokens = COALESCE(?, currentContextTokens)
-                    WHERE workerId = ?
-                """, arguments: [
-                    heartbeatAt,
-                    inFlight == nil ? nil : heartbeatAt,
-                    inFlight == nil ? nil : usage?.totalTokens,
-                    inFlight == nil ? nil : usage?.inputTokens,
-                    inFlight == nil ? nil : usage?.cacheReadTokens,
-                    usage?.contextTokens,
-                    workerId,
-                ])
+                try writeSweeperWorkerHeartbeat(
+                    db,
+                    workerId: workerId,
+                    heartbeatAt: heartbeatAt,
+                    progressTokens: progressTokens,
+                    inputTokens: inFlight == nil ? nil : usage?.inputTokens,
+                    cacheReadTokens: inFlight == nil ? nil : usage?.cacheReadTokens,
+                    contextTokens: usage?.contextTokens
+                )
             }
         } catch {
             logger.warning("Sweeper worker-heartbeat write failed for \(workerId): \(error)")
@@ -260,6 +256,72 @@ actor MCPSessionSweeper {
         }
         return parseTranscriptUsage(jsonl: text)
     }
+}
+
+// MARK: - Heartbeat write (single-sourced)
+
+/// The sweeper's per-worker heartbeat write.
+///
+/// Factored out of the actor so tests exercise **this** statement rather than a
+/// copy pasted into a fixture. A test that asserts against its own duplicate of
+/// the SQL certifies only that the duplicate behaves — it goes on passing after
+/// the real statement drifts, which is the failure mode this fix exists to
+/// remove from a different field.
+///
+/// `progressTokens` is the whole argument of the thing: pass the current
+/// transcript total when the worker holds an event and the reading is real,
+/// and `nil` for "no event" or "no reading". Never pass a clock.
+func writeSweeperWorkerHeartbeat(
+    _ db: Database,
+    workerId: String,
+    heartbeatAt: Int64,
+    progressTokens: Int64?,
+    inputTokens: Int64?,
+    cacheReadTokens: Int64?,
+    contextTokens: Int64?
+) throws {
+    try db.execute(sql: """
+        UPDATE workers
+        SET lastHeartbeat = ?,
+            -- `lastProgressAt` advances only when the transcript reading
+            -- MOVED. It used to be stamped with the tick clock whenever
+            -- `currentEventId` was non-NULL, i.e. on "holds an event" — which
+            -- is a fact about assignment, not about work. A worker wedged
+            -- mid-turn keeps its SSE stream open, so the sweeper re-stamped it
+            -- every 15s forever and the column could never go stale while an
+            -- event was held. That left the field with no way to express "no
+            -- progress" — the one thing its name claims to report, and the one
+            -- thing HealthMonitor's three consumers key on.
+            --
+            -- The previous reading is already in the row, and SQLite evaluates
+            -- every RHS against the PRE-UPDATE values, so `currentEventTokens`
+            -- here is last tick's number even though the same statement
+            -- overwrites it below. No new column, no in-memory watermark to
+            -- lose on restart.
+            --
+            -- The NULL guard is load-bearing: a transcript we could not read
+            -- must mean "no information", never "advance". Without it,
+            -- `NULL IS NOT <n>` is true and a transient read failure would
+            -- stamp false progress — precisely the defect class this fix
+            -- exists to remove.
+            lastProgressAt = CASE
+                WHEN ? IS NOT NULL AND currentEventTokens IS NOT ? THEN ?
+                ELSE lastProgressAt
+            END,
+            currentEventTokens = COALESCE(?, currentEventTokens),
+            currentInputTokens = COALESCE(?, currentInputTokens),
+            currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
+            currentContextTokens = COALESCE(?, currentContextTokens)
+        WHERE workerId = ?
+    """, arguments: [
+        heartbeatAt,
+        progressTokens, progressTokens, heartbeatAt,
+        progressTokens,
+        inputTokens,
+        cacheReadTokens,
+        contextTokens,
+        workerId,
+    ])
 }
 
 // MARK: - Transcript location (pure)

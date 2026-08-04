@@ -141,6 +141,92 @@ private struct PromptCacheStatsItem: Encodable {
 
 // MARK: - Helpers
 
+/// The `worker_heartbeat` action's row write.
+///
+/// Factored out of the handler closure for the same reason as
+/// `writeSweeperWorkerHeartbeat`: so a test can drive the real statement rather
+/// than assert against a copy that keeps passing after the original drifts.
+///
+/// Status is derived on every heartbeat: any worker with a `currentEventId` is
+/// BUSY, any without one is IDLE. Draining stays sticky (explicit lifecycle
+/// exit). Offline is NOT sticky — if a heartbeat arrives the worker is alive by
+/// definition, and a stale sweep flip must self-heal rather than sit until Evan
+/// manually DMs the worker to fix itself. HealthMonitor's escalation loop still
+/// catches genuine deaths via missing-heartbeat, so this only recovers
+/// false-positive offline flags.
+func writeWorkerHeartbeatAction(
+    _ db: Database,
+    workerId: String,
+    now: Int64,
+    lastProgressAt: Int64?,
+    currentEventTokens: Int64?,
+    currentSlug: String?,
+    currentCacheReadTokens: Int64?,
+    currentInputTokens: Int64?,
+    currentContextTokens: Int64?,
+    promptHash: String?,
+    sessionLabel: String?,
+    cwdBasename: String?
+) throws {
+    try db.execute(
+        sql: """
+        UPDATE workers SET
+            lastHeartbeat = ?,
+            -- lastProgressAt precedence:
+            --   (1) caller-supplied wins when present (future-proof — lets a
+            --       daemon send a more-accurate stamp than the heartbeat clock);
+            --   (2) if the worker holds an in-flight event AND its token reading
+            --       MOVED since the last write, that movement is the progress;
+            --   (3) otherwise preserve whatever's there.
+            --
+            -- Branch (2) used to read "holds an in-flight event" alone — the
+            -- heartbeat itself was treated as progress. That is the same defect
+            -- MCPSessionSweeper carried: it reports assignment, not work, so a
+            -- wedged-but-heartbeating worker was stamped "progressing" forever
+            -- and HealthMonitor could never see it stall. Both writers now share
+            -- one definition of progress, so the signal means the same thing
+            -- whichever door writes it. This path is dormant today (nothing has
+            -- POSTed this endpoint since the sonata-bridge stdio proxy was
+            -- retired) and is fixed anyway — a dormant writer left with the old
+            -- semantics is how the fix gets silently undone the day something
+            -- starts calling it again.
+            --
+            -- Same NULL guard as the sweeper: a caller that sends no token
+            -- reading has told us nothing, and "nothing" must not read as
+            -- "advance".
+            lastProgressAt = CASE
+                WHEN ? IS NOT NULL THEN ?
+                WHEN currentEventId IS NOT NULL AND currentEventId != ''
+                     AND ? IS NOT NULL AND currentEventTokens IS NOT ? THEN ?
+                ELSE lastProgressAt
+            END,
+            currentEventTokens = COALESCE(?, currentEventTokens),
+            currentSlug = COALESCE(?, currentSlug),
+            currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
+            currentInputTokens = COALESCE(?, currentInputTokens),
+            -- Session-scoped, unlike its neighbours: no event completion clears
+            -- it, because a session's context doesn't empty when its event does.
+            currentContextTokens = COALESCE(?, currentContextTokens),
+            currentPromptHash = COALESCE(?, currentPromptHash),
+            currentSessionLabel = COALESCE(?, currentSessionLabel),
+            currentCwdBasename = COALESCE(?, currentCwdBasename),
+            status = CASE
+                WHEN status = 'draining' THEN status
+                WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
+                ELSE 'idle'
+            END
+        WHERE workerId = ?
+        """,
+        arguments: [now,
+                    lastProgressAt, lastProgressAt,
+                    currentEventTokens, currentEventTokens, now,
+                    currentEventTokens, currentSlug,
+                    currentCacheReadTokens, currentInputTokens,
+                    currentContextTokens,
+                    promptHash, sessionLabel, cwdBasename, workerId]
+    )
+}
+
 /// SQL predicate matching a worker-pool slot, for use in a `workers` query.
 ///
 /// The pool is exactly the `sona-worker-N` slots. Other things legitimately
@@ -322,49 +408,19 @@ let workerActions: [SonataAction] = [
                     // The escalation loop in HealthMonitor still catches genuine
                     // deaths via missing-heartbeat, so this only recovers
                     // false-positive offline flags.
-                    try db.execute(
-                        sql: """
-                        UPDATE workers SET
-                            lastHeartbeat = ?,
-                            -- lastProgressAt precedence:
-                            --   (1) caller-supplied wins when present (future-proof —
-                            --       lets a daemon send a more-accurate stamp than the
-                            --       heartbeat clock);
-                            --   (2) if the worker holds an in-flight event, the
-                            --       heartbeat itself IS progress (the daemon
-                            --       heartbeats over HTTP independent of SSE state, so
-                            --       this closes the "SSE briefly dropped mid-tool-call
-                            --       → reclaimStrandedEvents false-positive" window);
-                            --   (3) otherwise preserve whatever's there.
-                            lastProgressAt = CASE
-                                WHEN ? IS NOT NULL THEN ?
-                                WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN ?
-                                ELSE lastProgressAt
-                            END,
-                            currentEventTokens = COALESCE(?, currentEventTokens),
-                            currentSlug = COALESCE(?, currentSlug),
-                            currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
-                            currentInputTokens = COALESCE(?, currentInputTokens),
-                            -- Session-scoped, unlike its neighbours: no event
-                            -- completion clears it, because a session's context
-                            -- doesn't empty when its event does.
-                            currentContextTokens = COALESCE(?, currentContextTokens),
-                            currentPromptHash = COALESCE(?, currentPromptHash),
-                            currentSessionLabel = COALESCE(?, currentSessionLabel),
-                            currentCwdBasename = COALESCE(?, currentCwdBasename),
-                            status = CASE
-                                WHEN status = 'draining' THEN status
-                                WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
-                                ELSE 'idle'
-                            END
-                        WHERE workerId = ?
-                        """,
-                        arguments: [now,
-                                    lastProgressAt, lastProgressAt, now,
-                                    currentEventTokens, currentSlug,
-                                    currentCacheReadTokens, currentInputTokens,
-                                    currentContextTokens,
-                                    promptHash, sessionLabel, cwdBasename, workerId]
+                    try writeWorkerHeartbeatAction(
+                        db,
+                        workerId: workerId,
+                        now: now,
+                        lastProgressAt: lastProgressAt,
+                        currentEventTokens: currentEventTokens,
+                        currentSlug: currentSlug,
+                        currentCacheReadTokens: currentCacheReadTokens,
+                        currentInputTokens: currentInputTokens,
+                        currentContextTokens: currentContextTokens,
+                        promptHash: promptHash,
+                        sessionLabel: sessionLabel,
+                        cwdBasename: cwdBasename
                     )
                     let count = db.changesCount
                     try sweepStaleWorkersForActions(in: db)
