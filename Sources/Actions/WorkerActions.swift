@@ -82,13 +82,34 @@ func reconcilePinnedWorkers(eventId: String, in db: Database) throws -> Int {
 
 // MARK: - Response shapes specific to actions
 
-private struct WorkerListItem: Encodable {
+/// Internal rather than private so `LastProgressAtHonestyTests` can assert that
+/// `lastProgressAt` actually reaches the wire. The whole point of projecting it
+/// is that the supervisor can read it, and a field silently dropped from the
+/// encoder would look identical from the writer's side.
+struct WorkerListItem: Encodable {
     let _id: String
     let workerId: String
     let sessionLabel: String
     let status: String
     let capabilities: String  // raw JSON string, matching existing route behaviour
     let lastHeartbeat: Int64
+    /// Last sweep at which this worker completed a model turn — a DIFFERENT
+    /// question from `lastHeartbeat`, which only says its SSE stream was open.
+    ///
+    /// Exposed 2026-08-04. The column existed but was absent from this
+    /// projection, so the supervisor — the one consumer whose entire job is
+    /// judging worker liveness — could not read the signal it most needed, and
+    /// hand-rolled "identical token counts for 3 cycles" instead. Token counters
+    /// flatten legitimately during minutes of IO, so that heuristic escalated a
+    /// healthy worker as frozen, minutes from a kill mid-ticket.
+    ///
+    /// Fixing the writer without projecting to the reader would have shipped an
+    /// honest signal that never reaches the decision it exists to correct.
+    ///
+    /// Stale progress here is grounds to DM the worker. It is NEVER on its own
+    /// grounds to kill one: stale progress + live connection is a heavy-IO
+    /// worker OR a hang, and only the DM separates them.
+    let lastProgressAt: Int64?
     let currentEventId: String
     let registeredAt: Int64
     let currentTask: String?
@@ -107,6 +128,7 @@ private struct WorkerListItem: Encodable {
         try c.encode(status, forKey: .status)
         try c.encode(capabilities, forKey: .capabilities)
         try c.encode(lastHeartbeat, forKey: .lastHeartbeat)
+        try c.encodeIfPresent(lastProgressAt, forKey: .lastProgressAt)
         try c.encode(currentEventId, forKey: .currentEventId)
         try c.encode(registeredAt, forKey: .registeredAt)
         try c.encodeIfPresent(currentTask, forKey: .currentTask)
@@ -120,7 +142,7 @@ private struct WorkerListItem: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case _id, workerId, sessionLabel, status, capabilities
-        case lastHeartbeat, currentEventId, registeredAt, currentTask, assignedAt
+        case lastHeartbeat, lastProgressAt, currentEventId, registeredAt, currentTask, assignedAt
         case currentEventTokens, currentSlug, currentCacheReadTokens, currentInputTokens
         case currentContextTokens
     }
@@ -191,15 +213,27 @@ func writeWorkerHeartbeatAction(
             -- semantics is how the fix gets silently undone the day something
             -- starts calling it again.
             --
-            -- Same NULL guard as the sweeper: a caller that sends no token
-            -- reading has told us nothing, and "nothing" must not read as
-            -- "advance".
+            -- The comparison is against `lastProgressTokens`, the SESSION-scoped
+            -- watermark, NOT `currentEventTokens`. The event-scoped column is
+            -- NULL at the start of every event and `NULL IS NOT <n>` is TRUE, so
+            -- comparing against it would stamp every freshly-assigned worker —
+            -- including one that never received its event — and silently defeat
+            -- reclaimStrandedEvents' assignedAt predicate. Same reasoning as the
+            -- sweeper; see the Schema.swift migration.
+            --
+            -- A caller that sends no token reading has told us nothing, and on
+            -- THIS path "nothing" preserves rather than advances: unlike the
+            -- sweeper, an absent parameter here is a caller that never populated
+            -- the field, not an observation that failed.
             lastProgressAt = CASE
                 WHEN ? IS NOT NULL THEN ?
                 WHEN currentEventId IS NOT NULL AND currentEventId != ''
-                     AND ? IS NOT NULL AND currentEventTokens IS NOT ? THEN ?
+                     AND ? IS NOT NULL
+                     AND lastProgressTokens IS NOT NULL
+                     AND lastProgressTokens IS NOT ? THEN ?
                 ELSE lastProgressAt
             END,
+            lastProgressTokens = COALESCE(?, lastProgressTokens),
             currentEventTokens = COALESCE(?, currentEventTokens),
             currentSlug = COALESCE(?, currentSlug),
             currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
@@ -220,6 +254,7 @@ func writeWorkerHeartbeatAction(
         arguments: [now,
                     lastProgressAt, lastProgressAt,
                     currentEventTokens, currentEventTokens, now,
+                    currentEventTokens,
                     currentEventTokens, currentSlug,
                     currentCacheReadTokens, currentInputTokens,
                     currentContextTokens,
@@ -620,6 +655,7 @@ let workerActions: [SonataAction] = [
                         status: row["status"] as? String ?? "offline",
                         capabilities: row["capabilities"] as? String ?? "[]",
                         lastHeartbeat: row["lastHeartbeat"] as? Int64 ?? 0,
+                        lastProgressAt: row["lastProgressAt"] as? Int64,
                         currentEventId: row["currentEventId"] as? String ?? "",
                         registeredAt: row["registeredAt"] as? Int64 ?? 0,
                         currentTask: row["currentTask"] as? String,

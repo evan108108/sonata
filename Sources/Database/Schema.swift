@@ -420,6 +420,27 @@ func createSchema(in db: Database) throws {
     // Migration: add sessionId for worker cycling (idempotent)
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN sessionId TEXT") } catch { /* column exists */ }
 
+    // Migration: durable SESSION-scoped watermark for the lastProgressAt
+    // decision (idempotent). The sweeper needs "did this worker's cumulative
+    // transcript total change since the previous sweep?", and the answer has to
+    // survive a Sonata restart.
+    //
+    // WHY A NEW COLUMN RATHER THAN REUSING currentEventTokens. That column is
+    // EVENT-scoped: every release path (complete/fail/clear_current_event/
+    // reconcile/reclaim/stale-sweep) sets it to NULL, and no assignment path
+    // writes it, so a freshly-assigned event always starts with it NULL. Since
+    // `NULL IS NOT <total>` is TRUE in SQLite, comparing against it would stamp
+    // lastProgressAt on the first sweep after EVERY assignment — including for a
+    // worker that never received its event. That would push lastProgressAt past
+    // `workerEvents.assignedAt` and make reclaimStrandedEvents' predicate
+    // structurally unable to fire, which is the same dead-net outcome as the
+    // original defect wearing a different mechanism.
+    //
+    // Session-scoped, so deliberately NOT nulled on release: transcript totals
+    // are cumulative per session and a worker's watermark must span the gap
+    // between two events, not restart at each one.
+    do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN lastProgressTokens INTEGER") } catch { /* column exists */ }
+
     // Migration: live monitoring v0 — per-event token spend, slug, cache hit rate.
     // All NULL when idle; cleared by the 60s sweep alongside currentEventId.
     do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN currentEventTokens INTEGER") } catch { /* column exists */ }

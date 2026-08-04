@@ -96,10 +96,19 @@ actor MCPSessionSweeper {
             )
         }
 
-        // The one reading that decides whether anything actually happened.
-        // Event-scoped like its neighbours below, so an idle worker never
-        // advances progress.
-        let progressTokens: Int64? = inFlight == nil ? nil : usage?.totalTokens
+        // The cumulative total is the progress discriminator, and it is
+        // SESSION-scoped: passed whether or not an event is in flight, because
+        // the watermark it feeds (`lastProgressTokens`) has to span the gap
+        // between two events. Its event-scoped neighbours below stay gated on
+        // `inFlight`.
+        //
+        // `totalTokens` rather than any other field because it is the only one
+        // that includes output, and output is the unambiguous signature of a
+        // model turn that actually completed — the others are input-side and
+        // describe what was SENT. `contextTokens` would be the tempting pick
+        // and is wrong: it is last-turn-only and DROPS after a compaction, so a
+        // decrease there is not "no progress".
+        let sampledTotal: Int64? = usage?.totalTokens
 
         do {
             try await dbPool.write { db in
@@ -107,7 +116,9 @@ actor MCPSessionSweeper {
                     db,
                     workerId: workerId,
                     heartbeatAt: heartbeatAt,
-                    progressTokens: progressTokens,
+                    inFlight: inFlight != nil,
+                    sampledTotal: sampledTotal,
+                    eventTokens: inFlight == nil ? nil : sampledTotal,
                     inputTokens: inFlight == nil ? nil : usage?.inputTokens,
                     cacheReadTokens: inFlight == nil ? nil : usage?.cacheReadTokens,
                     contextTokens: usage?.contextTokens
@@ -268,14 +279,46 @@ actor MCPSessionSweeper {
 /// the real statement drifts, which is the failure mode this fix exists to
 /// remove from a different field.
 ///
-/// `progressTokens` is the whole argument of the thing: pass the current
-/// transcript total when the worker holds an event and the reading is real,
-/// and `nil` for "no event" or "no reading". Never pass a clock.
+/// `sampledTotal` is the whole argument of the thing: the worker's cumulative
+/// transcript total for this sweep, or `nil` for "could not read the
+/// transcript". It is SESSION-scoped — pass it whether or not an event is in
+/// flight. Never pass a clock.
+///
+/// ## The four cases, and why each falls the way it does
+///
+/// - **Idle** (`inFlight == false`): never advance. Progress is a claim about
+///   an event being worked; a worker holding nothing has none to make.
+/// - **No reading** (`sampledTotal == nil`): ADVANCE. A missing or unresolvable
+///   transcript means we could not OBSERVE work, not that none happened, and
+///   this decision feeds a reaper that re-enqueues events. Asserting a hang
+///   from an absence of evidence is [[empty-result-read-as-absence]]; degrading
+///   to the old transport-clock behaviour is the conservative failure. (The
+///   first version of this fix had it the other way and pinned the risk as a
+///   test. Under `reclaimStrandedEvents`' `assignedAt` predicate that stops
+///   being a documented trade-off and becomes a live false positive: an
+///   unreadable transcript would hold `lastProgressAt` below `assignedAt`
+///   forever, so the worker is reclaimed every cycle for as long as it lives.)
+/// - **No baseline** (`lastProgressTokens IS NULL`): do NOT advance. There is
+///   nothing to compare against yet, and stamping here would hand a genuinely
+///   stranded worker a fresh timestamp. Costs a working worker one 15s tick,
+///   because the same statement writes the baseline it was missing.
+/// - **Otherwise**: advance iff the total CHANGED. `IS NOT` rather than `>`
+///   deliberately — a shrunken total means a replaced or truncated transcript,
+///   i.e. a different run, which is evidence of activity rather than stalling.
+///
+/// The comparison is against `lastProgressTokens`, NOT `currentEventTokens`.
+/// See the Schema.swift migration for why that distinction is load-bearing: the
+/// event-scoped column is NULL at the start of every event, `NULL IS NOT <n>`
+/// is TRUE, and comparing against it would stamp every freshly-assigned worker
+/// — including one that never received its event — which silently restores the
+/// dead-net the whole fix exists to remove.
 func writeSweeperWorkerHeartbeat(
     _ db: Database,
     workerId: String,
     heartbeatAt: Int64,
-    progressTokens: Int64?,
+    inFlight: Bool,
+    sampledTotal: Int64?,
+    eventTokens: Int64?,
     inputTokens: Int64?,
     cacheReadTokens: Int64?,
     contextTokens: Int64?
@@ -283,31 +326,30 @@ func writeSweeperWorkerHeartbeat(
     try db.execute(sql: """
         UPDATE workers
         SET lastHeartbeat = ?,
-            -- `lastProgressAt` advances only when the transcript reading
-            -- MOVED. It used to be stamped with the tick clock whenever
-            -- `currentEventId` was non-NULL, i.e. on "holds an event" — which
-            -- is a fact about assignment, not about work. A worker wedged
-            -- mid-turn keeps its SSE stream open, so the sweeper re-stamped it
-            -- every 15s forever and the column could never go stale while an
-            -- event was held. That left the field with no way to express "no
-            -- progress" — the one thing its name claims to report, and the one
-            -- thing HealthMonitor's three consumers key on.
+            -- `lastProgressAt` advances only when real model work was observed.
+            -- It used to be stamped with the tick clock whenever
+            -- `currentEventId` was non-NULL, i.e. on "holds an event" — a fact
+            -- about assignment, not about work. A worker wedged mid-turn keeps
+            -- its SSE stream open, so the sweeper re-stamped it every 15s
+            -- forever and the column could never go stale while an event was
+            -- held. That left the field with no way to express "no progress" —
+            -- the one thing its name claims to report, and the one thing
+            -- HealthMonitor's readers key on.
             --
-            -- The previous reading is already in the row, and SQLite evaluates
-            -- every RHS against the PRE-UPDATE values, so `currentEventTokens`
-            -- here is last tick's number even though the same statement
-            -- overwrites it below. No new column, no in-memory watermark to
-            -- lose on restart.
-            --
-            -- The NULL guard is load-bearing: a transcript we could not read
-            -- must mean "no information", never "advance". Without it,
-            -- `NULL IS NOT <n>` is true and a transient read failure would
-            -- stamp false progress — precisely the defect class this fix
-            -- exists to remove.
+            -- SQLite evaluates every RHS against the PRE-UPDATE row, so
+            -- `lastProgressTokens` here is the previous sweep's reading even
+            -- though the same statement overwrites it below. One atomic
+            -- statement, no in-memory watermark to lose on restart.
             lastProgressAt = CASE
-                WHEN ? IS NOT NULL AND currentEventTokens IS NOT ? THEN ?
+                WHEN ? = 0 THEN lastProgressAt              -- idle
+                WHEN ? IS NULL THEN ?                       -- no reading → stamp
+                WHEN lastProgressTokens IS NULL THEN lastProgressAt   -- no baseline
+                WHEN lastProgressTokens IS NOT ? THEN ?     -- total moved
                 ELSE lastProgressAt
             END,
+            -- Session-scoped watermark. Written on every sweep that produced a
+            -- reading, and deliberately never NULLed on release.
+            lastProgressTokens = COALESCE(?, lastProgressTokens),
             currentEventTokens = COALESCE(?, currentEventTokens),
             currentInputTokens = COALESCE(?, currentInputTokens),
             currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
@@ -315,8 +357,11 @@ func writeSweeperWorkerHeartbeat(
         WHERE workerId = ?
     """, arguments: [
         heartbeatAt,
-        progressTokens, progressTokens, heartbeatAt,
-        progressTokens,
+        inFlight ? 1 : 0,
+        sampledTotal, heartbeatAt,
+        sampledTotal, heartbeatAt,
+        sampledTotal,
+        eventTokens,
         inputTokens,
         cacheReadTokens,
         contextTokens,

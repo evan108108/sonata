@@ -107,34 +107,44 @@ actor HealthMonitor {
     /// never starting them. A "Continue" DM nudges the underlying agent loop
     /// back into action without touching state in the DB (which is the cheap,
     /// correct response — let the worker drive its own state machine).
+    /// How long an event must have been ASSIGNED before its holder is judged at
+    /// all — the assign→deliver→first-turn gap, with room to spare. Purely an
+    /// event-age grace window; the "is it actually working" question belongs to
+    /// `workerProgressStaleThreshold`.
     ///
-    /// ## Why 15 minutes, and why this constant MUST move with the signal
+    /// These were one overloaded constant until 2026-08-04. They measure
+    /// different quantities — how old an EVENT is, versus how long a WORKER has
+    /// been quiet — and the correct values differ by an order of magnitude, so
+    /// one number could not be right for both.
     ///
-    /// This is coupled to the `lastProgressAt` honesty fix, and shipping that
-    /// fix without this change would be a regression rather than a repair.
+    /// Internal rather than private so `LastProgressAtHonestyTests` can pin
+    /// both: a constant nobody asserts on is a constant somebody tunes.
+    let workerStuckThreshold: TimeInterval = 5 * 60   // 5 min since assignment
+
+    /// How long `lastProgressAt` may sit still before a worker is treated as
+    /// not-working. Consumed only by the NON-DESTRUCTIVE readers
+    /// (`nudgeStuckWorkers`, `sweepStaleDMEvents`); `reclaimStrandedEvents`
+    /// deliberately keys on `assignedAt` instead and uses no duration at all.
     ///
-    /// `lastProgressAt` used to be re-stamped every 15s for any worker holding
-    /// an event, so it could never go stale and none of the three consumers
-    /// below could ever fire. The field now advances only when a worker's
-    /// transcript token reading actually moves — so for the first time these
-    /// thresholds are live, including `reclaimStrandedEvents`, which re-enqueues
-    /// the event and frees the worker. Against the old 5 min that net would
-    /// start firing on HEALTHY workers.
+    /// This had to grow when `lastProgressAt` became honest. While it was
+    /// stamped on every sweep that a worker merely held an event it could not
+    /// go stale, so 5 minutes was a threshold on a signal that never tripped.
+    /// It now means "no model turn completed in this long", and a healthy
+    /// worker legitimately goes quiet for the length of one tool call.
     ///
-    /// The bound is set by what the signal measures. A transcript only grows
-    /// when a TURN LANDS, so the quantity to clear is the longest healthy
-    /// turn gap — not the longest tool call. A worker inside one long model
-    /// call or one long `swift build` correctly reads as "no progress" for the
-    /// duration of that turn. Measured 2026-07-22 (n=24): median 88s, max
-    /// healthy 4m47s — 13 seconds of headroom under the old value. 15 min is
-    /// ~3× the measured healthy max.
+    /// 45 min is sized off the pool's own transcripts: across 36,199 measured
+    /// tool-wait gaps, p99 was 1.1 min and p99.9 was 8.1 min, but 34 gaps
+    /// exceeded 10 min and 16 exceeded 20 min — real builds, test suites and
+    /// long web fetches. At 5 min every one of those 41 would have been a false
+    /// positive. The handful above 45 min are session suspensions, which no
+    /// progress-based signal can distinguish from a hang anyway; that case is
+    /// settled by DMing the worker, not by this clock.
     ///
-    /// If a future measurement shows 15 min is still tight, that is a threshold
-    /// tuning question. It is not a reason to make the signal dishonest again.
-    /// Internal rather than private so `LastProgressAtHonestyTests` can pin it:
-    /// the whole point of the coupling is that lowering this silently re-breaks
-    /// the fix, and a constant nobody asserts on is a constant somebody tunes.
-    let workerStuckThreshold: TimeInterval = 15 * 60  // 15 min no progress
+    /// (A prior revision of this fix set a single 15-min threshold from an n=24
+    /// sample drawn from memory_request work — which contains no builds, so the
+    /// sample could not see the tail it needed to clear. Recorded because the
+    /// number was not the error; the sampling frame was.)
+    let workerProgressStaleThreshold: TimeInterval = 45 * 60
     /// Worker must have heartbeated this recently to still be "alive" and
     /// worth nudging. Past this it's the reaper's job, not the nudger's.
     private let workerHeartbeatFreshness: TimeInterval = 90   // 90s
@@ -1061,7 +1071,12 @@ actor HealthMonitor {
         let now = Date()
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
-        let stuckBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+        // Progress-staleness, not event age: this sweep asks whether the agent
+        // loop has gone quiet, and a "Continue" DM is the cheap probe for it.
+        // Non-destructive, so a false positive costs one wasted DM — but at the
+        // old 5 min it would have injected a "Continue" into the middle of
+        // every build longer than that.
+        let stuckBeforeMs = nowMs - Int64(workerProgressStaleThreshold * 1000)
 
         struct StuckWorker {
             let workerId: String
@@ -1179,11 +1194,38 @@ actor HealthMonitor {
     /// clause could never be true while an event was held. The net was
     /// structurally incapable of firing on the case it was written for.
     ///
-    /// Note what the signal does and does not prove, because it bounds
-    /// `workerStuckThreshold`: a transcript grows when a TURN LANDS, so a
-    /// worker inside one long turn reads as "no progress" for that turn's
-    /// duration. That is correct — but it means the threshold must clear the
-    /// longest healthy turn gap. See `workerStuckThreshold` for the numbers.
+    /// ## Why "since assignment" and not "in the last N minutes"
+    ///
+    /// This used to ask whether progress was older than a duration threshold,
+    /// which was harmless only because the sweeper stamped `lastProgressAt` on
+    /// every tick a worker held an event — the column could not go stale, so
+    /// this reaper was dormant. Making the signal honest would have woken it
+    /// straight onto HEALTHY workers: a transcript grows only when a TURN
+    /// LANDS, so any build or test run longer than the threshold reads as "no
+    /// progress", and re-enqueueing there duplicates work — the exact failure
+    /// this function caused in July. Measured across 36,199 tool-wait gaps in
+    /// the pool's own transcripts, 16 exceeded 20 minutes.
+    ///
+    /// Keyed on `assignedAt` the predicate says what "stranded" actually MEANS
+    /// and stops depending on a duration at all. A worker that received its
+    /// event answered it with at least one model turn, so its `lastProgressAt`
+    /// is at or after `assignedAt` and it is immune no matter how long its tool
+    /// call runs. A worker that never received it has progress frozen at some
+    /// point before assignment, forever. `e.assignedAt < ?` survives purely as
+    /// a grace window so an event still inside the normal
+    /// assign→deliver→first-turn gap is not judged before it can start.
+    ///
+    /// This also keeps the standing ruling intact (wiki sonata/worker-timeouts.md,
+    /// Evan 2026-07-23: "set metadata.timeoutSeconds on the task, never add new
+    /// reaper logic"). reapOverdueTasks/timeoutSeconds remains the only
+    /// elapsed-time kill authority; a duration test here would have been a
+    /// second one.
+    ///
+    /// One case is deliberately NOT caught: a worker whose transcript cannot be
+    /// read at all. The sweeper stamps on a missing reading rather than assert a
+    /// hang, so such a worker keeps a fresh `lastProgressAt` and never lands
+    /// here. Recovering that false negative costs a supervisor pass; the false
+    /// positive would cost duplicated work.
     ///
     /// (Historical: this once fired on live workers whose SSE briefly dropped
     /// mid-tool-call. The HTTP-heartbeat path above was added 2026-07-06 to
@@ -1217,8 +1259,8 @@ actor HealthMonitor {
                       AND w.currentEventId IS NOT NULL AND w.currentEventId != ''
                       AND e.status = 'assigned'
                       AND e.assignedAt IS NOT NULL AND e.assignedAt < ?
-                      AND (w.lastProgressAt IS NULL OR w.lastProgressAt < ?)
-                    """, arguments: [aliveSinceMs, stuckBeforeMs, stuckBeforeMs])
+                      AND (w.lastProgressAt IS NULL OR w.lastProgressAt < e.assignedAt)
+                    """, arguments: [aliveSinceMs, stuckBeforeMs])
                     .compactMap { row -> Stranded? in
                         guard let wid = row["workerId"] as? String,
                               let eid = row["eventId"] as? String else { return nil }
@@ -1280,7 +1322,9 @@ actor HealthMonitor {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let ttlBeforeMs = nowMs - Int64(sonarDMTtl * 1000)
         let aliveSinceMs = nowMs - Int64(workerHeartbeatFreshness * 1000)
-        let progressStaleBeforeMs = nowMs - Int64(workerStuckThreshold * 1000)
+        // Progress-staleness, not event age — this guard asks whether the
+        // worker is still genuinely drafting a reply.
+        let progressStaleBeforeMs = nowMs - Int64(workerProgressStaleThreshold * 1000)
 
         struct StaleDM { let eventId: String; let workerId: String? }
         let stale: [StaleDM]
