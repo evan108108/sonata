@@ -281,6 +281,22 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             let now = nowMs()
 
             try await ctx.dbPool.write { db in
+                // Partial-update semantics on the optional string fields:
+                // nil-passed → keep the stored value; explicitly-passed (including
+                // empty string, which is not NULL) → overwrite. Anyone who wants
+                // to blank a field passes "".
+                //
+                // Prior behavior clobbered every unpassed column to NULL — a
+                // programmatic caller updating one field silently wiped the rest
+                // (Scout, 2026-08-05: dispatchFilter upsert nuked promptTemplate).
+                // The UI submits full rows so it never tripped this; discovered
+                // via a direct MCP call.
+                //
+                // Required fields (name, destKind, destTarget, authScheme) always
+                // arrive so no COALESCE guard is needed for them. `enabled` still
+                // uses excluded.enabled — same-shape latent bug (caller who omits
+                // it flips it back to true), fix separately after audit of every
+                // in-tree caller.
                 try db.execute(sql: """
                     INSERT INTO webhookRoutes
                         (id, slug, name, destKind, destTarget, authScheme, authSecretRef, authHeaderName, enabled, createdAtMs, promptTemplate, workerPool, dispatchFilter, actionParams)
@@ -290,13 +306,13 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
                         destKind = excluded.destKind,
                         destTarget = excluded.destTarget,
                         authScheme = excluded.authScheme,
-                        authSecretRef = excluded.authSecretRef,
-                        authHeaderName = excluded.authHeaderName,
+                        authSecretRef = COALESCE(excluded.authSecretRef, webhookRoutes.authSecretRef),
+                        authHeaderName = COALESCE(excluded.authHeaderName, webhookRoutes.authHeaderName),
                         enabled = excluded.enabled,
-                        promptTemplate = excluded.promptTemplate,
-                        workerPool = excluded.workerPool,
-                        dispatchFilter = excluded.dispatchFilter,
-                        actionParams = excluded.actionParams
+                        promptTemplate = COALESCE(excluded.promptTemplate, webhookRoutes.promptTemplate),
+                        workerPool = COALESCE(excluded.workerPool, webhookRoutes.workerPool),
+                        dispatchFilter = COALESCE(excluded.dispatchFilter, webhookRoutes.dispatchFilter),
+                        actionParams = COALESCE(excluded.actionParams, webhookRoutes.actionParams)
                     """, arguments: [
                         id, slug, name, destKind, destTarget, authScheme,
                         authSecretRef, authHeaderName, enabled ? 1 : 0, now,

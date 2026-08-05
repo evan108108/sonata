@@ -305,10 +305,16 @@ let emailOutboundActions: [SonataAction] = [
         name: "email_reply",
         description: """
             Reply to an email on its existing thread, from one of Sonata's inboxes. \
-            Prefer this over the AgentMail MCP tools: replying through Sonata records \
-            your session as the thread's owner, so later messages on the thread are \
-            routed back to you instead of being dispatched to a pool worker that would \
-            appear as a second voice in the conversation.
+            Prefer this over the AgentMail MCP tools. For INTERACTIVE sessions it also \
+            records your session as the thread's owner, so later messages on the thread \
+            route back to you instead of being dispatched to a pool worker that would \
+            appear as a second voice. \
+            WORKERS DO NOT TAKE OWNERSHIP — the recording is gated on role == \
+            "interactive" (a worker replying is doing dispatched work, not holding a \
+            conversation). If you are a worker, expect `ownershipRecorded: false` and \
+            expect follow-up messages on this thread to keep spawning fresh workers. \
+            That is the designed behaviour, NOT a regression: do not promise a \
+            correspondent that replying via this tool will stop the fan-out.
             """,
         group: "/api/email",
         path: "/reply",
