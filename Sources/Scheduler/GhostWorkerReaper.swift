@@ -55,10 +55,15 @@ enum GhostWorkerReaper {
     /// can't be killed, and repeated SIGTERM attempts against it would
     /// pollute the log. Zombie accumulation is a separate concern (Sonata's
     /// child-process lifecycle isn't waitpid'ing on termination — TODO).
-    static func enumerateWorkerProcesses() -> [DetectedProcess] {
+    ///
+    /// `async` because every `ps`/`pgrep` below runs off the cooperative pool —
+    /// this sweep fires once a minute from HealthMonitor and spawns `1 + 2N`
+    /// subprocesses per pass, so blocking a cooperative thread here was a
+    /// standing contributor to the pool exhaustion behind SCT-4.
+    static func enumerateWorkerProcesses() async -> [DetectedProcess] {
         // `-a` prints pid + full argv; `-f` matches against argv, not just
         // the executable name. Regex catches any mcp-cfg path fragment.
-        guard let output = shell(
+        guard let output = await shell(
             exec: "/usr/bin/pgrep",
             args: ["-a", "-f", "mcp-cfg/worker-.*\\.json"]
         ) else { return [] }
@@ -72,10 +77,10 @@ enum GhostWorkerReaper {
             // the mcp-cfg fragment so we get exactly one match per pid.
             guard let match = cmd.range(of: #"worker-\d+"#, options: .regularExpression) else { continue }
             let workerId = String(cmd[match])
-            let stat = processStat(pid: pid)
+            let stat = await processStat(pid: pid)
             // Skip zombies — signals are no-ops against a terminated process.
             if stat == "Z" { continue }
-            let age = processAge(pid: pid)
+            let age = await processAge(pid: pid)
             result.append(DetectedProcess(pid: pid, workerId: workerId, ageSeconds: age, stat: stat))
         }
         return result
@@ -84,8 +89,8 @@ enum GhostWorkerReaper {
     /// Read the first character of the process state via `ps -o stat`. Common
     /// values: `S` sleeping, `R` running, `I` idle, `Z` zombie/defunct,
     /// `T` stopped. Returns `?` when ps fails.
-    static func processStat(pid: pid_t) -> Character {
-        guard let output = shell(
+    static func processStat(pid: pid_t) async -> Character {
+        guard let output = await shell(
             exec: "/bin/ps",
             args: ["-o", "stat=", "-p", "\(pid)"]
         ) else { return "?" }
@@ -95,8 +100,8 @@ enum GhostWorkerReaper {
 
     /// Seconds since process start, via `ps -o etime`.
     /// etime format: `MM:SS`, `HH:MM:SS`, or `DD-HH:MM:SS`.
-    static func processAge(pid: pid_t) -> TimeInterval {
-        guard let output = shell(
+    static func processAge(pid: pid_t) async -> TimeInterval {
+        guard let output = await shell(
             exec: "/bin/ps",
             args: ["-o", "etime=", "-p", "\(pid)"]
         ) else { return 0 }
@@ -122,17 +127,10 @@ enum GhostWorkerReaper {
         return TimeInterval(days * 86400 + seconds)
     }
 
-    private static func shell(exec: String, args: [String]) -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: exec)
-        proc.arguments = args
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        return String(data: data, encoding: .utf8)
+    /// Off-pool so the once-a-minute sweep never blocks a cooperative thread —
+    /// see `OffPoolProcess` for why that matters.
+    private static func shell(exec: String, args: [String]) async -> String? {
+        await OffPoolProcess.run(exec, args)?.text
     }
 
     /// Reap orphaned processes. Returns the count killed.
@@ -140,7 +138,7 @@ enum GhostWorkerReaper {
     /// line so we can distinguish which invocation caught which ghost.
     @discardableResult
     static func reap(dbPool: DatabasePool, logger: Logger, source: String) async -> Int {
-        let detected = enumerateWorkerProcesses()
+        let detected = await enumerateWorkerProcesses()
         guard !detected.isEmpty else { return 0 }
 
         let live: Set<String>

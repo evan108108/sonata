@@ -511,9 +511,7 @@ let workerActions: [SonataAction] = [
                 """)
             }) ?? []
             let candidates = rows.map { ($0.workerId, $0.sessionLabel, $0.sessionId ?? "") }
-            let adopted = await MainActor.run {
-                WorkerManager.shared.adoptOrphans(candidates: candidates)
-            }
+            let adopted = await WorkerManager.shared.adoptOrphans(candidates: candidates)
             return ReconcileResponse(adopted: adopted, considered: candidates.count)
         }
     ),
@@ -537,9 +535,7 @@ let workerActions: [SonataAction] = [
         method: .post,
         params: [],
         handler: { _ in
-            let spawned = await MainActor.run {
-                WorkerManager.shared.maintainPoolSize()
-            }
+            let spawned = await WorkerManager.shared.maintainPoolSize()
             return SpawnResponse(spawned: spawned)
         }
     ),

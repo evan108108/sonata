@@ -952,7 +952,7 @@ private struct LiveWorkerRow: View {
             Button("Cancel", role: .cancel) {}
         }
         .alert("Remove \(worker.label)?", isPresented: $showRemoveAlert) {
-            Button("Remove", role: .destructive) { WorkerManager.shared.removeWorker(worker) }
+            Button("Remove", role: .destructive) { Task { await WorkerManager.shared.removeWorker(worker) } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This won't spawn a replacement.")

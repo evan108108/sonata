@@ -723,7 +723,7 @@ private func resurrectAbandonedPoolSlots(dbPool: DatabasePool, logger: Logger) a
     // run on the same cadence handles unregistered live processes; this
     // path is only for genuinely-dead workers.
     let liveWorkerIds = Set(
-        GhostWorkerReaper.enumerateWorkerProcesses().map { $0.workerId }
+        await GhostWorkerReaper.enumerateWorkerProcesses().map { $0.workerId }
     )
     for row in candidates {
         if liveWorkerIds.contains(row.workerId) {

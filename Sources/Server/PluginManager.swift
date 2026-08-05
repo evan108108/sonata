@@ -644,13 +644,12 @@ final class PluginManager: @unchecked Sendable {
 
         try FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["xzf", tarballPath, "-C", tempDir]
-        try process.run()
-        process.waitUntilExit()
+        // Off the cooperative pool — extraction blocks for the size of the
+        // tarball, and a blocked cooperative thread starves the HTTP server
+        // this install request is itself being served from (SCT-4).
+        let extraction = await OffPoolProcess.run("/usr/bin/tar", ["xzf", tarballPath, "-C", tempDir])
 
-        guard process.terminationStatus == 0 else {
+        guard let extraction, extraction.status == 0 else {
             try? FileManager.default.removeItem(atPath: tempDir)
             throw ActionError.custom("Failed to extract tarball", .badRequest)
         }

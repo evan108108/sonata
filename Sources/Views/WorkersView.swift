@@ -362,10 +362,10 @@ class WorkerManager: ObservableObject {
     @MainActor
     func adoptOrphans(
         candidates: [(workerId: String, label: String, sessionId: String)]
-    ) -> [String] {
+    ) async -> [String] {
         let knownIds = Set(workers.map { $0.id })
         let livePidByWorkerId: [String: pid_t] = Dictionary(
-            uniqueKeysWithValues: GhostWorkerReaper.enumerateWorkerProcesses()
+            uniqueKeysWithValues: await GhostWorkerReaper.enumerateWorkerProcesses()
                 .map { ($0.workerId, $0.pid) }
         )
         var adopted: [String] = []
@@ -558,9 +558,11 @@ class WorkerManager: ObservableObject {
     /// (e.g. sona-worker-1 missing while sona-worker-2 exists → spawn sona-worker-1)
     /// rather than appending sona-worker-N+1, which would create duplicate-label
     /// drift over time. Status-aware via `computePoolMaintainPlan`.
+    /// `async` because the liveness cross-check shells out to `pgrep`; that runs
+    /// off both the cooperative pool and the main thread (SCT-4 / UI hang).
     @MainActor
     @discardableResult
-    func maintainPoolSize() -> [String] {
+    func maintainPoolSize() async -> [String] {
         let target = WorkerManager.defaultWorkerCount
         let snapshot = workers.map {
             WorkerSlotInfo(id: $0.id, label: $0.label, status: $0.status)
@@ -598,7 +600,7 @@ class WorkerManager: ObservableObject {
         var toSpawn = plan.toSpawn
         if !displacedSet.isEmpty {
             let liveWorkerIds: Set<String> = Set(
-                GhostWorkerReaper.enumerateWorkerProcesses().map { $0.workerId }
+                await GhostWorkerReaper.enumerateWorkerProcesses().map { $0.workerId }
             )
             var kept: [String] = []
             for staleId in plan.toDisplace {
@@ -691,7 +693,15 @@ class WorkerManager: ObservableObject {
     /// polling → alert if refused to die → unregister (DELETE + re-enqueue)
     /// → remove from UI. Every step runs even if a prior step failed, so we
     /// never leave the DB row alive on a kill failure.
-    func removeWorker(_ worker: Worker) {
+    /// `async` for the same reason as `maintainPoolSize` — the `pgrep` fallback
+    /// that recovers a lost shell pid must not block the caller's thread.
+    ///
+    /// Deliberately NOT `@MainActor`: the post-SIGTERM verify below has to stay
+    /// on a GCD queue (it sleeps in 200ms slices, which must not land on the
+    /// cooperative pool), and isolating the whole method to the main actor would
+    /// make that closure capture a main-actor-bound `self`. The two terminal-view
+    /// touches are awaited individually instead.
+    func removeWorker(_ worker: Worker) async {
         let slotLabel = worker.label
         let sigtermGrace = CycleSettings.shared.sigtermGrace
         let workerId = worker.id
@@ -719,10 +729,10 @@ class WorkerManager: ObservableObject {
         //      predates the fix, recovery init) and the coordinator chain
         //      is already nil.
         let spawnedPid = worker.spawnedPid
-        let coordPid = worker.coordinator?.terminalView?.process?.shellPid ?? 0
+        let coordPid = await worker.coordinator?.terminalView?.process?.shellPid ?? 0
         var pgrepPid: pid_t = 0
         if spawnedPid == 0 && coordPid == 0 {
-            pgrepPid = GhostWorkerReaper.enumerateWorkerProcesses()
+            pgrepPid = await GhostWorkerReaper.enumerateWorkerProcesses()
                 .first(where: { $0.workerId == workerId })?.pid ?? 0
         }
         let shellPid: pid_t = spawnedPid > 0 ? spawnedPid
@@ -751,14 +761,18 @@ class WorkerManager: ObservableObject {
         // ghost-worker bug. Send SIGTERM directly as a belt when we have a
         // pid but the terminalView chain is gone.
         if worker.coordinator?.terminalView != nil {
-            worker.coordinator?.terminalView?.terminate()
+            await worker.coordinator?.terminalView?.terminate()
         } else if shellPid > 0 {
             print("[remove] terminalView nil — direct SIGTERM: \(slotLabel) pid=\(shellPid)")
             kill(shellPid, SIGTERM)
         }
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + sigtermGrace) { [weak self] in
-            guard let self else { return }
+        // Resolved through the singleton rather than captured: `self` is a
+        // non-Sendable ObservableObject and this closure is `@Sendable`. There is
+        // exactly one WorkerManager (`static let shared`), so this resolves to the
+        // same object the old `[weak self]` capture did — minus the capture.
+        DispatchQueue.global().asyncAfter(deadline: .now() + sigtermGrace) {
+            let manager = WorkerManager.shared
 
             // Verify the process is actually dead. kill(pid, 0) returns 0 if
             // the process still exists (even as a zombie); -1 with ESRCH if
@@ -784,7 +798,7 @@ class WorkerManager: ObservableObject {
             if !dead {
                 let msg = "Worker \(slotLabel) (pid \(shellPid)) survived SIGKILL. DB row will still be deleted, but a zombie process may be leaking memory. Consider a manual `kill -9 \(shellPid)`."
                 print("[remove] kill-failed: \(msg)")
-                DispatchQueue.main.async { self.alertSupervisor(message: msg) }
+                DispatchQueue.main.async { manager.alertSupervisor(message: msg) }
             } else {
                 print("[remove] exit-confirmed: \(slotLabel)")
             }
@@ -804,9 +818,9 @@ class WorkerManager: ObservableObject {
             // Remove from UI last so a user watching the list sees the slot
             // vanish only after the kill/cleanup sequence completes.
             DispatchQueue.main.async {
-                self.workers.removeAll { $0.id == workerId }
-                if self.selectedWorkerId == workerId {
-                    self.selectedWorkerId = self.workers.first?.id
+                manager.workers.removeAll { $0.id == workerId }
+                if manager.selectedWorkerId == workerId {
+                    manager.selectedWorkerId = manager.workers.first?.id
                 }
             }
         }
@@ -1086,7 +1100,7 @@ class WorkerManager: ObservableObject {
                 // (single dictionary build); spawns deterministically when a slot is
                 // missing. Replaces the implicit assumption that cycleWorker is the
                 // only path that removes Workers.
-                self.maintainPoolSize()
+                Task { await self.maintainPoolSize() }
             }
         }.resume()
     }
@@ -1747,7 +1761,7 @@ struct WorkersView: View {
                             }
                             .contextMenu {
                                 Button("Restart") { manager.restartWorker(worker) }
-                                Button("Remove", role: .destructive) { manager.removeWorker(worker) }
+                                Button("Remove", role: .destructive) { Task { await manager.removeWorker(worker) } }
                             }
                     }
                 }

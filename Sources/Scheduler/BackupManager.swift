@@ -81,19 +81,21 @@ actor BackupManager {
             logger.info("BackupManager: uploading to S3...")
             let gzPath = "\(backupDir)/sonata-\(dateStr).db.gz"
 
-            // Gzip the backup
-            let gzipProcess = Process()
-            gzipProcess.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
-            gzipProcess.arguments = ["-c", localDatedPath]
-            let gzipPipe = Pipe()
-            gzipProcess.standardOutput = gzipPipe
-            gzipProcess.standardError = FileHandle.nullDevice
+            // Gzip the backup. Off the cooperative pool — compressing the whole
+            // database blocks for as long as that takes (SCT-4).
             do {
-                try gzipProcess.run()
-                let gzData = gzipPipe.fileHandleForReading.readDataToEndOfFile()
-                gzipProcess.waitUntilExit()
+                let gzOutcome = await OffPoolProcess.run("/usr/bin/gzip", ["-c", localDatedPath])
+                let gzData = gzOutcome?.stdout ?? Data()
 
-                if gzipProcess.terminationStatus == 0 && !gzData.isEmpty {
+                if gzOutcome == nil {
+                    logger.error("BackupManager: gzip failed to spawn")
+                } else if gzOutcome?.status != 0 {
+                    logger.error("BackupManager: gzip exited \(gzOutcome?.status ?? -1)")
+                } else if gzData.isEmpty {
+                    logger.error("BackupManager: gzip produced no output")
+                }
+
+                if gzOutcome?.status == 0 && !gzData.isEmpty {
                     try gzData.write(to: URL(fileURLWithPath: gzPath))
                     let gzSizeMB = String(format: "%.1f", Double(gzData.count) / 1_048_576)
 
@@ -132,21 +134,23 @@ actor BackupManager {
 
     // MARK: - Local Backup
 
+    /// Uses the sqlite3 CLI for an online backup (safe during concurrent writes).
+    ///
+    /// Runs off the cooperative pool: copying the whole database takes as long as
+    /// it takes, and blocking a cooperative thread for that span starves the pool
+    /// the HTTP server shares — the failure mode behind SCT-4.
     private func performLocalBackup(to destPath: String) async -> Bool {
-        // Use sqlite3 CLI for online backup (safe during concurrent writes)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = [dbPath, ".backup '\(destPath)'"]
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            logger.error("BackupManager: sqlite3 backup failed — \(error)")
+        guard let outcome = await OffPoolProcess.run(
+            "/usr/bin/sqlite3",
+            [dbPath, ".backup '\(destPath)'"]
+        ) else {
+            logger.error("BackupManager: sqlite3 backup failed to spawn")
             return false
         }
+        if outcome.status != 0 {
+            logger.error("BackupManager: sqlite3 backup exited \(outcome.status)")
+        }
+        return outcome.status == 0
     }
 
     // MARK: - S3 Upload (AWS Signature V4)
