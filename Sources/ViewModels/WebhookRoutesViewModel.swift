@@ -224,9 +224,25 @@ class WebhookRoutesViewModel: ObservableObject {
     // MARK: - Copy URL
 
     func refreshPluginPubkey() async {
-        let call = await callAction("4a_pubkey_get")
+        // Plugin actions are registered as `<pluginName>_<actionName>` per
+        // PluginManager.swift:425 — calling the bare action name reaches
+        // nothing. Find the plugin-prefixed one from the registry. We accept
+        // any action that ends in `_4a_pubkey_get` so a future 4a plugin
+        // renamed off `4a-webhook-relay` keeps working without a viewmodel
+        // patch.
+        if actionNames.isEmpty { await loadActionNames() }
+        let name = actionNames.first { $0.hasSuffix("_4a_pubkey_get") }
+            ?? "4a_pubkey_get" // last-resort fallback
+        let call = await callAction(name)
         if call.ok, let dict = call.value as? [String: Any],
            let pubkey = dict["pubkey"] as? String, !pubkey.isEmpty {
+            pluginPubkey = pubkey
+        } else if call.ok, let outer = call.value as? [String: Any],
+                  let inner = outer["result"] as? [String: Any],
+                  let pubkey = inner["pubkey"] as? String, !pubkey.isEmpty {
+            // Plugin proxy actions wrap the result inside `{result: {...}}`;
+            // sniff for both shapes so an implementation change on either
+            // side doesn't silently zero this out.
             pluginPubkey = pubkey
         } else {
             // "Unknown tool" until the 4a plugin registers its actions —

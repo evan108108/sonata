@@ -241,15 +241,46 @@ private struct WebhookRouteEditSheet: View {
         slug.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil
     }
 
-    private var isValid: Bool {
-        guard !name.isEmpty, slugValid else { return false }
-        if destKind != "log" && destTarget.isEmpty { return false }
-        if authScheme == "hmacSha256" && authHeaderName.isEmpty { return false }
+    /// Returns nil when the form can be saved, or a short reason string
+    /// that names the field blocking it. Rendered under the Save button so
+    /// the user sees WHY the button is dead instead of the button just
+    /// being inert with no explanation (a real UX bug earlier: five gates,
+    /// zero feedback).
+    private var validationError: String? {
+        if name.isEmpty { return "Name is required." }
+        if slug.isEmpty { return "Slug is required." }
+        if !slugValid {
+            return "Slug can only contain letters, digits, dashes, and underscores."
+        }
+        if destKind != "log" && destTarget.isEmpty {
+            // Worker + promptTemplate is the sole case where destTarget is
+            // genuinely unused (dispatch flows through mem_task_create with
+            // the rendered template as the prompt; no workerEvents.type is
+            // constructed from destTarget). Every other destKind reads the
+            // field, so the check stays on for them.
+            let workerWithTemplate =
+                destKind == "worker" && !promptTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if !workerWithTemplate {
+                switch destKind {
+                case "action": return "Pick an action to dispatch to."
+                case "worker": return "Fill 'Slug (event type suffix)' — or set a Prompt template to make it optional."
+                case "dm":     return "Fill 'DM target' (session id, worker id, or name)."
+                default:       return "Destination target is required."
+                }
+            }
+        }
+        if authScheme == "hmacSha256" && authHeaderName.isEmpty {
+            return "Signature header name is required for HMAC-SHA256 (e.g. X-Hub-Signature-256)."
+        }
         // A new route with auth needs its secret up front; editing may leave
         // it blank to keep the stored one.
-        if authScheme != "none" && !isEditing && secret.isEmpty { return false }
-        return true
+        if authScheme != "none" && !isEditing && secret.isEmpty {
+            return "Shared secret is required for a new route with auth."
+        }
+        return nil
     }
+
+    private var isValid: Bool { validationError == nil }
 
     private var filteredActionNames: [String] {
         let names = actionFilter.isEmpty
@@ -350,7 +381,7 @@ private struct WebhookRouteEditSheet: View {
                         }
                     case "worker":
                         TextField("Slug (event type suffix)", text: $destTarget)
-                            .help("Used as workerEvents.type = webhook_<destTarget> when no template is set.")
+                            .help("Used as workerEvents.type = webhook_<destTarget> when NO prompt template is set. Optional when a template is set — dispatch flows through mem_task_create instead.")
                         TextField("Pool hint (optional)", text: $workerPool)
                             .help("Which worker pool the dispatched task should target. Blank → dispatcher default.")
                         VStack(alignment: .leading, spacing: 4) {
@@ -391,19 +422,30 @@ private struct WebhookRouteEditSheet: View {
 
             Divider()
 
-            HStack {
-                Spacer()
-                Button(isEditing ? "Save" : "Add Route") {
-                    saving = true
-                    Task {
-                        let ok = await save()
-                        saving = false
-                        if ok { dismiss() }
-                    }
+            VStack(alignment: .trailing, spacing: 6) {
+                // Surface the failing gate right under the Save button so
+                // the dead-button case reads as an actionable message
+                // instead of a form that "just doesn't work".
+                if let reason = validationError {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .disabled(!isValid || saving)
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+                HStack {
+                    Spacer()
+                    Button(isEditing ? "Save" : "Add Route") {
+                        saving = true
+                        Task {
+                            let ok = await save()
+                            saving = false
+                            if ok { dismiss() }
+                        }
+                    }
+                    .disabled(!isValid || saving)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                }
             }
             .padding()
         }
