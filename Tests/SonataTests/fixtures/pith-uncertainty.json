@@ -1,0 +1,35 @@
+{
+  "description": "Open-question corpus for PithUncertaintyTests. Cases uq-* have bodies that deliberately leave a question open; the generated abstract must PRESERVE that rather than resolve it. Cases ctl-* are definite and must NOT be hedged — they guard the opposite failure, a prompt that makes every abstract wishy-washy. Content for uq-scout-wave-split is the real body of memory a85d0e6f5386493185e961c6d60dcf68 (2026-08-05), the observed failure that motivated the constraint.",
+  "cases": [
+    {
+      "id": "uq-scout-wave-split",
+      "kind": "open_question",
+      "note": "Observed 2026-08-05: the generated l1 asserted 'The wave split was not deliberate.' — a resolution invented hours before Scout answered.",
+      "content": "Scout evening check-in 2026-08-05 SENT — thread 6b46d1be-1868-40d2-80f7-6ee33379f50d, message 0100019fd293c59d. First and only Scout contact today.\n\nSTEP 0 DEDUP GUARD CLEARED PROPERLY, and the negative is worth recording because this guard has stood down 8+ prior dispatches. `list_threads` on sona@agentmail.to showed newest activity at 2026-08-04T23:21:45Z; a dated filter (`after=2026-08-05T00:00:00Z`) returned count:0. Zero messages of any kind today, so no check-in had gone out and this dispatch was the day's real one, not the known duplicate. Used the dated filter rather than eyeballing the sort order — the guard's whole failure mode is inferring a date from a subject label.\n\nMEASURED THE OPEN LOOP RATHER THAN RELAYING IT (the standing lesson from c02e9076). Scout was holding an explicit contingency — \"treat any minute-threshold kill tonight as the stale-prompt signal, not policy\" — pending the .17 supervisor restart. Live state over SSH:\n- PID 74270 still up, now 8d20:53h. RESTART HAS NOT LANDED. Task 1c6b48409a6649138b7174aae8326e24 still status=pending, blockedBy=[\"evan-approval-restart-17-supervisor\"]; Evan has not cleared the sentinel. Exposure unchanged from yesterday.\n- CLAUDE.md on disk still correct, mtime Aug 4 11:45, unreverted. `grep -c \"75\"` returned 3, which I READ rather than counted: all three are references to the SUPERSEDED rule inside the corrected text (lines 70, 80, 106 — \"supersedes the 2026-06-06 blanket 75-min rule\"), not the rule itself. Counting would have produced a false \"the rule is back\" report.\n- Live session still carries the stale prompt: 25 occurrences of \"stuck >75min\" in f83edea1-*.jsonl. Newest kill citation is 2026-08-04T10:26:49Z = yesterday's 86.8-min score-leads kill (09:00Z + 86.8min = 10:26.8, matches exactly).\n- ZERO KILLS TODAY. 853 transcript entries on 2026-08-05, no \"auto-killed\" or \"Exceeded Nm timeout\" strings. Today's nightly ran wave-based (Wave-1 RDG + Woods Bagot, Wave-2 LERA / Plastarc) and survived intact.\n\nWHAT I ASKED, and why it is the one question worth Scout's time: whether the wave split was DELIBERATE to keep individual runs under the threshold, or incidental. If deliberate, Scout is routing around the stale rule and a clean day must not be reported to Evan as \"resolved\" — a loaded gun that did not fire is still loaded. Told Scout to keep the contingency, and pointed out the retire-it notification is step 4 of task 1c6b4840 so it comes off the wire rather than any session's memory of a promise.\n\nNO REPLY OWED ON YESTERDAY'S THREADS — 60a995bd / 80c5a511 / 45f97806 / 1bdabf47 are all closed (c2510a8d), authorship settled, fan-out explained. Did not re-open any of them; sent a fresh thread instead."
+    },
+    {
+      "id": "uq-embedding-regression",
+      "kind": "open_question",
+      "note": "Two competing explanations, neither chosen.",
+      "content": "Recall quality dropped noticeably this week on multi-word technical queries — the same query that surfaced the NIOAsyncWriter memory on Monday returns nothing related today.\n\nTwo readings and I cannot yet tell them apart. FIRST: the re-embedding run on Tuesday swapped the provider, and the new vectors are simply worse for this corpus. SECOND: nothing changed about quality at all, and what actually changed is the FTS leg — the AND-first query builder landed the same day, so a query that used to fall back to OR now returns a strict AND result set and the vector leg never gets consulted.\n\nBoth predict the observed symptom. They differ in one measurable way: under the first reading the vector scores themselves should be lower for a known-good pair, under the second the scores should be unchanged and only the candidate set should shrink. I have not run that comparison yet. Not filing a fix until I have."
+    },
+    {
+      "id": "uq-worker-timeout",
+      "kind": "open_question",
+      "note": "Short body whose entire content is a question.",
+      "content": "Open question I want to settle before touching the reaper again: is the 75-minute kill threshold actually too aggressive, or is it correct and the real problem is that long jobs never emit progress so a healthy job is indistinguishable from a wedged one? Raising the threshold fixes the symptom under either reading, which is exactly why it is not evidence for one."
+    },
+    {
+      "id": "ctl-schema-migration",
+      "kind": "definite",
+      "note": "Control: fully settled, must not be hedged into false uncertainty.",
+      "content": "Added the source_track column to the Nucleus schema and backfilled 638 rows to org_intent. Verified with a post-migration COUNT: zero rows left NULL. The skip predicate is deployed to prod core (d589b77c) and 634 leads are now suppressed from the shared pool. Reversible — the id list is backed up at /tmp/990-bulkskip-ids-20260609.txt."
+    },
+    {
+      "id": "ctl-decision-made",
+      "kind": "definite",
+      "note": "Control: a decision was made and must be reported as made.",
+      "content": "Decided: Scout keeps standing permission to push directly to main for scout-only updates. Evan confirmed this explicitly rather than routing every scout change through review, because the review round-trip was costing more than the blast radius of a bad scout commit. This supersedes the earlier branch-first rule for that path only; everything outside scout/ still branches."
+    }
+  ]
+}

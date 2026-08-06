@@ -17,6 +17,27 @@ enum Pith {
 
     /// The locked system prompt. If you change this, regenerate goldens (see
     /// `Tests/SonataTests/fixtures/pith-golden/README.md`).
+    ///
+    /// The uncertainty clause is load-bearing, not style. A summarizer's bias
+    /// runs one way — "asks whether X" compresses badly and "X is false"
+    /// compresses well — so it reaches for the resolution. Observed twice:
+    /// 2026-07-26 over `--file`, and 2026-08-05 on memory `a85d0e6f`, whose
+    /// body asked whether Scout's wave split was deliberate (the entire reason
+    /// the mail was sent) and whose l1 stated flatly "The wave split was not
+    /// deliberate" — hours before Scout answered. It later happened to become
+    /// true, which is worse: it makes the error undetectable by outcome.
+    ///
+    /// This lands where it does the most damage: `mem_recall`'s MCP default
+    /// tier is `l0`, so the synthesized layer is the one agents actually read,
+    /// and there is no confidence field distinguishing a recorded conclusion
+    /// from an invented one.
+    ///
+    /// Wording was chosen by measurement, not taste — see
+    /// `PithUncertaintyTests`. Two rejected phrasings are recorded there:
+    /// a terse imperative ("NEVER ANSWER A QUESTION THE SOURCE LEAVES OPEN")
+    /// left the `a85d0e6f` confabulation intact, and an earlier clause phrased
+    /// as a prohibition merely flipped it to the opposite assertion. Framing it
+    /// as a pre-emit check against the source is what actually held.
     static let systemPrompt = (
         "You generate LOD summaries for memories. " +
         "Return STRICT JSON with two fields: l0 and l1. " +
@@ -25,6 +46,10 @@ enum Pith {
         "Be abstractive — distill, don't quote. " +
         "Match the voice of the source (first-person for reflections, third-person for technical notes). " +
         "For very short input, l0/l1 may equal input. " +
+        "Before emitting, check every claim in l0/l1 against the source: " +
+        "if the source states it as a question, an uncertainty, or two competing readings, " +
+        "your summary must keep it that way (\"asks whether X\", \"X unresolved\"). " +
+        "Assert only what the source asserts. " +
         "Output ONLY the JSON. No preamble, no markdown fences."
     )
 
