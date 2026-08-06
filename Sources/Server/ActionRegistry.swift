@@ -455,9 +455,7 @@ final class ActionRegistry: @unchecked Sendable {
             if let formatter = action.mcpFormatter {
                 return (true, formatter(result))
             } else {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-                let data = try encoder.encode(AnyEncodable(result))
+                let data = responseJSONData(for: AnyEncodable(result), prettyPrinted: true)
                 return (true, String(data: data, encoding: .utf8) ?? "{}")
             }
         } catch let error as ActionError {
@@ -595,8 +593,15 @@ struct MCPCallResponse: Encodable {
 struct AnyEncodable: Encodable {
     private let _encode: (Encoder) throws -> Void
 
+    /// Captured at wrap time because erasure destroys the conformance the
+    /// serializer needs to test. Both the HTTP and MCP paths wrap handler
+    /// results in `AnyEncodable` before encoding them, so without this the
+    /// `OrderedJSONResponse` contract would never fire in production.
+    let orderedResponse: (any OrderedJSONResponse)?
+
     init(_ value: any Encodable) {
         _encode = { encoder in try value.encode(to: encoder) }
+        orderedResponse = value as? any OrderedJSONResponse
     }
 
     func encode(to encoder: Encoder) throws {

@@ -332,7 +332,26 @@ private struct EmailHitAction: Encodable {
     let snippet: String
 }
 
-private struct RecallResponseAction: Encodable {
+/// Field order below IS the wire contract, and `OrderedJSONResponse` is what
+/// stops `.sortedKeys` from alphabetizing it away. Recall responses regularly
+/// run past 50 KB, at which point consumers keep a byte prefix — so the blocks
+/// a caller must not miss lead, and pure instrumentation trails.
+private struct RecallResponseAction: Encodable, OrderedJSONResponse {
+    /// First, and deliberately: a prefix of an unknown response is unreadable
+    /// until you know which question it answers.
+    let query: String
+    /// Human-readable alerts for any stale/dead leg. Non-empty means the
+    /// answer may be incomplete — treat accordingly. Ahead of the payload
+    /// because "these results are missing a layer" has to arrive before the
+    /// results, not after 50 KB of them.
+    let warnings: [String]
+    /// Budget/graph truncation marker — front-placed for the same reason.
+    let partial: Bool
+    /// Per-layer self-report — every recall response carries the health of
+    /// its own retrieval legs so a dead layer can never masquerade as
+    /// "no memories exist" (the 2026-06-12 embedding outage went unnoticed
+    /// for weeks because recall had no way to say "my vector leg is dark").
+    let legs: [String: [String: String]]
     let memories: [RecallMemoryAction]
     let entities: [EntityResponse]
     let relations: [RelationResponse]
@@ -341,20 +360,18 @@ private struct RecallResponseAction: Encodable {
     let conversations: [ConversationHitAction]
     let emails: [EmailHitAction]
     let wander: [WanderMemoryAction]
+
+    // MARK: - Instrumentation (tail)
+    // Nothing below is an answer to the caller's question. It sorted to the
+    // front once; it stays last so it can never crowd out the payload again.
+
     let wanderCount: Int
-    let query: String
     let vectorResultCount: Int
-    let partial: Bool
-    /// Per-layer self-report — every recall response carries the health of
-    /// its own retrieval legs so a dead layer can never masquerade as
-    /// "no memories exist" (the 2026-06-12 embedding outage went unnoticed
-    /// for weeks because recall had no way to say "my vector leg is dark").
-    let legs: [String: [String: String]]
-    /// Human-readable alerts for any stale/dead leg. Non-empty means the
-    /// answer may be incomplete — treat accordingly.
-    let warnings: [String]
     let tokenUsage: TokenUsageAction
-    let _timings: [String: Int]
+    /// Timing breakdown, present only when the caller passes `debug=true`.
+    /// ~500 bytes of phase counters that no code reads — omitted by default so
+    /// a truncated view spends its budget on memories instead.
+    let _timings: [String: Int]?
 }
 
 private struct FetchFullResponse: Encodable {
@@ -740,6 +757,8 @@ let recallActions: [SonataAction] = [
               * `structuralMode: off | direct | expanded` — graph-proximity blend. Default `direct` boosts memories with a direct entity edge to a query anchor. `expanded` also promotes 1-hop neighbors at half strength.
               * `recencyMode: linear | recent` — `linear` (default) uses activity age (max(createdAt, lastAccessedAt)); `recent` uses creation age with a 48h exponential half-life for "made recently" queries.
               * `after` / `before` — hard-filter by createdAt. Accept unix ms or ISO date. Use these over `recencyMode=recent` when you know the range — they're exact.
+
+            Key order is deliberate, not alphabetical: `query`, `warnings`, `partial`, `legs` come first, then `memories`, with instrumentation last. A large response that reaches you truncated still carries its own health report in the part you can see.
             """,
         group: "/api/recall",
         path: "",
@@ -756,6 +775,7 @@ let recallActions: [SonataAction] = [
             ActionParam("recencyMode", .string, description: "Recency curve: 'linear' (default; linear decay over 30 d) | 'recent' (exponential half-life 48 h — sharp today>yesterday>last-week ordering). Persistent default in UserDefaults `recallRecencyMode`."),
             ActionParam("after", .string, description: "Only include memories created on/after this time. Accepts unix ms (`1721001600000`) or ISO date (`2026-07-15` / `2026-07-15T14:30:00Z`)."),
             ActionParam("before", .string, description: "Only include memories created on/before this time. Accepts unix ms or ISO date; `2026-07-15` is inclusive of the whole day (rolled to end-of-day UTC)."),
+            ActionParam("debug", .boolean, description: "Include the `_timings` phase breakdown. Off by default — it is instrumentation, not payload."),
         ],
         handler: { ctx in
             let rawTopic = try ctx.params.require("topic")
@@ -771,6 +791,7 @@ let recallActions: [SonataAction] = [
             let recencyMode = RecencyMode.parse(ctx.params.string("recencyMode"))
             let afterMs = parseTimeParam(ctx.params.string("after"), endOfDay: false)
             let beforeMs = parseTimeParam(ctx.params.string("before"), endOfDay: true)
+            let debug = ctx.params.bool("debug") ?? false
 
             let dbPool = ctx.dbPool
             let t0 = DispatchTime.now()
@@ -1463,6 +1484,10 @@ let recallActions: [SonataAction] = [
                 let partial = budgetCapHit || graphPartial
 
                 return RecallResponseAction(
+                    query: topic,
+                    warnings: warnings,
+                    partial: partial,
+                    legs: legs,
                     memories: included,
                     entities: finalEntities,
                     relations: finalRelations,
@@ -1472,11 +1497,7 @@ let recallActions: [SonataAction] = [
                     emails: emailResults,
                     wander: finalWander,
                     wanderCount: finalWanderCount,
-                    query: topic,
                     vectorResultCount: vectorScores.count,
-                    partial: partial,
-                    legs: legs,
-                    warnings: warnings,
                     tokenUsage: TokenUsageAction(
                         budget: budget,
                         used: used,
@@ -1486,7 +1507,7 @@ let recallActions: [SonataAction] = [
                         tier: tier,
                         unreturnedCandidates: max(0, unreturnedCandidates)
                     ),
-                    _timings: timings
+                    _timings: debug ? timings : nil
                 )
             } catch {
                 throw ActionError.custom("Recall failed: \(error.localizedDescription)", .internalServerError)
