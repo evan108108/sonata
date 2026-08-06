@@ -112,10 +112,12 @@ final class EmailOutboundGateway: @unchecked Sendable {
 
     typealias SendFn = @Sendable (_ inbox: InboxConfig, _ to: [String], _ subject: String, _ text: String) async throws -> Void
     typealias ReplyFn = @Sendable (_ inbox: InboxConfig, _ messageId: String, _ text: String) async throws -> Void
+    typealias ResolveThreadIdFn = @Sendable (_ inbox: InboxConfig, _ messageId: String) async throws -> String?
 
     private let lock = NSLock()
     private var sendOverride: SendFn?
     private var replyOverride: ReplyFn?
+    private var resolveThreadIdOverride: ResolveThreadIdFn?
     private let resolver = EmailProviderResolver()
 
     // The snapshot accessors are deliberately synchronous. Taking an NSLock
@@ -131,6 +133,11 @@ final class EmailOutboundGateway: @unchecked Sendable {
     private func snapshotReply() -> ReplyFn? {
         lock.lock(); defer { lock.unlock() }
         return replyOverride
+    }
+
+    private func snapshotResolveThreadId() -> ResolveThreadIdFn? {
+        lock.lock(); defer { lock.unlock() }
+        return resolveThreadIdOverride
     }
 
     func send(inbox: InboxConfig, to: [String], subject: String, text: String) async throws {
@@ -151,9 +158,47 @@ final class EmailOutboundGateway: @unchecked Sendable {
             inbox: inbox.address, messageId: messageId, text: text)
     }
 
+    /// The thread `messageId` belongs to, asked of the PROVIDER rather than of
+    /// our own store.
+    ///
+    /// This exists because `EmailThreadOwnership.threadId(forMessageId:)` reads
+    /// the `emails` table, which only knows messages Sonata has already
+    /// ingested. On the first reply to a thread nobody has written to yet, the
+    /// local lookup misses, ownership silently isn't recorded, and the next
+    /// inbound message on that thread falls through to normal dispatch — a pool
+    /// worker picks it up and becomes a second voice in a conversation an
+    /// interactive session is already holding.
+    ///
+    /// Deliberately separate from `reply` rather than folded into its return
+    /// value: the caller only needs this when the local lookup missed, so
+    /// keeping it its own call means the common path (thread already known)
+    /// costs no extra HTTP, and the cost is visible at the call site instead of
+    /// hidden inside "send a reply".
+    ///
+    /// Returns nil rather than throwing for a provider that cannot answer.
+    /// `getMessage` is AgentMail-specific — it is not on the `EmailProvider`
+    /// protocol — so an IMAP/SMTP inbox has no equivalent and keeps exactly the
+    /// behavior it has today (local lookup only). The provider is asked via the
+    /// resolver rather than matched against a hardcoded name list, so this
+    /// cannot drift from `EmailProviderResolver`'s own mapping.
+    func resolveThreadId(inbox: InboxConfig, messageId: String) async throws -> String? {
+        if let override = snapshotResolveThreadId() {
+            return try await override(inbox, messageId)
+        }
+        guard let agentMail = resolver.provider(for: inbox) as? AgentMailProvider else {
+            return nil
+        }
+        return try await agentMail.getMessage(
+            inboxId: inbox.address, messageId: messageId).threadId
+    }
+
     /// Test seam. Passing nil restores the live provider path.
-    func setOverrides(send: SendFn?, reply: ReplyFn?) {
-        lock.lock(); sendOverride = send; replyOverride = reply; lock.unlock()
+    func setOverrides(send: SendFn?, reply: ReplyFn?, resolveThreadId: ResolveThreadIdFn? = nil) {
+        lock.lock()
+        sendOverride = send
+        replyOverride = reply
+        resolveThreadIdOverride = resolveThreadId
+        lock.unlock()
     }
 }
 
@@ -350,8 +395,31 @@ let emailOutboundActions: [SonataAction] = [
             // conversation, and must not become the thread's owner.
             let sessionKey = ctx.params.string("sessionKey") ?? ""
             let isInteractive = (ctx.params.string("role") ?? "") == "interactive"
-            let threadId = await EmailThreadOwnership.threadId(
+
+            // Two sources for the thread id, in cost order.
+            //
+            // The local lookup only knows messages Sonata has already ingested,
+            // so it misses on exactly the case that matters: the FIRST reply to
+            // a thread with no prior Sonata-side messages. That used to leave
+            // ownership unrecorded, and the next inbound message on the thread
+            // then fell through to normal dispatch — a pool worker answering
+            // alongside the interactive session that was already holding the
+            // conversation.
+            //
+            // Asking the provider is the fallback, not the default: it costs an
+            // HTTP round trip, and once any message on the thread is ingested
+            // the local read answers for free.
+            var threadId = await EmailThreadOwnership.threadId(
                 forMessageId: messageId, dbPool: ctx.dbPool)
+            if threadId == nil {
+                // `try?` on purpose. The reply has ALREADY been sent by this
+                // point, so a provider hiccup here must not turn a delivered
+                // message into an error response. Failing to resolve degrades to
+                // the old behavior (ownership unrecorded) rather than lying
+                // about whether the mail went out.
+                threadId = try? await EmailOutboundGateway.shared.resolveThreadId(
+                    inbox: inbox, messageId: messageId)
+            }
             var recorded = false
             if isInteractive, !sessionKey.isEmpty, let threadId {
                 await EmailThreadOwnership.record(
