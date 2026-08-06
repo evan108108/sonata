@@ -131,7 +131,8 @@ enum DMActionsInbound {
                 sender: senderPeerName,
                 inReplyToMessageId: inReplyTo
             )
-            let pushed = await MCPConnections.shared.push(originSenderKey, jsonRPC: frame)
+            let pushed = await MCPConnections.shared.pushToWorker(
+                identifier: originSenderKey, jsonRPC: frame, dbPool: dbPool)
             if !pushed {
                 sonataFileLog("DMActionsInbound: reply target \(originSenderKey) not live — dropping inbound reply \(messageId)")
             } else {
@@ -198,7 +199,8 @@ enum DMActionsInbound {
             try DMAudit.markAcked(messageId: messageId, at: ackedAtMs, db: db)
         }
         let frame = DMFrames.dmAckNotification(messageId: messageId, ackedAtMs: ackedAtMs)
-        _ = await MCPConnections.shared.push(senderKey, jsonRPC: frame)
+        _ = await MCPConnections.shared.pushToWorker(
+            identifier: senderKey, jsonRPC: frame, dbPool: dbPool)
     }
 }
 
@@ -387,7 +389,16 @@ func sendResolved(
             sender: senderKey,
             inReplyToMessageId: inReplyToMessageId
         )
-        let pushed = await MCPConnections.shared.push(resolved.sessionKey, jsonRPC: frame)
+        // pushToWorker (not push): the audit row's resolved.sessionKey is
+        // whatever the caller passed as fromSessionId at original send time,
+        // which for workers may be a Claude sessionId (UUID) rather than the
+        // workerId that is the actual SSE key. pushToWorker's fast path is
+        // the same strict push; on push-fail it translates via the workers
+        // table (workerId OR sessionId) and retries. For non-worker targets
+        // the fallback is a one-row miss and behaviour degrades to the same
+        // not_live outcome push would have produced.
+        let pushed = await MCPConnections.shared.pushToWorker(
+            identifier: resolved.sessionKey, jsonRPC: frame, dbPool: dbPool)
         if !pushed {
             try? await dbPool.write { db in
                 try DMAudit.markNotLive(messageId: messageId, reason: "no_live_connection", db: db)
@@ -723,7 +734,8 @@ let dmActions: [SonataAction] = [
             } else if let senderKey = audit.senderSessionKey, !senderKey.isEmpty {
                 // Local DM — push dm_ack notification directly to the sender's SSE.
                 let frame = DMFrames.dmAckNotification(messageId: messageId, ackedAtMs: now)
-                _ = MCPConnections.shared.push(senderKey, jsonRPC: frame)
+                _ = await MCPConnections.shared.pushToWorker(
+                    identifier: senderKey, jsonRPC: frame, dbPool: ctx.dbPool)
             }
 
             return DMAckResponse(status: "acknowledged")
