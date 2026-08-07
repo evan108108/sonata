@@ -1559,9 +1559,19 @@ let recallActions: [SonataAction] = [
     ),
 
     // GET /api/recall/doc-search — full-text search across wiki pages and archived memories via MeiliSearch
+    //
+    // NAMED `mem_corpus_search`, NOT `mem_doc_search`, deliberately. It was registered under
+    // `mem_doc_search` and collided with the documents-FTS5 action in DocumentActions.swift.
+    // ActionRegistry.register() does `actions.removeAll { incomingNames.contains($0.name) }`
+    // before appending, and SonataApp registers documentActions (line ~1181) AFTER recallActions
+    // (~1156) — so this action was stripped from the registry entirely and `/api/recall/doc-search`
+    // answered 404. Not merely shadowed in MCP: unreachable by every door, which is why wiki
+    // bodies were searchable only through `mem_recall`'s blended path.
+    // Renaming THIS one is the safe repair: it was already dead, so nothing depends on it, and
+    // `mem_doc_search` keeps meaning what live callers currently get (documents FTS5).
     SonataAction(
-        name: "mem_doc_search",
-        description: "Full-text search across wiki pages, archived memories, docs, emails, and session transcripts.",
+        name: "mem_corpus_search",
+        description: "Full-text search across wiki pages, archived memories, docs, emails, and session transcripts (MeiliSearch). This is the cross-corpus door: `mem_search` covers memory bodies only, and this covers everything that is not a memory. Distinct from `mem_doc_search`, which is FTS5 over the `documents` table.",
         group: "/api/recall",
         path: "/doc-search",
         method: .get,

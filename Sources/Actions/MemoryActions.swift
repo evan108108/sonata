@@ -517,7 +517,19 @@ let memoryActions: [SonataAction] = [
     // GET /api/memory/search
     SonataAction(
         name: "mem_search",
-        description: "Full-text search on memories (FTS5).",
+        description: """
+            Full-text search over MEMORY BODIES ONLY — SQLite FTS5 across `memories.content`, \
+            nothing else. It does NOT cover wiki pages, session transcripts, emails, docs, or \
+            archived memories: those are indexed separately in MeiliSearch. Reach them with \
+            `mem_corpus_search` (index=wiki|archive|docs|private|emails|sessions|all), or let \
+            `mem_recall` blend both sides for you. Note `mem_doc_search` is a DIFFERENT tool — \
+            FTS5 over the `documents` table — and does not cover wiki or transcripts either.
+
+            READ AN EMPTY RESULT CORRECTLY: `[]` means no MEMORY matched. It is NOT evidence the \
+            topic is absent from the system — a wiki page or transcript can describe it in detail \
+            while this returns nothing. Before concluding something is unrecorded, also run \
+            `mem_corpus_search`, or use `mem_recall`, which queries both sides.
+            """,
         group: "/api/memory",
         path: "/search",
         method: .get,

@@ -157,6 +157,44 @@ final class EmailOutboundGateway: @unchecked Sendable {
     }
 }
 
+/// Map a loosely-written provider message id onto the exact string the provider
+/// stores. AgentMail's message lookup is an exact match on the full RFC-822
+/// Message-ID — `<ses-prefix-uuid-000000@email.amazonses.com>` — and answers
+/// anything else with a bare 404 "Message not found", which reads as "that
+/// message is gone" rather than "your id is a prefix of it". Every surface that
+/// hands an id out (get_thread, list_threads, send responses, our own `emails`
+/// table) carries the canonical form, but ids get retyped by hand between
+/// reading one and replying to it, and the two parts that fall off in transit
+/// are the angle brackets and the `-000000@…` tail. We already hold the
+/// canonical id, so recover it here instead of letting a transcription slip
+/// surface as a 404 that looks like provider breakage. Ids we don't recognise
+/// pass through untouched — this only ever adds a match, never removes one.
+private func canonicalMessageId(_ raw: String, dbPool: DatabasePool) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    var core = trimmed
+    if core.hasPrefix("<"), core.hasSuffix(">") {
+        core = String(core.dropFirst().dropLast())
+    }
+
+    // No `await`: see the note in resolveOutboundInbox — [Row] isn't Sendable,
+    // so this binds to the synchronous read overload.
+    let rows: [Row] = (try? dbPool.read { db in
+        try Row.fetchAll(db, sql: """
+            SELECT messageId FROM emails
+            WHERE messageId = :exact
+               OR messageId = :wrapped
+               OR messageId LIKE :tail
+            LIMIT 1
+        """, arguments: [
+            "exact": trimmed,
+            "wrapped": "<\(core)>",
+            "tail": "<\(core)-%",
+        ])
+    }) ?? []
+
+    return (rows.first?["messageId"] as String?) ?? trimmed
+}
+
 /// Resolve which inbox an outbound message goes out from. An explicit address
 /// must match an enabled inbox; without one we take the oldest enabled inbox,
 /// which is the same "primary inbox" convention GlobalAFKOrchestrator uses.
@@ -327,12 +365,17 @@ let emailOutboundActions: [SonataAction] = [
             ActionParam("role", .string, description: "Caller's session role — injected by the MCP layer, not supplied by hand"),
         ],
         handler: { ctx in
-            guard let messageId = ctx.params.string("messageId"), !messageId.isEmpty else {
+            guard let rawMessageId = ctx.params.string("messageId"), !rawMessageId.isEmpty else {
                 throw ActionError.missingParam("messageId")
             }
             guard let text = ctx.params.string("text") else {
                 throw ActionError.missingParam("text")
             }
+
+            // A hand-copied id is usually missing its angle brackets and/or the
+            // `-000000@…` tail; recover the stored form before it reaches the
+            // provider, which would only say "Message not found".
+            let messageId = canonicalMessageId(rawMessageId, dbPool: ctx.dbPool)
 
             let inbox = try await resolveOutboundInbox(
                 address: ctx.params.string("inbox"), dbPool: ctx.dbPool)
