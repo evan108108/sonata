@@ -28,7 +28,11 @@ readonly MODEL_LABEL="llama-3.1-8b-instruct-Q4_K_M"
 readonly TEMP=0.3
 readonly SEED=42
 
-readonly SYSTEM_PROMPT="You generate LOD summaries for memories. Return STRICT JSON with two fields: l0 and l1. l0 = one sentence, max ~15 words, the thesis or essence. l1 = 2-3 sentences, max ~60 words, the argument arc or key facts. Be abstractive — distill, don't quote. Match the voice of the source (first-person for reflections, third-person for technical notes). For very short input, l0/l1 may equal input. Output ONLY the JSON. No preamble, no markdown fences."
+# Must stay byte-identical to Pith.systemPrompt — PithRegressionTests asserts
+# the recorded goldens carry the same prompt the code sends. The inner double
+# quotes are backslash-escaped rather than heredoc'd: a heredoc inside $( )
+# breaks on the apostrophe in "don't".
+readonly SYSTEM_PROMPT="You generate LOD summaries for memories. Return STRICT JSON with two fields: l0 and l1. l0 = one sentence, max ~15 words, the thesis or essence. l1 = 2-3 sentences, max ~60 words, the argument arc or key facts. Be abstractive — distill, don't quote. Match the voice of the source (first-person for reflections, third-person for technical notes). For very short input, l0/l1 may equal input. Before emitting, check every claim in l0/l1 against the source: if the source states it as a question, an uncertainty, or two competing readings, your summary must keep it that way (\"asks whether X\", \"X unresolved\"). Assert only what the source asserts. Output ONLY the JSON. No preamble, no markdown fences."
 
 # 5 frozen memory IDs spanning reflection/code_pattern/decision/learning types
 readonly MEMORY_IDS=(

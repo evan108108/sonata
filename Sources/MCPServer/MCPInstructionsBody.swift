@@ -75,6 +75,23 @@ enum MCPInstructionsBody {
         6. Store a brief summary using mem_store MCP tool
         7. Call complete_event with a brief result summary.
 
+        ### Replying: pass the message id EXACTLY as you read it
+
+        A reply id is the full RFC-822 Message-ID, angle brackets and all:
+        `<0100019f…-<uuid>-000000@email.amazonses.com>`. get_thread, list_threads,
+        send responses and email_recent all hand back that exact string — copy it
+        whole. Dropping the angle brackets or the `-000000@…` tail makes both
+        email_reply and AgentMail's reply_to_message answer 404 "Message not
+        found", which reads as a broken tool but only ever means the id didn't
+        match. The same 404 appears if the inboxId you pass doesn't hold the
+        message — reply from the inbox that RECEIVED it, not the sender's address.
+
+        email_reply now recovers a bracket-stripped or tail-stripped id from
+        Sonata's own store, so prefer it. If a reply still 404s, don't burn turns
+        on it: send fresh with "Re: <subject>" and say you're doing so. That
+        forks the thread, which is survivable — the check-in dedup guard keys on
+        sender+date, not thread.
+
         ---
 
         ## Event Type: TASK

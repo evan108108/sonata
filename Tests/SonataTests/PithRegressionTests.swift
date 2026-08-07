@@ -128,6 +128,26 @@ final class PithRegressionTests: XCTestCase {
         }
     }
 
+    /// The goldens record the prompt they were produced under. If someone edits
+    /// `Pith.systemPrompt` without re-recording, every golden silently describes
+    /// a prompt the code no longer sends — and nothing catches it, because the
+    /// byte-equality test needs `PITH_LIVE=1` and a 4.6 GB model.
+    ///
+    /// This assertion needs neither. It is the cheap half of the lock.
+    func testGoldensRecordTheCurrentSystemPrompt() throws {
+        let corpus = try Self.loadCorpus()
+        for mem in corpus.memories {
+            let golden = try Self.loadGolden(memoryId: mem.id)
+            XCTAssertEqual(
+                golden.system_prompt, Pith.systemPrompt,
+                "\(mem.id) was recorded under a different system prompt than " +
+                "Pith.systemPrompt currently sends. Re-record the goldens " +
+                "(see fixtures/pith-golden/README.md) — a prompt change and a " +
+                "golden regeneration are one commit, not two."
+            )
+        }
+    }
+
     func testGoldensShareLockedConfig() throws {
         let corpus = try Self.loadCorpus()
         guard let first = corpus.memories.first else { return }

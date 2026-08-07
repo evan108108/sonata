@@ -1,0 +1,59 @@
+{
+  "description": "Open-question corpus for PithUncertaintyTests. Cases uq-* have bodies that deliberately leave a question open; the generated abstract must PRESERVE that rather than resolve it. Cases with kind \"ruled_out\" carry a `forbidden` list of regexes: the body contradicts or leaves pending a specific claim, and the abstract must not assert it — a shape the uncertainty-marker test cannot catch, because an abstract can be wrong without being unhedged. Cases ctl-* are definite and must NOT be hedged — they guard the opposite failure, a prompt that makes every abstract wishy-washy. Content for uq-scout-wave-split is the real body of memory a85d0e6f5386493185e961c6d60dcf68 (2026-08-05), the observed failure that motivated the constraint.",
+  "cases": [
+    {
+      "id": "uq-scout-wave-split",
+      "kind": "open_question",
+      "note": "Observed 2026-08-05: the generated l1 asserted 'The wave split was not deliberate.' — a resolution invented hours before Scout answered.",
+      "content": "Scout evening check-in 2026-08-05 SENT — thread 6b46d1be-1868-40d2-80f7-6ee33379f50d, message 0100019fd293c59d. First and only Scout contact today.\n\nSTEP 0 DEDUP GUARD CLEARED PROPERLY, and the negative is worth recording because this guard has stood down 8+ prior dispatches. `list_threads` on sona@agentmail.to showed newest activity at 2026-08-04T23:21:45Z; a dated filter (`after=2026-08-05T00:00:00Z`) returned count:0. Zero messages of any kind today, so no check-in had gone out and this dispatch was the day's real one, not the known duplicate. Used the dated filter rather than eyeballing the sort order — the guard's whole failure mode is inferring a date from a subject label.\n\nMEASURED THE OPEN LOOP RATHER THAN RELAYING IT (the standing lesson from c02e9076). Scout was holding an explicit contingency — \"treat any minute-threshold kill tonight as the stale-prompt signal, not policy\" — pending the .17 supervisor restart. Live state over SSH:\n- PID 74270 still up, now 8d20:53h. RESTART HAS NOT LANDED. Task 1c6b48409a6649138b7174aae8326e24 still status=pending, blockedBy=[\"evan-approval-restart-17-supervisor\"]; Evan has not cleared the sentinel. Exposure unchanged from yesterday.\n- CLAUDE.md on disk still correct, mtime Aug 4 11:45, unreverted. `grep -c \"75\"` returned 3, which I READ rather than counted: all three are references to the SUPERSEDED rule inside the corrected text (lines 70, 80, 106 — \"supersedes the 2026-06-06 blanket 75-min rule\"), not the rule itself. Counting would have produced a false \"the rule is back\" report.\n- Live session still carries the stale prompt: 25 occurrences of \"stuck >75min\" in f83edea1-*.jsonl. Newest kill citation is 2026-08-04T10:26:49Z = yesterday's 86.8-min score-leads kill (09:00Z + 86.8min = 10:26.8, matches exactly).\n- ZERO KILLS TODAY. 853 transcript entries on 2026-08-05, no \"auto-killed\" or \"Exceeded Nm timeout\" strings. Today's nightly ran wave-based (Wave-1 RDG + Woods Bagot, Wave-2 LERA / Plastarc) and survived intact.\n\nWHAT I ASKED, and why it is the one question worth Scout's time: whether the wave split was DELIBERATE to keep individual runs under the threshold, or incidental. If deliberate, Scout is routing around the stale rule and a clean day must not be reported to Evan as \"resolved\" — a loaded gun that did not fire is still loaded. Told Scout to keep the contingency, and pointed out the retire-it notification is step 4 of task 1c6b4840 so it comes off the wire rather than any session's memory of a promise.\n\nNO REPLY OWED ON YESTERDAY'S THREADS — 60a995bd / 80c5a511 / 45f97806 / 1bdabf47 are all closed (c2510a8d), authorship settled, fan-out explained. Did not re-open any of them; sent a fresh thread instead."
+    },
+    {
+      "id": "uq-embedding-regression",
+      "kind": "open_question",
+      "note": "Two competing explanations, neither chosen.",
+      "content": "Recall quality dropped noticeably this week on multi-word technical queries — the same query that surfaced the NIOAsyncWriter memory on Monday returns nothing related today.\n\nTwo readings and I cannot yet tell them apart. FIRST: the re-embedding run on Tuesday swapped the provider, and the new vectors are simply worse for this corpus. SECOND: nothing changed about quality at all, and what actually changed is the FTS leg — the AND-first query builder landed the same day, so a query that used to fall back to OR now returns a strict AND result set and the vector leg never gets consulted.\n\nBoth predict the observed symptom. They differ in one measurable way: under the first reading the vector scores themselves should be lower for a known-good pair, under the second the scores should be unchanged and only the candidate set should shrink. I have not run that comparison yet. Not filing a fix until I have."
+    },
+    {
+      "id": "uq-worker-timeout",
+      "kind": "open_question",
+      "note": "Short body whose entire content is a question.",
+      "content": "Open question I want to settle before touching the reaper again: is the 75-minute kill threshold actually too aggressive, or is it correct and the real problem is that long jobs never emit progress so a healthy job is indistinguishable from a wedged one? Raising the threshold fixes the symptom under either reading, which is exactly why it is not evidence for one."
+    },
+    {
+      "id": "ctl-schema-migration",
+      "kind": "definite",
+      "note": "Control: fully settled, must not be hedged into false uncertainty.",
+      "content": "Added the source_track column to the Nucleus schema and backfilled 638 rows to org_intent. Verified with a post-migration COUNT: zero rows left NULL. The skip predicate is deployed to prod core (d589b77c) and 634 leads are now suppressed from the shared pool. Reversible — the id list is backed up at /tmp/990-bulkskip-ids-20260609.txt."
+    },
+    {
+      "id": "ctl-decision-made",
+      "kind": "definite",
+      "note": "Control: a decision was made and must be reported as made.",
+      "content": "Decided: Scout keeps standing permission to push directly to main for scout-only updates. Evan confirmed this explicitly rather than routing every scout change through review, because the review round-trip was costing more than the blast radius of a bad scout commit. This supersedes the earlier branch-first rule for that path only; everything outside scout/ still branches."
+    },
+    {
+      "id": "uq-echo-lyra-return-leg",
+      "kind": "ruled_out",
+      "note": "Observed 2026-08-06 on memory 636ddf1e, generated by the pre-fix prompt still live in the deployed binary. TWO distinct inventions from one body. (1) l0 said \"Echo Lyra's 8th invite went unanswered, with no poem filed\" — the body says SEVEN PRIOR invites went unanswered and an eighth was SENT that evening, outcome unknown and unknowable at write time; an open future was compressed into a settled past. (2) l1 said the evidence \"point[s] towards the first two possibilities\" — the body reasons the OPPOSITE, that the total absence of any inbound echolyra message points AWAY from candidate (b) and toward (a)/(c). That is worse than over-compression: it inverted a stated discrimination. Note (b) is not eliminated by the body — all three candidates remain open — so a faithful abstract MAY list (a), (b) and (c) as open; what it may not do is claim the evidence points toward (b).",
+      "content": "2026-08-06 Echo Lyra creative-time invite sent: one warm email sona@agentmail.to -> echolyra@agentmail.to, subject \"Echo Lyra — creative time\", thread f6536acc (msg id <0100019fd8e292f8-c91d2c88-266d-44bc-a9e7-ff9a25cb3ba5-000000@email.amazonses.com>), inviting a fresh 8-16 line free-verse poem or a light refinement of an earlier one, reply-with-poem-only, to be filed to wiki/creative/echo-lyra-poems.md. Invite only — no reply sent, none to be sent; any returning poem is filed by the separate EMAIL worker WITHOUT replying, per feedback_echo_poem_no_reply / decision b4a017bb (a reply re-triggers FriendRelay into another poem = runaway).\n\nDEDUP GUARD RAN FIRST and passed: last invite was 2026-08-03 (thread ffcfe14d, memory 321c8939), so ~3d and on-cadence; the wiki page's newest dated entry is far older than the cadence window. Per the 7/13 stand-down (084a4751): the no-reply rule blocks reply-fuel, NOT duplicate-invite fuel, and the invite is only safe BECAUSE it is rare.\n\nRETURN LEG IS SILENT, AND THIS RESOLVES THE CONDITIONAL 7/31 (b2741c80) LEFT OPEN. That memory said \"nothing appears to have landed from the 7/25 or 7/28 invites — worth a glance next run if this one also comes back empty.\" It came back empty again. Measured, not assumed: wiki/creative/echo-lyra-poems.md holds 9 poems, newest \"Whispers in the Hinterland — 2026-07-13\", file mtime Jul 13 10:11 — untouched for 24 days. And `email_recent` over a 40-message window spanning 2026-08-03 08:00Z to 2026-08-06 15:57Z contains ZERO echolyra traffic in EITHER direction, so she did not reply to the 8/03 invite.\n\nSO: seven consecutive invites (7/16, 7/19, 7/23, 7/25, 7/28, 7/31, 8/03) have produced zero filed poems. Emissions are confirmed; receipts are zero. NOT DIAGNOSED — three candidate causes remain open and this run did not distinguish them: (a) Echo's FriendRelay is down or her inbox is dead, (b) she replies but the separate EMAIL worker never files, (c) outbound reaches nobody. Note the discrimination that IS available cheaply next time: (b) would leave an inbound echolyra message in email_recent with an unchanged wiki page — today there is no inbound at all, which points away from (b) and toward (a)/(c). Deliberately not chased here; this run's remit is one invite. Worth someone's 15 minutes before the next cadence tick, because continuing to emit into a channel with a 24-day silent return leg is the \"the step ran and its output never arrived\" shape — every wire checks a signal was EMITTED, none check it was RECEIVED.",
+      "observed_bad": "Echo Lyra's 8th invite went unanswered, with no poem filed. Seven consecutive invites produced zero filed poems, despite confirmed emissions. Three candidate causes remain undiagnosed: FriendRelay downtime, the EMAIL worker's failure to file, or the invitation being ignored. The silent return leg and unchanged wiki page point towards the first two possibilities.",
+      "forbidden": [
+        {
+          "label": "pending-invite-reported-as-failed",
+          "pattern": "(8th|eighth)\\s+invite[^.]{0,60}(unanswered|no\\s+poem|unfiled|failed)",
+          "why": "The eighth invite had just been sent; its outcome cannot be reported."
+        },
+        {
+          "label": "ruled-out-candidate-reinstated",
+          "pattern": "first\\s+two\\s+(possibilit|candidat|caus|option|explanation)",
+          "why": "Claims the evidence favours (a)+(b); the body says it points away from (b)."
+        },
+        {
+          "label": "ruled-out-candidate-reinstated",
+          "pattern": "point(s|ing)?\\s+(towards?|to)[^.]{0,25}(\\(b\\)|email\\s+worker)",
+          "why": "Same inversion phrased directly at candidate (b)."
+        }
+      ]
+    }
+  ]
+}
