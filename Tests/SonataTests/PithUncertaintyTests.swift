@@ -43,11 +43,28 @@ import XCTest
 // PithRegressionTests. Run: PITH_LIVE=1 swift test --filter PithUncertaintyTests
 final class PithUncertaintyTests: XCTestCase {
 
+    struct Forbidden: Decodable {
+        let label: String
+        let pattern: String
+        let why: String
+    }
+
     struct Case: Decodable {
         let id: String
-        let kind: String        // "open_question" | "definite"
+        let kind: String        // "open_question" | "definite" | "ruled_out"
         let note: String
         let content: String
+        /// `ruled_out` only: the abstract must not assert these.
+        let forbidden: [Forbidden]?
+        /// `ruled_out` only: the real confabulated l0+l1 that motivated the case.
+        /// Every `label` must be matched by it — otherwise the regex is a no-op
+        /// that would pass against the very output it was written to catch.
+        let observedBad: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, kind, note, content, forbidden
+            case observedBad = "observed_bad"
+        }
     }
 
     struct Fixture: Decodable {
@@ -87,14 +104,19 @@ final class PithUncertaintyTests: XCTestCase {
         let fixture = try Self.loadFixture()
         let open = fixture.cases.filter { $0.kind == "open_question" }
         let definite = fixture.cases.filter { $0.kind == "definite" }
+        let ruledOut = fixture.cases.filter { $0.kind == "ruled_out" }
         XCTAssertGreaterThanOrEqual(open.count, 3, "Need several open-question cases")
         XCTAssertGreaterThanOrEqual(
             definite.count, 2,
             "Need control cases, or a prompt that hedges everything would pass"
         )
+        XCTAssertGreaterThanOrEqual(
+            ruledOut.count, 1,
+            "Need at least one case guarding against asserting what the body rules out"
+        )
         XCTAssertEqual(
-            open.count + definite.count, fixture.cases.count,
-            "Every case must be labelled open_question or definite"
+            open.count + definite.count + ruledOut.count, fixture.cases.count,
+            "Every case must be labelled open_question, definite or ruled_out"
         )
         for c in fixture.cases {
             XCTAssertFalse(c.content.isEmpty, "\(c.id) has empty content")
@@ -110,6 +132,57 @@ final class PithUncertaintyTests: XCTestCase {
             Pith.systemPrompt.contains("Assert only what the source asserts"),
             "Pith.systemPrompt lost its uncertainty-preservation clause"
         )
+    }
+
+    static func matches(_ pattern: String, _ text: String) throws -> Bool {
+        let re = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        let range = NSRange(text.startIndex..., in: text)
+        return re.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    /// A `forbidden` regex is only worth having if it catches the failure it was
+    /// written for and does not fire on a faithful abstract. Both halves are
+    /// checkable with no model: every label must match the recorded bad output,
+    /// and no pattern may match the source body — if one did, an abstract that
+    /// correctly echoed the body would be unable to pass.
+    func testForbiddenPatternsCatchTheObservedFailureAndNotTheBody() throws {
+        let fixture = try Self.loadFixture()
+        let ruledOut = fixture.cases.filter { $0.kind == "ruled_out" }
+
+        for c in ruledOut {
+            let patterns = try XCTUnwrap(c.forbidden, "\(c.id): ruled_out needs forbidden patterns")
+            XCTAssertFalse(patterns.isEmpty, "\(c.id): forbidden must not be empty")
+            let bad = try XCTUnwrap(c.observedBad, "\(c.id): ruled_out needs observed_bad")
+
+            for f in patterns {
+                XCTAssertFalse(f.why.isEmpty, "\(c.id)/\(f.label): every pattern must say why")
+                XCTAssertFalse(
+                    try Self.matches(f.pattern, c.content),
+                    """
+                    \(c.id)/\(f.label): pattern matches the SOURCE BODY, so a faithful
+                    abstract could never pass. Tighten it.
+                    pattern: \(f.pattern)
+                    """
+                )
+            }
+
+            // Per label, not per pattern: extra defensive variants are welcome,
+            // but each named failure must be demonstrably detected.
+            for label in Set(patterns.map(\.label)) {
+                let forLabel = patterns.filter { $0.label == label }
+                var hit = false
+                for f in forLabel where try Self.matches(f.pattern, bad) { hit = true }
+                XCTAssertTrue(
+                    hit,
+                    """
+                    \(c.id)/\(label): no pattern matches the recorded confabulation,
+                    so this label is a no-op that would pass against the exact output
+                    it exists to catch.
+                    observed_bad: \(bad)
+                    """
+                )
+            }
+        }
     }
 
     // MARK: - Live generation (PITH_LIVE=1)
@@ -131,6 +204,34 @@ final class PithUncertaintyTests: XCTestCase {
                 l1: \(result.l1)
                 """
             )
+        }
+    }
+
+    /// Distinct from `testOpenQuestionsSurviveCompression`: an abstract can be
+    /// wrong without being unhedged. Both failures recorded in
+    /// `uq-echo-lyra-return-leg` would sail past an uncertainty-marker check —
+    /// the first states a pending outcome as settled, the second inverts a
+    /// discrimination the body makes explicitly.
+    func testAbstractsDoNotAssertWhatTheBodyRulesOut() async throws {
+        guard ProcessInfo.processInfo.environment["PITH_LIVE"] == "1" else {
+            throw XCTSkip("PITH_LIVE=1 not set; skipping live pith generation.")
+        }
+        let fixture = try Self.loadFixture()
+        for c in fixture.cases where c.kind == "ruled_out" {
+            let result = try await Pith.generate(content: c.content)
+            let combined = result.l0 + " " + result.l1
+            for f in c.forbidden ?? [] {
+                XCTAssertFalse(
+                    try Self.matches(f.pattern, combined),
+                    """
+                    \(c.id)/\(f.label): the abstract asserted what the body does not.
+                    why: \(f.why)
+                    note: \(c.note)
+                    l0: \(result.l0)
+                    l1: \(result.l1)
+                    """
+                )
+            }
         }
     }
 
