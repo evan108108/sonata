@@ -1,14 +1,12 @@
 import Foundation
 import CommonCrypto
-import CryptoKit
 
 /// AWS Signature V4 request signing.
 ///
 /// Factored out of `BackupManager`, which had this inline for the single case of
-/// PUTting a gzipped database. There are three callers now — the DB object, the
-/// tree archive, and the bucket lifecycle rules — and the lifecycle call needs a
-/// canonical query string and extra signed headers that the inline version could
-/// not express (ADA-483).
+/// PUTting a gzipped database held entirely in memory. The tree archive added a
+/// second caller that cannot work that way — it is gigabytes, so its payload
+/// hash has to come from disk (ADA-483).
 enum AWSSigV4 {
     private static let algorithm = "AWS4-HMAC-SHA256"
     private static let terminator = "aws4_request"
@@ -98,15 +96,6 @@ enum AWSSigV4 {
         var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
         CC_SHA256_Final(&digest, &context)
         return hex(Data(digest))
-    }
-
-    /// Base64 MD5, required by `PutBucketLifecycleConfiguration`.
-    ///
-    /// CryptoKit's `Insecure.MD5` rather than `CC_MD5`, which is deprecated and
-    /// would warn. MD5 here is a transport integrity check demanded by the S3
-    /// API, not a security boundary.
-    static func contentMD5Base64(_ data: Data) -> String {
-        Data(Insecure.MD5.hash(data: data)).base64EncodedString()
     }
 
     // MARK: - Primitives

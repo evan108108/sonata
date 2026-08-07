@@ -21,7 +21,6 @@ actor CleanupManager {
         var worktreesSkipped = 0
         var localBackupsRemoved = 0
         var bytesFreed: Int64 = 0
-        var s3LifecycleUpdated = false
 
         var freedGB: String { String(format: "%.2f", Double(bytesFreed) / 1_073_741_824) }
     }
@@ -47,29 +46,22 @@ actor CleanupManager {
 
     // MARK: - Entry point
 
-    /// `reconcileS3` exists so tests can exercise the prune phases without
-    /// reaching for credentials or touching a real bucket. Production always
-    /// leaves it on.
-    func runCleanup(reconcileS3: Bool = true) async -> Summary {
+    /// Local disk only. Nothing here reaches S3 — the bucket keeps its own
+    /// 30-day disaster-recovery window, which is a different job from the
+    /// short local rollback this prunes.
+    func runCleanup() async -> Summary {
         logger.info("CleanupManager: phase 1 (prune) starting")
         var summary = Summary()
 
         await pruneStaleWorkspaces(into: &summary)
         await pruneAbandonedWorktrees(into: &summary)
         pruneOldLocalBackups(into: &summary)
-        if reconcileS3 {
-            summary.s3LifecycleUpdated = await S3Lifecycle.reconcile(
-                expiryDays: config.s3RetentionDays,
-                logger: logger
-            )
-        }
 
         logger.info("""
             CleanupManager: phase 1 complete — freed=\(summary.freedGB) GB, \
             workspaces removed=\(summary.workspacesRemoved) kept=\(summary.workspacesKept), \
             worktrees removed=\(summary.worktreesRemoved) skipped=\(summary.worktreesSkipped), \
-            local backups removed=\(summary.localBackupsRemoved), \
-            s3 lifecycle updated=\(summary.s3LifecycleUpdated)
+            local backups removed=\(summary.localBackupsRemoved)
             """)
         return summary
     }

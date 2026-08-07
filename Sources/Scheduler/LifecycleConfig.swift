@@ -15,14 +15,16 @@ struct LifecycleConfig: Sendable {
     var treeExcludes: [String] = LifecycleConfig.defaultTreeExcludes
 
     /// How long a dated local backup survives in `~/.sonata/backups`.
-    var localRetentionDays: Int = 2
-
-    /// Expiry written to the bucket's lifecycle rules. Kept equal to
-    /// `localRetentionDays` by default so both copies age out together.
-    var s3RetentionDays: Int = 2
+    ///
+    /// Deliberately short, and deliberately not mirrored to S3. Local backups
+    /// are day-to-day rollback; S3 is disaster recovery and keeps its own
+    /// 30-day window, which is the horizon over which an incident like the one
+    /// behind this ticket actually gets noticed. This code never touches the
+    /// bucket's lifecycle rules.
+    var localRetentionDays: Int = 7
 
     /// How long an untouched prStar review workspace survives.
-    var prstarWorkspacesRetentionDays: Int = 2
+    var prstarWorkspacesRetentionDays: Int = 7
 
     static let s3Bucket = "enginable-sonata-backups"
     static let s3Region = "us-east-1"

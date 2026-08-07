@@ -2,8 +2,7 @@ import XCTest
 @testable import Sonata
 
 // Tests for the lifecycle manager (ADA-483) — the prune predicate, the tree
-// archive's exclude resolution, local backup retention, and the S3 lifecycle
-// document.
+// archive's exclude resolution, and local backup retention.
 //
 // The bug this feature answers was a silent gap in coverage: the backup looked
 // healthy for years while never containing the tree. So these tests assert on
@@ -11,8 +10,8 @@ import XCTest
 // quietly swallowed `plugins/` would reproduce the original incident exactly,
 // and a test that only checked "prstar-workspaces is absent" would pass.
 //
-// Nothing here touches a real bucket: every cleanup run passes
-// `reconcileS3: false`, and the archive tests work in a temp fixture tree.
+// Nothing here reaches the network: cleanup is local-disk only, and the archive
+// tests work in a temp fixture tree.
 final class LifecycleManagerTests: XCTestCase {
 
     private var root: String = ""
@@ -60,7 +59,7 @@ final class LifecycleManagerTests: XCTestCase {
             [.modificationDate: Date().addingTimeInterval(-60 * 86_400)], ofItemAtPath: ancientDir
         )
 
-        let summary = await CleanupManager(dataDir: root).runCleanup(reconcileS3: false)
+        let summary = await CleanupManager(dataDir: root).runCleanup()
 
         XCTAssertFalse(exists("prstar-workspaces/enginable/repo/pr-100-aaa"), "stale workspace should be pruned")
         XCTAssertTrue(exists("prstar-workspaces/enginable/repo/pr-200-bbb"), "fresh workspace must survive")
@@ -77,7 +76,7 @@ final class LifecycleManagerTests: XCTestCase {
         try write("prstar-workspaces/enginable/repo/pr-100-aaa/file.txt", ageDays: 30)
         try write("prstar-workspaces/enginable/repo/scratch-notes/file.txt", ageDays: 30)
 
-        _ = await CleanupManager(dataDir: root).runCleanup(reconcileS3: false)
+        _ = await CleanupManager(dataDir: root).runCleanup()
 
         XCTAssertFalse(exists("prstar-workspaces/enginable/repo/pr-100-aaa"))
         XCTAssertTrue(exists("prstar-workspaces/enginable/repo/scratch-notes"), "only pr-* dirs are in scope")
@@ -93,7 +92,7 @@ final class LifecycleManagerTests: XCTestCase {
         try write("backups/sonata-latest.db-wal", ageDays: 90)
         try write("backups/sonata-2026-08-07.db", ageDays: 0)   // inside retention
 
-        let summary = await CleanupManager(dataDir: root).runCleanup(reconcileS3: false)
+        let summary = await CleanupManager(dataDir: root).runCleanup()
 
         XCTAssertFalse(exists("backups/sonata-2026-05-06.db"))
         XCTAssertFalse(exists("backups/sonata-2026-05-06.db.gz"))
@@ -110,7 +109,7 @@ final class LifecycleManagerTests: XCTestCase {
     func testNonWorktreeDirectoryIsSkipped() async throws {
         try write("worktrees/not-a-worktree/file.txt", ageDays: 90)
 
-        let summary = await CleanupManager(dataDir: root).runCleanup(reconcileS3: false)
+        let summary = await CleanupManager(dataDir: root).runCleanup()
 
         XCTAssertTrue(exists("worktrees/not-a-worktree"))
         XCTAssertEqual(summary.worktreesRemoved, 0)
@@ -133,7 +132,7 @@ final class LifecycleManagerTests: XCTestCase {
         try runGit(["-C", repo, "worktree", "add", "-q", "-b", "feature", worktree])
         try "dirty".write(toFile: "\(worktree)/uncommitted.txt", atomically: true, encoding: .utf8)
 
-        let summary = await CleanupManager(dataDir: root).runCleanup(reconcileS3: false)
+        let summary = await CleanupManager(dataDir: root).runCleanup()
 
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: "\(worktree)/uncommitted.txt"),
@@ -242,39 +241,27 @@ final class LifecycleManagerTests: XCTestCase {
         XCTAssertFalse(BackupScope.tree.includesDB)
     }
 
-    // MARK: - S3 lifecycle document
-
-    func testLifecycleXMLCoversBothPrefixesWithConfiguredExpiry() {
-        let xml = S3Lifecycle.configurationXML(expiryDays: 2)
-
-        XCTAssertTrue(xml.contains("<Prefix>backups/</Prefix>"))
-        XCTAssertTrue(xml.contains("<Prefix>tree/</Prefix>"), "the tree archive needs its own expiry or it accumulates forever")
-        XCTAssertEqual(xml.components(separatedBy: "<Days>2</Days>").count - 1, 2)
-        XCTAssertEqual(xml.components(separatedBy: "<Rule>").count - 1, 2)
-        XCTAssertTrue(xml.contains("<Status>Enabled</Status>"))
-    }
-
     // MARK: - SigV4
 
-    /// Signing is deterministic for a fixed timestamp, and the query string and
-    /// extra headers must reach the signature — the lifecycle PUT fails with a
-    /// signature mismatch if `lifecycle=` or `content-md5` are dropped.
+    /// Signing is deterministic for a fixed timestamp, and every signed input —
+    /// the query string and any extra header — must actually reach the
+    /// signature. A header that is sent but not signed is a 403 from S3.
     func testSigV4SignsQueryStringAndExtraHeaders() {
         let fixedDate = Date(timeIntervalSince1970: 1_754_582_400)
         func sign(query: String, extra: [String: String]) -> String {
             AWSSigV4.headers(
-                method: "PUT", host: "bucket.s3.us-east-1.amazonaws.com", path: "/",
+                method: "PUT", host: "bucket.s3.us-east-1.amazonaws.com", path: "/key.tar.gz",
                 query: query, payloadHash: AWSSigV4.sha256Hex(Data("body".utf8)),
                 extraHeaders: extra, region: "us-east-1",
                 accessKey: "AKIAEXAMPLE", secretKey: "secret", now: fixedDate
             )["Authorization"] ?? ""
         }
 
-        let base = sign(query: "lifecycle=", extra: ["Content-MD5": "abc"])
-        XCTAssertEqual(base, sign(query: "lifecycle=", extra: ["Content-MD5": "abc"]), "signing must be deterministic")
-        XCTAssertNotEqual(base, sign(query: "", extra: ["Content-MD5": "abc"]), "query string must be signed")
-        XCTAssertNotEqual(base, sign(query: "lifecycle=", extra: ["Content-MD5": "different"]), "extra headers must be signed")
-        XCTAssertTrue(base.contains("SignedHeaders=content-md5;host;x-amz-content-sha256;x-amz-date"))
+        let base = sign(query: "", extra: ["Content-Type": "application/gzip"])
+        XCTAssertEqual(base, sign(query: "", extra: ["Content-Type": "application/gzip"]), "signing must be deterministic")
+        XCTAssertNotEqual(base, sign(query: "versionId=2", extra: ["Content-Type": "application/gzip"]), "query string must be signed")
+        XCTAssertNotEqual(base, sign(query: "", extra: ["Content-Type": "text/plain"]), "extra headers must be signed")
+        XCTAssertTrue(base.contains("SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date"))
         XCTAssertTrue(base.hasPrefix("AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/"))
     }
 
