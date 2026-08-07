@@ -47,17 +47,22 @@ actor CleanupManager {
 
     // MARK: - Entry point
 
-    func runCleanup() async -> Summary {
+    /// `reconcileS3` exists so tests can exercise the prune phases without
+    /// reaching for credentials or touching a real bucket. Production always
+    /// leaves it on.
+    func runCleanup(reconcileS3: Bool = true) async -> Summary {
         logger.info("CleanupManager: phase 1 (prune) starting")
         var summary = Summary()
 
         await pruneStaleWorkspaces(into: &summary)
         await pruneAbandonedWorktrees(into: &summary)
         pruneOldLocalBackups(into: &summary)
-        summary.s3LifecycleUpdated = await S3Lifecycle.reconcile(
-            expiryDays: config.s3RetentionDays,
-            logger: logger
-        )
+        if reconcileS3 {
+            summary.s3LifecycleUpdated = await S3Lifecycle.reconcile(
+                expiryDays: config.s3RetentionDays,
+                logger: logger
+            )
+        }
 
         logger.info("""
             CleanupManager: phase 1 complete — freed=\(summary.freedGB) GB, \
@@ -120,9 +125,14 @@ actor CleanupManager {
 
     /// `find -print -quit` stops at the first hit, so a live workspace costs a
     /// partial walk rather than a full one.
+    ///
+    /// `-type f` is load-bearing. Without it `find` also tests the workspace
+    /// directory itself, whose mtime moves whenever any entry is added or
+    /// removed — including by a prune — so a directory could look fresh while
+    /// everything inside it was months old. Contents decide, never the container.
     private func containsFileNewerThanRetention(_ path: String) async -> Bool {
         let outcome = await OffPoolProcess.run(Self.findBinary, [
-            path, "-mtime", "-\(config.prstarWorkspacesRetentionDays)", "-print", "-quit",
+            path, "-type", "f", "-mtime", "-\(config.prstarWorkspacesRetentionDays)", "-print", "-quit",
         ])
         guard let outcome, outcome.status == 0 else {
             // A find that could not run is not evidence of staleness. Keep the
