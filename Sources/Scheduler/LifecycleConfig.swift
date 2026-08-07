@@ -53,8 +53,11 @@ struct LifecycleConfig: Sendable {
         "*/logs",
         "./.build",              // Swift build artifacts
         "*/.build",
+        "*.bun-build",           // Bun build leftovers in plugin dirs — 58 MB apiece
         "*/node_modules",        // inside plugin dirs
         "*.log",
+        "./sonata.db.pre-*",     // superseded one-off pre-migration DB snapshots
+        "*/apple-sounds",        // re-downloadable audio assets parked in a session scratch dir
     ]
 }
 

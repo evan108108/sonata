@@ -175,6 +175,15 @@ final class LifecycleManagerTests: XCTestCase {
         try write("plugins/prstar/node_modules/dep/index.js")
         try write("plugins/prstar/.build/artifact.o")
         try write("plugins/prstar/debug.log")
+        // Bun leaves 58 MB build artifacts per invocation. Named `.<hash>.bun-build`,
+        // so `*/.build` never caught them and 1.18 GB reached S3 nightly.
+        try write("plugins/prstar/.18ad57ff3777b9eb-00000000.bun-build")
+        try write("plugins/sonata-studio/.18ad7d9fffcdfbff-00000000.bun-build")
+        // Superseded one-off snapshots taken before past migrations.
+        try write("sonata.db.pre-reembed")
+        try write("sonata.db.pre-gemma")
+        // Re-downloadable media parked in a session scratch directory.
+        try write("session/session12/apple-sounds/BrownNoise.wav")
 
         let archive = "\(root)-archive.tar.gz"
         defer { try? FileManager.default.removeItem(atPath: archive) }
@@ -196,6 +205,7 @@ final class LifecycleManagerTests: XCTestCase {
         for dropped in [
             "prstar-workspaces", "/bin/", "worktrees", "models/", "meili-data",
             "backups", "logs", "node_modules", ".build", "debug.log",
+            "bun-build", "sonata.db.pre-", "apple-sounds",
         ] {
             XCTAssertFalse(
                 listing.contains(dropped),
