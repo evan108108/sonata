@@ -827,21 +827,33 @@ let systemActions: [SonataAction] = [
         }
     ),
 
-    // POST /api/backup — trigger an immediate full backup (local + S3)
+    // POST /api/backup — trigger an immediate lifecycle run (prune + backup + S3)
     SonataAction(
         name: "system_backup",
-        description: "Trigger an immediate full backup (local + S3).",
+        description: "Trigger an immediate backup (local + S3). scope=db backs up the database only, scope=tree prunes and archives the ~/.sonata tree, scope=both (default) does everything.",
         group: "/api",
         path: "/backup",
         method: .post,
-        params: [],
+        params: [
+            ActionParam(
+                "scope", .string,
+                description: "db | tree | both (default both)",
+                default: BackupScope.both.rawValue
+            )
+        ],
         handler: { ctx in
+            let scope = BackupScope(param: ctx.params.string("scope"))
             let backupManager = BackupManager(dbPool: ctx.dbPool)
-            await backupManager.runBackup()
-            let backupPath = "\(DatabaseManager.dataDirectory)/backups/sonata-latest.db"
-            let size = (try? FileManager.default.attributesOfItem(atPath: backupPath)[.size] as? Int64) ?? 0
+            await backupManager.runBackup(scope: scope)
+
+            // Report whichever artifact this scope actually produced.
+            let backupsDir = "\(DatabaseManager.dataDirectory)/backups"
+            let reportedPath = scope == .tree
+                ? "\(backupsDir)/sonata-tree-latest.tar.gz"
+                : "\(backupsDir)/sonata-latest.db"
+            let size = (try? FileManager.default.attributesOfItem(atPath: reportedPath)[.size] as? Int64) ?? 0
             let sizeMB = String(format: "%.1f", Double(size) / 1_048_576)
-            return BackupResponse(success: true, path: backupPath, sizeMB: sizeMB)
+            return BackupResponse(success: true, path: reportedPath, sizeMB: sizeMB)
         }
     ),
 
