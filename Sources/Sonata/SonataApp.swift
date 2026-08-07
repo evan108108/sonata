@@ -442,9 +442,27 @@ func ensureBundledHooks() {
         let filename: String
         let event: String        // "Stop", "UserPromptSubmit", etc.
         let timeoutSeconds: Int  // per Claude Code hook config
+        // Claude Code tool-name filter. When nil the hook runs on every event
+        // occurrence; for PreToolUse that means spawning the process on every
+        // single tool call. A hook that only cares about one tool should say so
+        // here rather than pay ~58ms of process spawn on each Read/Bash/Edit.
+        // Matching is exact per alternative, not substring — the official
+        // plugins list "Edit|Write|MultiEdit|NotebookEdit" precisely because
+        // "Edit" alone does not match "NotebookEdit".
+        var matcher: String? = nil
     }
     let hooks: [HookInstall] = [
         HookInstall(filename: "sidecar-user-prompt-submit-hook.sh", event: "UserPromptSubmit", timeoutSeconds: 3),
+        // Blocks harness-internal background `Agent` subagents so substantive
+        // multi-step work runs as a visible Sonata worker instead (ADA-472).
+        // Allowlists Explore/fork, blocks the rest, and degrades to
+        // pass-through when Sonata is unreachable.
+        HookInstall(
+            filename: "pre-tool-use-agent-guardrail.js",
+            event: "PreToolUse",
+            timeoutSeconds: 10,
+            matcher: "Agent"
+        ),
     ]
 
     // Hooks we've shipped in the past and now want removed from users'
@@ -538,13 +556,18 @@ func ensureBundledHooks() {
             }
         }
         if alreadyRegistered { continue }
-        groups.append([
+        var group: [String: Any] = [
             "hooks": [[
                 "type": "command",
                 "command": path,
                 "timeout": install.timeoutSeconds,
             ]],
-        ])
+        ]
+        // Omitted entirely when nil so existing entries keep their current
+        // shape — an explicit null would read as "match nothing" to some
+        // config parsers.
+        if let matcher = install.matcher { group["matcher"] = matcher }
+        groups.append(group)
         hooksSection[install.event] = groups
         dirty = true
     }
