@@ -332,7 +332,20 @@ actor FriendRelay {
             for contact in contacts {
                 // Skip self and contacts without a provider
                 if contact["role"] as? String == "self" { continue }
-                guard let provider = contact["provider"] as? String, !provider.isEmpty else { continue }
+                guard let provider = contact["provider"] as? String, !provider.isEmpty else {
+                    // Warn, don't skip silently. A providerless AI contact is
+                    // indistinguishable from a friend with nothing to say: on
+                    // 2026-07-15 a full-column contact upsert nulled Echo
+                    // Lyra's provider and this bare `continue` swallowed it for
+                    // 27 days and 8 unanswered invites, with no error anywhere.
+                    // Federated peers (peerKind="federated") run their own
+                    // Sonata and are never invoked, so they are expected here.
+                    if contact["peerKind"] as? String != "federated" {
+                        let who = contact["email"] as? String ?? contact["name"] as? String ?? "unknown"
+                        logger.warning("FriendRelay: skipping AI contact \(who) — no provider set; it will never generate replies")
+                    }
+                    continue
+                }
                 guard let name = contact["name"] as? String,
                       let email = contact["email"] as? String else { continue }
 
