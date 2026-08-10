@@ -114,11 +114,14 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
     }
 
     /// Broadcast tools/list_changed to every attached session so clients
-    /// re-request tools/list. Called when a plugin registers new actions.
+    /// re-request tools/list. Called when a plugin registers new actions,
+    /// crashes, or is disabled.
+    ///
+    /// Also bumps the connections layer's tools-list epoch: any session
+    /// that is currently detached will get the notification replayed on
+    /// its next attach() — that's the boot-race + reconnect-during-
+    /// plugin-install recovery path.
     func broadcastToolsListChanged() async {
-        let frame = DMFrames.notification(
-            method: "notifications/tools/list_changed", params: [:]
-        )
-        _ = await MCPConnections.shared.broadcast(jsonRPC: frame)
+        _ = await MCPConnections.shared.broadcastToolsListChanged()
     }
 }

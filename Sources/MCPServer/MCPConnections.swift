@@ -16,14 +16,40 @@ import GRDB
 actor MCPConnections {
     private var writers: [String: MCPSSEWriter] = [:]
 
+    /// Monotonic counter bumped every time the tool surface changes
+    /// (plugin registered / crashed / disabled). Used to detect writers
+    /// that were disconnected across a mutation and need a replay on
+    /// reconnect.
+    private var toolsListEpoch: Int = 0
+
+    /// Per-session record of the last epoch this session was told about.
+    /// A reconnecting session whose value is behind `toolsListEpoch`
+    /// missed a mutation while its stream was down — attach() replays
+    /// `tools/list_changed` so the client re-pulls tools/list. Kept
+    /// across detach — the same session key can reconnect.
+    private var lastPushedEpoch: [String: Int] = [:]
+
     /// Called by MCPHTTPRouter when an SSE GET succeeds and yields a writer.
     /// If a prior writer exists for this sessionKey (reconnect), close it so
     /// its stream terminates cleanly before we replace it.
+    ///
+    /// Reconnect-replay of tools/list_changed: if the tool surface mutated
+    /// while this session was disconnected, push list_changed to the new
+    /// writer so the client refreshes. Without this, a client that
+    /// reconnects between Sonata's HTTP-up and plugin discovery holds an
+    /// incomplete tool surface forever — the broadcast that would have
+    /// told them never reached them, because their writer wasn't attached
+    /// when it fired. (2026-08-10 ADA report: post-restart clients saw
+    /// bridge-native tools but not plugin proxies like prstar_*.)
     func attach(_ sessionKey: String, writer: MCPSSEWriter) {
         if let prior = writers[sessionKey] {
             prior.close()
         }
         writers[sessionKey] = writer
+        if (lastPushedEpoch[sessionKey] ?? 0) < toolsListEpoch {
+            writer.send(jsonRPC: Self.toolsListChangedFrame)
+            lastPushedEpoch[sessionKey] = toolsListEpoch
+        }
     }
 
     /// Called from the writer's onClose callback and from MCPHTTPRouter on
@@ -114,6 +140,30 @@ actor MCPConnections {
             w.close()
         }
     }
+
+    /// Notify every live writer that the tool surface changed. Bumps the
+    /// epoch so any writer currently detached will be replayed on its
+    /// next attach. Called by MCPNotificationDispatcher whenever the
+    /// ActionRegistry mutates (plugin register / crash / disable).
+    /// Returns the count of writers immediately pushed to.
+    @discardableResult
+    func broadcastToolsListChanged() -> Int {
+        toolsListEpoch += 1
+        var count = 0
+        for (key, w) in writers where !w.isClosed {
+            w.send(jsonRPC: Self.toolsListChangedFrame)
+            lastPushedEpoch[key] = toolsListEpoch
+            count += 1
+        }
+        return count
+    }
+
+    /// The JSON-RPC frame for `notifications/tools/list_changed`. Params
+    /// are empty by MCP spec — the receiver re-fetches tools/list. Held
+    /// as a static constant so the hot path (broadcast fans out to every
+    /// writer) does not re-serialize.
+    private static let toolsListChangedFrame =
+        #"{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{}}"#
 }
 
 extension MCPConnections {
