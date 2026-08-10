@@ -1448,5 +1448,56 @@ extension DatabaseMigrator {
                 // column may already exist on partial-migration retry
             }
         }
+
+        // v42: watchers — filesystem event source primitive. A watcher config
+        // row plus a per-fire event log. When a watched file event matches
+        // pattern + trigger, the runner dispatches a task via mem_task_create
+        // with source='watcher/<id>', substituting {{path}}/{{name}}/{{ext}}/
+        // {{dir}}/{{event}}/{{watcher}} tokens in the prompt (or prepending a
+        // preamble if none are present). watcher_events is append-only history
+        // so the UI can render "Recent triggers" and auto-disable a watcher
+        // after K consecutive failures without recomputing from tasks.
+        registerMigration("v42_watchers") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS watchers (
+                    id             TEXT PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    path           TEXT NOT NULL,
+                    pattern        TEXT NOT NULL DEFAULT '*',
+                    recursive      INTEGER NOT NULL DEFAULT 0,
+                    trigger        TEXT NOT NULL DEFAULT 'file_added',
+                    prompt         TEXT NOT NULL,
+                    enabled        INTEGER NOT NULL DEFAULT 1,
+                    cooldownMs     INTEGER NOT NULL DEFAULT 5000,
+                    retryCount     INTEGER NOT NULL DEFAULT 2,
+                    sizeThreshold  INTEGER,
+                    lastError      TEXT,
+                    consecutiveFailures INTEGER NOT NULL DEFAULT 0,
+                    lastFiredAt    INTEGER,
+                    createdAt      INTEGER NOT NULL,
+                    updatedAt      INTEGER NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS watchers_by_enabled
+                ON watchers(enabled)
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS watcher_events (
+                    id           TEXT PRIMARY KEY,
+                    watcherId    TEXT NOT NULL,
+                    path         TEXT NOT NULL,
+                    eventType    TEXT NOT NULL,
+                    firedAt      INTEGER NOT NULL,
+                    taskId       TEXT,
+                    status       TEXT NOT NULL,
+                    error        TEXT
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS watcher_events_by_watcher_time
+                ON watcher_events(watcherId, firedAt DESC)
+                """)
+        }
     }
 }

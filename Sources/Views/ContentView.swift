@@ -15,6 +15,7 @@ enum SonataTab: Int, CaseIterable {
     case plugins = 11
     case studio = 12
     case sessions = 13
+    case watchers = 14
 }
 
 // FocusedValue key so .commands{} in SonataApp can switch tabs
@@ -53,6 +54,7 @@ struct ContentView: View {
             NavRailItem(tab: .email, label: "Email", systemImage: "envelope.fill"),
             NavRailItem(tab: .people, label: "People", systemImage: "person.2.fill"),
             NavRailItem(tab: .files, label: "Files", systemImage: "person.text.rectangle"),
+            NavRailItem(tab: .watchers, label: "Watchers", systemImage: "eye.fill"),
             NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill", badge: railCounts.failedPluginCount, badgeIsAlert: true),
             NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
         ]
@@ -240,6 +242,8 @@ struct ContentView: View {
             PrivateFilesView()
         case .plugins:
             PluginsView()
+        case .watchers:
+            WatchersView()
         case .studio:
             StudioView()
         case .dashboard:

@@ -1212,6 +1212,20 @@ struct SonataApp: App {
                 registry.register(whatHappenedActions)
                 registry.register(makeWebhookActions(registry: registry))
                 registry.register(emailWebhookActions)
+
+                // Filesystem watchers primitive. The runner owns FSEventStream
+                // lifecycles; actions do the row I/O and hand test-fires back
+                // to the runner. Created here (pre-mountHTTP) so its actions
+                // land in the HTTP router alongside everything else; started
+                // later next to WikiFileWatcher so its FSEventStreams come up
+                // after the DB and registry are fully wired.
+                let watcherRunner = WatcherRunner(
+                    dbPool: pool,
+                    registry: registry,
+                    logger: Logger(label: "sonata.watcher-runner")
+                )
+                registry.register(makeWatcherActions(runner: watcherRunner))
+
                 registerInternalWhatHappenedDomains(dbPool: pool)
 
                 // No registry to publish. MCPConnections.shared and MCPAuth.shared are
@@ -1506,6 +1520,12 @@ struct SonataApp: App {
                 let wikiWatcher = WikiFileWatcher(dbPool: pool, search: meili)
                 await wikiWatcher.start()
 
+                // 8-bis. Filesystem watchers primitive (user-defined FSEvent-driven
+                // task dispatch). Instance was constructed pre-mountHTTP so its
+                // actions land on the HTTP router; start() re-registers every
+                // enabled row and opens FSEventStreams for them.
+                await watcherRunner.start()
+
                 // 8a. MeiliSearch initial backfill (first run or after data clear)
                 Task {
                     await meili.backfillWiki(dbPool: pool)
@@ -1645,6 +1665,7 @@ struct SonataApp: App {
                     await healthMonitor.shutdown()
                     await backupManager.shutdown()
                     await wikiWatcher.shutdown()
+                    await watcherRunner.shutdown()
                     await pluginManager.shutdown()
                     await meili.shutdown()
                     logger.info("Sonata shutdown complete")

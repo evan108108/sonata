@@ -18,10 +18,20 @@ private struct TaskItem: Identifiable, Hashable {
     let result: String?
     let error: String?
     let createdAt: Int64?
+    let source: String?
     let rawPretty: String
 
     var createdDate: Date? {
         createdAt.map { Date(timeIntervalSince1970: Double($0) / 1000) }
+    }
+
+    /// When the task's source is `watcher/<id>`, return the watcher id so a
+    /// row can render `▲ Watcher: <id>` and click through. Uses the row's
+    /// data alone — no extra fetch. Peer primitive to `parentId`'s
+    /// "subtask" badge.
+    var watcherSourceId: String? {
+        guard let src = source, src.hasPrefix("watcher/") else { return nil }
+        return String(src.dropFirst("watcher/".count))
     }
 
     static func == (lhs: TaskItem, rhs: TaskItem) -> Bool { lhs.id == rhs.id }
@@ -61,6 +71,7 @@ private struct TaskItem: Identifiable, Hashable {
                 result: resultStr,
                 error: dict["error"] as? String,
                 createdAt: (dict["createdAt"] as? NSNumber)?.int64Value,
+                source: dict["source"] as? String,
                 rawPretty: rawPretty
             )
         }
@@ -368,10 +379,25 @@ private struct TaskListRow: View {
                 Text(task.title)
                     .font(.body)
                     .lineLimit(2)
-                if let when = task.createdDate {
-                    Text(when.formatted(.relative(presentation: .named)))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    if let when = task.createdDate {
+                        Text(when.formatted(.relative(presentation: .named)))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    if let wid = task.watcherSourceId {
+                        HStack(spacing: 3) {
+                            Image(systemName: "eye.fill")
+                                .font(.system(size: 8))
+                            Text(wid)
+                                .font(.caption2)
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.15), in: Capsule())
+                        .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -398,6 +424,9 @@ private struct TaskDetailView: View {
                     badge(task.status, color: statusColor(task.status))
                     if let who = task.assignedTo { badge("→ \(who)") }
                     if task.parentId != nil { badge("subtask", color: .purple) }
+                    if let wid = task.watcherSourceId {
+                        badge("▲ Watcher: \(wid)", color: .accentColor)
+                    }
                     Spacer()
                     if let when = task.createdDate {
                         Text("created \(when.formatted(.dateTime))")
