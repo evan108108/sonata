@@ -22,9 +22,12 @@
  *     Per-call override. The block reason explains this to the model, so the
  *     model can read the nudge, decide the background Agent is genuinely the
  *     right tool this time, and re-invoke with the marker + justification.
- *     Reason is stripped from the prompt before pass-through and logged to
- *     stderr as the audit trail. Without this, the guardrail becomes a hard
- *     wall — Evan's intent is "nudge with agent having some say", not "block".
+ *     Reason is logged to stderr as the audit trail; the marker itself stays
+ *     in the prompt the subagent receives (PreToolUse hooks can allow/deny
+ *     but not mutate `tool_input`, so we cannot strip it on pass). Subagents
+ *     understand the annotation as a guardrail signature and ignore it.
+ *     Without this override the guardrail becomes a hard wall — Evan's
+ *     intent is "nudge with agent having some say", not "block".
  * ---------------------------------------------------------------------------
  *
  * BEHAVIOUR
