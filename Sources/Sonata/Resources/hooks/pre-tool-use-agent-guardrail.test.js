@@ -107,15 +107,15 @@ server.listen(0, "127.0.0.1", async () => {
   r = await runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } }, INT);
   check("Bash / interactive -> pass untouched", r.decision === null && r.stderr === "");
 
-  console.log("\n=== 2. Allowlist (context-management primitives) ===");
+  console.log("\n=== 2. Allowlist (Explore is silent everywhere; fork is now interactive-blocked) ===");
   r = await runHook(agent("Explore"), INT);
   check("Explore / interactive -> pass, silent", r.decision === null && r.stderr === "");
   r = await runHook(agent("Explore"), WRK);
   check("Explore / worker -> pass, silent", r.decision === null && r.stderr === "");
   r = await runHook(agent("fork"), INT);
-  check("fork / interactive -> pass + stderr nudge", r.decision === null && /work worth watching/.test(r.stderr));
+  check("fork / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
   r = await runHook(agent("fork"), WRK);
-  check("fork / worker -> pass + stderr nudge", r.decision === null && /same isolation plus visibility/.test(r.stderr));
+  check("fork / worker -> pass, silent (workers use bg agents freely)", r.decision === null && r.stderr === "");
 
   console.log("\n=== 3. Interactive block + filed-task provenance ===");
   lastPost = null;
@@ -156,13 +156,13 @@ server.listen(0, "127.0.0.1", async () => {
   check("  did NOT file a task", lastPost === null);
   check("  explains why no task was filed", r.decision && /No task was filed/.test(r.decision.reason));
 
-  console.log("\n=== 6. Worker block (workers don't recurse) ===");
+  console.log("\n=== 6. Worker branch (workers use bg agents freely, no block) ===");
   lastPost = null;
   r = await runHook(agent("Plan"), WRK);
-  check("Plan / worker -> block", r.decision && r.decision.decision === "block");
-  check("  worker-specific message", r.decision && /Spawning another worker from inside a worker/.test(r.decision.reason));
-  check("  tells worker to DM its dispatcher", r.decision && /DM your dispatcher/.test(r.decision.reason));
+  check("Plan / worker -> pass, silent", r.decision === null && r.stderr === "");
   check("  files NO task from a worker", lastPost === null);
+  r = await runHook(agent("general-purpose"), WRK);
+  check("general-purpose / worker -> pass, silent", r.decision === null && r.stderr === "");
 
   console.log("\n=== 7. Escape hatch ===");
   r = await runHook(agent("Plan"), { ...INT, CLAUDE_ALLOW_BG_AGENT: "1" });
@@ -185,7 +185,45 @@ server.listen(0, "127.0.0.1", async () => {
   check("  forbids falling back to Agent", /Do not fall back to a background Agent/.test(r9));
   poolIdle = 2;
 
-  console.log("\n=== 10. Fails open on malformed input ===");
+  console.log("\n=== 10. Per-call override marker ===");
+  lastPost = null;
+  r = await runHook(
+    {
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      session_id: "s",
+      cwd: "/tmp",
+      tool_input: {
+        subagent_type: "general-purpose",
+        prompt: "[bg-agent-approved: context would blow parent] Audit every route handler under app/routes for missing auth checks and report a punch list.",
+      },
+    },
+    INT,
+  );
+  check("marker at prompt start -> pass, not blocked", r.decision === null);
+  check("  reason captured in stderr", /OVERRIDE .* context would blow parent/.test(r.stderr));
+  check("  did NOT file a task (bypass)", lastPost === null);
+  r = await runHook(
+    {
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      session_id: "s",
+      cwd: "/tmp",
+      tool_input: {
+        subagent_type: "general-purpose",
+        prompt: "Audit stuff. Also, [bg-agent-approved: sneaky] should not bypass — must be at start.",
+      },
+    },
+    INT,
+  );
+  check("marker mid-prompt -> still blocks (must be at start)", r.decision && r.decision.decision === "block");
+  r = await runHook(
+    { hook_event_name: "PreToolUse", tool_name: "Agent", session_id: "s", cwd: "/tmp", tool_input: { subagent_type: "fork", prompt: "[bg-agent-approved: one-shot lookup] Grep for FOO across src/." } },
+    INT,
+  );
+  check("marker on fork / interactive -> pass, not blocked", r.decision === null);
+
+  console.log("\n=== 11. Fails open on malformed input ===");
   r = await runHook("not json at all", INT);
   check("garbage stdin -> pass", r.decision === null);
 

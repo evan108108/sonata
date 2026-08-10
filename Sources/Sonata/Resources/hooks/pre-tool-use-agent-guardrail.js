@@ -10,27 +10,35 @@
  *              (~/.sonata/wiki/ideas/agent-tool-guardrail.md)
  *
  * ---------------------------------------------------------------------------
- * ESCAPE HATCH
+ * ESCAPE HATCHES
  *
  *   CLAUDE_ALLOW_BG_AGENT=1
+ *     Set on the calling process to bypass this hook for that session
+ *     entirely. Every bypass still logs a line to stderr, so an opt-out is
+ *     visible rather than silent. Use when you genuinely want a background
+ *     Agent and accept that it will not appear anywhere in Sonata.
  *
- * Set on the calling process to bypass this hook for that session entirely.
- * Every bypass still logs a line to stderr, so an opt-out is visible rather
- * than silent. Use when you genuinely want a background Agent and accept that
- * it will not appear anywhere in Sonata.
+ *   [bg-agent-approved: <one-line reason>] prefix in the Agent's `prompt`
+ *     Per-call override. The block reason explains this to the model, so the
+ *     model can read the nudge, decide the background Agent is genuinely the
+ *     right tool this time, and re-invoke with the marker + justification.
+ *     Reason is stripped from the prompt before pass-through and logged to
+ *     stderr as the audit trail. Without this, the guardrail becomes a hard
+ *     wall — Evan's intent is "nudge with agent having some say", not "block".
  * ---------------------------------------------------------------------------
  *
  * BEHAVIOUR
  *
- *   subagent_type        interactive session          worker session
- *   -------------------  --------------------------  -------------------------
- *   Explore              pass (silent)               pass (silent)
- *   fork                 pass + stderr nudge         pass + stderr nudge
- *   everything else      BLOCK -> Sonata worker      BLOCK -> "don't recurse"
- *   (incl. omitted,                                   DM your dispatcher
- *    which the harness
- *    treats as
- *    general-purpose)
+ *   subagent_type        interactive session                worker session
+ *   -------------------  --------------------------------  --------------
+ *   Explore              pass (silent)                     pass (silent)
+ *   everything else      BLOCK-with-override -> worker     pass (silent)
+ *   (incl. fork, Plan,     (agent may re-invoke with       (workers use
+ *    general-purpose,      [bg-agent-approved: ...]          bg agents so
+ *    omitted, custom)      to bypass this call)              they don't
+ *                                                            recursively
+ *                                                            spawn more
+ *                                                            Sonata workers)
  *
  * Non-`Agent` tools are passed through untouched and cost one JSON parse.
  *
@@ -64,11 +72,23 @@ const http = require("node:http");
 
 const SONATA_API = process.env.MEM_API || "http://localhost:3211";
 
-// Context-management primitives, not work-you-want-to-watch. `Explore` is a
-// one-shot read-only lookup whose result lands in the visible turn; `fork`
-// exists precisely so its tool noise stays out of the parent context.
+// Silent pass-through: `Explore` is a one-shot read-only lookup whose result
+// lands in the visible turn — no need to steer the model toward a worker for
+// it. Everything else (including `fork`) is subject to the block-with-override
+// path in interactive sessions. `fork` was previously in a NUDGE_ALLOW set
+// that wrote a "consider a worker" note to stderr on pass, but per Anthropic's
+// PreToolUse hook contract, stderr on exit-0 goes to the CLI's own stream —
+// the model never sees it. So the nudge was invisible and fork was effectively
+// unguarded. Moved into block-with-override so the message reaches the model.
 const SILENT_ALLOW = new Set(["Explore"]);
-const NUDGE_ALLOW = new Set(["fork"]);
+
+// Per-call override marker. The model reads the block reason (which names this
+// syntax explicitly), decides whether the guardrail's redirect is still right,
+// and if not, re-invokes with this prefix carrying a one-line justification.
+// Captured in stderr for the audit trail. Matches at the START of the trimmed
+// prompt only — otherwise a stray occurrence deep in a long prompt would
+// accidentally authorise unrelated work.
+const OVERRIDE_MARKER_RE = /^\s*\[bg-agent-approved:\s*([^\]]+)\]\s*/;
 
 // Hooks are on the critical path of every tool call. Keep the whole Sonata
 // round-trip well under the configured hook timeout.
@@ -297,8 +317,19 @@ function redirectForInteractive(subagentType, what, snapshot, taskId, noPromptTo
     "  3. Tell the worker to DM before it marks the task complete, so you",
     "     approve the result before it finalises.",
     "",
-    `Allowed background subagent_types: ${[...SILENT_ALLOW, ...NUDGE_ALLOW].join(", ")}`,
+    `Silent-allowlist subagent_types: ${[...SILENT_ALLOW].join(", ")}`,
     "(context-management primitives, not work worth watching).",
+    "",
+    "PER-CALL OVERRIDE — if you have a legit reason a background Agent is",
+    "genuinely the right tool here (e.g. the parent context would be blown by",
+    "the tool noise, or the work is one-shot enough that a worker is overkill),",
+    "you can bypass this block by re-invoking with the prompt prefixed:",
+    "",
+    "  [bg-agent-approved: <one-line reason>] <original prompt...>",
+    "",
+    "The marker is stripped before the subagent sees the prompt, and the",
+    "justification is captured in the hook's stderr for the audit trail. Use",
+    "sparingly — the default is a Sonata worker.",
   ];
 
   if (taskId) {
@@ -353,26 +384,6 @@ function redirectForInteractive(subagentType, what, snapshot, taskId, noPromptTo
   return lines.join("\n");
 }
 
-function redirectForWorker(subagentType) {
-  return [
-    `Background Agent (subagent_type=${subagentType}) blocked.`,
-    "",
-    "You are a Sonata worker. Spawning another worker from inside a worker is",
-    "disallowed — orchestration belongs to the session that dispatched you, and",
-    "a worker fanning out on its own is invisible to it.",
-    "",
-    "If you need a decision, clarification, or approval: DM your dispatcher",
-    "(sonar_dm_send / dm_send to the dispatching session id) and keep working on",
-    "what you can in the meantime.",
-    "If you need work done: do it yourself in this session.",
-    "",
-    `Still allowed here: ${[...SILENT_ALLOW, ...NUDGE_ALLOW].join(", ")} — you need those`,
-    "for your own context management.",
-    "",
-    "To bypass deliberately for this session: CLAUDE_ALLOW_BG_AGENT=1",
-  ].join("\n");
-}
-
 async function main(raw) {
   let payload;
   try {
@@ -406,16 +417,25 @@ async function main(raw) {
 
   if (SILENT_ALLOW.has(subagentType)) return pass();
 
-  if (NUDGE_ALLOW.has(subagentType)) {
+  // Per-call override: the model previously read a block reason naming this
+  // syntax and re-invoked with justification. Log the reason as the audit
+  // trail and pass through.
+  const rawPrompt = typeof input.prompt === "string" ? input.prompt : "";
+  const overrideMatch = rawPrompt.match(OVERRIDE_MARKER_RE);
+  if (overrideMatch) {
     process.stderr.write(
-      `[agent-guardrail] using ${subagentType} — make sure this isn't work worth ` +
-        `watching. A Sonata worker gives the same isolation plus visibility ` +
-        `(Workers UI, DM-able, transcript).\n`,
+      `[agent-guardrail] OVERRIDE (subagent_type=${subagentType}) — ` +
+        `reason: ${overrideMatch[1].trim()}\n`,
     );
     return pass();
   }
 
-  // Everything below this point is a block candidate.
+  // Worker sessions use background agents freely — worker→worker recursion is
+  // the anti-pattern, not worker→bg-agent. Silent pass so worker throughput
+  // isn't measured against a stderr wall.
+  if (sessionRole() === "worker") return pass();
+
+  // Everything below this point is a block candidate (interactive branch).
 
   // Sonata offline => the redirect has nowhere to land. Degrade loudly.
   const ping = await sonata("/api/ping");
@@ -430,12 +450,6 @@ async function main(raw) {
         `\`curl ${SONATA_API}/api/ping\` should return {"pong":true}.\n`,
     );
     return pass();
-  }
-
-  if (sessionRole() === "worker") {
-    // No task is filed here on purpose: the fix for a worker is to talk to its
-    // dispatcher, not to enqueue more work.
-    return block(redirectForWorker(subagentType));
   }
 
   const what = describeCall(input);
