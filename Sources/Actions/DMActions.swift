@@ -144,6 +144,28 @@ enum DMActionsInbound {
 
         // Thread initiation: materialize as a sonar_dm workerEvent for a
         // local worker to pick up. Mirrors inbound email pattern.
+        //
+        // Sender-affinity routing (2026-08-11): if the same peer/session
+        // ALREADY has a sonar_dm workerEvent assigned to some worker, this
+        // new event is PRE-ASSIGNED to that same worker rather than left
+        // pending for the pool. Reason: two overlapping DMs from one peer
+        // landing on two workers produces plural "Sona" verdicts that
+        // discount every future report from all of us — sona-worker-2 hit
+        // the failure mode 2026-08-11 15:55 (Scout sent one design question
+        // twice, ~2 min apart, and worker-1 and worker-2 independently
+        // started answering).
+        //
+        // The idempotencyKey guard beside INSERT keys on message_id which is
+        // fresh per send, so it cannot catch this — same class of bug as the
+        // pr_review fix 2026-07-17 (WorkerEventIdempotency.swift). Affinity
+        // routing is the strictly-safer failure mode (drops nothing, adds no
+        // false-dedup risk) and mirrors the thread-ownership routing
+        // inbound email already uses.
+        //
+        // Fallback when there's no active sibling: insert as pending, as
+        // today. Also emits a `sibling_events` digest in the payload so a
+        // claiming worker can see overlap directly rather than having to
+        // discover it from live behavior.
         let payloadJSON: [String: Any] = [
             "message_id": messageId,
             "from_peer_name": fromPeerName ?? "",
@@ -154,16 +176,108 @@ enum DMActionsInbound {
             "context": context ?? "",
             "received_at_ms": now,
         ]
-        let payloadStr = (try? JSONSerialization.data(withJSONObject: payloadJSON))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let idemKey = WorkerEventIdempotency.key(type: "sonar_dm", payload: payloadJSON)
         try? await dbPool.write { db in
-            try db.execute(sql: """
-                INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
-                VALUES (?, 'sonar_dm', ?, 5, 'pending', ?, ?)
-                ON CONFLICT(idempotencyKey) DO NOTHING
-            """, arguments: [newUUID(), payloadStr, now, idemKey])
+            let sibling = findAssignedSonarDMSibling(
+                db: db,
+                fromPeerId: fromPeerId ?? "",
+                fromPeerName: fromPeerName ?? "",
+                fromSessionId: fromSessionId ?? ""
+            )
+            var payloadWithSibling = payloadJSON
+            if let sibling {
+                payloadWithSibling["sibling_events"] = [[
+                    "message_id": sibling.priorMessageId,
+                    "assignedTo": sibling.workerId,
+                ]]
+            } else {
+                payloadWithSibling["sibling_events"] = [Any]()
+            }
+            let payloadStr = (try? JSONSerialization.data(withJSONObject: payloadWithSibling))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
+            if let sibling {
+                // Pre-assign to the same worker so `worker_event_claim`
+                // returns this event via its "assigned to me" branch
+                // (WorkerActions.swift:1024) instead of it being visible to
+                // the whole pool as a pending pick. The other CAS UPDATE at
+                // :1088 skips when isResumingOwnAssigned, so a pre-assigned
+                // row goes through the claim path cleanly without any race
+                // with the fresh-pending guard.
+                try db.execute(sql: """
+                    INSERT INTO workerEvents
+                        (id, type, payload, priority, status, assignedTo,
+                         assignedAt, sessionId, createdAt, idempotencyKey)
+                    VALUES (?, 'sonar_dm', ?, 5, 'assigned', ?, ?, ?, ?, ?)
+                    ON CONFLICT(idempotencyKey) DO NOTHING
+                """, arguments: [
+                    newUUID(), payloadStr, sibling.workerId,
+                    now, sibling.workerSessionId, now, idemKey,
+                ])
+            } else {
+                try db.execute(sql: """
+                    INSERT INTO workerEvents (id, type, payload, priority, status, createdAt, idempotencyKey)
+                    VALUES (?, 'sonar_dm', ?, 5, 'pending', ?, ?)
+                    ON CONFLICT(idempotencyKey) DO NOTHING
+                """, arguments: [newUUID(), payloadStr, now, idemKey])
+            }
         }
+    }
+
+    /// Look up an already-assigned sonar_dm workerEvent from the same peer/
+    /// session as the inbound one. Returns nil when no sibling is active —
+    /// either no prior DM from this sender or the prior DM has already
+    /// completed.
+    ///
+    /// Match precedence: `from_peer_id` when present on the new event,
+    /// otherwise `from_peer_name`, otherwise `from_session_id`. Peer identity
+    /// is what matters — two different sessions of the same peer should
+    /// still route to the same worker so Sona speaks with one voice per
+    /// conversation partner.
+    ///
+    /// Only matches ASSIGNED rows on purpose. When the sibling is still
+    /// PENDING (nobody has claimed it yet), we don't know which worker will
+    /// eventually pick it up, so pre-assigning the new event to a specific
+    /// worker would just move the race. In that case fall back to a normal
+    /// pending insert; the pool's claim will pick both up in order and the
+    /// scenario (two DMs arriving fully before any worker claims) is the
+    /// rarer race worth deferring.
+    private static func findAssignedSonarDMSibling(
+        db: Database,
+        fromPeerId: String,
+        fromPeerName: String,
+        fromSessionId: String
+    ) -> (workerId: String, workerSessionId: String?, priorMessageId: String)? {
+        let matchExpr: String
+        let matchValue: String
+        if !fromPeerId.isEmpty {
+            matchExpr = "json_extract(payload, '$.from_peer_id') = ?"
+            matchValue = fromPeerId
+        } else if !fromPeerName.isEmpty {
+            matchExpr = "json_extract(payload, '$.from_peer_name') = ?"
+            matchValue = fromPeerName
+        } else if !fromSessionId.isEmpty {
+            matchExpr = "json_extract(payload, '$.from_session_id') = ?"
+            matchValue = fromSessionId
+        } else {
+            return nil
+        }
+        let sql = """
+            SELECT assignedTo, sessionId, json_extract(payload, '$.message_id') AS priorMessageId
+            FROM workerEvents
+            WHERE type = 'sonar_dm'
+              AND status = 'assigned'
+              AND assignedTo IS NOT NULL AND assignedTo != ''
+              AND \(matchExpr)
+            ORDER BY assignedAt DESC
+            LIMIT 1
+        """
+        guard let row = try? Row.fetchOne(db, sql: sql, arguments: [matchValue]),
+              let workerId = row["assignedTo"] as? String, !workerId.isEmpty,
+              let priorMessageId = row["priorMessageId"] as? String, !priorMessageId.isEmpty
+        else { return nil }
+        let sessionId = row["sessionId"] as? String
+        return (workerId: workerId, workerSessionId: sessionId, priorMessageId: priorMessageId)
     }
 
     /// Peer-forwarded ACK for a DM we originally sent. Update our own
