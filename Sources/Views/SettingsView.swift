@@ -12,7 +12,7 @@ struct SettingsView: View {
     @State private var ownerEmail = ""
     @State private var ownerEmailSaved = false
     @State private var secretsExpanded = false
-    @State private var emailExpanded = true
+    @State private var emailExpanded = false
     @State private var webhookRoutesExpanded = false
     @State private var mcpExpanded = false
     @State private var workerExpanded = false
