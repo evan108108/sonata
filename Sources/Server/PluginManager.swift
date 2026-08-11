@@ -17,6 +17,16 @@ struct PluginManifest: Codable {
     let configSchema: [String: ConfigSchemaEntry]?
     let actions: [ManifestAction]?
     let capabilities: PluginCapabilities?
+    /// Claude Code slash-command skill slugs this plugin ships. For each slug
+    /// listed here, the plugin must ship `SKILL.md` at
+    /// `<plugin-dir>/skills/<slug>/SKILL.md` and Sonata installs it into
+    /// `~/.claude/skills/<slug>/` on plugin install (with a `.plugin-owner`
+    /// sidecar tagging the owning plugin), then removes it on uninstall.
+    /// Optional — omit or leave empty to opt out. Overwriting a personal skill
+    /// (no owner sidecar) or a different plugin's skill is logged and skipped
+    /// unless the caller explicitly asked for takeover; today the safe path is
+    /// always "skip and log."
+    let skills: [String]?
 
     enum CodingKeys: String, CodingKey {
         case name, version, description, author, port, arch, actions
@@ -25,7 +35,7 @@ struct PluginManifest: Codable {
         case eventsChannel = "events_channel"
         case eventsTopic = "events_topic"
         case configSchema = "config_schema"
-        case capabilities
+        case capabilities, skills
     }
 }
 
@@ -736,8 +746,114 @@ final class PluginManager: @unchecked Sendable {
             """, arguments: [manifest.name, manifest.version, manifest.description, manifest.port, finalDir, existingConfig, now, now])
         }
 
+        installPluginSkills(manifest: manifest, pluginDir: finalDir)
+
         sonataFileLog("Plugin \(manifest.name) v\(manifest.version): installed to \(finalDir)")
         return manifest
+    }
+
+    /// Deploy plugin-declared Claude Code skills into ~/.claude/skills/.
+    ///
+    /// For each `skills[]` slug in the manifest, copy
+    /// `<pluginDir>/skills/<slug>/` to `~/.claude/skills/<slug>/`, then write a
+    /// `.plugin-owner` sidecar naming the plugin so uninstall can distinguish
+    /// its own from a user's personal skill or another plugin's.
+    ///
+    /// Conflict rules:
+    ///   - Destination exists with NO `.plugin-owner` file (user-personal
+    ///     skill): skip and log WARN. Users own their `~/.claude/skills/`.
+    ///   - Destination exists with a `.plugin-owner` naming a DIFFERENT plugin:
+    ///     skip and log WARN. Two plugins claiming the same slug is an
+    ///     integration problem, not something Sonata quietly resolves. The
+    ///     first-installed plugin keeps the slot.
+    ///   - Destination exists with a `.plugin-owner` naming THIS plugin: full
+    ///     overwrite. Same-plugin reinstall or upgrade always refreshes.
+    ///   - Destination missing: create fresh, tag it.
+    ///
+    /// Missing on-disk skill files (declared in manifest but not shipped)
+    /// are logged and skipped so a partial rollout doesn't fail install.
+    private func installPluginSkills(manifest: PluginManifest, pluginDir: String) {
+        guard let slugs = manifest.skills, !slugs.isEmpty else { return }
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let skillsRoot = home.appendingPathComponent(".claude/skills")
+        try? fm.createDirectory(at: skillsRoot, withIntermediateDirectories: true)
+
+        for slug in slugs {
+            let sourceDir = (pluginDir as NSString).appendingPathComponent("skills/\(slug)")
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: sourceDir, isDirectory: &isDir), isDir.boolValue else {
+                sonataFileLog("Plugin \(manifest.name): declared skill '\(slug)' — no directory at \(sourceDir), skipping")
+                continue
+            }
+            let destDir = skillsRoot.appendingPathComponent(slug)
+            let ownerFile = destDir.appendingPathComponent(".plugin-owner")
+
+            if fm.fileExists(atPath: destDir.path) {
+                if let existingOwner = try? String(contentsOf: ownerFile, encoding: .utf8) {
+                    let owner = existingOwner.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if owner != manifest.name {
+                        sonataFileLog("Plugin \(manifest.name): skill '\(slug)' already owned by plugin '\(owner)' — skipping (uninstall the other plugin first)")
+                        continue
+                    }
+                    // Same-plugin reinstall: nuke and refresh.
+                    try? fm.removeItem(at: destDir)
+                } else {
+                    // No owner tag = user-personal skill. Never overwrite.
+                    sonataFileLog("Plugin \(manifest.name): skill '\(slug)' already exists in ~/.claude/skills without a plugin owner — skipping (would clobber user-personal skill)")
+                    continue
+                }
+            }
+
+            do {
+                try fm.copyItem(atPath: sourceDir, toPath: destDir.path)
+                try manifest.name.write(to: ownerFile, atomically: true, encoding: .utf8)
+                sonataFileLog("Plugin \(manifest.name): installed skill '\(slug)' from \(sourceDir)")
+            } catch {
+                sonataFileLog("Plugin \(manifest.name): failed to install skill '\(slug)' — \(error)")
+            }
+        }
+    }
+
+    /// Remove plugin-owned Claude Code skills from ~/.claude/skills/.
+    /// Only removes directories whose `.plugin-owner` sidecar names `pluginName`
+    /// — user-personal skills and other plugins' skills stay intact.
+    ///
+    /// The manifest is optional: on uninstall the on-disk plugin dir has
+    /// already been read to find `finalDir`, so a manifest re-parse is cheap,
+    /// but a stale/partial install may not have one. When absent, this scans
+    /// the skills root and matches on owner tag alone.
+    private func uninstallPluginSkills(pluginName: String, manifest: PluginManifest?) {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let skillsRoot = home.appendingPathComponent(".claude/skills")
+        guard fm.fileExists(atPath: skillsRoot.path) else { return }
+
+        // Prefer the manifest's declared list so we don't scan the whole
+        // skills root when we know exactly what was installed. Fall back to a
+        // full scan for stale-install cleanup.
+        let candidateSlugs: [String]
+        if let declared = manifest?.skills, !declared.isEmpty {
+            candidateSlugs = declared
+        } else {
+            candidateSlugs = (try? fm.contentsOfDirectory(atPath: skillsRoot.path)) ?? []
+        }
+
+        for slug in candidateSlugs {
+            let destDir = skillsRoot.appendingPathComponent(slug)
+            let ownerFile = destDir.appendingPathComponent(".plugin-owner")
+            guard let existingOwner = try? String(contentsOf: ownerFile, encoding: .utf8) else {
+                continue  // Not a plugin-owned skill; leave alone.
+            }
+            let owner = existingOwner.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard owner == pluginName else { continue }
+            do {
+                try fm.removeItem(at: destDir)
+                sonataFileLog("Plugin \(pluginName): removed skill '\(slug)'")
+            } catch {
+                sonataFileLog("Plugin \(pluginName): failed to remove skill '\(slug)' — \(error)")
+            }
+        }
     }
 
     /// Find manifest in first-level subdirectories (tarball may have a wrapper dir)
@@ -786,7 +902,8 @@ final class PluginManager: @unchecked Sendable {
                 name: name, version: version, description: description, author: nil,
                 sonataVersion: nil, port: port, arch: nil, startCommand: "",
                 eventsChannel: nil, eventsTopic: nil,
-                configSchema: nil, actions: nil, capabilities: nil
+                configSchema: nil, actions: nil, capabilities: nil,
+                skills: nil
             ),
             mode: "external",
             baseURL: url,
@@ -896,7 +1013,8 @@ final class PluginManager: @unchecked Sendable {
                 name: name, version: "0.0.0", description: nil, author: nil,
                 sonataVersion: nil, port: row.port, arch: nil, startCommand: "",
                 eventsChannel: nil, eventsTopic: nil,
-                configSchema: nil, actions: nil, capabilities: nil
+                configSchema: nil, actions: nil, capabilities: nil,
+                skills: nil
             ),
             mode: row.mode,
             baseURL: baseURL,
@@ -1054,6 +1172,12 @@ final class PluginManager: @unchecked Sendable {
         let path = try await dbPool.read { db in
             try String.fetchOne(db, sql: "SELECT path FROM plugins WHERE name = ?", arguments: [name])
         }
+
+        // Read the manifest before nuking the dir so uninstallPluginSkills
+        // knows exactly which slugs to look for. Falls back to a full scan of
+        // ~/.claude/skills for stale installs whose plugin dir is already gone.
+        let manifest: PluginManifest? = path.flatMap { loadManifest(pluginDir: $0) }
+        uninstallPluginSkills(pluginName: name, manifest: manifest)
 
         try await dbPool.write { db in
             try db.execute(sql: "DELETE FROM plugins WHERE name = ?", arguments: [name])
