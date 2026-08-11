@@ -411,16 +411,26 @@ enum MemorySidecarHandler {
     ///
     /// Capped at 3000 chars — mem_recall's tokenizer truncates beyond ~2k
     /// anyway, and the prompt gets first-position priority.
+    /// The prompt/head bodies can be arbitrarily long (a session reading a
+    /// SKILL.md into its context, a pasted transcript, a code review body).
+    /// The prior 3000/2000-char caps produced URL-encoded topics well past
+    /// 50 KB when interpolated into the `?topic=` query param at recall()
+    /// time — the query strings timed out before the recall stack ever
+    /// started. `recall()` itself now caps at 512 as a hard belt, and this
+    /// cuts the input down first so no downstream code has to handle a
+    /// giant string. 400/400 gives 800 chars total when both are present,
+    /// well under the recall cap and easily plenty for the FTS + embedding
+    /// layers to find topically-relevant memories.
     private static func queryText(from request: Request) -> String {
         let prompt = request.recent_context.last_user_prompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let head = request.recent_context.last_assistant_head?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !prompt.isEmpty && !head.isEmpty {
-            return String((prompt + "\n\n" + head).prefix(3000))
+            return String((prompt.prefix(400) + "\n\n" + head.prefix(400)).prefix(maxRecallTopicChars))
         }
         if !prompt.isEmpty {
-            return String(prompt.prefix(2000))
+            return String(prompt.prefix(maxRecallTopicChars))
         }
-        return String(head.prefix(2000))
+        return String(head.prefix(maxRecallTopicChars))
     }
 
     // MARK: - Recall
@@ -503,15 +513,30 @@ enum MemorySidecarHandler {
     private static let emailSynthesizedRank: Double = 0.70
     private static let wikiSynthesizedRank: Double = 0.70
 
+    /// Defense-in-depth cap on the `?topic=` query param. `/api/recall` is a
+    /// GET, so the topic rides in the URL — URL-encoding whitespace, quotes
+    /// and Unicode expands 3–9x, so a 500-char topic can produce a 3–4 KB
+    /// query string, and the 3000-char cap that used to live in `queryText`
+    /// produced 50+ KB URLs that timed out at the 2 s deadline (observed
+    /// 2026-08-11 after workers started reading SKILL.md bodies into their
+    /// prompt/head context). 512 is well under any URL limit and still
+    /// covers every real memory query the embedding stack cares about — the
+    /// recall models don't get better with a 3 KB blob. If a future query
+    /// genuinely needs more, `/api/recall` becomes a POST first.
+    private static let maxRecallTopicChars = 512
+
     private static func recall(
         query: String,
         limit: Int,
         recencyMode: SidecarUserConfig.RecencyMode,
         excludeSessionId: String
     ) async throws -> [Candidate] {
+        let boundedQuery = query.count > maxRecallTopicChars
+            ? String(query.prefix(maxRecallTopicChars))
+            : query
         var components = URLComponents(string: "http://127.0.0.1:\(sonataPort)/api/recall")!
         components.queryItems = [
-            URLQueryItem(name: "topic", value: query),
+            URLQueryItem(name: "topic", value: boundedQuery),
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "tier", value: "l0"),
             URLQueryItem(name: "recencyMode", value: recencyMode.rawValue),
