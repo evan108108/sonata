@@ -599,7 +599,7 @@ func ensureBundledSkills() {
     let skillsRoot = home.appendingPathComponent(".claude/skills")
     try? fm.createDirectory(at: skillsRoot, withIntermediateDirectories: true)
 
-    let skills = ["afk"]
+    let skills = ["afk", "dispatch", "meeting", "memory", "supervisor"]
     for slug in skills {
         let destDir = skillsRoot.appendingPathComponent(slug)
         try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
