@@ -357,14 +357,17 @@ actor HealthMonitor {
             }
 
             // Nudge any workers that look stuck on the current event.
-            // GATED OFF until the bridge bumps `lastProgressMs` on every tool
-            // call. Today, that signal only updates in complete_event /
-            // fail_event handlers, so a worker chugging through tool calls
-            // looks "stuck" to the nudger and gets interrupted with a useless
-            // "Continue" DM. Flip SONA_WORKER_NUDGE=1 once the bridge fix lands.
-            if ProcessInfo.processInfo.environment["SONA_WORKER_NUDGE"] == "1" {
-                await nudgeStuckWorkers()
-            }
+            // Previously gated behind SONA_WORKER_NUDGE because `lastProgressAt`
+            // only advanced on complete_event/fail_event, so a worker chugging
+            // through tool calls would look stuck and get a useless "Continue"
+            // DM. The bridge started stamping `lastProgressAt` on real model
+            // turns on 2026-08-03 (see workerProgressStaleThreshold docstring),
+            // and the threshold was rebalanced to 45 min off 36k measured
+            // tool-wait gaps. Gate removed 2026-08-11 (Evan): default should be
+            // on, so the "worker finished, forgot complete_event, sits busy
+            // forever" pattern self-heals via one DM instead of needing a human
+            // to notice.
+            await nudgeStuckWorkers()
 
             // Self-heal stranded events every cycle (always on, unlike the
             // nudge above). A worker holding an event whose SSE push was lost
@@ -1114,17 +1117,25 @@ actor HealthMonitor {
         }
     }
 
-    /// Send a literal "Continue" DM to a worker's session. Persists to the
+    /// DM a worker that appears finished with an open event. Persists to the
     /// durable inbox AND tries the live SSE push, matching what the regular
     /// dm_send path does.
+    ///
+    /// Wording follows Evan's proven manual-nudge pattern (2026-08-11): calling
+    /// the worker by label and stating the observation ("status busy but not
+    /// doing anything") reliably triggers the "oh, I forgot to call
+    /// complete_event, closing out" self-correction. Generic "Continue" DMs
+    /// sometimes got read as "keep working" instead of "close out."
     private func sendContinueNudge(to targetSessionId: String, workerLabel: String, eventId: String) async {
         let messageId = UUID().uuidString
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let body = "Continue"
+        let body = """
+        You are \(workerLabel) and your status is busy but you don't appear to be doing anything. If your work on event \(eventId) is complete, call complete_event({event_id: "\(eventId)"}) to close out. If you are still working, ignore this — no reply needed.
+        """
         let context = "health-monitor-nudge:\(eventId)"
         let fromSessionId = "sonata-health-monitor"
 
-        logger.info("nudging stuck worker '\(workerLabel)' (session \(targetSessionId), event \(eventId)) with Continue")
+        logger.info("nudging stuck worker '\(workerLabel)' (session \(targetSessionId), event \(eventId))")
 
         do {
             try await dbPool.write { db in

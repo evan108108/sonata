@@ -356,11 +356,14 @@ func makeWatcherActions(runner: WatcherRunner?) -> [SonataAction] {
                 args.append(id)
 
                 let setClause = sets.joined(separator: ", ")
+                // Bind to a let so Swift 6 doesn't flag the `var args` capture
+                // inside the @Sendable write closure.
+                let updateArgs = args
                 do {
                     try await ctx.dbPool.write { db in
                         try db.execute(
                             sql: "UPDATE watchers SET \(setClause) WHERE id = ?",
-                            arguments: StatementArguments(args)
+                            arguments: StatementArguments(updateArgs)
                         )
                     }
                 } catch {
