@@ -186,64 +186,12 @@ final class DMActionsTests: XCTestCase {
     // ladder in identity matching.
 
     private func makePoolWithWorkerEvents() throws -> DatabasePool {
-        // Different dm_messages shape than makeInMemoryDbPool — this one
-        // matches the DMAudit.insert column set (resolvedSessionKey,
-        // resolvedKind, senderSessionKey, senderPeerName, inReplyToMessageId,
-        // direction, failureReason). Without those columns the audit write
-        // in routePeerInbound throws silently (wrapped in `try?`), which
-        // doesn't affect the workerEvents insert we care about, but keeps
-        // the sqlite log noisy and makes debug reads harder.
-        let tmp = NSTemporaryDirectory() + "sonata-dm-affinity-test-\(UUID().uuidString).sqlite"
-        addTeardownBlock { try? FileManager.default.removeItem(atPath: tmp) }
-        let pool = try DatabasePool(path: tmp)
-        try pool.write { db in
-            try db.execute(sql: """
-                CREATE TABLE IF NOT EXISTS dm_messages (
-                    messageId           TEXT PRIMARY KEY,
-                    targetSessionId     TEXT NOT NULL,
-                    resolvedSessionKey  TEXT,
-                    resolvedKind        TEXT,
-                    senderSessionKey    TEXT,
-                    senderPeerName      TEXT,
-                    body                TEXT NOT NULL,
-                    context             TEXT,
-                    sentAtMs            INTEGER NOT NULL,
-                    receivedAtMs        INTEGER NOT NULL,
-                    deliveryStatus      TEXT NOT NULL,
-                    inReplyToMessageId  TEXT,
-                    direction           TEXT NOT NULL,
-                    failureReason       TEXT,
-                    fromSessionId       TEXT
-                )
-            """)
-            try db.execute(sql: """
-                CREATE TABLE IF NOT EXISTS workerEvents (
-                    id             TEXT PRIMARY KEY,
-                    type           TEXT NOT NULL,
-                    payload        TEXT NOT NULL,
-                    priority       INTEGER NOT NULL DEFAULT 5,
-                    assignedTo     TEXT,
-                    status         TEXT NOT NULL DEFAULT 'pending',
-                    result         TEXT,
-                    createdAt      INTEGER NOT NULL,
-                    assignedAt     INTEGER,
-                    completedAt    INTEGER,
-                    sessionId      TEXT,
-                    idempotencyKey TEXT
-                )
-            """)
-            // Full (non-partial) unique index — matches production's v29
-            // migration. v28 shipped a partial `WHERE idempotencyKey IS NOT
-            // NULL` variant, but SQLite's `ON CONFLICT(col) DO NOTHING` needs
-            // a non-partial UNIQUE target, so v29 dropped and replaced. If a
-            // test schema uses the partial form, every INSERT throws "ON
-            // CONFLICT clause does not match any PRIMARY KEY or UNIQUE
-            // constraint" (which is exactly what tripped me up 2026-08-11).
-            try db.execute(sql: """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_workerEvents_idempotencyKey
-                    ON workerEvents(idempotencyKey)
-            """)
-        }
+        // Uses the same migrator production runs — no hand-rolled schemas.
+        // See TestDatabase.swift for why (short version: hand-rolling
+        // workerEvents' idempotency index cost 20 min of debugging on
+        // 2026-08-11 when the test schema drifted from v29's shape).
+        let (pool, path) = try TestDatabase.makePool()
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
         return pool
     }
 
