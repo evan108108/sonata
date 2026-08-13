@@ -151,24 +151,39 @@ private func flagDirtyFromMemory(
     }
 }
 
+/// mem_store's result. Adds `warnings` to the plain `{id, success}` shape so an
+/// annotation that resolved to a different row than the caller named is visible
+/// in the response instead of only in the graph, months later.
+struct MemoryStoreResponse: Encodable {
+    let id: String
+    let success = true
+    let warnings: [String]?
+}
+
 /// Parse the inline `entities` and `relations` JSON params on `mem_store`
 /// and persist them alongside the just-created memory. Best-effort — errors
 /// here don't roll back the memory row; annotation is additive polish.
 ///
 /// `entities` JSON: `[{"name": "Scout", "type": "project", "description": "..."}]`
-///   Existing entities matching (name, type) are reused (dedup'd).
+///   An existing row matching (name, type) case-insensitively is reused. A name
+///   that exists ONLY under other types is reused too, NOT forked — see the
+///   fork guard below.
 ///
 /// `relations` JSON: `[{"entity": "Scout", "relation": "about"}]`
 ///   `entity` matches by NAME against the just-upserted set OR pre-existing
 ///   entities. Skips silently if the name can't be resolved — makes calls
 ///   idempotent when an entity was already annotated via a prior store.
+///
+/// Returns caller-facing warnings for anything resolved differently than the
+/// caller literally asked for. The store still succeeds; what it must not do is
+/// succeed *quietly* while writing somewhere other than the caller named.
 private func storeInlineEntitiesAndRelations(
     memoryId: String,
     entitiesJSON: String?,
     relationsJSON: String?,
     now: Int64,
     dbPool: DatabasePool
-) async throws {
+) async throws -> [String] {
     // Parse loosely — malformed JSON just skips annotation.
     let entityDefs: [(name: String, type: String, description: String)] = {
         guard let data = entitiesJSON?.data(using: .utf8),
@@ -193,28 +208,45 @@ private func storeInlineEntitiesAndRelations(
         }
     }()
 
-    guard !entityDefs.isEmpty || !relationDefs.isEmpty else { return }
+    guard !entityDefs.isEmpty || !relationDefs.isEmpty else { return [] }
 
-    try await dbPool.write { db in
-        // (1) Upsert entities. Look up existing by (name, type) case-insensitively.
-        //     entityIdByName is used by (2) below to resolve relation targets by name.
+    return try await dbPool.write { db -> [String] in
+        var warnings: [String] = []
+
+        // (1) Upsert entities, resolving through the shared rule in
+        //     EntityIdentity.swift so this door and mem_entity_upsert agree on
+        //     what a name means. entityIdByName is used by (2) to resolve
+        //     relation targets by name.
         //
-        //     HAZARD — this key is STRICTER than (2)'s. A caller passing a `type` that
-        //     doesn't match the stored row misses here, inserts a fork, and (because the
-        //     fork lands in entityIdByName first) that fork also captures (2)'s relation,
-        //     which name-only resolution would have put on the original. Create and
-        //     resolve must agree on one key; today they don't. Changing which key wins is
-        //     a data-model call (is identity `name`, or `name`+`type`?), not a local fix.
+        //     FORK GUARD — a `type` that doesn't match the stored row used to
+        //     miss here and INSERT a second row under the same name, and
+        //     because that fork landed in entityIdByName first it also captured
+        //     (2)'s relation, which name-only resolution would have put on the
+        //     original. Both halves were silent. Now a name that exists only
+        //     under other types resolves to the existing row and reports it;
+        //     callers guess types against a free-text vocabulary that already
+        //     holds tool AND technology, product AND project, so a guess must
+        //     not be able to split a hub.
         var entityIdByName: [String: String] = [:]  // key = lowercased name
         for def in entityDefs {
-            let existing = try Row.fetchOne(
-                db,
-                sql: "SELECT id FROM entities WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?) LIMIT 1",
-                arguments: [def.name, def.type]
-            )
-            if let existing, let id = existing["id"] as? String {
-                entityIdByName[def.name.lowercased()] = id
-            } else {
+            switch try resolveEntity(db, name: def.name, type: def.type) {
+            case .matched(let existing, _):
+                entityIdByName[def.name.lowercased()] = existing.id
+
+            case .typeMismatch(let candidates):
+                let canonical = candidates[0]  // most-connected; ordering is total
+                entityIdByName[def.name.lowercased()] = canonical.id
+                warnings.append(
+                    "entity '\(def.name)': no row of type '\(def.type)' exists, so the annotation was "
+                    + "attached to \(canonical.label) instead of forking a new row"
+                    + (candidates.count > 1
+                       ? " (name is already forked across \(candidates.count) rows: \(candidates.map(\.label).joined(separator: ", ")))"
+                       : "")
+                    + ". The description you passed was NOT applied — use mem_entity_patch with that id to edit it, "
+                    + "or mem_entity_upsert if you genuinely meant a different entity."
+                )
+
+            case .absent:
                 let newId = newUUID()
                 try db.execute(
                     sql: """
@@ -229,21 +261,18 @@ private func storeInlineEntitiesAndRelations(
         }
 
         // (2) Create relations. Resolve entity by name — first the just-upserted
-        //     set, then fall back to any pre-existing entity with that name.
+        //     set, then fall back to any pre-existing entity with that name
+        //     (most-connected wins, so an edge can't land on an empty stub).
         for def in relationDefs {
             let key = def.entity.lowercased()
             let entityId: String
             if let id = entityIdByName[key] {
                 entityId = id
             } else {
-                guard let row = try Row.fetchOne(
-                    db,
-                    sql: "SELECT id FROM entities WHERE LOWER(name) = LOWER(?) LIMIT 1",
-                    arguments: [def.entity]
-                ), let id = row["id"] as? String else {
+                guard let candidate = try resolveEntityByName(db, name: def.entity) else {
                     continue  // No entity to link — skip this relation silently.
                 }
-                entityId = id
+                entityId = candidate.id
             }
             let relId = newUUID()
             try db.execute(
@@ -255,6 +284,8 @@ private func storeInlineEntitiesAndRelations(
                 arguments: [relId, memoryId, entityId, def.relation, now]
             )
         }
+
+        return warnings
     }
 }
 
@@ -310,9 +341,9 @@ let memoryActions: [SonataAction] = [
               entities='[{"name":"Scout","type":"project"}]'
               relations='[{"entity":"Scout","relation":"about"}]'
 
-            The server reuses an existing entity ONLY on an exact case-insensitive match of BOTH name and type ("Scout"/"scout" merge; "Scout Leader" does not). Any other input INSERTs a new row.
+            The server reuses an existing entity on a case-insensitive match of BOTH name and type ("Scout"/"scout" merge; "Scout Leader" does not). A name that exists ONLY under a different type is NOT forked — the annotation attaches to the existing row (the most-connected one, if the name is already forked) and the response carries a `warnings` entry saying so. Only a name that exists nowhere INSERTs a new row.
 
-            GET THE `type` RIGHT — a wrong type silently forks the entity. Passing type "failure_mode" for an entity stored as "principle" does not update it and does not error: it creates a second empty-description row under the same name, and because relations resolve by NAME against the just-upserted set first, the new fork also STEALS the relation that belonged on the original. The call still returns success. If you are not certain of an entity's existing type, look it up (mem_entity_search) before annotating; a fork is worse than no annotation.
+            So a wrong `type` no longer splits an entity, but it does mean your `description` is ignored and your edge lands on a row you didn't name. READ `warnings` in the response. If you are not certain of an entity's existing type, look it up (mem_entity_by_name / mem_entity_search) first, and use mem_entity_patch by id to edit a description.
 
             Memories with entity edges get a `structural` boost in mem_recall's ranking blend, so annotated memories are discoverable via graph proximity beyond lexical match.
 
@@ -336,7 +367,7 @@ let memoryActions: [SonataAction] = [
             ActionParam("l0", .string, description: "Pre-computed L0 (skips pith generation)"),
             ActionParam("l1", .string, description: "Pre-computed L1 (skips pith generation)"),
             ActionParam("entities", .string, description: """
-                Optional JSON array of entities to upsert alongside this memory: `[{"name": "Scout", "type": "project", "description": "..."}]`. Existing entities matching by (name, type) are reused. Use this on durable memories (importance ≥ 7, hard rules, decisions, learnings) so future recall can surface them via graph proximity — a single mem_store call is preferable to a follow-up mem_entity_upsert.
+                Optional JSON array of entities to upsert alongside this memory: `[{"name": "Scout", "type": "project", "description": "..."}]`. An existing entity matching (name, type) case-insensitively is reused; a name that exists only under another type is reused too (never forked) and reported in the response `warnings`. Use this on durable memories (importance ≥ 7, hard rules, decisions, learnings) so future recall can surface them via graph proximity — a single mem_store call is preferable to a follow-up mem_entity_upsert.
                 """),
             ActionParam("relations", .string, description: """
                 Optional JSON array of relations linking this memory to entities: `[{"entity": "Scout", "relation": "about"}]`. The `entity` field is the name (matched against the just-upserted set OR existing entities). Common relation types: `about`, `mentions`, `learned_from`, `part_of`, `related_to`. Pair with `entities` on the same call for one-shot annotation.
@@ -416,11 +447,12 @@ let memoryActions: [SonataAction] = [
             // persisted, we don't want annotation errors to lose content.
             let entitiesJSON = ctx.params.string("entities")
             let relationsJSON = ctx.params.string("relations")
+            var annotationWarnings: [String] = []
             if entitiesJSON != nil || relationsJSON != nil {
-                try? await storeInlineEntitiesAndRelations(
+                annotationWarnings = (try? await storeInlineEntitiesAndRelations(
                     memoryId: id, entitiesJSON: entitiesJSON,
                     relationsJSON: relationsJSON, now: now, dbPool: ctx.dbPool
-                )
+                )) ?? []
             }
 
             // Embed on insert — local model, zero marginal cost. Detached so
@@ -432,7 +464,14 @@ let memoryActions: [SonataAction] = [
                 try? await embedMemoryIfMissing(dbPool: dbPool, memoryId: id, content: content)
             }
 
-            return StoreResponse(id: id)
+            // The memory row is stored either way — annotation is additive and
+            // must never cost content. But a store whose annotation landed on a
+            // row other than the one named has to SAY so; `success: true` alone
+            // is what let type-forks accumulate unnoticed for months.
+            return MemoryStoreResponse(
+                id: id,
+                warnings: annotationWarnings.isEmpty ? nil : annotationWarnings
+            )
         }
     ),
 

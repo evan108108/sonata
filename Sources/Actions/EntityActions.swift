@@ -16,48 +16,100 @@ private func encodeAnyJSON(_ value: Any) -> String? {
     return str
 }
 
+/// mem_entity_upsert's result. `id` alone was not enough to tell a caller what
+/// happened — `success: true` looked identical whether the write landed on the
+/// row they named, a fork of it, or a brand new row. `created` and `matchedBy`
+/// make the target explicit, and `warnings` reports a forked name that the
+/// caller resolved unambiguously but should still know about.
+struct EntityUpsertResponse: Encodable {
+    let id: String
+    let success = true
+    let created: Bool
+    /// `id` | `name+type` | `created`
+    let matchedBy: String
+    let warnings: [String]?
+}
+
 let entityActions: [SonataAction] = [
 
-    // POST /api/entity — upsert by name
+    // POST /api/entity — upsert by (name, type), or by id
+    //
+    // This door used to match on `WHERE name = ?` and ignore its own `type`
+    // argument entirely, which made it silently destructive: upsert(name:"Sona",
+    // type:"agent", description:…) returned the id of the CANONICAL Sona/person
+    // row (1035 edges) and overwrote its description and type. Once a name was
+    // forked, the fork could never be addressed through here at all — the name
+    // always resolved to whichever row came back first, while the caller
+    // believed they were editing the one they named.
+    //
+    // Now: the `type` argument participates in matching (via the shared
+    // resolver in EntityIdentity.swift, so this door and the mem_store
+    // annotation door agree), and a name that resolves to no row of the named
+    // type is a 409 naming the ids — never a silent write to a row the caller
+    // did not name. `id` is the escape hatch that can address any specific row,
+    // including changing its type.
     SonataAction(
         name: "mem_entity_upsert",
-        description: "Upsert an entity by name. Creates if new, updates if existing.",
+        description: """
+            Upsert an entity, matched on (name, type). Creates if new, updates if existing.
+
+            Matching is case-insensitive and considers BOTH name and type. If the name exists but only under a DIFFERENT type, this errors (409) and names the conflicting rows rather than overwriting one of them — pass `id` to target a specific row (that is also how you change an existing entity's type), or use mem_entity_patch.
+            """,
         group: "/api/entity",
         path: "/",
         method: .post,
         params: [
-            ActionParam("name", .string, required: true, description: "Entity name (unique key)"),
-            ActionParam("type", .string, required: true, description: "Entity type"),
+            ActionParam("name", .string, required: true, description: "Entity name (matched case-insensitively, together with type)"),
+            ActionParam("type", .string, required: true, description: "Entity type (participates in matching — a mismatch is an error, not an overwrite)"),
             ActionParam("description", .string, required: true, description: "Entity description"),
             ActionParam("attributes", .object, description: "Arbitrary JSON attributes"),
+            ActionParam("id", .string, description: "Target a specific entity row by id, bypassing name/type matching. Required to disambiguate a forked name, and the only way to change an existing entity's type."),
         ],
         handler: { ctx in
             let name = try ctx.params.require("name")
             let type = try ctx.params.require("type")
             let description = try ctx.params.require("description")
             let attributesJSON: String? = ctx.params.object("attributes").flatMap { encodeAnyJSON($0) }
+            let targetId = ctx.params.string("id").flatMap { $0.isEmpty ? nil : $0 }
 
             let now = nowMs()
 
-            do {
-                let resultId = try await ctx.dbPool.write { db -> String in
-                    let existing = try EntityRow.fetchOne(
-                        db,
-                        sql: "SELECT * FROM entities WHERE name = ?",
-                        arguments: [name]
-                    )
+            // Two shapes: an id-targeted write takes the caller's `name`
+            // verbatim (they named the row, they may rename it), while a
+            // name-matched write leaves the stored spelling alone — matching is
+            // case-insensitive, and normalizing `evenflow` to `Evenflow`
+            // because of one caller's casing is a rename nobody asked for.
+            let updateById = """
+                UPDATE entities
+                SET name = ?, type = ?, description = ?, attributes = COALESCE(?, attributes), updatedAt = ?
+                WHERE id = ?
+                """
+            let updateMatched = """
+                UPDATE entities
+                SET type = ?, description = ?, attributes = COALESCE(?, attributes), updatedAt = ?
+                WHERE id = ?
+                """
 
-                    if let existing = existing {
+            do {
+                let result = try await ctx.dbPool.write { db -> EntityUpsertResponse in
+                    // Explicit id — address exactly this row, whatever it holds.
+                    if let targetId {
+                        guard try Row.fetchOne(
+                            db,
+                            sql: "SELECT id FROM entities WHERE id = ?",
+                            arguments: [targetId]
+                        ) != nil else {
+                            throw ActionError.notFound("Entity id '\(targetId)'")
+                        }
                         try db.execute(
-                            sql: """
-                            UPDATE entities
-                            SET type = ?, description = ?, attributes = COALESCE(?, attributes), updatedAt = ?
-                            WHERE id = ?
-                            """,
-                            arguments: [type, description, attributesJSON, now, existing.id]
+                            sql: updateById,
+                            arguments: [name, type, description, attributesJSON, now, targetId]
                         )
-                        return existing.id
-                    } else {
+                        return EntityUpsertResponse(id: targetId, created: false, matchedBy: "id", warnings: nil)
+                    }
+
+                    switch try resolveEntity(db, name: name, type: type) {
+                    case .absent:
                         let id = newUUID()
                         try db.execute(
                             sql: """
@@ -66,10 +118,40 @@ let entityActions: [SonataAction] = [
                             """,
                             arguments: [id, name, type, description, attributesJSON, now, now]
                         )
-                        return id
+                        return EntityUpsertResponse(id: id, created: true, matchedBy: "created", warnings: nil)
+
+                    case .matched(let target, let siblings):
+                        try db.execute(
+                            sql: updateMatched,
+                            arguments: [type, description, attributesJSON, now, target.id]
+                        )
+                        // Unambiguous — the type picked the row — but the caller
+                        // should know the name is forked, because every
+                        // name-only door (relations, by-name lookup) will resolve
+                        // it to the most-connected row, not necessarily this one.
+                        let warnings = siblings.isEmpty ? nil : [
+                            "Name '\(name)' is forked across \(siblings.count + 1) rows; matched \(target.label) on type. Others: \(siblings.map(\.label).joined(separator: ", "))."
+                        ]
+                        return EntityUpsertResponse(id: target.id, created: false, matchedBy: "name+type", warnings: warnings)
+
+                    case .typeMismatch(let candidates):
+                        // The old behavior was to overwrite candidates.first here
+                        // and return success:true. That is the bug.
+                        throw ActionError.custom(
+                            """
+                            Entity '\(name)' exists, but not with type '\(type)'. \
+                            Refusing to overwrite a row you did not name. \
+                            Existing: \(candidates.map(\.label).joined(separator: ", ")). \
+                            Pass `id` to target one of these explicitly (this is also how you change an entity's type), \
+                            or use a distinct name.
+                            """,
+                            .conflict
+                        )
                     }
                 }
-                return StoreResponse(id: resultId)
+                return result
+            } catch let e as ActionError {
+                throw e
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
@@ -222,9 +304,14 @@ let entityActions: [SonataAction] = [
     ),
 
     // GET /api/entity?name=
+    //
+    // Callers use this to check an entity's stored `type` BEFORE annotating, so
+    // handing back an arbitrary row of a forked name is what causes the next
+    // fork. Resolves through the shared rule: case-insensitive, most-connected
+    // row wins, ordering total.
     SonataAction(
         name: "mem_entity_by_name",
-        description: "Get an entity by name.",
+        description: "Get an entity by name (case-insensitive). If the name is forked across several rows, returns the most-connected one — use mem_entity_search or mem_entity_list to see the rest.",
         group: "/api/entity",
         path: "/",
         method: .get,
@@ -234,8 +321,13 @@ let entityActions: [SonataAction] = [
         handler: { ctx in
             let name = try ctx.params.require("name")
             do {
-                let row = try await ctx.dbPool.read { db in
-                    try EntityRow.fetchOne(db, sql: "SELECT * FROM entities WHERE name = ?", arguments: [name])
+                let row = try await ctx.dbPool.read { db -> EntityRow? in
+                    guard let candidate = try resolveEntityByName(db, name: name) else { return nil }
+                    return try EntityRow.fetchOne(
+                        db,
+                        sql: "SELECT * FROM entities WHERE id = ?",
+                        arguments: [candidate.id]
+                    )
                 }
                 guard let row else {
                     throw ActionError.notFound("Entity not found")
@@ -344,12 +436,10 @@ let entityActions: [SonataAction] = [
             do {
                 let resultId: String? = try await ctx.dbPool.write { db -> String? in
                     if let name = name, !name.isEmpty {
-                        let row = try EntityRow.fetchOne(
-                            db,
-                            sql: "SELECT * FROM entities WHERE name = ?",
-                            arguments: [name]
-                        )
-                        guard let row else { return nil }
+                        // Same shared rule as every other name-keyed door — a
+                        // reference bump landing on the empty fork instead of
+                        // the hub is a reference lost.
+                        guard let row = try resolveEntityByName(db, name: name) else { return nil }
                         try db.execute(
                             sql: """
                             UPDATE entities
