@@ -463,6 +463,20 @@ func ensureBundledHooks() {
             timeoutSeconds: 10,
             matcher: "Agent"
         ),
+        // Blocks session-local scheduling primitives (harness's CronCreate
+        // and ScheduleWakeup at the 3600s max-delay clamp) so long-horizon
+        // schedules the user is counting on to fire while they sleep don't
+        // silently die with the calling session. Redirects to Sonata's
+        // durable scheduler (calendar_create one-shot / scheduler_create
+        // recurring). Filed 2026-08-14 by AE IV after a real miss —
+        // next-morning scout verification check was scheduled with
+        // session-local CronCreate; would have died overnight.
+        HookInstall(
+            filename: "pre-tool-use-scheduler-guardrail.js",
+            event: "PreToolUse",
+            timeoutSeconds: 5,
+            matcher: "CronCreate|ScheduleWakeup"
+        ),
     ]
 
     // Hooks we've shipped in the past and now want removed from users'
