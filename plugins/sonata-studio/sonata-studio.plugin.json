@@ -7,6 +7,7 @@
   "port": 4200,
   "arch": "arm64",
   "start_command": "bin/sonata-studio",
+  "health_timeout_seconds": 90,
   "actions": [
     {
       "name": "studio_room_create",

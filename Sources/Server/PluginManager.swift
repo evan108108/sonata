@@ -27,6 +27,18 @@ struct PluginManifest: Codable {
     /// unless the caller explicitly asked for takeover; today the safe path is
     /// always "skip and log."
     let skills: [String]?
+    /// Seconds `waitForHealthy` will poll `/api/actions` before declaring the
+    /// plugin failed. Optional — nil falls back to `PluginManager.healthTimeout`
+    /// (15s, aggressive default for fast Node/Elixir plugins). A plugin whose
+    /// boot path is dominated by external work (SSE handshakes to a remote
+    /// gateway, WASM warmup, model preload) should declare its own budget
+    /// here so steady-state startup doesn't get flagged failed and drop its
+    /// actions off the registry every deploy. After the deadline the DB row
+    /// stays `failed` and no re-registration runs — sonata-studio hit this
+    /// 2026-08-27: 15s budget vs ~52s actual boot meant its 34 actions were
+    /// silently missing from every session's tool surface until the operator
+    /// toggled it in the UI.
+    let healthTimeoutSeconds: Double?
 
     enum CodingKeys: String, CodingKey {
         case name, version, description, author, port, arch, actions
@@ -36,6 +48,7 @@ struct PluginManifest: Codable {
         case eventsTopic = "events_topic"
         case configSchema = "config_schema"
         case capabilities, skills
+        case healthTimeoutSeconds = "health_timeout_seconds"
     }
 }
 
@@ -373,7 +386,11 @@ final class PluginManager: @unchecked Sendable {
 
     /// Poll GET /api/actions until 200 or timeout. Returns true if healthy.
     func waitForHealthy(_ runtime: PluginRuntime) async -> Bool {
-        let deadline = Date().addingTimeInterval(healthTimeout)
+        // Per-plugin override lets slow-boot plugins (studio boots ~52s
+        // via 4a SSE handshakes) declare a larger budget in their manifest
+        // so their actions don't get dropped from the registry every deploy.
+        let budget = runtime.manifest.healthTimeoutSeconds ?? healthTimeout
+        let deadline = Date().addingTimeInterval(budget)
         let url = URL(string: "\(runtime.baseURL)/api/actions")!
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2
@@ -903,7 +920,8 @@ final class PluginManager: @unchecked Sendable {
                 sonataVersion: nil, port: port, arch: nil, startCommand: "",
                 eventsChannel: nil, eventsTopic: nil,
                 configSchema: nil, actions: nil, capabilities: nil,
-                skills: nil
+                skills: nil,
+                healthTimeoutSeconds: nil
             ),
             mode: "external",
             baseURL: url,
@@ -1014,7 +1032,8 @@ final class PluginManager: @unchecked Sendable {
                 sonataVersion: nil, port: row.port, arch: nil, startCommand: "",
                 eventsChannel: nil, eventsTopic: nil,
                 configSchema: nil, actions: nil, capabilities: nil,
-                skills: nil
+                skills: nil,
+                healthTimeoutSeconds: nil
             ),
             mode: row.mode,
             baseURL: baseURL,
