@@ -708,13 +708,34 @@ let dmActions: [SonataAction] = [
                     replyTargetName = sessKey
                 } else if !priorSender.isEmpty {
                     // Reply from the original RECIPIENT → send back to the
-                    // original SENDER. Infer kind from the sessionKey shape.
-                    let kind: DMTargetKind = priorSender.hasPrefix("worker-") ? .worker :
-                        (priorSender == "supervisor" ? .supervisor : .session)
-                    replyTarget = DMResolvedTarget(
-                        sessionKey: priorSender, kind: kind,
-                        peerId: nil, sessionId: nil
-                    )
+                    // original SENDER.
+                    //
+                    // Do NOT trust `priorSender` as a canonical MCP session
+                    // key: it's whatever the original sender passed as
+                    // `fromSessionId` at send time, which for interactive
+                    // sessions is often the raw sessionId UUID
+                    // ("<uuid>"), not the derived
+                    // `session-<first16hex>` that MCPConnections is keyed
+                    // by. Handing the raw form to `push(...)` silently
+                    // returns not_live even against a healthy live
+                    // session (observed 2026-08-27 while replying to AE
+                    // II's mcp-fingerprint DM: two dm_reply calls returned
+                    // not_live because the raw UUID wasn't the SSE key,
+                    // while dm_send at the same session id — which routes
+                    // through the resolver — landed sent).
+                    //
+                    // Re-resolve through DMTargetResolver so the key gets
+                    // canonicalized the same way dm_send would. This also
+                    // gives us worker/supervisor/peer routing in one place
+                    // and refuses cleanly if the sender is no longer
+                    // reachable.
+                    guard let resolved = await DMTargetResolver.resolve(priorSender, dbPool: ctx.dbPool) else {
+                        return DMSendResponse(status: "not_found", messageId: nil, reason: "reply_sender_no_longer_reachable")
+                    }
+                    if resolved.kind == .selfPeer {
+                        return DMSendResponse(status: "not_found", messageId: nil, reason: "self_peer")
+                    }
+                    replyTarget = resolved
                     replyTargetName = priorSender
                 } else {
                     return DMSendResponse(status: "not_found", messageId: nil, reason: "cannot_resolve_reply_target")
