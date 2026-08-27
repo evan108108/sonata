@@ -24,6 +24,7 @@ private func jobToResponseForAction(_ row: ScheduledJobRow) -> ScheduledJobRespo
         lastError: row.lastError,
         lastExitCode: row.lastExitCode,
         nextRunAt: row.nextRunAt,
+        notifyTarget: row.notifyTarget,
         createdAt: row.createdAt
     )
 }
@@ -71,12 +72,14 @@ let schedulerActions: [SonataAction] = [
             ActionParam("command", .string, required: true, description: "Command to run"),
             ActionParam("enabled", .boolean, description: "Enabled (default true)"),
             ActionParam("nextRunAt", .number, description: "Override nextRunAt (epoch ms)"),
+            ActionParam("notifyTarget", .string, description: "Optional DM target (session id / worker id / label / peer name / \"supervisor\"). When set, fire DMs this target instead of running the shell command; falls back to shell if the target isn't live at fire time."),
         ],
         handler: { ctx in
             let name = try ctx.params.require("name")
             let schedule = try ctx.params.require("schedule")
             let command = try ctx.params.require("command")
             let enabled = ctx.params.bool("enabled") ?? true
+            let notifyTarget = ctx.params.string("notifyTarget")
 
             let now = Double(nowMs())
             let nextRun = ctx.params.double("nextRunAt")
@@ -87,16 +90,17 @@ let schedulerActions: [SonataAction] = [
                 try await ctx.dbPool.write { db in
                     try db.execute(
                         sql: """
-                        INSERT INTO scheduledJobs (id, name, schedule, command, enabled, nextRunAt, createdAt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO scheduledJobs (id, name, schedule, command, enabled, nextRunAt, notifyTarget, createdAt)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(name) DO UPDATE SET
                             schedule = excluded.schedule,
                             command = excluded.command,
                             enabled = excluded.enabled,
-                            nextRunAt = excluded.nextRunAt
+                            nextRunAt = excluded.nextRunAt,
+                            notifyTarget = excluded.notifyTarget
                         """,
                         arguments: [newUUID(), name, schedule, command,
-                                   enabled, nextRun, now]
+                                   enabled, nextRun, notifyTarget, now]
                     )
                 }
             } catch {

@@ -9,6 +9,13 @@ struct ScheduledEntry: Sendable {
     let jobType: JobType
     let nextFireTime: Date
     let payload: JobPayload
+    /// Optional DM target for the "notify a session instead of spawning a
+    /// worker" path (v43 notifyTarget column). When set AND resolves to a
+    /// live target at fire time, the scheduler DMs `notifyBodyText()` to the
+    /// target and skips worker spawn / shell exec. On not_live/not_found it
+    /// falls back to the payload's normal path so a durable schedule still
+    /// fires. `nil` (the vast majority of rows) fires as it always has.
+    let notifyTarget: String?
 
     enum JobType: String, Sendable {
         case spawnClaude = "spawn-claude"
@@ -24,6 +31,22 @@ struct ScheduledEntry: Sendable {
         case shellCommand(command: String)
         /// Call a registered Swift function by name.
         case internalFunc(name: String)
+    }
+
+    /// Text payload the scheduler DMs when `notifyTarget` is set and resolves.
+    /// Callers only reach this when the payload has a natural text body
+    /// (claude prompt, shell command). Internal-function payloads don't
+    /// have a body and take the normal fire path even with `notifyTarget`
+    /// set — that path is checked at the fire site.
+    func notifyBodyText() -> String? {
+        switch payload {
+        case .claude(let prompt, _, _, _):
+            return prompt
+        case .shellCommand(let command):
+            return command
+        case .internalFunc:
+            return nil
+        }
     }
 }
 
@@ -198,19 +221,20 @@ public actor SchedulerActor {
         do {
             // Try scheduledJobs first
             let row: Row? = try dbPool.read { db in
-                try Row.fetchOne(db, sql: "SELECT id, name, schedule, command FROM scheduledJobs WHERE id = ?", arguments: [jobId])
+                try Row.fetchOne(db, sql: "SELECT id, name, schedule, command, notifyTarget FROM scheduledJobs WHERE id = ?", arguments: [jobId])
             }
             if let row = row, let id = row["id"] as? String,
                let command = row["command"] as? String {
                 let name = row["name"] as? String ?? id
-                let entry = ScheduledEntry(id: id, name: name, jobType: .shell, nextFireTime: Date(), payload: .shellCommand(command: command))
+                let notifyTarget = row["notifyTarget"] as? String
+                let entry = ScheduledEntry(id: id, name: name, jobType: .shell, nextFireTime: Date(), payload: .shellCommand(command: command), notifyTarget: notifyTarget)
                 logger.info("Triggering job \"\(name)\" immediately (loaded from DB)")
                 await fireJob(entry: entry, source: .scheduledJob)
                 return
             }
             // Try calendarEvents
             let calRow: Row? = try dbPool.read { db in
-                try Row.fetchOne(db, sql: "SELECT id, title, prompt, taskType, workingDir, model, maxTurns FROM calendarEvents WHERE id = ?", arguments: [jobId])
+                try Row.fetchOne(db, sql: "SELECT id, title, prompt, taskType, workingDir, model, maxTurns, notifyTarget FROM calendarEvents WHERE id = ?", arguments: [jobId])
             }
             if let row = calRow, let id = row["id"] as? String {
                 let title = row["title"] as? String ?? id
@@ -218,8 +242,9 @@ public actor SchedulerActor {
                 let workingDir = row["workingDir"] as? String
                 let model = row["model"] as? String
                 let maxTurns = row["maxTurns"] as? Int
+                let notifyTarget = row["notifyTarget"] as? String
                 let payload: ScheduledEntry.JobPayload = .claude(prompt: prompt, workingDir: workingDir, model: model, maxTurns: maxTurns)
-                let entry = ScheduledEntry(id: id, name: title, jobType: .spawnClaude, nextFireTime: Date(), payload: payload)
+                let entry = ScheduledEntry(id: id, name: title, jobType: .spawnClaude, nextFireTime: Date(), payload: payload, notifyTarget: notifyTarget)
                 logger.info("Triggering calendar event \"\(title)\" immediately (loaded from DB)")
                 await fireJob(entry: entry, source: .calendarEvent)
                 return
@@ -264,7 +289,7 @@ public actor SchedulerActor {
         let calendarEntries: [(ScheduledEntry, JobSource)] = try await dbPool.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT id, title, prompt, scheduledAt, recurrence, taskType,
-                       workingDir, model, maxTurns, createdAt
+                       workingDir, model, maxTurns, notifyTarget, createdAt
                 FROM calendarEvents
                 WHERE enabled = 1
             """)
@@ -281,6 +306,7 @@ public actor SchedulerActor {
                 let workingDir = row["workingDir"] as? String
                 let model = row["model"] as? String
                 let maxTurns = row["maxTurns"] as? Int
+                let notifyTarget = row["notifyTarget"] as? String
                 let createdAt = (row["createdAt"] as? Int64).map { Date(timeIntervalSince1970: Double($0) / 1000.0) }
                 let title = row["title"] as? String ?? id
 
@@ -325,14 +351,14 @@ public actor SchedulerActor {
                     payload = .internalFunc(name: prompt ?? taskTypeStr)
                 }
 
-                return (ScheduledEntry(id: id, name: title, jobType: jobType, nextFireTime: nextFire, payload: payload), .calendarEvent)
+                return (ScheduledEntry(id: id, name: title, jobType: jobType, nextFireTime: nextFire, payload: payload, notifyTarget: notifyTarget), .calendarEvent)
             }
         }
 
         // Load scheduled jobs
         let scheduledEntries: [(ScheduledEntry, JobSource)] = try await dbPool.read { db in
             let rows = try Row.fetchAll(db, sql: """
-                SELECT id, name, schedule, command, nextRunAt
+                SELECT id, name, schedule, command, nextRunAt, notifyTarget
                 FROM scheduledJobs
                 WHERE enabled = 1
             """)
@@ -362,8 +388,9 @@ public actor SchedulerActor {
                 }
 
                 let name = row["name"] as? String ?? id
+                let notifyTarget = row["notifyTarget"] as? String
                 let payload: ScheduledEntry.JobPayload = .shellCommand(command: command)
-                return (ScheduledEntry(id: id, name: name, jobType: .shell, nextFireTime: nextFire, payload: payload), .scheduledJob)
+                return (ScheduledEntry(id: id, name: name, jobType: .shell, nextFireTime: nextFire, payload: payload, notifyTarget: notifyTarget), .scheduledJob)
             }
         }
 
@@ -469,34 +496,74 @@ public actor SchedulerActor {
             var resultText: String? = nil
             var errorText: String? = nil
 
-            do {
-                switch entry.payload {
-                case .claude(let prompt, let workingDir, let model, let maxTurns):
-                    logger.info("Firing spawn-claude job \(entry.id)")
-                    resultText = try await claudeRunner.run(
-                        jobId: entry.id,
-                        prompt: prompt,
-                        workingDir: workingDir,
-                        model: model,
-                        maxTurns: maxTurns
-                    )
-
-                case .shellCommand(let command):
-                    logger.info("Firing shell job \(entry.id): \(command.prefix(80))")
-                    resultText = try await SchedulerActor.runShellCommand(command)
-
-                case .internalFunc(let name):
-                    logger.info("Firing internal job \(entry.id): \(name)")
-                    if let fn = internalFunctions[name] {
-                        try await fn()
-                    } else {
-                        throw SchedulerError.unknownInternalFunction(name)
-                    }
+            // notify_target branch (v43). If the schedule row carries a
+            // notifyTarget AND the payload has a text body worth DMing,
+            // try to DM that target first. On sent → skip normal execution.
+            // On not_live/not_found → fall through to today's exec path so
+            // the schedule still fires. `.internalFunc` payloads have no
+            // DM body; they always take the exec path.
+            var dmAttempted = false
+            var dmSucceeded = false
+            if let target = entry.notifyTarget, !target.isEmpty,
+               let bodyText = entry.notifyBodyText() {
+                dmAttempted = true
+                let outcome = await SchedulerActor.attemptScheduledNotify(
+                    target: target,
+                    bodyText: bodyText,
+                    entryId: entry.id,
+                    source: source,
+                    dbPool: dbPool,
+                    logger: logger
+                )
+                switch outcome {
+                case .sent(let messageId):
+                    dmSucceeded = true
+                    resultText = "notified \(target) (dm \(messageId))"
+                    logger.info("Job \(entry.id): DMed notifyTarget=\(target) instead of spawning worker")
+                case .fellBackNotLive(let reason):
+                    logger.warning("Job \(entry.id): notifyTarget=\(target) not live at fire (\(reason)) — falling back to worker spawn")
+                case .fellBackNotFound(let reason):
+                    logger.warning("Job \(entry.id): notifyTarget=\(target) not found at fire (\(reason)) — falling back to worker spawn")
                 }
-            } catch {
-                runStatus = "error"
-                errorText = String(describing: error)
-                logger.error("Job \(entry.id) failed: \(error)")
+            }
+
+            if !dmSucceeded {
+                do {
+                    switch entry.payload {
+                    case .claude(let prompt, let workingDir, let model, let maxTurns):
+                        logger.info("Firing spawn-claude job \(entry.id)")
+                        resultText = try await claudeRunner.run(
+                            jobId: entry.id,
+                            prompt: prompt,
+                            workingDir: workingDir,
+                            model: model,
+                            maxTurns: maxTurns
+                        )
+
+                    case .shellCommand(let command):
+                        logger.info("Firing shell job \(entry.id): \(command.prefix(80))")
+                        resultText = try await SchedulerActor.runShellCommand(command)
+
+                    case .internalFunc(let name):
+                        logger.info("Firing internal job \(entry.id): \(name)")
+                        if let fn = internalFunctions[name] {
+                            try await fn()
+                        } else {
+                            throw SchedulerError.unknownInternalFunction(name)
+                        }
+                    }
+                } catch {
+                    runStatus = "error"
+                    errorText = String(describing: error)
+                    logger.error("Job \(entry.id) failed: \(error)")
+                }
+
+                if dmAttempted {
+                    // Prepend a marker so the audit row makes clear we tried
+                    // to DM first and only spawned as a fallback.
+                    let prefix = "notify_target fallback (spawned worker/exec): "
+                    resultText = prefix + (resultText ?? "")
+                }
             }
 
             let finalStatus = runStatus
@@ -587,7 +654,8 @@ public actor SchedulerActor {
             name: entry.name,
             jobType: entry.jobType,
             nextFireTime: nextFire,
-            payload: entry.payload
+            payload: entry.payload,
+            notifyTarget: entry.notifyTarget
         )
 
         // Insert in sorted position
@@ -610,6 +678,106 @@ public actor SchedulerActor {
                 try db.execute(sql: "UPDATE calendarEvents SET scheduledAt = ?, updatedAt = ? WHERE id = ?",
                                arguments: [nextMs, nextMs, entry.id])
             }
+        }
+    }
+
+    // MARK: - notify_target DM path (v43)
+
+    /// Outcome of a scheduled fire's DM attempt. `sent` means the DM landed
+    /// on a live target and normal execution is skipped; the two fallback
+    /// cases mean the target wasn't reachable at fire time so the caller
+    /// runs the payload's usual path (spawn worker / shell exec).
+    enum NotifyOutcome: Sendable {
+        case sent(messageId: String)
+        case fellBackNotLive(reason: String)
+        case fellBackNotFound(reason: String)
+    }
+
+    /// Wrap the raw payload text (claude prompt or shell command) with a
+    /// preamble identifying the schedule row and the fire time. Extracted
+    /// so tests can assert the exact on-the-wire body shape without going
+    /// through the DM resolver.
+    ///
+    /// Contract:
+    ///   calendar_create rows → `[scheduled reminder from calendar_event/<id>, fired at <iso>]\n\n<body>`
+    ///   scheduler_create rows → `[scheduled reminder from scheduler_job/<id>, fired at <iso>]\n\n<body>`
+    static func wrappedNotifyBody(
+        bodyText: String,
+        entryId: String,
+        source: JobSource,
+        firedAt: Date
+    ) -> String {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        let firedAtIso = iso.string(from: firedAt)
+        let originPrefix: String
+        switch source {
+        case .calendarEvent: originPrefix = "calendar_event/\(entryId)"
+        case .scheduledJob:  originPrefix = "scheduler_job/\(entryId)"
+        }
+        return "[scheduled reminder from \(originPrefix), fired at \(firedAtIso)]\n\n\(bodyText)"
+    }
+
+    /// Resolve the caller's DM target, build the wrapped body, and try to
+    /// DM it. Called at fire time. Never throws — a DM failure just returns
+    /// a `fellBack*` outcome so the caller can spawn a worker as fallback.
+    /// Isolated as a `static` helper because it's driven from inside a
+    /// `Task.detached` in `fireJob` where actor isolation isn't in scope.
+    static func attemptScheduledNotify(
+        target: String,
+        bodyText: String,
+        entryId: String,
+        source: JobSource,
+        dbPool: DatabasePool,
+        logger: Logger
+    ) async -> NotifyOutcome {
+        let wrapped = Self.wrappedNotifyBody(
+            bodyText: bodyText,
+            entryId: entryId,
+            source: source,
+            firedAt: Date()
+        )
+        let originPrefix: String
+        switch source {
+        case .calendarEvent: originPrefix = "calendar_event/\(entryId)"
+        case .scheduledJob:  originPrefix = "scheduler_job/\(entryId)"
+        }
+
+        guard let resolved = await DMTargetResolver.resolve(target, dbPool: dbPool) else {
+            let reason: String
+            if await SonarPeerLookup.pluginReachable() {
+                reason = "no_such_target"
+            } else {
+                reason = "sonar_offline"
+            }
+            return .fellBackNotFound(reason: reason)
+        }
+        if resolved.kind == .selfPeer {
+            return .fellBackNotFound(reason: "self_peer")
+        }
+
+        // Sender key is a stable synthetic identity for the scheduler.
+        // Recipients see the wrapped body's `[scheduled reminder from ...]`
+        // preamble; they don't route replies here (there's no live session
+        // behind `scheduler:*`). The audit row keeps the attribution.
+        let senderKey = "scheduler:\(entryId)"
+        let response = await sendResolved(
+            target: target,
+            resolved: resolved,
+            body: wrapped,
+            context: "scheduled reminder from \(originPrefix)",
+            senderKey: senderKey,
+            inReplyToMessageId: nil,
+            dbPool: dbPool
+        )
+
+        switch response.status {
+        case "sent":
+            return .sent(messageId: response.messageId ?? "")
+        case "not_live":
+            return .fellBackNotLive(reason: response.reason ?? "not_live")
+        default:
+            return .fellBackNotFound(reason: response.reason ?? "not_found")
         }
     }
 

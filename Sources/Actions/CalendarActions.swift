@@ -22,6 +22,7 @@ private func rowToCalendarResponseForAction(_ row: CalendarEventRow) -> Calendar
         model: row.model,
         maxTurns: row.maxTurns,
         taskType: row.taskType,
+        notifyTarget: row.notifyTarget,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt
     )
@@ -158,6 +159,7 @@ let calendarActions: [SonataAction] = [
             ActionParam("model", .string, description: "Model override"),
             ActionParam("maxTurns", .integer, description: "Max turns override"),
             ActionParam("taskType", .string, required: true, description: "Task type"),
+            ActionParam("notifyTarget", .string, description: "Optional DM target (session id / worker id / label / peer name / \"supervisor\"). When set, fire DMs this target instead of spawning a worker; falls back to worker spawn if the target isn't live at fire time."),
         ],
         handler: { ctx in
             let title = try ctx.params.require("title")
@@ -171,6 +173,7 @@ let calendarActions: [SonataAction] = [
             let workingDir = ctx.params.string("workingDir")
             let model = ctx.params.string("model")
             let maxTurns = ctx.params.int("maxTurns")
+            let notifyTarget = ctx.params.string("notifyTarget")
 
             let id = newUUID()
             let now = nowMs()
@@ -182,15 +185,15 @@ let calendarActions: [SonataAction] = [
                         INSERT INTO calendarEvents
                             (id, title, description, prompt, scheduledAt, recurrence,
                              runCount, enabled, project, workingDir, model, maxTurns,
-                             taskType, createdAt, updatedAt)
-                        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                             taskType, notifyTarget, createdAt, updatedAt)
+                        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         arguments: [
                             id, title, description, prompt,
                             scheduledAt, recurrence,
                             enabled, project, workingDir,
                             model, maxTurns, taskType,
-                            now, now
+                            notifyTarget, now, now
                         ]
                     )
                 }
@@ -222,6 +225,7 @@ let calendarActions: [SonataAction] = [
             ActionParam("model", .string, description: "New model"),
             ActionParam("maxTurns", .integer, description: "New max turns"),
             ActionParam("taskType", .string, description: "New task type"),
+            ActionParam("notifyTarget", .string, description: "New notifyTarget (empty string clears)"),
         ],
         handler: { ctx in
             let id = try ctx.params.require("id")
@@ -241,6 +245,11 @@ let calendarActions: [SonataAction] = [
             if let v = ctx.params.string("model")       { setClauses.append("model = ?");       args.append(v) }
             if let v = ctx.params.int("maxTurns")       { setClauses.append("maxTurns = ?");    args.append(v) }
             if let v = ctx.params.string("taskType")    { setClauses.append("taskType = ?");    args.append(v) }
+            if let v = ctx.params.string("notifyTarget") {
+                // Empty string is treated as an explicit clear.
+                setClauses.append("notifyTarget = ?")
+                args.append(v.isEmpty ? DatabaseValue.null : v.databaseValue)
+            }
 
             args.append(id)
             let sql = "UPDATE calendarEvents SET \(setClauses.joined(separator: ", ")) WHERE id = ?"

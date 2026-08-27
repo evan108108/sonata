@@ -22,6 +22,7 @@ struct CalendarEventRow: FetchableRecord, PersistableRecord, Codable {
     var model: String?
     var maxTurns: Int?
     var taskType: String
+    var notifyTarget: String?
     var createdAt: Int64
     var updatedAt: Int64
 }
@@ -79,6 +80,7 @@ struct CalendarEventResponse: Encodable {
     let model: String?
     let maxTurns: Int?
     let taskType: String
+    let notifyTarget: String?
     let createdAt: Int64
     let updatedAt: Int64
 
@@ -99,6 +101,7 @@ struct CalendarEventResponse: Encodable {
         try c.encodeIfPresent(model, forKey: .model)
         try c.encodeIfPresent(maxTurns, forKey: .maxTurns)
         try c.encode(taskType, forKey: .taskType)
+        try c.encodeIfPresent(notifyTarget, forKey: .notifyTarget)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
     }
@@ -108,6 +111,7 @@ struct CalendarEventResponse: Encodable {
         case scheduledAt, recurrence
         case lastRunAt, lastRunStatus, runCount
         case enabled, project, workingDir, model, maxTurns, taskType
+        case notifyTarget
         case createdAt, updatedAt
     }
 }

@@ -1499,5 +1499,17 @@ extension DatabaseMigrator {
                 ON watcher_events(watcherId, firedAt DESC)
                 """)
         }
+
+        // v43: notifyTarget on calendarEvents + scheduledJobs. When set at
+        // schedule-create time, fire dispatches a DM to that target (any
+        // string dm_send resolves — session_id / worker_id / label /
+        // peer_name / "supervisor") instead of spawning a fresh worker.
+        // If the target isn't live at fire time, falls back to the worker-
+        // spawn path so a durable schedule still fires. Nullable → old rows
+        // fire as before.
+        registerMigration("v43_scheduler_notify_target") { db in
+            try db.execute(sql: "ALTER TABLE calendarEvents ADD COLUMN notifyTarget TEXT")
+            try db.execute(sql: "ALTER TABLE scheduledJobs ADD COLUMN notifyTarget TEXT")
+        }
     }
 }

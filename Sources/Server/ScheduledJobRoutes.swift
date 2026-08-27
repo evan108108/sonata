@@ -17,12 +17,13 @@ struct ScheduledJobRow: FetchableRecord, PersistableRecord, Codable {
     var lastError: String?
     var lastExitCode: Double?
     var nextRunAt: Double?
+    var notifyTarget: String?
     var createdAt: Double
 
     enum CodingKeys: String, CodingKey {
         case id, name, schedule, command, enabled
         case lastRunAt, lastResult, lastError, lastExitCode
-        case nextRunAt, createdAt
+        case nextRunAt, notifyTarget, createdAt
     }
 }
 
@@ -55,5 +56,6 @@ struct ScheduledJobResponse: Encodable {
     let lastError: String?
     let lastExitCode: Double?
     let nextRunAt: Double?
+    let notifyTarget: String?
     let createdAt: Double
 }
