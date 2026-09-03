@@ -515,6 +515,20 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
             return
         }
 
+        // Pre-accept Claude Code's workspace-trust dialog for this cwd.
+        // Claude Code 2.1.259 added an interactive "Is this a project you
+        // trust?" prompt on every un-accepted cwd. Sonata's PTY is a real
+        // TTY (so the prompt isn't skipped the way --print skips it), and
+        // --dangerously-skip-permissions does NOT bypass the trust check.
+        // Without pre-acceptance the tab shows the dialog waiting on Enter,
+        // Evan never sees a prompt to answer, and eventually the tab renders
+        // "Session ended, exit code 256" — every new interactive session
+        // broke this way once 2.1.259 landed. Sonata-launched sessions are
+        // trusted by construction (Evan picked the cwd himself), so we
+        // idempotently write hasTrustDialogAccepted:true into ~/.claude.json
+        // for this cwd right before spawn.
+        InteractiveSessionTab.ensureClaudeWorkspaceTrust(cwd: cwd)
+
         lastSpawnAt = Date()
         termView.startProcess(
             executable: binary,
@@ -657,6 +671,51 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
 // MARK: - Environment
 
 extension InteractiveSessionTab {
+    /// Ensure Claude Code's per-cwd trust flag is set to `true` in
+    /// `~/.claude.json` under `projects.<cwd>.hasTrustDialogAccepted`. Sonata
+    /// treats every launched session as trusted-by-construction (the user
+    /// picked the cwd), and Claude Code's own "Yes, I trust this folder"
+    /// button writes the same flag. Idempotent, best-effort — any I/O or
+    /// JSON-parse failure logs and returns without blocking spawn (the
+    /// worst case is the pre-existing dialog behaviour).
+    static func ensureClaudeWorkspaceTrust(cwd: URL) {
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        let path = "\(home)/.claude.json"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else {
+            // First-run Claude Code — file doesn't exist yet. Leave it
+            // alone; claude will create it and prompt normally. Sonata
+            // sessions run against an existing Claude install in practice.
+            return
+        }
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                sonataFileLog("ensureClaudeWorkspaceTrust: ~/.claude.json is not a JSON object; skipping")
+                return
+            }
+            var projects = root["projects"] as? [String: Any] ?? [:]
+            var project = projects[cwd.path] as? [String: Any] ?? [:]
+            if let already = project["hasTrustDialogAccepted"] as? Bool, already {
+                return  // fast path — already accepted
+            }
+            project["hasTrustDialogAccepted"] = true
+            projects[cwd.path] = project
+            root["projects"] = projects
+            let updated = try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.prettyPrinted, .withoutEscapingSlashes]
+            )
+            // Atomic replace: write to a sibling tmp then rename, so a
+            // concurrently-spawning claude never reads a torn file.
+            let tmp = path + ".sonata-tmp"
+            try updated.write(to: URL(fileURLWithPath: tmp), options: .atomic)
+            _ = try? fm.replaceItemAt(URL(fileURLWithPath: path), withItemAt: URL(fileURLWithPath: tmp))
+        } catch {
+            sonataFileLog("ensureClaudeWorkspaceTrust: failed to update ~/.claude.json for cwd=\(cwd.path): \(error)")
+        }
+    }
+
     static var claudeBinary: String {
         if let env = ProcessInfo.processInfo.environment["SONA_CLAUDE_BINARY"] {
             return env
