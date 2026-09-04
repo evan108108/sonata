@@ -34,12 +34,11 @@
  *
  *   subagent_type        interactive session                worker session
  *   -------------------  --------------------------------  --------------
- *   Explore              pass (silent)                     pass (silent)
- *   everything else      BLOCK-with-override -> worker     pass (silent)
- *   (incl. fork, Plan,     (agent may re-invoke with       (workers use
- *    general-purpose,      [bg-agent-approved: ...]          bg agents so
- *    omitted, custom)      to bypass this call)              they don't
- *                                                            recursively
+ *   every subagent type  BLOCK-with-override -> worker     pass (silent)
+ *   (Explore, fork,        (agent may re-invoke with       (workers use
+ *    Plan, general-        [bg-agent-approved: ...]          bg agents so
+ *    purpose, omitted,     to bypass this call)              they don't
+ *    custom)                                                 recursively
  *                                                            spawn more
  *                                                            Sonata workers)
  *
@@ -75,15 +74,16 @@ const http = require("node:http");
 
 const SONATA_API = process.env.MEM_API || "http://localhost:3211";
 
-// Silent pass-through: `Explore` is a one-shot read-only lookup whose result
-// lands in the visible turn — no need to steer the model toward a worker for
-// it. Everything else (including `fork`) is subject to the block-with-override
-// path in interactive sessions. `fork` was previously in a NUDGE_ALLOW set
-// that wrote a "consider a worker" note to stderr on pass, but per Anthropic's
-// PreToolUse hook contract, stderr on exit-0 goes to the CLI's own stream —
-// the model never sees it. So the nudge was invisible and fork was effectively
-// unguarded. Moved into block-with-override so the message reaches the model.
-const SILENT_ALLOW = new Set(["Explore"]);
+// Silent pass-through subagent types. Empty by default (2026-09-04):
+// `Explore` used to live here on the theory that it's a one-shot read-only
+// lookup whose result lands in the visible turn. In practice Explore fans
+// out enough tool calls and reads enough files that its context cost is
+// indistinguishable from a general-purpose Agent — the entire point of the
+// Workers UI (mid-flight inspection, DM-able, transcript retained) applies
+// to Explore too. Evan directive: "same rules exactly" as background Agent.
+// Reinstate an entry here only for a subagent type whose work is genuinely
+// context-management scaffolding rather than the work-you-want-visible.
+const SILENT_ALLOW = new Set();
 
 // Per-call override marker. The model reads the block reason (which names this
 // syntax explicitly), decides whether the guardrail's redirect is still right,
@@ -320,9 +320,13 @@ function redirectForInteractive(subagentType, what, snapshot, taskId, noPromptTo
     "  3. Tell the worker to DM before it marks the task complete, so you",
     "     approve the result before it finalises.",
     "",
-    `Silent-allowlist subagent_types: ${[...SILENT_ALLOW].join(", ")}`,
-    "(context-management primitives, not work worth watching).",
-    "",
+    ...(SILENT_ALLOW.size
+      ? [
+          `Silent-allowlist subagent_types: ${[...SILENT_ALLOW].join(", ")}`,
+          "(context-management primitives, not work worth watching).",
+          "",
+        ]
+      : []),
     "PER-CALL OVERRIDE — if you have a legit reason a background Agent is",
     "genuinely the right tool here (e.g. the parent context would be blown by",
     "the tool noise, or the work is one-shot enough that a worker is overkill),",

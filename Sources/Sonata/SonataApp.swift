@@ -455,8 +455,11 @@ func ensureBundledHooks() {
         HookInstall(filename: "sidecar-user-prompt-submit-hook.sh", event: "UserPromptSubmit", timeoutSeconds: 3),
         // Blocks harness-internal background `Agent` subagents so substantive
         // multi-step work runs as a visible Sonata worker instead (ADA-472).
-        // Allowlists Explore/fork, blocks the rest, and degrades to
-        // pass-through when Sonata is unreachable.
+        // Silent-allowlist is empty as of 2026-09-04 (Explore removed per
+        // Evan directive — "same rules exactly"); the hook blocks every
+        // subagent type in interactive sessions and passes silently in
+        // worker sessions, and degrades to pass-through when Sonata is
+        // unreachable.
         HookInstall(
             filename: "pre-tool-use-agent-guardrail.js",
             event: "PreToolUse",

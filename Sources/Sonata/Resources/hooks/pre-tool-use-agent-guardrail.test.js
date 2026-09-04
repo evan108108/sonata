@@ -107,11 +107,11 @@ server.listen(0, "127.0.0.1", async () => {
   r = await runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } }, INT);
   check("Bash / interactive -> pass untouched", r.decision === null && r.stderr === "");
 
-  console.log("\n=== 2. Allowlist (Explore is silent everywhere; fork is now interactive-blocked) ===");
+  console.log("\n=== 2. Allowlist empty (Explore joins fork/Plan under block-with-override) ===");
   r = await runHook(agent("Explore"), INT);
-  check("Explore / interactive -> pass, silent", r.decision === null && r.stderr === "");
+  check("Explore / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
   r = await runHook(agent("Explore"), WRK);
-  check("Explore / worker -> pass, silent", r.decision === null && r.stderr === "");
+  check("Explore / worker -> pass, silent (workers use bg agents freely)", r.decision === null && r.stderr === "");
   r = await runHook(agent("fork"), INT);
   check("fork / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
   r = await runHook(agent("fork"), WRK);
