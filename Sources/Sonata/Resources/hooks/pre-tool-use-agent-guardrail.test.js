@@ -97,6 +97,20 @@ const agent = (t, extra) => ({
   ),
 });
 
+// Top-level `Explore` tool payload — separate surface from Agent, so it needs
+// its own factory. Explore uses `question` (per the tool contract in Claude
+// Code) rather than `prompt`; the guardrail scans both.
+const explore = (extra) => ({
+  hook_event_name: "PreToolUse",
+  tool_name: "Explore",
+  session_id: "session-TEST-123",
+  cwd: "/Users/evan/testcwd",
+  tool_input: Object.assign(
+    { question: "Find every place we call OrgSandboxManager.complete and describe the call sites in one sentence each." },
+    extra || {},
+  ),
+});
+
 server.listen(0, "127.0.0.1", async () => {
   const API = `http://127.0.0.1:${server.address().port}`;
   const INT = { SONA_WORKER: "0", MEM_API: API, SONA_SESSION_ID: "session-TEST-123" };
@@ -107,15 +121,34 @@ server.listen(0, "127.0.0.1", async () => {
   r = await runHook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } }, INT);
   check("Bash / interactive -> pass untouched", r.decision === null && r.stderr === "");
 
-  console.log("\n=== 2. Allowlist empty (Explore joins fork/Plan under block-with-override) ===");
+  console.log("\n=== 2. Allowlist empty (Explore-as-subagent joins fork/Plan under block-with-override) ===");
   r = await runHook(agent("Explore"), INT);
-  check("Explore / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
+  check("Agent(Explore) / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
   r = await runHook(agent("Explore"), WRK);
-  check("Explore / worker -> pass, silent (workers use bg agents freely)", r.decision === null && r.stderr === "");
+  check("Agent(Explore) / worker -> pass, silent (workers use bg agents freely)", r.decision === null && r.stderr === "");
   r = await runHook(agent("fork"), INT);
   check("fork / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
   r = await runHook(agent("fork"), WRK);
   check("fork / worker -> pass, silent (workers use bg agents freely)", r.decision === null && r.stderr === "");
+
+  console.log("\n=== 2b. Top-level Explore tool guarded same as Agent ===");
+  r = await runHook(explore(), INT);
+  check("Explore / interactive -> BLOCK-with-override", r.decision && r.decision.decision === "block" && /bg-agent-approved/.test(r.decision.reason));
+  check("  block opener names the Explore surface", r.decision && /Explore fan-out search/.test(r.decision.reason));
+  check("  subagent_type=Explore labels the filed task", r.decision && /subagent_type=Explore/.test(r.decision.reason));
+  r = await runHook(explore(), WRK);
+  check("Explore / worker -> pass, silent", r.decision === null && r.stderr === "");
+  // Override marker must work on Explore's `question` field, not just `prompt`.
+  r = await runHook(
+    explore({ question: "[bg-agent-approved: one-shot lookup, no worker latency budget] Find OrgSandboxManager.complete callers." }),
+    INT,
+  );
+  check("Explore / override marker in question field -> pass", r.decision === null);
+  check("  override reason logged to stderr", /OVERRIDE.*one-shot lookup/.test(r.stderr));
+  // Bare Bash / Read still passes untouched — the new matcher must not widen
+  // beyond Agent and Explore.
+  r = await runHook({ hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/x" } }, INT);
+  check("Read / interactive -> pass untouched (matcher stays tight)", r.decision === null && r.stderr === "");
 
   console.log("\n=== 3. Interactive block + filed-task provenance ===");
   lastPost = null;

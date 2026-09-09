@@ -464,7 +464,7 @@ func ensureBundledHooks() {
             filename: "pre-tool-use-agent-guardrail.js",
             event: "PreToolUse",
             timeoutSeconds: 10,
-            matcher: "Agent"
+            matcher: "Agent|Explore"
         ),
         // Blocks session-local scheduling primitives (harness's CronCreate
         // and ScheduleWakeup at the 3600s max-delay clamp) so long-horizon

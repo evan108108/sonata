@@ -180,25 +180,43 @@ function sessionRole() {
   return "interactive";
 }
 
-/** Short, stable label for the work the Agent call was about to do. */
-function describeCall(input) {
+/** Fields the guardrail treats as the "prompt" body across both surfaces.
+ *
+ * The `Agent` tool uses `prompt`. The top-level `Explore` tool uses `question`
+ * for the actual query, and per its help text it can also take `query`; we
+ * accept either. First non-empty string wins. Description is deliberately
+ * excluded — it's a 3-5 word label, not substantive scope, and treating it as
+ * a prompt would file context-free stubs.
+ */
+const PROMPT_FIELDS = ["prompt", "question", "query"];
+
+function readPromptField(input) {
+  for (const key of PROMPT_FIELDS) {
+    const v = input[key];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/** Short, stable label for the work the Agent/Explore call was about to do. */
+function describeCall(input, toolName) {
   const desc = typeof input.description === "string" ? input.description.trim() : "";
   if (desc) return desc.slice(0, 120);
-  const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  const prompt = readPromptField(input).trim();
   if (prompt) return prompt.split("\n")[0].slice(0, 120);
-  return "background Agent work";
+  return toolName === "Explore" ? "Explore fan-out search" : "background Agent work";
 }
 
 /**
  * A filed task is dispatched for real, so it must be worth dispatching.
- * An `Agent` call carrying only a `description` (legal — `prompt` is what the
- * subagent reads, `description` is a 3-5 word label) would otherwise file a
+ * An `Agent`/`Explore` call carrying only a `description` (legal — the
+ * prompt-shaped field is what the subagent reads) would otherwise file a
  * context-free stub that a worker then picks up and has to guess at.
  */
 const MIN_PROMPT_CHARS = 40;
 
 function substantivePrompt(input) {
-  const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  const prompt = readPromptField(input).trim();
   return prompt.length >= MIN_PROMPT_CHARS ? prompt : null;
 }
 
@@ -298,9 +316,12 @@ async function queueSnapshot() {
   return { ahead, idle, total };
 }
 
-function redirectForInteractive(subagentType, what, snapshot, taskId, noPromptToHandOff) {
+function redirectForInteractive(toolName, subagentType, what, snapshot, taskId, noPromptToHandOff) {
+  const opener = toolName === "Explore"
+    ? `Explore fan-out search (routed as subagent_type=${subagentType}) blocked.`
+    : `Background Agent (subagent_type=${subagentType}) blocked.`;
   const lines = [
-    `Background Agent (subagent_type=${subagentType}) blocked.`,
+    opener,
     "",
     "Substantive multi-step work must run as a Sonata worker so it is visible:",
     "live turn counter in the Workers UI, inspectable mid-flight, DM-able, and",
@@ -400,7 +421,15 @@ async function main(raw) {
     return pass();
   }
 
-  if (!payload || payload.tool_name !== "Agent") return pass();
+  // Guard two surfaces with identical policy: `Agent` (harness-internal
+  // background subagents) and `Explore` (top-level read-only fan-out search
+  // primitive). `Explore` runs as a background context of its own — its
+  // whole point is to fan out to many files and summarise, which is exactly
+  // the shape of work we want visible in Workers UI. So an `Explore` call
+  // is treated as an Agent call whose subagent_type is `"Explore"`, and the
+  // same block-with-override / worker-file-and-nudge pipeline runs.
+  const toolName = payload.tool_name;
+  if (toolName !== "Agent" && toolName !== "Explore") return pass();
 
   const input =
     payload.tool_input && typeof payload.tool_input === "object"
@@ -409,14 +438,18 @@ async function main(raw) {
 
   // Omitting subagent_type means general-purpose per the Agent tool contract,
   // so an absent value must be treated as blockable rather than allowed.
+  // For top-level `Explore`, the subagent-type-shaped label is always
+  // "Explore" regardless of any input; that's what we log and file under.
   const subagentType =
-    typeof input.subagent_type === "string" && input.subagent_type.trim()
-      ? input.subagent_type.trim()
-      : "general-purpose";
+    toolName === "Explore"
+      ? "Explore"
+      : typeof input.subagent_type === "string" && input.subagent_type.trim()
+        ? input.subagent_type.trim()
+        : "general-purpose";
 
   if (process.env.CLAUDE_ALLOW_BG_AGENT === "1") {
     process.stderr.write(
-      `[agent-guardrail] CLAUDE_ALLOW_BG_AGENT=1 — allowing background Agent ` +
+      `[agent-guardrail] CLAUDE_ALLOW_BG_AGENT=1 — allowing ${toolName} ` +
         `(subagent_type=${subagentType}). This run will not appear in Sonata.\n`,
     );
     return pass();
@@ -426,9 +459,15 @@ async function main(raw) {
 
   // Per-call override: the model previously read a block reason naming this
   // syntax and re-invoked with justification. Log the reason as the audit
-  // trail and pass through.
-  const rawPrompt = typeof input.prompt === "string" ? input.prompt : "";
-  const overrideMatch = rawPrompt.match(OVERRIDE_MARKER_RE);
+  // trail and pass through. Match against every prompt-shaped field so the
+  // marker works on either `Agent` (prompt) or `Explore` (question/query).
+  let overrideMatch = null;
+  for (const key of PROMPT_FIELDS) {
+    const v = input[key];
+    if (typeof v !== "string") continue;
+    const m = v.match(OVERRIDE_MARKER_RE);
+    if (m) { overrideMatch = m; break; }
+  }
   if (overrideMatch) {
     process.stderr.write(
       `[agent-guardrail] OVERRIDE (subagent_type=${subagentType}) — ` +
@@ -459,7 +498,7 @@ async function main(raw) {
     return pass();
   }
 
-  const what = describeCall(input);
+  const what = describeCall(input, toolName);
   const snapshot = await queueSnapshot();
   const prompt = substantivePrompt(input);
 
@@ -496,7 +535,7 @@ async function main(raw) {
   }
 
   return block(
-    redirectForInteractive(subagentType, what, snapshot, taskId, !prompt),
+    redirectForInteractive(toolName, subagentType, what, snapshot, taskId, !prompt),
   );
 }
 
