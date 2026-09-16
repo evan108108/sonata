@@ -28,8 +28,7 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         guard let view = terminalView else { return }
 
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-        let claudeBinary = ProcessInfo.processInfo.environment["SONA_CLAUDE_BINARY"]
-            ?? "\(home)/.local/bin/claude"
+        let claudeBinary = ClaudeBinary.resolvedPath()
 
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
         let commonPaths = [

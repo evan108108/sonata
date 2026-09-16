@@ -55,11 +55,9 @@ enum SidecarLaunchEnvironment {
         ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
     }
 
-    /// Same resolution order as `SupervisorCoordinator`.
-    static var claudeBinaryPath: String {
-        ProcessInfo.processInfo.environment["SONA_CLAUDE_BINARY"]
-            ?? "\(homeDirectory)/.local/bin/claude"
-    }
+    /// Same resolution order as `SupervisorCoordinator`. Delegates to
+    /// `ClaudeBinary` so the fallback chain matches every other spawn path.
+    static var claudeBinaryPath: String { ClaudeBinary.resolvedPath() }
 
     /// Throw unless this machine can actually run a sidecar.
     static func validatePreconditions() throws {

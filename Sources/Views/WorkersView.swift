@@ -175,24 +175,8 @@ class WorkerManager: ObservableObject {
         }
     }
 
-    /// Config — mirrors SonaWorkers Config but reads from env
-    static var claudeBinary: String {
-        if let env = ProcessInfo.processInfo.environment["SONA_CLAUDE_BINARY"] {
-            return env
-        }
-        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-        let candidates = [
-            "\(home)/.local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "/usr/local/bin/claude",
-        ]
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-        return "claude"
-    }
+    /// Config — mirrors SonaWorkers Config. Resolution lives in `ClaudeBinary`.
+    static var claudeBinary: String { ClaudeBinary.resolvedPath() }
 
     /// Goose binary path (no-fork engine, T3) — `SONA_GOOSE_BINARY` override or
     /// the usual install locations. Delegates to the pure resolver in

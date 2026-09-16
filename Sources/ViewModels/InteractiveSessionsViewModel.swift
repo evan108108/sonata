@@ -716,23 +716,7 @@ extension InteractiveSessionTab {
         }
     }
 
-    static var claudeBinary: String {
-        if let env = ProcessInfo.processInfo.environment["SONA_CLAUDE_BINARY"] {
-            return env
-        }
-        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-        let candidates = [
-            "\(home)/.local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "/usr/local/bin/claude",
-        ]
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-        return "claude"
-    }
+    static var claudeBinary: String { ClaudeBinary.resolvedPath() }
 
     /// Build env for an Interactive Sessions subprocess. Mirrors the WorkerCoordinator
     /// passthrough list but flips SONA_WORKER=0 and omits WORKER_ID / SESSION_LABEL —
