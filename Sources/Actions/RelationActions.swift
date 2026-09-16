@@ -39,8 +39,9 @@ let relationActions: [SonataAction] = [
 
             let now = nowMs()
 
+            let result: Result<String, ActionError>
             do {
-                let resultId = try await ctx.dbPool.write { db -> String in
+                result = try await ctx.dbPool.write { db -> Result<String, ActionError> in
                     let existing = try RelationRow.fetchOne(
                         db,
                         sql: """
@@ -51,7 +52,26 @@ let relationActions: [SonataAction] = [
                     )
 
                     if let existing = existing {
-                        return existing.id
+                        return .success(existing.id)
+                    }
+
+                    // Emit-side existence check: refuse writes that would create
+                    // a dangling edge (target/source id doesn't resolve to a row
+                    // in the named table). Before this check, a truncated or
+                    // typo'd id was silently accepted and returned success:true,
+                    // creating an edge that never fires in graph recall. See
+                    // learning db6c0952 (2026-07-28) and 6d43323c (2026-07-19)
+                    // for the two prior live instances, and the 2026-09-16
+                    // task that landed this check for the third.
+                    if !relationEndpointExists(db: db, id: sourceId, type: sourceType) {
+                        return .failure(.notFound(
+                            "sourceId '\(sourceId)' does not resolve to a \(sourceType) row (dangling_source)"
+                        ))
+                    }
+                    if !relationEndpointExists(db: db, id: targetId, type: targetType) {
+                        return .failure(.notFound(
+                            "targetId '\(targetId)' does not resolve to a \(targetType) row (dangling_target)"
+                        ))
                     }
 
                     let id = newUUID()
@@ -62,11 +82,19 @@ let relationActions: [SonataAction] = [
                         """,
                         arguments: [id, sourceId, sourceType, targetId, targetType, relation, now]
                     )
-                    return id
+                    return .success(id)
                 }
-                return StoreResponse(id: resultId)
+            } catch let error as ActionError {
+                throw error
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+
+            switch result {
+            case .success(let id):
+                return StoreResponse(id: id)
+            case .failure(let err):
+                throw err
             }
         }
     ),
@@ -110,14 +138,52 @@ let relationActions: [SonataAction] = [
         ],
         handler: { ctx in
             let id = try ctx.params.require("id")
+            let deleted: Bool
             do {
-                try await ctx.dbPool.write { db in
+                deleted = try await ctx.dbPool.write { db -> Bool in
+                    // Existence-before-delete so a bogus id gets a distinct
+                    // 404 instead of the same success:true a real delete
+                    // returns — the symmetric emit-side ⊥ for the create
+                    // handler above.
+                    let hit = try Int.fetchOne(
+                        db,
+                        sql: "SELECT 1 FROM relations WHERE id = ? LIMIT 1",
+                        arguments: [id]
+                    )
+                    guard hit != nil else { return false }
                     try db.execute(sql: "DELETE FROM relations WHERE id = ?", arguments: [id])
+                    return true
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            guard deleted else {
+                throw ActionError.notFound("relation '\(id)' does not exist")
             }
             return SuccessResponse()
         }
     ),
 ]
+
+// MARK: - Endpoint existence check
+//
+// Returns true when `id` names an existing row in the table implied by `type`
+// ("memory" -> memories, "entity" -> entities). Ignores status (an archived
+// memory is not a dangling target). Kept file-private and pure so the create
+// handler and the test can both call it. See db6c0952, 6d43323c.
+func relationEndpointExists(db: GRDB.Database, id: String, type: String) -> Bool {
+    let sql: String
+    switch type {
+    case "memory":
+        sql = "SELECT 1 FROM memories WHERE id = ? LIMIT 1"
+    case "entity":
+        sql = "SELECT 1 FROM entities WHERE id = ? LIMIT 1"
+    default:
+        return false
+    }
+    do {
+        return try Int.fetchOne(db, sql: sql, arguments: [id]) != nil
+    } catch {
+        return false
+    }
+}
