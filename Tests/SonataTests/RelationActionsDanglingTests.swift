@@ -181,6 +181,178 @@ final class RelationActionsDanglingTests: XCTestCase {
         XCTAssertEqual(try relationCountForSource(pool, sourceId: src), 1, "dedup must not double-insert")
     }
 
+    // MARK: - create — full sourceType × targetType × dangling-shape matrix
+    //
+    // The task's acceptance criterion is that all four (sourceType,targetType)
+    // combinations refuse dangling ids for both dangling shapes: (a) invalid
+    // shape (prefix/truncated/non-hex) and (b) valid 32-hex shape but no row.
+    // The tests above already cover entity→entity for both source and target;
+    // the matrix below fills in the remaining three combinations and the
+    // valid-shape-missing-row shape.
+
+    private struct Combo {
+        let sourceType: String
+        let targetType: String
+    }
+
+    private static let comboMatrix: [Combo] = [
+        Combo(sourceType: "entity", targetType: "entity"),
+        Combo(sourceType: "entity", targetType: "memory"),
+        Combo(sourceType: "memory", targetType: "entity"),
+        Combo(sourceType: "memory", targetType: "memory"),
+    ]
+
+    private func seedEndpoint(_ pool: DatabasePool, type: String, id: String) throws {
+        switch type {
+        case "entity":
+            try seedEntity(pool, id: id)
+        case "memory":
+            try seedMemory(pool, id: id)
+        default:
+            XCTFail("unknown endpoint type \(type)")
+        }
+    }
+
+    // Invalid-shape: 8-char prefix, the exact shape the 2026-09-17 cron hit.
+    // Runs the same check for every (sourceType, targetType) pair with a
+    // valid seeded source and a dangling target.
+    func testCreateRefusesDanglingTarget_invalidShape_allCombos() async throws {
+        for combo in Self.comboMatrix {
+            let pool = try makePool()
+            let goodSource = "aaaaaaaabbbbccccdddd1111eeee2222"
+            let danglingTarget = "12345678"
+            try seedEndpoint(pool, type: combo.sourceType, id: goodSource)
+
+            let ctx = ActionContext(
+                params: ActionParams([
+                    "sourceId": goodSource,
+                    "sourceType": combo.sourceType,
+                    "targetId": danglingTarget,
+                    "targetType": combo.targetType,
+                    "relation": "mentions",
+                ]),
+                dbPool: pool
+            )
+
+            do {
+                _ = try await create.handler(ctx)
+                XCTFail("(\(combo.sourceType)→\(combo.targetType), invalid-shape) should refuse dangling target")
+            } catch let err as ActionError {
+                guard case .notFound(let msg) = err else {
+                    XCTFail("(\(combo.sourceType)→\(combo.targetType), invalid-shape) expected notFound, got \(err)")
+                    continue
+                }
+                XCTAssertTrue(msg.contains("dangling_target"),
+                    "(\(combo.sourceType)→\(combo.targetType), invalid-shape) missing dangling_target token; got: \(msg)")
+            }
+            XCTAssertEqual(try relationCountForSource(pool, sourceId: goodSource), 0,
+                "(\(combo.sourceType)→\(combo.targetType), invalid-shape) refused create must leave no row")
+        }
+    }
+
+    // Valid 32-hex shape but no matching row — the yesterday-deleted-endpoint
+    // case the task acceptance calls out. Same matrix.
+    func testCreateRefusesDanglingTarget_validShapeMissingRow_allCombos() async throws {
+        for combo in Self.comboMatrix {
+            let pool = try makePool()
+            let goodSource = "aaaaaaaabbbbccccdddd1111eeee2222"
+            // Well-formed 32-hex id that we never seed.
+            let missingTarget = "ee2b4d126c2948bda00625af5e546703"
+            try seedEndpoint(pool, type: combo.sourceType, id: goodSource)
+
+            let ctx = ActionContext(
+                params: ActionParams([
+                    "sourceId": goodSource,
+                    "sourceType": combo.sourceType,
+                    "targetId": missingTarget,
+                    "targetType": combo.targetType,
+                    "relation": "mentions",
+                ]),
+                dbPool: pool
+            )
+
+            do {
+                _ = try await create.handler(ctx)
+                XCTFail("(\(combo.sourceType)→\(combo.targetType), 32-hex-missing) should refuse dangling target")
+            } catch let err as ActionError {
+                guard case .notFound(let msg) = err else {
+                    XCTFail("(\(combo.sourceType)→\(combo.targetType), 32-hex-missing) expected notFound, got \(err)")
+                    continue
+                }
+                XCTAssertTrue(msg.contains("dangling_target"),
+                    "(\(combo.sourceType)→\(combo.targetType), 32-hex-missing) missing dangling_target token; got: \(msg)")
+            }
+            XCTAssertEqual(try relationCountForSource(pool, sourceId: goodSource), 0,
+                "(\(combo.sourceType)→\(combo.targetType), 32-hex-missing) refused create must leave no row")
+        }
+    }
+
+    // Symmetric: dangling source with a valid target, both shapes, all combos.
+    func testCreateRefusesDanglingSource_bothShapes_allCombos() async throws {
+        for combo in Self.comboMatrix {
+            for danglingSource in ["12345678", "ee2b4d126c2948bda00625af5e546703"] {
+                let pool = try makePool()
+                let goodTarget = "ffffffff9999888877776666555544443"
+                try seedEndpoint(pool, type: combo.targetType, id: goodTarget)
+
+                let ctx = ActionContext(
+                    params: ActionParams([
+                        "sourceId": danglingSource,
+                        "sourceType": combo.sourceType,
+                        "targetId": goodTarget,
+                        "targetType": combo.targetType,
+                        "relation": "mentions",
+                    ]),
+                    dbPool: pool
+                )
+
+                do {
+                    _ = try await create.handler(ctx)
+                    XCTFail("(\(combo.sourceType)→\(combo.targetType), source='\(danglingSource)') should refuse")
+                } catch let err as ActionError {
+                    guard case .notFound(let msg) = err else {
+                        XCTFail("(\(combo.sourceType)→\(combo.targetType), source='\(danglingSource)') expected notFound, got \(err)")
+                        continue
+                    }
+                    XCTAssertTrue(msg.contains("dangling_source"),
+                        "(\(combo.sourceType)→\(combo.targetType), source='\(danglingSource)') missing dangling_source token; got: \(msg)")
+                }
+            }
+        }
+    }
+
+    // Happy path across every combo — a well-formed create still succeeds
+    // when both endpoints resolve. Guards against a refusal check that
+    // accidentally rejects legal writes.
+    func testCreateSucceeds_allCombos() async throws {
+        for combo in Self.comboMatrix {
+            let pool = try makePool()
+            let src = "aaaaaaaabbbbccccdddd1111eeee2222"
+            let tgt = "ffffffff9999888877776666555544443"
+            try seedEndpoint(pool, type: combo.sourceType, id: src)
+            try seedEndpoint(pool, type: combo.targetType, id: tgt)
+
+            let ctx = ActionContext(
+                params: ActionParams([
+                    "sourceId": src,
+                    "sourceType": combo.sourceType,
+                    "targetId": tgt,
+                    "targetType": combo.targetType,
+                    "relation": "about",
+                ]),
+                dbPool: pool
+            )
+
+            let response = try await create.handler(ctx)
+            let data = try JSONEncoder().encode(EncodableRelShim(value: response))
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            XCTAssertEqual(json?["success"] as? Bool, true,
+                "(\(combo.sourceType)→\(combo.targetType)) happy path should succeed")
+            XCTAssertEqual(try relationCountForSource(pool, sourceId: src), 1,
+                "(\(combo.sourceType)→\(combo.targetType)) happy path should write exactly one row")
+        }
+    }
+
     // MARK: - delete
 
     func testDeleteUnknownIdReturnsNotFound() async throws {
