@@ -106,6 +106,11 @@ let schedulerActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            // The scheduler fires from an in-memory queue built by loadJobs(),
+            // and fireJob() does not re-check `enabled`. Without a reload, a new
+            // job never fires and a disabled one keeps firing until something
+            // else happens to reload. calendar_* already does this.
+            await ctx.scheduler?.reload()
             return SuccessResponse()
         }
     ),
@@ -129,6 +134,9 @@ let schedulerActions: [SonataAction] = [
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
+            // Same reason as scheduler_create: drop the deleted job from the
+            // in-memory queue now, not at the next unrelated reload.
+            await ctx.scheduler?.reload()
             return SuccessResponse()
         }
     ),
