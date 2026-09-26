@@ -257,6 +257,25 @@ private func storeInlineEntitiesAndRelations(
                     arguments: [newId, def.name, def.type, def.description, now, now]
                 )
                 entityIdByName[def.name.lowercased()] = newId
+
+                // NAME-VARIANT GUARD — "Archer" vs "Archer Frohlich". Insert
+                // anyway (it may be a different entity), but say which rows the
+                // name may have meant. Full ids, because the remedy is a
+                // relation or patch by id and a truncated id doesn't resolve.
+                // The query runs after the INSERT, so drop the new row from it.
+                let variants = try nameVariantCandidates(db, name: def.name, type: def.type)
+                    .filter { $0.id != newId }
+                if !variants.isEmpty {
+                    let named = variants
+                        .map { "\($0.name)/\($0.type) (id \($0.id), \($0.edgeCount) edge\($0.edgeCount == 1 ? "" : "s"))" }
+                        .joined(separator: ", ")
+                    warnings.append(
+                        "entity '\(def.name)': created a new \(def.type) row (id \(newId)), but existing \(def.type) "
+                        + "row(s) carry a name variant of it: \(named). If you meant one of those, re-annotate with "
+                        + "its exact name. If this is a duplicate, link it related_to the canonical row by id and "
+                        + "mark its description as a duplicate."
+                    )
+                }
             }
         }
 
@@ -342,6 +361,8 @@ let memoryActions: [SonataAction] = [
               relations='[{"entity":"Scout","relation":"about"}]'
 
             The server reuses an existing entity on a case-insensitive match of BOTH name and type ("Scout"/"scout" merge; "Scout Leader" does not). A name that exists ONLY under a different type is NOT forked — the annotation attaches to the existing row (the most-connected one, if the name is already forked) and the response carries a `warnings` entry saying so. Only a name that exists nowhere INSERTs a new row.
+
+            For person, organization and project, a new name that is a word-subset or word-superset of an existing same-type name ("Archer" vs "Archer Frohlich") still INSERTs, but `warnings` names the existing row(s) by full id. That usually means you forked a short alias. Search first (mem_entity_search) and annotate with the canonical row's exact name.
 
             So a wrong `type` no longer splits an entity, but it does mean your `description` is ignored and your edge lands on a row you didn't name. READ `warnings` in the response. If you are not certain of an entity's existing type, look it up (mem_entity_by_name / mem_entity_search) first, and use mem_entity_patch by id to edit a description.
 

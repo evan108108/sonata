@@ -375,6 +375,90 @@ final class EntityIdentityTests: XCTestCase {
         XCTAssertEqual(try description(pool, id: "hub"), "kept")
         XCTAssertNil(body["warnings"])
     }
+
+    // MARK: - mem_store inline annotation (the name-variant guard)
+
+    /// The 2026-09-25 specimen: person "Archer" forked an empty stub beside the
+    /// canonical "Archer Frohlich" with no warning. The insert must still
+    /// happen (the short name may be someone else), but the caller must hear
+    /// about the likely canonical row, by full id.
+    func testAnnotationWithAShortAliasStillInsertsButNamesTheCanonicalRow() async throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "archer-canonical-full-id", name: "Archer Frohlich", type: "person", edges: 5)
+
+        let response = try await store.handler(ActionContext(
+            params: storeParams(
+                entities: #"[{"name":"archer","type":"person"}]"#,
+                relations: #"[{"entity":"archer","relation":"about"}]"#
+            ),
+            dbPool: pool
+        ))
+        let body = try json(response)
+
+        XCTAssertEqual(try entityCount(pool, name: "archer"), 1, "the guard warns, it does not block")
+        let targets = try relationTargets(pool, memoryId: body["id"] as! String)
+        XCTAssertEqual(targets.count, 1)
+        XCTAssertNotEqual(targets.first, "archer-canonical-full-id",
+            "an exact-name annotation must not be silently redirected to a different name")
+
+        let warnings = body["warnings"] as? [String] ?? []
+        XCTAssertEqual(warnings.count, 1, "got \(body)")
+        let warning = warnings.first ?? ""
+        XCTAssertTrue(warning.contains("Archer Frohlich"), "must name the candidate; got: \(warning)")
+        XCTAssertTrue(warning.contains("archer-canonical-full-id"),
+            "must carry the FULL id — relation_create refuses a truncated one; got: \(warning)")
+        XCTAssertTrue(warning.contains(targets.first ?? "<none>"),
+            "must carry the new row's id so the caller can patch or link it; got: \(warning)")
+    }
+
+    func testNameVariantGuardFiresInTheSupersetDirectionToo() async throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "scout", name: "Scout", type: "project", edges: 3)
+
+        let response = try await store.handler(ActionContext(
+            params: storeParams(
+                entities: #"[{"name":"Scout Lead Discovery","type":"project"}]"#,
+                relations: "[]"
+            ),
+            dbPool: pool
+        ))
+        let warnings = try json(response)["warnings"] as? [String] ?? []
+
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings.first?.contains("Scout/project (id scout") ?? false, "got: \(warnings)")
+    }
+
+    func testNameVariantGuardStaysQuietOutsideItsScope() async throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "a", name: "Archer Frohlich", type: "person")
+        try insertEntity(pool, id: "b", name: "scheduler registered not live", type: "failure_mode")
+
+        let response = try await store.handler(ActionContext(
+            params: storeParams(
+                entities: """
+                [
+                  {"name":"Archer Smith","type":"person"},
+                  {"name":"Archer","type":"organization"},
+                  {"name":"scheduler","type":"failure_mode"}
+                ]
+                """,
+                relations: "[]"
+            ),
+            dbPool: pool
+        ))
+        let body = try json(response)
+
+        // Overlapping-but-not-nested words, a different type, and a type
+        // outside person/organization/project are all different things.
+        XCTAssertNil(body["warnings"], "got \(body)")
+        XCTAssertEqual(try entityCount(pool, name: "Archer Smith"), 1)
+        XCTAssertEqual(try entityCount(pool, name: "scheduler"), 1)
+    }
+
+    func testNameTokensSplitOnAnyWhitespaceAndIgnoreCase() {
+        XCTAssertEqual(nameTokens("  Archer\tFROHLICH \n"), ["archer", "frohlich"])
+        XCTAssertTrue(nameTokens("   ").isEmpty)
+    }
 }
 
 // Type-erased Encodable shim so XCTest can JSONEncode `any Encodable` results

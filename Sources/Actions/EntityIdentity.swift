@@ -55,6 +55,16 @@ struct EntityCandidate {
 /// `LIMIT 1` with no ORDER BY let SQLite's row order decide, which is why the
 /// same name could resolve to the fork one call and the hub the next.
 func entityCandidates(_ db: Database, name: String) throws -> [EntityCandidate] {
+    try fetchRankedCandidates(db, where: "LOWER(e.name) = LOWER(?)", arguments: [name])
+}
+
+/// Shared SELECT behind every candidate lookup, so all of them rank under the
+/// same total ordering.
+private func fetchRankedCandidates(
+    _ db: Database,
+    where predicate: String,
+    arguments: StatementArguments
+) throws -> [EntityCandidate] {
     let rows = try Row.fetchAll(
         db,
         sql: """
@@ -62,10 +72,10 @@ func entityCandidates(_ db: Database, name: String) throws -> [EntityCandidate] 
                (SELECT COUNT(*) FROM relations r
                  WHERE r.sourceId = e.id OR r.targetId = e.id) AS edgeCount
         FROM entities e
-        WHERE LOWER(e.name) = LOWER(?)
+        WHERE \(predicate)
         ORDER BY edgeCount DESC, e.createdAt ASC, e.id ASC
         """,
-        arguments: [name]
+        arguments: arguments
     )
     return rows.compactMap { row in
         guard let id = row["id"] as? String,
@@ -113,4 +123,46 @@ func resolveEntity(_ db: Database, name: String, type: String) throws -> EntityR
         return .matched(exact, siblings: candidates.filter { $0.id != exact.id })
     }
     return .typeMismatch(candidates)
+}
+
+// MARK: - Name-variant forks
+//
+// The type guard above closes forks where the NAME matches and the type
+// doesn't. The mirror case is the same type under a shorter or longer name:
+// annotating person "Archer" (2026-09-25) found no row named exactly that, so it
+// INSERTed an empty stub next to the canonical "Archer Frohlich", the memory's
+// edge landed on the stub, and nothing said so. Unlike a type mismatch this one
+// can't be resolved automatically — "Archer" may genuinely be a different
+// person — so the insert still happens and the caller is told which rows the
+// name may have meant.
+
+/// Types where short-name aliasing is common enough to be worth a warning.
+/// Concepts, tools and failure modes are named precisely, and a word-subset
+/// there ("scheduler" vs "scheduler-registered-not-live") is usually a
+/// different thing.
+let nameVariantEntityTypes: Set<String> = ["person", "organization", "project"]
+
+/// Lowercased whitespace-separated words of a name, e.g. "Archer  Frohlich" →
+/// {"archer", "frohlich"}.
+func nameTokens(_ name: String) -> Set<String> {
+    Set(name.lowercased().split(whereSeparator: \.isWhitespace).map(String.init))
+}
+
+/// Same-type rows whose name is a word-subset or word-superset of `name`
+/// ("Archer" ⊂ "Archer Frohlich"), most-connected first. Empty for types
+/// outside `nameVariantEntityTypes`.
+///
+/// Call this only once `resolveEntity` has returned `.absent`. The exact-name
+/// row, if there is one, is not excluded here.
+func nameVariantCandidates(_ db: Database, name: String, type: String) throws -> [EntityCandidate] {
+    guard nameVariantEntityTypes.contains(type.lowercased()) else { return [] }
+    let wanted = nameTokens(name)
+    guard !wanted.isEmpty else { return [] }
+    // The per-type population is a few hundred rows at most, so filtering by
+    // token set in Swift is cheaper to get right than tokenizing in SQL.
+    return try fetchRankedCandidates(db, where: "LOWER(e.type) = LOWER(?)", arguments: [type])
+        .filter { candidate in
+            let tokens = nameTokens(candidate.name)
+            return !tokens.isEmpty && (tokens.isSubset(of: wanted) || tokens.isSuperset(of: wanted))
+        }
 }
