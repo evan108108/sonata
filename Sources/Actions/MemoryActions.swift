@@ -158,6 +158,9 @@ struct MemoryStoreResponse: Encodable {
     let id: String
     let success = true
     let warnings: [String]?
+    /// Set only for `type: learning` when recent same-project learnings look
+    /// like the same thing. The same ids also appear in a `warnings` line.
+    var similarRecentLearnings: SimilarLearningsWarning? = nil
 }
 
 /// Parse the inline `entities` and `relations` JSON params on `mem_store`
@@ -372,6 +375,8 @@ let memoryActions: [SonataAction] = [
 
             So a wrong `type` no longer splits an entity, but it does mean your `description` is ignored and your edge lands on a row you didn't name. READ `warnings` in the response. If you are not certain of an entity's existing type, look it up (mem_entity_by_name / mem_entity_search) first, and use mem_entity_patch by id to edit a description.
 
+            For type=learning, the store also checks same-project learnings from the last 7 days (NULL project is its own bucket). If up to 3 of them share at least 4 of this memory's 8 most distinctive terms, `warnings` names them by full id and `similarRecentLearnings` carries {kind, ids, hint}. The write is never blocked. If they describe the same technique, update the shared doc (e.g. TECHNIQUES.md) or supersede the older memory rather than adding another.
+
             Memories with entity edges get a `structural` boost in mem_recall's ranking blend, so annotated memories are discoverable via graph proximity beyond lexical match.
 
             Skip annotation for ephemeral content: status updates, chat snapshots, subagent-stop-hook notes with importance < 7.
@@ -491,13 +496,33 @@ let memoryActions: [SonataAction] = [
                 try? await embedMemoryIfMissing(dbPool: dbPool, memoryId: id, content: content)
             }
 
+            // SIMILAR-LEARNINGS GUARD — five workers stored the same "reusable
+            // techniques" on 2026-09-26 and nothing noticed until consolidation.
+            // A learning that re-derives a recent one should update the shared
+            // doc instead, so name the lookalikes at write time. Advisory only:
+            // the row is already stored and a lookup failure costs nothing.
+            var warnings = annotationWarnings
+            var similar: SimilarLearningsWarning?
+            if type == "learning" {
+                let matches = (try? await ctx.dbPool.read { db in
+                    try LearningSimilarity.findSimilar(
+                        db, memoryId: id, content: content, project: project, createdAt: createdAt
+                    )
+                }) ?? []
+                if !matches.isEmpty {
+                    warnings.append(LearningSimilarity.warning(for: matches))
+                    similar = SimilarLearningsWarning(ids: matches.map(\.id), hint: LearningSimilarity.hint)
+                }
+            }
+
             // The memory row is stored either way — annotation is additive and
             // must never cost content. But a store whose annotation landed on a
             // row other than the one named has to SAY so; `success: true` alone
             // is what let type-forks accumulate unnoticed for months.
             return MemoryStoreResponse(
                 id: id,
-                warnings: annotationWarnings.isEmpty ? nil : annotationWarnings
+                warnings: warnings.isEmpty ? nil : warnings,
+                similarRecentLearnings: similar
             )
         }
     ),
