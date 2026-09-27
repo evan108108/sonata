@@ -54,6 +54,8 @@ let entityActions: [SonataAction] = [
             Upsert an entity, matched on (name, type). Creates if new, updates if existing.
 
             Matching is case-insensitive and considers BOTH name and type. If the name exists but only under a DIFFERENT type, this errors (409) and names the conflicting rows rather than overwriting one of them — pass `id` to target a specific row (that is also how you change an existing entity's type), or use mem_entity_patch.
+
+            Names listed in a row's `attributes.aliases` resolve to that row everywhere (annotation, relations, by-name lookup). Upserting BY an alias is refused (409) so a nickname can never overwrite the canonical row's description — use the canonical name or `id`.
             """,
         group: "/api/entity",
         path: "/",
@@ -119,6 +121,20 @@ let entityActions: [SonataAction] = [
                             arguments: [id, name, type, description, attributesJSON, now, now]
                         )
                         return EntityUpsertResponse(id: id, created: true, matchedBy: "created", warnings: nil)
+
+                    case .matched(let target, _) where target.viaAlias:
+                        // An alias is a pointer, not a license to rewrite the
+                        // canonical row: upserting "Archer" must not replace
+                        // Archer Frohlich's description with whatever the
+                        // caller meant by the nickname.
+                        throw ActionError.custom(
+                            """
+                            '\(name)' is an alias of \(target.label). Refusing to overwrite the canonical row \
+                            through its alias. Upsert with the canonical name '\(target.name)', or pass `id` \
+                            to target that row explicitly.
+                            """,
+                            .conflict
+                        )
 
                     case .matched(let target, let siblings):
                         try db.execute(

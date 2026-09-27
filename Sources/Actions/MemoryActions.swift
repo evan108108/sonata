@@ -232,6 +232,12 @@ private func storeInlineEntitiesAndRelations(
             switch try resolveEntity(db, name: def.name, type: def.type) {
             case .matched(let existing, _):
                 entityIdByName[def.name.lowercased()] = existing.id
+                if existing.viaAlias {
+                    warnings.append(
+                        "entity '\(def.name)' is an alias of \(existing.name)/\(existing.type) (id \(existing.id)); "
+                        + "the annotation was attached there. Use the canonical name next time."
+                    )
+                }
 
             case .typeMismatch(let candidates):
                 let canonical = candidates[0]  // most-connected; ordering is total
@@ -362,7 +368,7 @@ let memoryActions: [SonataAction] = [
 
             The server reuses an existing entity on a case-insensitive match of BOTH name and type ("Scout"/"scout" merge; "Scout Leader" does not). A name that exists ONLY under a different type is NOT forked — the annotation attaches to the existing row (the most-connected one, if the name is already forked) and the response carries a `warnings` entry saying so. Only a name that exists nowhere INSERTs a new row.
 
-            For person, organization and project, a new name that is a word-subset or word-superset of an existing same-type name ("Archer" vs "Archer Frohlich") still INSERTs, but `warnings` names the existing row(s) by full id. That usually means you forked a short alias. Search first (mem_entity_search) and annotate with the canonical row's exact name.
+            For person, organization and project, a new name that is a word-subset or word-superset of an existing same-type name ("Archer" vs "Archer Frohlich") still INSERTs, but `warnings` names the existing row(s) by full id. That usually means you forked a short alias. Search first (mem_entity_search) and annotate with the canonical row's exact name. A canonical row can also declare nicknames in `attributes.aliases` (set with mem_entity_patch, e.g. {"aliases": ["Archer"]} on "Archer Frohlich"); an annotation using an alias attaches to the canonical row and says so in `warnings`.
 
             So a wrong `type` no longer splits an entity, but it does mean your `description` is ignored and your edge lands on a row you didn't name. READ `warnings` in the response. If you are not certain of an entity's existing type, look it up (mem_entity_by_name / mem_entity_search) first, and use mem_entity_patch by id to edit a description.
 

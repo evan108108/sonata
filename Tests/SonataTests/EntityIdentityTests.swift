@@ -455,6 +455,90 @@ final class EntityIdentityTests: XCTestCase {
         XCTAssertEqual(try entityCount(pool, name: "scheduler"), 1)
     }
 
+    // MARK: - Aliases (attributes.aliases on the canonical row)
+
+    private func setAttributes(_ pool: DatabasePool, id: String, _ json: String) throws {
+        try pool.write { db in
+            try db.execute(sql: "UPDATE entities SET attributes = ? WHERE id = ?", arguments: [json, id])
+        }
+    }
+
+    /// The 2026-09-25..27 specimen: a DO-NOT-ENRICH description on the "Archer"
+    /// stub redirected nothing. An alias on the canonical row must.
+    func testAnnotationByAliasLandsOnTheCanonicalRowAndSaysSo() async throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "canon-archer", name: "Archer Frohlich", type: "person", description: "kept", edges: 19)
+        try setAttributes(pool, id: "canon-archer", #"{"aliases":["Archer"]}"#)
+
+        let response = try await store.handler(ActionContext(
+            params: storeParams(
+                entities: #"[{"name":"archer","type":"person","description":"ignored"}]"#,
+                relations: #"[{"entity":"archer","relation":"about"}]"#
+            ),
+            dbPool: pool
+        ))
+        let body = try json(response)
+
+        XCTAssertEqual(try entityCount(pool, name: "archer"), 0, "an alias must not fork a new row")
+        XCTAssertEqual(try relationTargets(pool, memoryId: body["id"] as! String), ["canon-archer"])
+        XCTAssertEqual(try description(pool, id: "canon-archer"), "kept")
+        let warning = (body["warnings"] as? [String])?.first ?? ""
+        XCTAssertTrue(warning.contains("Archer Frohlich") && warning.contains("canon-archer"),
+            "the caller must learn the canonical name and id; got: \(warning)")
+    }
+
+    func testAliasOutranksALessConnectedExactNameStub() async throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "canon-archer", name: "Archer Frohlich", type: "person", edges: 19)
+        try setAttributes(pool, id: "canon-archer", #"{"aliases":["Archer"]}"#)
+        try insertEntity(pool, id: "stub", name: "Archer", type: "person", edges: 1)
+
+        let response = try await store.handler(ActionContext(
+            params: storeParams(
+                entities: #"[{"name":"Archer","type":"person"}]"#,
+                relations: #"[{"entity":"Archer","relation":"about"}]"#
+            ),
+            dbPool: pool
+        ))
+        XCTAssertEqual(try relationTargets(pool, memoryId: try json(response)["id"] as! String), ["canon-archer"],
+            "most-connected wins, so a leftover stub can no longer capture the name")
+    }
+
+    func testUpsertByAliasIsRefusedAndLeavesTheCanonicalRowAlone() async throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "canon-archer", name: "Archer Frohlich", type: "person", description: "the real description", edges: 19)
+        try setAttributes(pool, id: "canon-archer", #"{"aliases":["Archer"]}"#)
+
+        do {
+            _ = try await upsert.handler(ActionContext(
+                params: ActionParams(["name": "Archer", "type": "person", "description": "clobber"]),
+                dbPool: pool
+            ))
+            XCTFail("upsert through an alias must not overwrite the canonical row")
+        } catch let error as ActionError {
+            guard case .custom(let message, let status) = error else { return XCTFail("expected conflict, got \(error)") }
+            XCTAssertEqual(status, .conflict)
+            XCTAssertTrue(message.contains("Archer Frohlich"), "must name the canonical row; got: \(message)")
+        }
+        XCTAssertEqual(try description(pool, id: "canon-archer"), "the real description")
+        XCTAssertEqual(try entityCount(pool, name: "Archer"), 0, "refusing must not fork either")
+    }
+
+    func testByNameResolutionFollowsAliasesAndSurvivesMalformedAttributes() throws {
+        let pool = try makePool()
+        try insertEntity(pool, id: "canon-archer", name: "Archer Frohlich", type: "person", edges: 3)
+        try setAttributes(pool, id: "canon-archer", #"{"aliases":["Archer","A.F."]}"#)
+        try insertEntity(pool, id: "junk", name: "Unrelated", type: "concept")
+        try setAttributes(pool, id: "junk", "not json {")
+
+        let hit = try pool.read { db in try resolveEntityByName(db, name: "ARCHER") }
+        XCTAssertEqual(hit?.id, "canon-archer")
+        XCTAssertEqual(hit?.viaAlias, true)
+        let exact = try pool.read { db in try resolveEntityByName(db, name: "Archer Frohlich") }
+        XCTAssertEqual(exact?.viaAlias, false, "the row's own name is not an alias hit")
+        XCTAssertNil(try pool.read { db in try resolveEntityByName(db, name: "Nobody") })
+    }
+
     func testNameTokensSplitOnAnyWhitespaceAndIgnoreCase() {
         XCTAssertEqual(nameTokens("  Archer\tFROHLICH \n"), ["archer", "frohlich"])
         XCTAssertTrue(nameTokens("   ").isEmpty)

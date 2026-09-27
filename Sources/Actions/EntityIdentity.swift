@@ -40,6 +40,9 @@ struct EntityCandidate {
     /// name is forked: prefer the row the graph actually uses.
     let edgeCount: Int
     let createdAt: Int64
+    /// True when this row matched through `attributes.aliases` rather than its
+    /// own name — the caller used a nickname and landed on the canonical row.
+    var viaAlias: Bool = false
 
     /// Human-readable form for error and warning text, e.g.
     /// `Sona/person (9071333c, 1035 edges)`.
@@ -48,14 +51,36 @@ struct EntityCandidate {
     }
 }
 
-/// Every row whose name matches `name` case-insensitively, most-connected first.
+/// Every row whose name — or one of whose `attributes.aliases` — matches `name`
+/// case-insensitively, most-connected first.
 ///
 /// The ordering is TOTAL — edges DESC, then createdAt ASC, then id ASC — so two
 /// callers resolving the same name always land on the same row. The previous
 /// `LIMIT 1` with no ORDER BY let SQLite's row order decide, which is why the
 /// same name could resolve to the fork one call and the hub the next.
+///
+/// ALIASES exist because a description cannot redirect a name-matcher. The
+/// duplicate person row "Archer" carried "DO NOT ENRICH — canonical is Archer
+/// Frohlich" in its description and still captured 6 inline annotations in two
+/// days (2026-09-25..27), since every door matched the bare name exactly.
+/// Putting `{"aliases": ["Archer"]}` on the canonical row makes the short name
+/// resolve there through every door. Set it with mem_entity_patch.
 func entityCandidates(_ db: Database, name: String) throws -> [EntityCandidate] {
-    try fetchRankedCandidates(db, where: "LOWER(e.name) = LOWER(?)", arguments: [name])
+    let wanted = name.lowercased()
+    return try fetchRankedCandidates(
+        db,
+        where: """
+            LOWER(e.name) = LOWER(?)
+            OR (json_valid(e.attributes) AND EXISTS (
+                SELECT 1 FROM json_each(e.attributes, '$.aliases') a
+                WHERE LOWER(a.value) = LOWER(?)))
+            """,
+        arguments: [name, name]
+    ).map { candidate in
+        var c = candidate
+        c.viaAlias = c.name.lowercased() != wanted
+        return c
+    }
 }
 
 /// Shared SELECT behind every candidate lookup, so all of them rank under the
