@@ -182,7 +182,16 @@ export const entity = {
    */
   patch: (args: { id: string; attributes: Record<string, unknown> }) =>
     request<StoreResponse>("PATCH", "/api/entity/", args),
-  delete: (id: string) => request<{ success: boolean }>("DELETE", `/api/entity/?id=${encodeURIComponent(id)}`),
+  /**
+   * DELETE /api/entity/. Sonata refuses (409) to delete an entity that still has relations,
+   * so no edge is left pointing at a deleted id. Pass `cascade: true` to delete the relations
+   * with the entity, which is right when the entity is junk (a deleted room's in_room edges).
+   */
+  delete: (id: string, opts: { cascade?: boolean } = {}) =>
+    request<{ success: boolean; relationsDeleted?: number }>(
+      "DELETE",
+      `/api/entity/?id=${encodeURIComponent(id)}${opts.cascade ? "&cascade=true" : ""}`,
+    ),
   touch: (id: string) => request<{ success: boolean }>("POST", "/api/entity/touch", { id }),
 };
 

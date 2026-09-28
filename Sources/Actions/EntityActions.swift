@@ -413,23 +413,105 @@ let entityActions: [SonataAction] = [
     // DELETE /api/entity?id=
     SonataAction(
         name: "mem_entity_delete",
-        description: "Delete an entity by ID.",
+        description: """
+            Delete an entity by ID. If the entity still has relations, the delete is REFUSED (409, naming the edge count) \
+            so no edge is left pointing at a deleted id. To keep the edges on another row (a duplicate), use mem_entity_merge. \
+            To delete the edges along with the entity (junk), pass cascade: true. Relations and entity go in one transaction.
+            """,
         group: "/api/entity",
         path: "/",
         method: .delete,
         params: [
             ActionParam("id", .string, required: true, description: "Entity ID"),
+            ActionParam("cascade", .boolean, description: "Also delete this entity's relations (default false: refuse if it has any)"),
         ],
         handler: { ctx in
             let id = try ctx.params.require("id")
+            let cascade = ctx.params.bool("cascade") ?? false
+            let outcome: EntityDeleteOutcome
             do {
-                try await ctx.dbPool.write { db in
-                    try db.execute(sql: "DELETE FROM entities WHERE id = ?", arguments: [id])
-                }
+                outcome = try await ctx.dbPool.write { db in try deleteEntity(db, id: id, cascade: cascade) }
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
-            return SuccessResponse()
+            switch outcome {
+            case .notFound:
+                throw ActionError.notFound("entity \(id)")
+            case .refused(let edges):
+                throw ActionError.custom(
+                    """
+                    Entity \(id) still has \(edges) relation(s). Deleting it would leave them pointing at a deleted id. \
+                    If it duplicates another entity, use mem_entity_merge (fromId: \(id), intoId: <canonical>) to move them first. \
+                    To delete the relations with the entity, pass cascade: true.
+                    """,
+                    .conflict
+                )
+            case .deleted(let relationsDeleted):
+                return EntityDeleteResponse(relationsDeleted: relationsDeleted)
+            }
+        }
+    ),
+
+    // POST /api/entity/merge
+    SonataAction(
+        name: "mem_entity_merge",
+        description: """
+            Merge a duplicate entity (fromId) into the canonical one (intoId), in one transaction. Every relation is \
+            re-pointed to intoId. Edges intoId already has, and edges between the two rows, are dropped rather than \
+            duplicated. The duplicate's name is added to intoId's attributes.aliases, and its old name, type and \
+            description are kept under attributes.mergedFrom. Reference counts are summed, then fromId is deleted. \
+            Pass dryRun: true to see the counts without writing.
+            """,
+        group: "/api/entity",
+        path: "/merge",
+        method: .post,
+        params: [
+            ActionParam("fromId", .string, required: true, description: "The duplicate entity to fold in and delete"),
+            ActionParam("intoId", .string, required: true, description: "The canonical entity that keeps everything"),
+            ActionParam("dryRun", .boolean, description: "Report what would change without writing (default false)"),
+        ],
+        handler: { ctx in
+            let fromId = try ctx.params.require("fromId")
+            let intoId = try ctx.params.require("intoId")
+            let dryRun = ctx.params.bool("dryRun") ?? false
+            do {
+                let plan = try await ctx.dbPool.write { db in
+                    try mergeEntity(db, fromId: fromId, intoId: intoId, dryRun: dryRun, now: nowMs())
+                }
+                return EntityMergeResponse(dryRun: dryRun, plan: plan)
+            } catch EntityMergeError.sameEntity {
+                throw ActionError.invalidParam("intoId", "must differ from fromId")
+            } catch EntityMergeError.notFound(let missing) {
+                throw ActionError.notFound("entity \(missing)")
+            } catch let e as ActionError {
+                throw e
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
+        }
+    ),
+
+    // POST /api/entity/dangling-edges
+    SonataAction(
+        name: "mem_relation_dangling",
+        description: """
+            Count relations whose entity endpoint no longer exists (left behind by entity deletes before 2026-09-28), \
+            with a sample. Only endpoints typed 'entity' are checked, against the entities table. Deletes them only \
+            when delete: true.
+            """,
+        group: "/api/entity",
+        path: "/dangling-edges",
+        method: .post,
+        params: [
+            ActionParam("delete", .boolean, description: "Delete the dangling relations (default false: report only)"),
+        ],
+        handler: { ctx in
+            let delete = ctx.params.bool("delete") ?? false
+            do {
+                return try await ctx.dbPool.write { db in try danglingEntityEdges(db, delete: delete) }
+            } catch {
+                throw ActionError.database(error.localizedDescription)
+            }
         }
     ),
 

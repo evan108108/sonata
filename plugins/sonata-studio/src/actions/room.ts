@@ -1536,7 +1536,10 @@ export async function deleteRoom(
     }
   }
 
-  await entity.delete(row.id);
+  // Cascade: cards, members and tracks point at the room with in_room edges.
+  // Without it Sonata refuses the delete (409); before 2026-09-28 it silently
+  // left those edges dangling (29 of the 52 found in the live graph).
+  await entity.delete(row.id, { cascade: true });
 
   return {
     ok: true,
