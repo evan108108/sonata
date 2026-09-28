@@ -58,6 +58,18 @@ actor TaskDispatcher {
     /// dropping a late run is strictly better than running it against a moved world.
     private static let scheduledTaskMaxStalenessMs: Int64 = 2 * 60 * 60 * 1000  // 2 hours
 
+    /// How long a session-created task can sit `pending` before it's auto-cancelled.
+    ///
+    /// Sona sessions (source='sonata') and pool workers (source='sonata-worker')
+    /// routinely call TaskCreate to track in-flight work, then get compacted /
+    /// restarted before firing the matching TaskUpdate → completed. The row then
+    /// sits `pending` forever, indistinguishable in the Tasks UI from real work.
+    /// Two weeks of silence is a strong "the session that owned this is gone"
+    /// signal — cancel with an audit note rather than leave visual noise.
+    /// Scheduler-source tasks have their own (much tighter) window above; this
+    /// only sweeps the human/agent-created backlog.
+    private static let sessionTaskMaxStalenessMs: Int64 = 14 * 24 * 60 * 60 * 1000  // 14 days
+
     /// Retire scheduled tasks that sat undispatched past their useful life.
     ///
     /// The backend can be up with zero attached workers — `poll()` then returns early
@@ -93,11 +105,50 @@ actor TaskDispatcher {
         }
     }
 
+    /// Auto-cancel session-created pending tasks that have been untouched past
+    /// `sessionTaskMaxStalenessMs`. Runs before the workers-idle check so it
+    /// still fires when the pool is quiet — that's exactly when abandoned rows
+    /// pile up.
+    private func expireStaleSessionTasks() async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let cutoff = now - Self.sessionTaskMaxStalenessMs
+        do {
+            try await dbPool.write { [logger] db in
+                let stale = try Row.fetchAll(db, sql: """
+                    SELECT id, title, updatedAt FROM tasks
+                    WHERE status = 'pending'
+                      AND source IN ('sonata', 'sonata-worker')
+                      AND updatedAt < ?
+                """, arguments: [cutoff])
+
+                for row in stale {
+                    let taskId = row["id"] as! String
+                    let title = row["title"] as? String ?? taskId
+                    let ageDays = ((now - (row["updatedAt"] as? Int64 ?? now)) / 86_400_000)
+                    try db.execute(sql: """
+                        UPDATE tasks SET status = 'cancelled', lastError = ?, updatedAt = ?
+                        WHERE id = ?
+                    """, arguments: [
+                        "auto-stale: pending untouched for \(ageDays)d — no session claimed it",
+                        now, taskId
+                    ])
+                    logger.info("Auto-cancelled abandoned session task \"\(title.prefix(60))\" (\(taskId)) — \(ageDays)d untouched")
+                }
+                if !stale.isEmpty {
+                    logger.info("Auto-cancelled \(stale.count) abandoned session task(s) — pending rows whose creating session never came back")
+                }
+            }
+        } catch {
+            logger.error("Stale session-task expiry failed: \(error.localizedDescription)")
+        }
+    }
+
     private func poll() async throws {
         // Drop cron runs that missed their window BEFORE looking for workers — this
         // must run even when no worker is idle, since that is exactly the condition
         // that lets the backlog build.
         await expireStaleScheduledTasks()
+        await expireStaleSessionTasks()
 
         // Dynamic concurrency: match available idle workers. Counts pool slots
         // only (`poolSlotSQLPredicate`) — a non-pool session holding a

@@ -254,6 +254,21 @@ struct TasksView: View {
                             TaskListRow(task: task)
                                 .sidebarRowSelection(selectedId == task.id)
                                 .onTapGesture { selectedId = task.id }
+                                .contextMenu {
+                                    if isOpenStatus(task.status) {
+                                        Button("Cancel Task", role: .destructive) {
+                                            Task { await cancelTask(task.id) }
+                                        }
+                                    }
+                                    Button("Copy Title") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(task.title, forType: .string)
+                                    }
+                                    Button("Copy ID") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(task.id, forType: .string)
+                                    }
+                                }
                         }
 
                         if hasMore(status) {
@@ -361,6 +376,21 @@ struct TasksView: View {
     private func fetchData(_ path: String) async -> Data? {
         guard let url = URL(string: "http://127.0.0.1:\(sonataPort)\(path)") else { return nil }
         return try? await URLSession.shared.data(from: url).0
+    }
+
+    // Any status that's still "in play" — cancellable via the right-click menu.
+    // Terminal statuses (completed/failed/cancelled) are already closed out.
+    private func isOpenStatus(_ status: String) -> Bool {
+        !["completed", "done", "failed", "cancelled"].contains(status)
+    }
+
+    private func cancelTask(_ id: String) async {
+        guard let url = URL(string: "http://127.0.0.1:\(sonataPort)/api/task/cancel?id=\(id)")
+        else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        _ = try? await URLSession.shared.data(for: req)
+        await loadTasks()
     }
 }
 
