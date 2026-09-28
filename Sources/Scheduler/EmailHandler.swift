@@ -946,6 +946,23 @@ actor EmailHandler {
                         ON CONFLICT(idempotencyKey) DO NOTHING
                     """, arguments: [id, payloadStr, now, idemKey])
                 }
+
+                // Mark dispatched emails 'read' now — dispatch itself is proof
+                // "someone is looking." Complements the mark-replied hook in
+                // WorkerActions.swift:1306 that only fires when a worker's
+                // complete_event payload actually includes messageIds. Together
+                // they cover both discipline gaps that stranded 50+ scoutleader
+                // emails as 'unread' (2026-09-22, Scout's diagnosis). Guard
+                // WHERE status='unread' so a subsequent mark_replied UPDATE
+                // (via worker_event_complete or email_reply) still wins.
+                let messageIds = emails.map { $0.messageId }
+                let ph = messageIds.map { _ in "?" }.joined(separator: ",")
+                var args: [DatabaseValueConvertible] = ["read"]
+                args.append(contentsOf: messageIds)
+                try db.execute(sql: """
+                    UPDATE emails SET status = ?
+                    WHERE messageId IN (\(ph)) AND status = 'unread'
+                """, arguments: StatementArguments(args))
             }
             logger.info("EmailHandler: email event enqueued directly (\(id))")
         } catch {

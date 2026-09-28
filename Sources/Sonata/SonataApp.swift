@@ -1183,6 +1183,21 @@ struct SonataApp: App {
                     logger: Logger(label: "sonata.conversation.indexer"))
                 await conversationIndexer.start()
 
+                // Convergence backfill for the `sessions` Meili index.
+                // Wiki/archive/docs/private each get a startup backfill (§8a
+                // below), but sessions is populated only by the forward
+                // sweep — so any transcriptIndexState row whose Meili write
+                // was lost (SQLite corruption, wiped index, mid-migration
+                // interrupt) can never be recovered by the normal 5-min
+                // tick, which skips files whose size/mtime is unchanged.
+                // `backfillMissing` prunes rows whose source .jsonl is gone
+                // and resets the rest so the next sweep re-indexes them.
+                // Detached so it doesn't block boot. Motivating incident:
+                // scout-cloud 2026-09-16 (Scout thread f7b23883).
+                Task {
+                    _ = await conversationIndexer.backfillMissing()
+                }
+
                 let scheduler = SchedulerActor(dbPool: pool)
 
                 let router = Router(context: BasicWebSocketRequestContext.self)

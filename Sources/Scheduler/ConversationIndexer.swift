@@ -56,6 +56,109 @@ actor ConversationIndexer {
 
     func stop() { task?.cancel(); task = nil }
 
+    /// Convergence pass: prune transcriptIndexState rows whose .jsonl file
+    /// is gone (nothing to re-chunk), and reset every surviving row so the
+    /// next transcript sweep re-reads it from offset 0. Meili doc ids are
+    /// stable (`<sessionId>_<chunkIndex>`), so re-indexing is an upsert —
+    /// idempotent. Also removes any existing chunks for the reset rows to
+    /// avoid stale duplicates when a prior chunkCount was over-reported.
+    ///
+    /// Motivating incident: 2026-09-16 the .17→scout-cloud SQLite migration
+    /// hit a corruption storm (12:01-12:21 local) mid-write into
+    /// transcriptIndexState — 785 rows / 9,031 chunks were recorded but the
+    /// corresponding Meili writes were lost. The normal 5-tick sweep skips
+    /// any file whose size/mtime is unchanged, so that backlog could never
+    /// drain without an explicit reset. Runs once per launch, right after
+    /// `start()`, from a detached Task so it never blocks boot.
+    ///
+    /// Returns the counts for logging.
+    @discardableResult
+    func backfillMissing() async -> (purged: Int, reset: Int, chunks: Int) {
+        struct StateRow {
+            let path: String
+            let sessionId: String
+            let chunkCount: Int
+        }
+        let rows: [StateRow]
+        do {
+            rows = try await dbPool.read { db in
+                try Row.fetchAll(
+                    db,
+                    sql: "SELECT path, sessionId, chunkCount FROM transcriptIndexState"
+                ).map {
+                    StateRow(path: $0["path"], sessionId: $0["sessionId"], chunkCount: $0["chunkCount"])
+                }
+            }
+        } catch {
+            logger.error("conversation index: backfill state read failed: \(error)")
+            return (0, 0, 0)
+        }
+        guard !rows.isEmpty else { return (0, 0, 0) }
+
+        let fm = FileManager.default
+        var orphans: [StateRow] = []
+        var live: [StateRow] = []
+        for r in rows {
+            if fm.fileExists(atPath: r.path) { live.append(r) } else { orphans.append(r) }
+        }
+
+        // 1. Purge orphan rows + their Meili chunks (source file gone; can
+        //    never be re-chunked).
+        if !orphans.isEmpty {
+            for o in orphans where o.chunkCount > 0 {
+                let ids = (0..<o.chunkCount).map { "\(o.sessionId)_\($0)" }
+                await search.removeSessionChunks(ids: ids)
+            }
+            let orphanPaths = orphans.map { $0.path }
+            do {
+                try await dbPool.write { db in
+                    for chunk in stride(from: 0, to: orphanPaths.count, by: 500) {
+                        let slice = Array(orphanPaths[chunk..<min(chunk + 500, orphanPaths.count)])
+                        let ph = slice.map { _ in "?" }.joined(separator: ",")
+                        try db.execute(
+                            sql: "DELETE FROM transcriptIndexState WHERE path IN (\(ph))",
+                            arguments: StatementArguments(slice))
+                    }
+                }
+                logger.info("conversation index: pruned \(orphans.count) orphan transcript rows (source file missing)")
+            } catch {
+                logger.error("conversation index: orphan prune failed: \(error)")
+            }
+        }
+
+        // 2. Reset live rows: remove any existing Meili chunks, zero the state.
+        //    Next sweep re-indexes from offset 0 via the normal indexTranscript path.
+        var chunksRemoved = 0
+        for r in live where r.chunkCount > 0 {
+            let ids = (0..<r.chunkCount).map { "\(r.sessionId)_\($0)" }
+            await search.removeSessionChunks(ids: ids)
+            chunksRemoved += ids.count
+        }
+        do {
+            try await dbPool.write { db in
+                try db.execute(sql: """
+                    UPDATE transcriptIndexState
+                    SET lastSize = 0, lastMtimeMs = 0, lastOffset = 0, chunkCount = 0
+                    """)
+            }
+        } catch {
+            logger.error("conversation index: state reset failed: \(error)")
+            return (orphans.count, 0, chunksRemoved)
+        }
+        if !live.isEmpty {
+            logger.info("conversation index: reset \(live.count) transcript rows for backfill (\(chunksRemoved) stale chunks removed); next sweep will re-index")
+        }
+
+        // 3. Kick a sweep now so the backfill actually drains — otherwise
+        //    the user waits for the next tick (up to 5 minutes) to see any
+        //    progress. sweepTranscripts respects its own 55s budget and the
+        //    remainder falls to subsequent ticks.
+        await sweepTranscripts()
+        lastTranscriptSweepMs = nowMs()
+
+        return (orphans.count, live.count, chunksRemoved)
+    }
+
     func healthSnapshot() async -> (lastSweepMs: Int64, filesIndexed: Int) {
         let files = (try? await dbPool.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcriptIndexState") ?? 0
