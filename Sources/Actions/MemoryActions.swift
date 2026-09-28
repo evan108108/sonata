@@ -343,6 +343,47 @@ func memRowToResponse(_ row: MemoryRow) -> MemoryResponse {
     )
 }
 
+/// The l0 scan tier's one-line text: the stored abstract, else the head of the
+/// body. Shared by mem_recall's and mem_recent's tier=l0 so both scan the same
+/// way (recall trims to 80 characters, a recent-list scan to 160).
+func memoryL0Text(_ row: MemoryRow, fallbackChars: Int) -> String {
+    row.l0 ?? String(row.content.prefix(fallbackChars))
+}
+
+/// mem_recent tier=l0: enough to pick which memories to read, without their
+/// bodies (then mem_fetch_full the chosen ids). ~10x smaller per memory than
+/// MemoryResponse, so a 100-row scan fits under the MCP tool-output cap.
+struct MemoryL0Response: Encodable {
+    let _id: String
+    let createdAt: Int64
+    let type: String
+    let importance: Double
+    let source: String?
+    let tags: [String]
+    let status: String?
+    let l0: String
+    let accessCount: Int?
+    let _tier: String
+}
+
+/// Fallback length for an l0 line when the memory has no stored abstract.
+let recentL0FallbackChars = 160
+
+func memRowToL0Response(_ row: MemoryRow) -> MemoryL0Response {
+    MemoryL0Response(
+        _id: row.id,
+        createdAt: row.createdAt,
+        type: row.type,
+        importance: row.importance,
+        source: row.source,
+        tags: parseTags(row.tagsJSON),
+        status: row.status,
+        l0: memoryL0Text(row, fallbackChars: recentL0FallbackChars),
+        accessCount: row.accessCount,
+        _tier: "l0"
+    )
+}
+
 let memoryActions: [SonataAction] = [
 
     // GET / — health check
@@ -530,7 +571,12 @@ let memoryActions: [SonataAction] = [
     // GET /api/memory/recent
     SonataAction(
         name: "mem_recent",
-        description: "List recent memories ordered by createdAt DESC.",
+        description: """
+            List recent memories ordered by createdAt DESC. Bodies are included by default; \
+            for a large scan (limit 30+) use tier=l0 to scan (id, type, importance, tags, l0 \
+            abstract; ~10x smaller), then mem_fetch_full the ids you need. A full-tier limit=100 \
+            can overflow the tool-output cap.
+            """,
         group: "/api/memory",
         path: "/recent",
         method: .get,
@@ -543,9 +589,14 @@ let memoryActions: [SonataAction] = [
             ActionParam("includeAll", .boolean, description: "Include normally-excluded noise sources (e.g. subagent-stop-hook)."),
             ActionParam("after", .string, description: "Only include memories with createdAt on/after this time. Accepts unix ms or ISO date (`2026-07-15`)."),
             ActionParam("before", .string, description: "Only include memories with createdAt on/before this time. Accepts unix ms or ISO date; bare `YYYY-MM-DD` rolls to end-of-day inclusive."),
+            ActionParam("tier", .string, description: "Response tier: 'full' (default: whole bodies) or 'l0' (_id, createdAt, type, importance, source, tags, status, l0 abstract, accessCount; no content). Use tier=l0 to scan, then mem_fetch_full the ids you need."),
         ],
         handler: { ctx in
             let limit = ctx.params.int("limit") ?? 20
+            let tier = (ctx.params.string("tier") ?? "full").lowercased()
+            guard tier == "full" || tier == "l0" else {
+                throw ActionError.invalidParam("tier", "must be 'full' or 'l0'")
+            }
             let type = ctx.params.string("type")
             let source = ctx.params.string("source")
             let includeAll = ctx.params.bool("includeAll") ?? false
@@ -598,6 +649,7 @@ let memoryActions: [SonataAction] = [
                 let rows = try ctx.dbPool.read { db in
                     try MemoryRow.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 }
+                if tier == "l0" { return rows.map(memRowToL0Response) }
                 return rows.map(memRowToResponse)
             } catch {
                 throw ActionError.database(error.localizedDescription)

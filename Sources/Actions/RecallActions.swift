@@ -1247,7 +1247,7 @@ let recallActions: [SonataAction] = [
                     for scored in sorted {
                         let mem = scored.row
                         let tags = parseTags(mem.tagsJSON)
-                        let l0Text = mem.l0 ?? String(mem.content.prefix(80))
+                        let l0Text = memoryL0Text(mem, fallbackChars: 80)
                         let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
                         let l0Tokens = recallEstimateTokens(l0Repr)
                         if used + l0Tokens > memoryBudget { break }

@@ -356,14 +356,15 @@ func makeWatcherActions(runner: WatcherRunner?) -> [SonataAction] {
                 args.append(id)
 
                 let setClause = sets.joined(separator: ", ")
-                // Bind to a let so Swift 6 doesn't flag the `var args` capture
-                // inside the @Sendable write closure.
-                let updateArgs = args
+                // Build the (Sendable) StatementArguments out here: a `let` of
+                // [any DatabaseValueConvertible] is still non-Sendable, so capturing
+                // it in the @Sendable write closure was a Swift 6 error-in-waiting.
+                let updateArgs: StatementArguments = StatementArguments(args)
                 do {
                     try await ctx.dbPool.write { db in
                         try db.execute(
                             sql: "UPDATE watchers SET \(setClause) WHERE id = ?",
-                            arguments: StatementArguments(updateArgs)
+                            arguments: updateArgs
                         )
                     }
                 } catch {

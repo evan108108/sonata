@@ -211,34 +211,6 @@ private func workerRowToSummary(_ row: WorkerRow) -> WorkerSummary {
     )
 }
 
-/// Build a MemoryResponse from a MemoryRow, using the shared parseTags helper.
-/// Local to CompositeActions to avoid cross-file private-func conflicts.
-private func memRowToResponseForComposite(_ row: MemoryRow) -> MemoryResponse {
-    MemoryResponse(
-        _id: row.id,
-        _creationTime: row.createdAt,
-        content: row.content,
-        type: row.type,
-        tags: parseTags(row.tagsJSON),
-        source: row.source,
-        importance: row.importance,
-        l0: row.l0,
-        l1: row.l1,
-        accessCount: row.accessCount,
-        lastAccessedAt: row.lastAccessedAt,
-        status: row.status,
-        supersededBy: row.supersededBy,
-        revisionOf: row.revisionOf,
-        revisionNote: row.revisionNote,
-        validFrom: row.validFrom,
-        validUntil: row.validUntil,
-        project: row.project,
-        topic: row.topic,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt
-    )
-}
-
 /// Escape a string for safe embedding into a JSON string literal.
 private func jsonEscape(_ s: String) -> String {
     var out = ""
@@ -454,7 +426,7 @@ let compositeActions: [SonataAction] = [
                         arguments: [ftsQuery]
                     )
                 }
-                return rows.map(memRowToResponseForComposite)
+                return rows.map(memRowToResponse)
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
@@ -567,7 +539,7 @@ let compositeActions: [SonataAction] = [
                         arguments: [ftsQuery, limit]
                     )
                 }
-                return rows.map(memRowToResponseForComposite)
+                return rows.map(memRowToResponse)
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
