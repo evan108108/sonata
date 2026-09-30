@@ -102,6 +102,51 @@ func resolveAttributedModel(workerModel: String?, payload: String?) -> String {
     return ModelPricing.defaultModel
 }
 
+// MARK: - Event token reading at completion
+
+enum WorkerTranscripts {
+    /// Test seam: when set, completion reads transcripts from here instead of
+    /// ~/.claude/projects. Only the tests set it.
+    nonisolated(unsafe) static var projectsRootOverride: String?
+
+    static var projectsRoot: String {
+        projectsRootOverride
+            ?? "\(FileManager.default.homeDirectoryForCurrentUser.path)/.claude/projects"
+    }
+}
+
+/// A fresh event-scoped reading of `eventId`'s transcript, taken at the moment
+/// the event completes or fails.
+///
+/// The swept currentEventTokens / currentInputTokens / currentCacheReadTokens
+/// lag by up to one sweep (15s), and a worker's LAST turn — the one that calls
+/// complete_event — lands after the last sweep essentially every time, so the
+/// swept columns always missed the final turn. Reading here closes that gap.
+///
+/// Runs OUTSIDE the write transaction: transcripts are multi-MB and parsing
+/// one while holding the writer would stall every other write in the app.
+/// Nil when there is no session, no assignedAt, or no transcript on disk;
+/// callers then fall back to the swept columns.
+func readEventTokensAtCompletion(
+    eventId: String, dbPool: DatabasePool
+) async -> TranscriptUsage.EventTokens? {
+    let bounds: (sessionId: String?, assignedAt: Int64?)? = try? await dbPool.read { db in
+        guard let row = try Row.fetchOne(db, sql: """
+            SELECT w.sessionId, e.assignedAt
+            FROM workerEvents e
+            JOIN workers w ON w.workerId = e.assignedTo
+            WHERE e.id = ?
+        """, arguments: [eventId]) else { return nil }
+        return (row["sessionId"], row["assignedAt"])
+    }
+    guard let sessionId = bounds?.sessionId, !sessionId.isEmpty,
+          let assignedAt = bounds?.assignedAt,
+          let path = resolveTranscriptPath(
+              projectsRoot: WorkerTranscripts.projectsRoot, sessionId: sessionId),
+          let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    return parseTranscriptUsage(jsonl: text, since: assignedAt)?.event
+}
+
 // MARK: - Response shapes specific to actions
 
 private struct WorkerListItem: Encodable {
@@ -1164,6 +1209,7 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let resultText = ctx.params.string("result")
             let now = nowMs()
+            let fresh = await readEventTokensAtCompletion(eventId: eventId, dbPool: ctx.dbPool)
             // `rotateSidecar` rides out of the transaction alongside the freed
             // worker id: the rotation it triggers must happen *after* the
             // commit, but whether to rotate at all can only be decided inside,
@@ -1176,15 +1222,19 @@ let workerEventActions: [SonataAction] = [
                         arguments: [eventId])
 
                     // Pull totalTokens + model attribution off the worker row before
-                    // we clear it. Model is the one the worker actually ran on;
+                    // we clear it. Tokens prefer the fresh reading (see
+                    // readEventTokensAtCompletion); the swept column is the
+                    // fallback. Model is the one the worker actually ran on;
                     // see resolveAttributedModel for the fallback order.
-                    var attributedTokens: Int64?
+                    var attributedTokens: Int64? = fresh?.totalTokens
                     var workerModel: String?
                     if let workerId = row?.assignedTo {
                         let tokRow = try Row.fetchOne(db, sql: """
                             SELECT currentEventTokens, model FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
-                        attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                        if attributedTokens == nil {
+                            attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                        }
                         workerModel = tokRow?["model"] as? String
                     }
                     let attributedModel = resolveAttributedModel(
@@ -1234,8 +1284,8 @@ let workerEventActions: [SonataAction] = [
                             FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
                         let workerStatus = workerRow?["status"] as? String
-                        let inputTokens = workerRow?["currentInputTokens"] as? Int64
-                        let cacheReadTokens = workerRow?["currentCacheReadTokens"] as? Int64
+                        let inputTokens = fresh?.inputTokens ?? workerRow?["currentInputTokens"] as? Int64
+                        let cacheReadTokens = fresh?.cacheReadTokens ?? workerRow?["currentCacheReadTokens"] as? Int64
                         let promptHash = workerRow?["currentPromptHash"] as? String
                         let sessionLabel = workerRow?["currentSessionLabel"] as? String
                         let cwdBasename = workerRow?["currentCwdBasename"] as? String
@@ -1381,6 +1431,7 @@ let workerEventActions: [SonataAction] = [
             let eventId = try ctx.params.require("eventId")
             let errorText = ctx.params.string("error")
             let now = nowMs()
+            let fresh = await readEventTokensAtCompletion(eventId: eventId, dbPool: ctx.dbPool)
             let completedWorkerId: String?
             do {
                 completedWorkerId = try await ctx.dbPool.write { db -> String? in
@@ -1390,13 +1441,15 @@ let workerEventActions: [SonataAction] = [
 
                     // Same token attribution as the complete path — failures still
                     // burned tokens and should show up in the Dashboard cost card.
-                    var attributedTokens: Int64?
+                    var attributedTokens: Int64? = fresh?.totalTokens
                     var workerModel: String?
                     if let workerId = row?.assignedTo {
                         let tokRow = try Row.fetchOne(db, sql: """
                             SELECT currentEventTokens, model FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
-                        attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                        if attributedTokens == nil {
+                            attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                        }
                         workerModel = tokRow?["model"] as? String
                     }
                     let attributedModel = resolveAttributedModel(
@@ -1441,8 +1494,8 @@ let workerEventActions: [SonataAction] = [
                             FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
                         let workerStatus = workerRow?["status"] as? String
-                        let inputTokens = workerRow?["currentInputTokens"] as? Int64
-                        let cacheReadTokens = workerRow?["currentCacheReadTokens"] as? Int64
+                        let inputTokens = fresh?.inputTokens ?? workerRow?["currentInputTokens"] as? Int64
+                        let cacheReadTokens = fresh?.cacheReadTokens ?? workerRow?["currentCacheReadTokens"] as? Int64
                         let promptHash = workerRow?["currentPromptHash"] as? String
                         let sessionLabel = workerRow?["currentSessionLabel"] as? String
                         let cwdBasename = workerRow?["currentCwdBasename"] as? String
