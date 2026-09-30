@@ -64,16 +64,25 @@ actor MCPSessionSweeper {
     private func updateWorkerHeartbeat(workerId: String, at heartbeatAt: Int64) async {
         // One read for both facts we need about this worker: whether it holds an
         // event, and which transcript on disk is its own.
-        let row: (eventId: String?, sessionId: String?)? = try? await dbPool.read { db in
+        let row: (eventId: String?, sessionId: String?, assignedAt: Int64?)? = try? await dbPool.read { db in
             guard let row = try Row.fetchOne(
                 db,
-                sql: "SELECT currentEventId, sessionId FROM workers WHERE workerId = ?",
+                sql: """
+                    SELECT w.currentEventId, w.sessionId, e.assignedAt
+                    FROM workers w
+                    LEFT JOIN workerEvents e ON e.id = w.currentEventId
+                    WHERE w.workerId = ?
+                """,
                 arguments: [workerId]
             ) else { return nil }
-            return (row["currentEventId"], row["sessionId"])
+            return (row["currentEventId"], row["sessionId"], row["assignedAt"])
         }
         let inFlight: String? = row?.eventId
         let sessionId: String? = row?.sessionId
+        // Start of the in-flight event's window. Pool sessions outlive their
+        // events, so the transcript holds every earlier event's turns too; only
+        // turns stamped at or after this belong to the event being booked.
+        let eventStart: Int64? = inFlight == nil ? nil : row?.assignedAt
 
         // Sampled whether or not an event is in flight. The cumulative columns
         // below are still gated on `inFlight` — they are event-scoped and get
@@ -82,7 +91,9 @@ actor MCPSessionSweeper {
         // session's context does not empty when its event does, and an idle
         // session sitting on a nearly-full window is exactly what the sidecar
         // monitor needs to see.
-        let usage = await readWorkerTranscriptUsage(workerId: workerId, sessionId: sessionId)
+        let usage = await readWorkerTranscriptUsage(
+            workerId: workerId, sessionId: sessionId, since: eventStart
+        )
 
         // Feed the sidecar spend ledger from the same reading. This is the
         // live path: the `worker_heartbeat` action would be the intuitive home
@@ -120,9 +131,16 @@ actor MCPSessionSweeper {
                 """, arguments: [
                     heartbeatAt,
                     (inFlight == nil || !stampProgress) ? nil : heartbeatAt,
-                    inFlight == nil ? nil : usage?.totalTokens,
-                    inFlight == nil ? nil : usage?.inputTokens,
-                    inFlight == nil ? nil : usage?.cacheReadTokens,
+                    // Event-scoped, NOT the session totals. worker_event_complete/
+                    // fail copy these into workerEvents, and a pool session's
+                    // totals include every event it ran before this one — prStar
+                    // events were booked ~42M against a measured ~12M.
+                    // `event` is nil without an assignedAt to bound the window;
+                    // COALESCE then keeps the column as it was rather than
+                    // writing the session total back in.
+                    usage?.event?.totalTokens,
+                    usage?.event?.inputTokens,
+                    usage?.event?.cacheReadTokens,
                     usage?.contextTokens,
                     // Session-scoped like currentContextTokens: written at idle too.
                     usage?.model,
@@ -250,7 +268,7 @@ actor MCPSessionSweeper {
     /// most-recently-modified fallback, since that fallback IS the original
     /// bug.
     private func readWorkerTranscriptUsage(
-        workerId: String, sessionId: String?
+        workerId: String, sessionId: String?, since: Int64? = nil
     ) async -> TranscriptUsage? {
         guard let sessionId, !sessionId.isEmpty else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -276,7 +294,7 @@ actor MCPSessionSweeper {
         guard let path, let text = try? String(contentsOfFile: path, encoding: .utf8) else {
             return nil
         }
-        return parseTranscriptUsage(jsonl: text)
+        return parseTranscriptUsage(jsonl: text, since: since)
     }
 }
 
@@ -357,8 +375,14 @@ struct TranscriptPathCache {
 /// bug this type exists to keep separated:
 ///
 /// - `totalTokens` / `inputTokens` / `cacheReadTokens` are SUMS across every
-///   assistant turn. They answer "what has this event cost?" and are what the
-///   prompt-cache panel and HealthMonitor consume.
+///   assistant turn in the SESSION. They answer "what has this session cost?"
+///   and feed the sidecar spend ledger and progress stamping, which both take
+///   deltas of a session-monotonic counter.
+/// - `event` holds the same three sums restricted to turns at or after the
+///   in-flight event's `assignedAt`. It answers "what has this event cost?" and
+///   is what gets booked onto workerEvents. The session sums used to be booked
+///   there directly, which overcharged every event on a pool session by
+///   everything that session ran before it (prStar: ~42M booked vs ~12M real).
 /// - `contextTokens` is the LAST non-sidechain turn only. It answers "how full
 ///   is the window right now?"
 ///
@@ -376,6 +400,53 @@ struct TranscriptUsage: Equatable, Sendable {
     /// Last non-sidechain assistant turn's `message.model` — what the session
     /// is actually running on. Nil when no turn named a real model.
     var model: String? = nil
+    /// Sums over turns at or after the `since` bound passed to
+    /// `parseTranscriptUsage`. Nil when no bound was given; all-zero when one
+    /// was given and no turn has landed inside it yet (an event that hasn't
+    /// produced a turn has cost nothing, which is a reading, not a missing one).
+    var event: EventTokens? = nil
+
+    struct EventTokens: Equatable, Sendable {
+        let totalTokens: Int64
+        let inputTokens: Int64
+        let cacheReadTokens: Int64
+    }
+}
+
+/// A transcript timestamp in Claude Code's own format, for an epoch-ms instant.
+///
+/// Built by hand rather than through `ISO8601DateFormatter`'s fractional-second
+/// option, which takes a `Date` (a Double) and can land one millisecond off
+/// either side of the boundary it is meant to reproduce.
+func transcriptTimestamp(ms: Int64) -> String {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    let (secs, millis) = ms.quotientAndRemainder(dividingBy: 1000)
+    let (s, m) = millis < 0 ? (secs - 1, millis + 1000) : (secs, millis)
+    let base = f.string(from: Date(timeIntervalSince1970: TimeInterval(s)))
+    return String(base.dropLast()) + String(format: ".%03lldZ", m)
+}
+
+/// Whether a turn stamped `ts` falls at or after `since`.
+///
+/// Claude Code stamps turns as `2026-09-30T12:56:28.461Z` — fixed width, UTC,
+/// millisecond precision — and for strings of exactly that shape lexicographic
+/// order IS time order, so the common case is a string compare against
+/// `sinceStamp` (pre-rendered once per parse). Anything else is parsed. A turn
+/// whose timestamp can't be read is outside every window: it can't be placed,
+/// and booking it to whichever event is in flight is how the original bug read.
+func transcriptTurnIsAtOrAfter(_ ts: String?, sinceMs: Int64, sinceStamp: String) -> Bool {
+    guard let ts, !ts.isEmpty else { return false }
+    let utf8 = Array(ts.utf8)
+    if utf8.count == 24, utf8[23] == UInt8(ascii: "Z"), utf8[19] == UInt8(ascii: ".") {
+        return ts >= sinceStamp
+    }
+    let withFraction = ISO8601DateFormatter()
+    withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    guard let date = withFraction.date(from: ts) ?? plain.date(from: ts) else { return false }
+    return Int64((date.timeIntervalSince1970 * 1000).rounded()) >= sinceMs
 }
 
 /// Whether this sweep should advance `workers.lastProgressAt`.
@@ -503,13 +574,33 @@ func sidecarSpendDelta(
 ///
 /// `model` skips `<synthetic>`: Claude Code writes that id on the placeholder
 /// turns it fabricates for API errors, and it names no model anything ran on.
-func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
+///
+/// Usage is counted ONCE per API response (`message.id`). Claude Code writes a
+/// separate transcript line per content block (thinking, text, each tool_use),
+/// and every one of them repeats the response's full `usage`. Summing per line
+/// counted the same call two to four times: on one real worker transcript, 374
+/// assistant lines were 154 responses, and the per-line sum read 118.8M against
+/// 46.4M per response. All 116 multi-line responses carried byte-identical
+/// usage on every line, so the first line seen is the response. Lines with no
+/// `message.id` are counted each time, as before, since nothing ties them together.
+///
+/// `since` (epoch ms, the in-flight event's `assignedAt`) additionally sums the
+/// turns stamped at or after it into `event`. Bounding by timestamp rather than
+/// by a baseline sampled at assignment keeps this stateless: it survives a
+/// Sonata restart mid-event, and it doesn't lose the turns a worker takes in
+/// the up-to-15s gap before the first sweep after assignment.
+func parseTranscriptUsage(jsonl: String, since: Int64? = nil) -> TranscriptUsage? {
     var totalTokens: Int64 = 0
     var inputTokens: Int64 = 0
     var cacheReadTokens: Int64 = 0
     var contextTokens: Int64 = 0
     var model: String?
     var sawAssistant = false
+    let sinceStamp = since.map { transcriptTimestamp(ms: $0) }
+    var eventTotal: Int64 = 0
+    var eventInput: Int64 = 0
+    var eventCacheRead: Int64 = 0
+    var seenMessageIds = Set<String>()
 
     for line in jsonl.split(separator: "\n") {
         guard !line.isEmpty,
@@ -520,6 +611,8 @@ func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
               let msg = obj["message"] as? [String: Any],
               let usage = msg["usage"] as? [String: Any] else { continue }
         sawAssistant = true
+        if let id = msg["id"] as? String, !id.isEmpty,
+           !seenMessageIds.insert(id).inserted { continue }
         let input = (usage["input_tokens"] as? Int64) ?? 0
         let cacheCreate = (usage["cache_creation_input_tokens"] as? Int64) ?? 0
         let cacheRead = (usage["cache_read_input_tokens"] as? Int64) ?? 0
@@ -532,6 +625,12 @@ func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
         if let m = msg["model"] as? String, !m.isEmpty, m != "<synthetic>" {
             model = m
         }
+        if let since, let sinceStamp,
+           transcriptTurnIsAtOrAfter(obj["timestamp"] as? String, sinceMs: since, sinceStamp: sinceStamp) {
+            eventTotal += input + cacheCreate + cacheRead + output
+            eventInput += input + cacheCreate + cacheRead
+            eventCacheRead += cacheRead
+        }
     }
 
     guard sawAssistant else { return nil }
@@ -540,6 +639,11 @@ func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
         inputTokens: inputTokens,
         cacheReadTokens: cacheReadTokens,
         contextTokens: contextTokens,
-        model: model
+        model: model,
+        event: since == nil ? nil : .init(
+            totalTokens: eventTotal,
+            inputTokens: eventInput,
+            cacheReadTokens: eventCacheRead
+        )
     )
 }
