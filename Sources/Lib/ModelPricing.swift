@@ -43,8 +43,8 @@ enum ModelPricing {
     /// this matches that bias and keeps cost numbers honest.
     ///
     /// NOTE: this constant is also the *write-side* attribution fallback in
-    /// `WorkerActions` — an event whose payload carries no `model` field is
-    /// persisted with this id. Changing it changes what future rows claim to
+    /// `WorkerActions` — an event whose worker row has no recorded model and
+    /// whose payload carries no `model` field is persisted with this id. Changing it changes what future rows claim to
     /// have run on, so treat it as an attribution decision, not a constant.
     static let defaultModel = "claude-opus-4-7"
 

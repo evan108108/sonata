@@ -1322,18 +1322,23 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
             let workerId = worker.id
             let label = worker.label
             let workerSessionId = worker.sessionId
+            let spawnModel = worker.model
             let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
             DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
                 // Register
                 var req = URLRequest(url: URL(string: "http://localhost:\(port)/api/worker/register")!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = try? JSONSerialization.data(withJSONObject: [
+                var body: [String: Any] = [
                     "workerId": workerId,
                     "sessionLabel": label,
                     "sessionId": workerSessionId,
                     "capabilities": ["task", "email"]
-                ])
+                ]
+                // Only an explicit --model is known here; a worker spawned
+                // without one gets its model from the sweeper's transcript read.
+                if let spawnModel { body["model"] = spawnModel }
+                req.httpBody = try? JSONSerialization.data(withJSONObject: body)
                 URLSession.shared.dataTask(with: req) { _, response, _ in
                     let ok = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
                     DispatchQueue.main.async { [weak self] in

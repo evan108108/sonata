@@ -1511,5 +1511,16 @@ extension DatabaseMigrator {
             try db.execute(sql: "ALTER TABLE calendarEvents ADD COLUMN notifyTarget TEXT")
             try db.execute(sql: "ALTER TABLE scheduledJobs ADD COLUMN notifyTarget TEXT")
         }
+
+        // v44: the model a worker actually runs on. Session-scoped, not
+        // event-scoped — nothing clears it on completion. Seeded from the
+        // spawn `--model` at registration when one was passed, then overwritten
+        // by the sweeper from the transcript's last assistant turn, which is
+        // the only source that knows what a worker spawned WITHOUT `--model`
+        // (every pool worker) is running on. worker_event_complete/fail read
+        // it first when attributing an event's tokens.
+        registerMigration("v44_worker_model") { db in
+            do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN model TEXT") } catch { /* column exists */ }
+        }
     }
 }

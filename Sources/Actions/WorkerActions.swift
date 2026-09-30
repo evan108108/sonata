@@ -80,6 +80,28 @@ func reconcilePinnedWorkers(eventId: String, in db: Database) throws -> Int {
     return db.changesCount
 }
 
+// MARK: - Event model attribution
+
+/// Which model an event's tokens are booked against: the model the worker
+/// actually ran on (`workers.model`), then the payload's `model`, then
+/// `ModelPricing.defaultModel`.
+///
+/// Worker first because the payload's `model` is a REQUEST, and nothing
+/// honours it — TaskDispatcher never routes on `tasks.model`, and a pool worker
+/// runs whatever its process was spawned on. Before 2026-09-30 the payload won,
+/// and every event without one (all of them, in practice) was booked as the
+/// default rather than the Opus 5.5 the pool was really on.
+func resolveAttributedModel(workerModel: String?, payload: String?) -> String {
+    if let m = workerModel, !m.isEmpty { return m }
+    if let payload,
+       let data = payload.data(using: .utf8),
+       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let m = json["model"] as? String, !m.isEmpty {
+        return m
+    }
+    return ModelPricing.defaultModel
+}
+
 // MARK: - Response shapes specific to actions
 
 private struct WorkerListItem: Encodable {
@@ -109,6 +131,8 @@ private struct WorkerListItem: Encodable {
     let currentCacheReadTokens: Int64?
     let currentInputTokens: Int64?
     let currentContextTokens: Int64?
+    /// Model the worker is actually running on (see migration v44).
+    let model: String?
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -128,13 +152,14 @@ private struct WorkerListItem: Encodable {
         try c.encodeIfPresent(currentCacheReadTokens, forKey: .currentCacheReadTokens)
         try c.encodeIfPresent(currentInputTokens, forKey: .currentInputTokens)
         try c.encodeIfPresent(currentContextTokens, forKey: .currentContextTokens)
+        try c.encodeIfPresent(model, forKey: .model)
     }
 
     enum CodingKeys: String, CodingKey {
         case _id, workerId, sessionLabel, status, capabilities
         case lastHeartbeat, lastProgressAt, currentEventId, registeredAt, currentTask, assignedAt
         case currentEventTokens, currentSlug, currentCacheReadTokens, currentInputTokens
-        case currentContextTokens
+        case currentContextTokens, model
     }
 }
 
@@ -229,11 +254,13 @@ let workerActions: [SonataAction] = [
             ActionParam("sessionLabel", .string, required: true, description: "Human-readable session label"),
             ActionParam("capabilities", .stringArray, description: "Capabilities (comma-separated or array)"),
             ActionParam("sessionId", .string, description: "Claude session UUID for cycling/resume"),
+            ActionParam("model", .string, description: "Model the worker was spawned with (--model), if any"),
         ],
         handler: { ctx in
             let workerId = try ctx.params.require("workerId")
             let sessionLabel = ctx.params.string("sessionLabel") ?? ""
             let sessionId = ctx.params.string("sessionId")
+            let model = ctx.params.string("model").flatMap { $0.isEmpty ? nil : $0 }
 
             let now = nowMs()
             let capsJSON = encodeTags(ctx.params.stringArray("capabilities") ?? [])
@@ -267,20 +294,21 @@ let workerActions: [SonataAction] = [
                     // wrong state until the first heartbeat fixes it.
                     try db.execute(
                         sql: """
-                        INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt, sessionId)
-                        VALUES (?, ?, ?, 'idle', ?, ?, ?, ?)
+                        INSERT INTO workers (id, workerId, sessionLabel, status, capabilities, lastHeartbeat, registeredAt, sessionId, model)
+                        VALUES (?, ?, ?, 'idle', ?, ?, ?, ?, ?)
                         ON CONFLICT(workerId) DO UPDATE SET
                             sessionLabel = excluded.sessionLabel,
                             capabilities = excluded.capabilities,
                             lastHeartbeat = excluded.lastHeartbeat,
                             sessionId = excluded.sessionId,
+                            model = COALESCE(excluded.model, model),
                             status = CASE
                                 WHEN status = 'draining' THEN status
                                 WHEN currentEventId IS NOT NULL AND currentEventId != '' THEN 'busy'
                                 ELSE 'idle'
                             END
                         """,
-                        arguments: [newUUID(), workerId, sessionLabel, capsJSON, now, now, sessionId]
+                        arguments: [newUUID(), workerId, sessionLabel, capsJSON, now, now, sessionId, model]
                     )
                     try sweepStaleWorkersForActions(in: db)
                 }
@@ -581,7 +609,8 @@ let workerActions: [SonataAction] = [
                         currentSlug: row["currentSlug"] as? String,
                         currentCacheReadTokens: row["currentCacheReadTokens"] as? Int64,
                         currentInputTokens: row["currentInputTokens"] as? Int64,
-                        currentContextTokens: row["currentContextTokens"] as? Int64
+                        currentContextTokens: row["currentContextTokens"] as? Int64,
+                        model: row["model"] as? String
                     )
                 }
             } catch {
@@ -1147,25 +1176,19 @@ let workerEventActions: [SonataAction] = [
                         arguments: [eventId])
 
                     // Pull totalTokens + model attribution off the worker row before
-                    // we clear it. Model resolves from the payload's `model` field
-                    // when present (the dispatcher propagates tasks.model into the
-                    // payload), else falls back to Opus — matches the rest of the
-                    // system's default for dispatched task work.
+                    // we clear it. Model is the one the worker actually ran on;
+                    // see resolveAttributedModel for the fallback order.
                     var attributedTokens: Int64?
-                    var attributedModel: String?
+                    var workerModel: String?
                     if let workerId = row?.assignedTo {
                         let tokRow = try Row.fetchOne(db, sql: """
-                            SELECT currentEventTokens FROM workers WHERE workerId = ?
+                            SELECT currentEventTokens, model FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
                         attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                        workerModel = tokRow?["model"] as? String
                     }
-                    if let payload = row?.payload,
-                       let payloadData = payload.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-                       let m = json["model"] as? String, !m.isEmpty {
-                        attributedModel = m
-                    }
-                    if attributedModel == nil { attributedModel = ModelPricing.defaultModel }
+                    let attributedModel = resolveAttributedModel(
+                        workerModel: workerModel, payload: row?.payload)
 
                     // Owner-guard: only terminate the event if it is still
                     // 'assigned' to the CALLER. A stale completion from a zombie
@@ -1368,20 +1391,16 @@ let workerEventActions: [SonataAction] = [
                     // Same token attribution as the complete path — failures still
                     // burned tokens and should show up in the Dashboard cost card.
                     var attributedTokens: Int64?
-                    var attributedModel: String?
+                    var workerModel: String?
                     if let workerId = row?.assignedTo {
                         let tokRow = try Row.fetchOne(db, sql: """
-                            SELECT currentEventTokens FROM workers WHERE workerId = ?
+                            SELECT currentEventTokens, model FROM workers WHERE workerId = ?
                         """, arguments: [workerId])
                         attributedTokens = tokRow?["currentEventTokens"] as? Int64
+                        workerModel = tokRow?["model"] as? String
                     }
-                    if let payload = row?.payload,
-                       let payloadData = payload.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-                       let m = json["model"] as? String, !m.isEmpty {
-                        attributedModel = m
-                    }
-                    if attributedModel == nil { attributedModel = ModelPricing.defaultModel }
+                    let attributedModel = resolveAttributedModel(
+                        workerModel: workerModel, payload: row?.payload)
 
                     // Owner-guard (see worker_event_complete): only fail the
                     // event if it is still 'assigned' to THIS caller. A stale

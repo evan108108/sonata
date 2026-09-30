@@ -344,6 +344,7 @@ final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         guard let url = URL(string: "http://localhost:\(port)/api/worker/register") else { return }
         let workerId = sessionKey
         let label = sessionLabel
+        let spawnModel = model
         let name = sidecarName
         let log = logger
 
@@ -355,6 +356,7 @@ final class SidecarCoordinator: NSObject, LocalProcessTerminalViewDelegate {
                 "workerId": workerId,
                 "sessionLabel": label,
                 "sessionId": claudeSessionId,
+                "model": spawnModel,
                 // Sidecars are routed to by event_type through SidecarRegistry,
                 // not by capability matching, so this stays empty rather than
                 // advertising work the sidecar will not do.

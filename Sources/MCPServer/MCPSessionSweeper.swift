@@ -114,7 +114,8 @@ actor MCPSessionSweeper {
                         currentEventTokens = COALESCE(?, currentEventTokens),
                         currentInputTokens = COALESCE(?, currentInputTokens),
                         currentCacheReadTokens = COALESCE(?, currentCacheReadTokens),
-                        currentContextTokens = COALESCE(?, currentContextTokens)
+                        currentContextTokens = COALESCE(?, currentContextTokens),
+                        model = COALESCE(?, model)
                     WHERE workerId = ?
                 """, arguments: [
                     heartbeatAt,
@@ -123,6 +124,8 @@ actor MCPSessionSweeper {
                     inFlight == nil ? nil : usage?.inputTokens,
                     inFlight == nil ? nil : usage?.cacheReadTokens,
                     usage?.contextTokens,
+                    // Session-scoped like currentContextTokens: written at idle too.
+                    usage?.model,
                     workerId,
                 ])
             }
@@ -370,6 +373,9 @@ struct TranscriptUsage: Equatable, Sendable {
     let cacheReadTokens: Int64
     /// Last non-sidechain assistant turn's `input + cacheCreate + cacheRead`.
     let contextTokens: Int64
+    /// Last non-sidechain assistant turn's `message.model` — what the session
+    /// is actually running on. Nil when no turn named a real model.
+    var model: String? = nil
 }
 
 /// Whether this sweep should advance `workers.lastProgressAt`.
@@ -494,11 +500,15 @@ func sidecarSpendDelta(
 /// `cacheRead` is deliberately counted ONCE, inside `input + cacheCreate +
 /// cacheRead`. It is not added again on top; doing so double-counts it, which
 /// is half of what made the original rotation signal read 15,890%.
+///
+/// `model` skips `<synthetic>`: Claude Code writes that id on the placeholder
+/// turns it fabricates for API errors, and it names no model anything ran on.
 func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
     var totalTokens: Int64 = 0
     var inputTokens: Int64 = 0
     var cacheReadTokens: Int64 = 0
     var contextTokens: Int64 = 0
+    var model: String?
     var sawAssistant = false
 
     for line in jsonl.split(separator: "\n") {
@@ -519,6 +529,9 @@ func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
         cacheReadTokens += cacheRead
         // Overwritten each turn — the last assignment wins.
         contextTokens = input + cacheCreate + cacheRead
+        if let m = msg["model"] as? String, !m.isEmpty, m != "<synthetic>" {
+            model = m
+        }
     }
 
     guard sawAssistant else { return nil }
@@ -526,6 +539,7 @@ func parseTranscriptUsage(jsonl: String) -> TranscriptUsage? {
         totalTokens: totalTokens,
         inputTokens: inputTokens,
         cacheReadTokens: cacheReadTokens,
-        contextTokens: contextTokens
+        contextTokens: contextTokens,
+        model: model
     )
 }
