@@ -507,11 +507,12 @@ private func recallMsElapsed(since start: DispatchTime) -> Int {
     return Int(ns / 1_000_000)
 }
 
-private func recallEncodeMemoryForBudget(_ mem: MemoryRow, tags: [String]) -> String {
-    let tagsStr = tags.joined(separator: "\",\"")
-    return """
-    {"_id":"\(mem.id)","type":"\(mem.type)","content":"\(mem.content)","importance":\(mem.importance),"tags":["\(tagsStr)"],"source":"\(mem.source ?? "")","l0":"\(mem.l0 ?? "")","l1":"\(mem.l1 ?? "")","createdAt":\(mem.createdAt),"updatedAt":\(mem.updatedAt)}
-    """
+/// Token cost of one memory exactly as the response carries it, plus its array
+/// separator. A hand-built slim string here once under-counted l0 items ~4–5x
+/// (no tags, no `_scoreComponents`, no timestamps), so `used` overran `budget`.
+private func recallEstimateItemTokens(_ item: RecallMemoryAction) -> Int {
+    guard let data = try? JSONEncoder().encode(item) else { return 0 }
+    return recallEstimateTokens(String(decoding: data, as: UTF8.self) + ",")
 }
 
 private func recallMakeRecallMemory(
@@ -1240,71 +1241,61 @@ let recallActions: [SonataAction] = [
                 // Budget-aware packing — branches by tier.
                 // tier=l0:   id + l0 abstract only. ~10x smaller per memory.
                 // tier=full: today's LOD ladder (full → l1 → l0) up to budget.
+                // Both stop at `limit` (the ranked list is often ~5000 long), and each
+                // item is costed from the JSON it is actually emitted as — tags, the
+                // score breakdown and timestamps included — so `used` stays ≤ budget.
                 var used = 0
                 var included: [RecallMemoryAction] = []
 
                 if tier == "l0" {
                     for scored in sorted {
+                        if included.count >= limit { break }
                         let mem = scored.row
-                        let tags = parseTags(mem.tagsJSON)
-                        let l0Text = memoryL0Text(mem, fallbackChars: 80)
-                        let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
-                        let l0Tokens = recallEstimateTokens(l0Repr)
-                        if used + l0Tokens > memoryBudget { break }
-                        included.append(recallMakeRecallMemory(
-                            mem, tags: tags, searchRank: scored.searchRank,
+                        let item = recallMakeRecallMemory(
+                            mem, tags: parseTags(mem.tagsJSON), searchRank: scored.searchRank,
                             rankScore: scored.rankScore, components: scored.components,
                             tier: "l0", includeContent: false,
-                            overrideL0: l0Text
-                        ))
-                        used += l0Tokens
+                            overrideL0: memoryL0Text(mem, fallbackChars: 80)
+                        )
+                        let tokens = recallEstimateItemTokens(item)
+                        if used + tokens > memoryBudget { break }
+                        included.append(item)
+                        used += tokens
                     }
                 } else {
                     for scored in sorted {
+                        if included.count >= limit { break }
                         let mem = scored.row
                         let tags = parseTags(mem.tagsJSON)
-
                         let l0Text = mem.l0 ?? String(mem.content.prefix(80))
-                        let l0Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"importance\":\(mem.importance)}"
-                        let l0Tokens = recallEstimateTokens(l0Repr)
+                        let l1Text = mem.l1 ?? String(mem.content.prefix(250))
 
-                        if used + l0Tokens > memoryBudget { break }
-
-                        let fullJSON = recallEncodeMemoryForBudget(mem, tags: tags)
-                        let fullTokens = recallEstimateTokens(fullJSON)
-
-                        if used + fullTokens <= memoryBudget {
-                            included.append(recallMakeRecallMemory(
+                        // Richest rung that still fits; if not even l0 fits, stop.
+                        let rungs = [
+                            recallMakeRecallMemory(
                                 mem, tags: tags, searchRank: scored.searchRank,
                                 rankScore: scored.rankScore, components: scored.components,
                                 tier: "full", includeContent: true
-                            ))
-                            used += fullTokens
-                            continue
-                        }
-
-                        let l1Text = mem.l1 ?? String(mem.content.prefix(250))
-                        let l1Repr = "{\"_id\":\"\(mem.id)\",\"type\":\"\(mem.type)\",\"l0\":\"\(l0Text)\",\"l1\":\"\(l1Text)\",\"importance\":\(mem.importance),\"source\":\"\(mem.source ?? "")\"}"
-                        let l1Tokens = recallEstimateTokens(l1Repr)
-
-                        if used + l1Tokens <= memoryBudget {
-                            included.append(recallMakeRecallMemory(
+                            ),
+                            recallMakeRecallMemory(
                                 mem, tags: tags, searchRank: scored.searchRank,
                                 rankScore: scored.rankScore, components: scored.components,
                                 tier: "l1", includeContent: false,
                                 overrideL0: l0Text, overrideL1: l1Text
-                            ))
-                            used += l1Tokens
-                            continue
-                        }
-
-                        included.append(recallMakeRecallMemory(
-                            mem, tags: tags, searchRank: scored.searchRank,
-                            rankScore: scored.rankScore, components: scored.components,
-                            tier: "l0", includeContent: false,
-                            overrideL0: l0Text
-                        ))
-                        used += l0Tokens
+                            ),
+                            recallMakeRecallMemory(
+                                mem, tags: tags, searchRank: scored.searchRank,
+                                rankScore: scored.rankScore, components: scored.components,
+                                tier: "l0", includeContent: false,
+                                overrideL0: l0Text
+                            ),
+                        ]
+                        guard let (item, tokens) = rungs.lazy
+                            .map({ ($0, recallEstimateItemTokens($0)) })
+                            .first(where: { used + $0.1 <= memoryBudget })
+                        else { break }
+                        included.append(item)
+                        used += tokens
                     }
                 }
 
