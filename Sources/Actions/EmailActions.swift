@@ -39,6 +39,15 @@ private func resolveEmailIdForAction(
     return nil
 }
 
+/// email_mark_replied's result. `{success:true}` alone was identical for an
+/// unread email, one already marked replied, and an `id` matching no row (the
+/// UPDATE just touched zero rows). `found` and `alreadyReplied` report which.
+struct EmailMarkRepliedResponse: Encodable {
+    let success = true
+    let found: Bool
+    let alreadyReplied: Bool
+}
+
 let emailActions: [SonataAction] = [
 
     // GET /api/email/unread
@@ -200,7 +209,7 @@ let emailActions: [SonataAction] = [
     // POST /api/email/mark-replied
     SonataAction(
         name: "email_mark_replied",
-        description: "Mark an email as replied; sets repliedAt=now (by id or messageId).",
+        description: "Mark an email as replied; sets repliedAt=now (by id or messageId). Returns `found` (false if no email row matched) and `alreadyReplied` (true if it was already marked replied).",
         group: "/api/email",
         path: "/mark-replied",
         method: .post,
@@ -220,16 +229,24 @@ let emailActions: [SonataAction] = [
 
             let now = nowMs()
             do {
-                try await ctx.dbPool.write { db in
+                return try await ctx.dbPool.write { db -> EmailMarkRepliedResponse in
+                    let priorStatus = try String.fetchOne(
+                        db,
+                        sql: "SELECT status FROM emails WHERE id = ?",
+                        arguments: [resolvedId]
+                    )
                     try db.execute(
                         sql: "UPDATE emails SET status = 'replied', repliedAt = ? WHERE id = ?",
                         arguments: [now, resolvedId]
+                    )
+                    return EmailMarkRepliedResponse(
+                        found: priorStatus != nil,
+                        alreadyReplied: priorStatus == "replied"
                     )
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
             }
-            return SuccessResponse()
         }
     ),
 

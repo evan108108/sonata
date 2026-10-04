@@ -20,14 +20,44 @@ private func encodeAnyJSON(_ value: Any) -> String? {
 /// happened — `success: true` looked identical whether the write landed on the
 /// row they named, a fork of it, or a brand new row. `created` and `matchedBy`
 /// make the target explicit, and `warnings` reports a forked name that the
-/// caller resolved unambiguously but should still know about.
+/// caller resolved unambiguously but should still know about. `action` splits
+/// the `created: false` case: an upsert that rewrote a row with the values it
+/// already held is `unchanged`, so a caller re-running a batch can tell "I
+/// changed N rows" from "N rows were already right".
 struct EntityUpsertResponse: Encodable {
     let id: String
     let success = true
     let created: Bool
     /// `id` | `name+type` | `created`
     let matchedBy: String
+    /// `inserted` | `updated` | `unchanged`
+    let action: String
     let warnings: [String]?
+}
+
+/// Whether an upsert's UPDATE would change the stored row. `name` is nil for
+/// the name-matched path, which never rewrites the stored spelling. A nil
+/// `attributesJSON` keeps the stored attributes (the UPDATE COALESCEs it), so
+/// it is never a change. Attributes compare as parsed JSON, not as strings,
+/// because dictionary key order is not stable across encodes.
+private func entityUpsertWouldChange(
+    _ db: Database, id: String, name: String?, type: String, description: String, attributesJSON: String?
+) throws -> Bool {
+    guard let row = try Row.fetchOne(
+        db,
+        sql: "SELECT name, type, description, attributes FROM entities WHERE id = ?",
+        arguments: [id]
+    ) else { return true }
+    if let name, name != (row["name"] as String) { return true }
+    if type != (row["type"] as String) { return true }
+    if description != (row["description"] as String) { return true }
+    guard let attributesJSON else { return false }
+    guard let stored: String = row["attributes"] else { return true }
+    guard let new = try? JSONSerialization.jsonObject(with: Data(attributesJSON.utf8)) as? NSObject,
+          let old = try? JSONSerialization.jsonObject(with: Data(stored.utf8)) as? NSObject else {
+        return attributesJSON != stored
+    }
+    return !new.isEqual(old)
 }
 
 let entityActions: [SonataAction] = [
@@ -103,11 +133,18 @@ let entityActions: [SonataAction] = [
                         ) != nil else {
                             throw ActionError.notFound("Entity id '\(targetId)'")
                         }
+                        let changed = try entityUpsertWouldChange(
+                            db, id: targetId, name: name, type: type,
+                            description: description, attributesJSON: attributesJSON
+                        )
                         try db.execute(
                             sql: updateById,
                             arguments: [name, type, description, attributesJSON, now, targetId]
                         )
-                        return EntityUpsertResponse(id: targetId, created: false, matchedBy: "id", warnings: nil)
+                        return EntityUpsertResponse(
+                            id: targetId, created: false, matchedBy: "id",
+                            action: changed ? "updated" : "unchanged", warnings: nil
+                        )
                     }
 
                     switch try resolveEntity(db, name: name, type: type) {
@@ -120,7 +157,7 @@ let entityActions: [SonataAction] = [
                             """,
                             arguments: [id, name, type, description, attributesJSON, now, now]
                         )
-                        return EntityUpsertResponse(id: id, created: true, matchedBy: "created", warnings: nil)
+                        return EntityUpsertResponse(id: id, created: true, matchedBy: "created", action: "inserted", warnings: nil)
 
                     case .matched(let target, _) where target.viaAlias:
                         // An alias is a pointer, not a license to rewrite the
@@ -137,6 +174,10 @@ let entityActions: [SonataAction] = [
                         )
 
                     case .matched(let target, let siblings):
+                        let changed = try entityUpsertWouldChange(
+                            db, id: target.id, name: nil, type: type,
+                            description: description, attributesJSON: attributesJSON
+                        )
                         try db.execute(
                             sql: updateMatched,
                             arguments: [type, description, attributesJSON, now, target.id]
@@ -148,7 +189,10 @@ let entityActions: [SonataAction] = [
                         let warnings = siblings.isEmpty ? nil : [
                             "Name '\(name)' is forked across \(siblings.count + 1) rows; matched \(target.label) on type. Others: \(siblings.map(\.label).joined(separator: ", "))."
                         ]
-                        return EntityUpsertResponse(id: target.id, created: false, matchedBy: "name+type", warnings: warnings)
+                        return EntityUpsertResponse(
+                            id: target.id, created: false, matchedBy: "name+type",
+                            action: changed ? "updated" : "unchanged", warnings: warnings
+                        )
 
                     case .typeMismatch(let candidates):
                         // The old behavior was to overwrite candidates.first here

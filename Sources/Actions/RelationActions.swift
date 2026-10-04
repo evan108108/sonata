@@ -7,12 +7,23 @@ import Hummingbird
 
 private let validRelationSides: Set<String> = ["memory", "entity"]
 
+/// mem_relation_create's result. `{id, success:true}` used to be identical for
+/// an insert and a dedup, so a caller whose pre-scan wrongly believed an edge
+/// was missing got "success" back and reported a write that never happened
+/// (10/03 KG enrichment: 24 "new" edges, 12 already present). `created` is that
+/// missing state; on dedup `id` is the EXISTING relation's id.
+struct RelationCreateResponse: Encodable {
+    let id: String
+    let success = true
+    let created: Bool
+}
+
 let relationActions: [SonataAction] = [
 
     // POST /api/relation — create (deduped)
     SonataAction(
         name: "mem_relation_create",
-        description: "Create a relation between a memory/entity and another memory/entity. Deduplicates.",
+        description: "Create a relation between a memory/entity and another memory/entity. Deduplicates: `created` is true for a new row, false when the relation already existed (`id` is then the existing relation's id).",
         group: "/api/relation",
         path: "/",
         method: .post,
@@ -39,9 +50,9 @@ let relationActions: [SonataAction] = [
 
             let now = nowMs()
 
-            let result: Result<String, ActionError>
+            let result: Result<RelationCreateResponse, ActionError>
             do {
-                result = try await ctx.dbPool.write { db -> Result<String, ActionError> in
+                result = try await ctx.dbPool.write { db -> Result<RelationCreateResponse, ActionError> in
                     let existing = try RelationRow.fetchOne(
                         db,
                         sql: """
@@ -52,7 +63,7 @@ let relationActions: [SonataAction] = [
                     )
 
                     if let existing = existing {
-                        return .success(existing.id)
+                        return .success(RelationCreateResponse(id: existing.id, created: false))
                     }
 
                     // Emit-side existence check: refuse writes that would create
@@ -82,7 +93,7 @@ let relationActions: [SonataAction] = [
                         """,
                         arguments: [id, sourceId, sourceType, targetId, targetType, relation, now]
                     )
-                    return .success(id)
+                    return .success(RelationCreateResponse(id: id, created: true))
                 }
             } catch let error as ActionError {
                 throw error
@@ -91,8 +102,8 @@ let relationActions: [SonataAction] = [
             }
 
             switch result {
-            case .success(let id):
-                return StoreResponse(id: id)
+            case .success(let response):
+                return response
             case .failure(let err):
                 throw err
             }
