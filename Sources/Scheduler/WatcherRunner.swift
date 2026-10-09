@@ -21,6 +21,10 @@ import Logging
 /// time only fires the dispatch once per cooldown window. Not a global rate
 /// limit — different files fire independently.
 ///
+/// `file_added` is also idempotent per path: one new file dispatches once,
+/// whatever the gap between its FS events (see `fileAddedClaims`). Later
+/// events for the path are logged as `deduped` in watcher_events.
+///
 /// Retry: on dispatch failure, the watcher row's consecutiveFailures counter
 /// increments. When it hits K in a row (see `autoDisableThreshold`), the
 /// watcher is auto-disabled and a DM goes to the supervisor session so the
@@ -47,6 +51,14 @@ actor WatcherRunner {
     /// distinct paths seen; not swept because the entry cost is small and the
     /// watcher's own lifecycle bounds the map.
     private var lastDispatchMs: [String: Int64] = [:]
+
+    /// Per-(watcherId, path) claim for `file_added`: a new file dispatches
+    /// once, ever. Sync clients land a file in two FS events (create, then
+    /// an atomic replace seconds later), both flagged Created/Renamed, and
+    /// the gap can exceed `cooldownMs`. The claim is taken BEFORE the
+    /// dispatch awaits, so a second event arriving mid-dispatch (actor
+    /// reentrancy) sees it; `watcher_events` backs it across restarts.
+    private var fileAddedClaims: Set<String> = []
 
     /// Guard against `start()` being called twice.
     private var started = false
@@ -193,8 +205,78 @@ actor WatcherRunner {
             }
             lastDispatchMs[debounceKey] = now
 
+            if event == "file_added" {
+                // The source side of a rename carries the Renamed flag too:
+                // a path that is gone was moved away, not added.
+                guard FileManager.default.fileExists(atPath: path) else { continue }
+                if fileAddedClaims.contains(debounceKey) {
+                    await recordDeduped(watcherId: watcherId, path: path,
+                                        reason: "already claimed by this runner")
+                    continue
+                }
+                fileAddedClaims.insert(debounceKey)
+                if let prior = await priorFileAddedDispatch(watcherId: watcherId, path: path) {
+                    await recordDeduped(watcherId: watcherId, path: path,
+                                        reason: "already dispatched as event \(prior)")
+                    continue
+                }
+                let result = await dispatch(row: row, eventType: event, path: path)
+                // A failed dispatch leaves the path unclaimed so the next
+                // event for it can retry.
+                if result.status != "dispatched" {
+                    fileAddedClaims.remove(debounceKey)
+                }
+                continue
+            }
+
             await dispatch(row: row, eventType: event, path: path)
         }
+    }
+
+    /// Id of an earlier successful `file_added` dispatch for this path, if
+    /// any. The event log is the durable half of the per-path claim.
+    private func priorFileAddedDispatch(watcherId: String, path: String) async -> String? {
+        do {
+            return try await dbPool.read { db in
+                try String.fetchOne(
+                    db,
+                    sql: """
+                    SELECT id FROM watcher_events
+                    WHERE watcherId = ? AND path = ?
+                      AND eventType = 'file_added' AND status = 'dispatched'
+                    ORDER BY firedAt LIMIT 1
+                    """,
+                    arguments: [watcherId, path]
+                )
+            }
+        } catch {
+            // Fail open: a missed dedup is a duplicate task, a false dedup
+            // is a lost file.
+            logger.error("WatcherRunner: file_added dedup lookup failed for \(path): \(error)")
+            return nil
+        }
+    }
+
+    /// Audit row for a suppressed duplicate, so `watcher_events_recent`
+    /// shows the dedup fired. Does not touch the failure counters.
+    private func recordDeduped(watcherId: String, path: String, reason: String) async {
+        let id = newUUID()
+        let firedAt = nowMs()
+        do {
+            try await dbPool.write { db in
+                try db.execute(
+                    sql: """
+                    INSERT INTO watcher_events
+                        (id, watcherId, path, eventType, firedAt, taskId, status, error)
+                    VALUES (?, ?, ?, 'file_added', ?, NULL, 'deduped', ?)
+                    """,
+                    arguments: [id, watcherId, path, firedAt, reason]
+                )
+            }
+        } catch {
+            logger.error("WatcherRunner: failed to record deduped file_added for \(path): \(error)")
+        }
+        logger.info("WatcherRunner: file_added for \(path) deduped (\(reason))")
     }
 
     /// Classify an FSEventStream flag word into one of the trigger types the
