@@ -57,6 +57,7 @@ let embeddingActions: [SonataAction] = [
         ],
         handler: { ctx in
             let content = try ctx.params.require("content")
+            try ToolCallMarkupGuard.check(content, field: "content")
             let type = try ctx.params.require("type")
             guard validMemoryTypesForEmbeddingAction.contains(type) else {
                 throw ActionError.invalidParam("type", "Invalid memory type '\(type)'")

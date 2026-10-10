@@ -446,6 +446,7 @@ let compositeActions: [SonataAction] = [
         mcpOnly: true,
         handler: { ctx in
             let thought = try ctx.params.require("thought")
+            try ToolCallMarkupGuard.check(thought, field: "thought")
             let id = newUUID()
             let now = nowMs()
             do {

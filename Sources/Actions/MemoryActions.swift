@@ -452,6 +452,10 @@ let memoryActions: [SonataAction] = [
             guard validMemoryTypesForActions.contains(type) else {
                 throw ActionError.invalidParam("type", "Invalid memory type '\(type)'")
             }
+            // Before anything is written: the inline-entity annotation below is
+            // best-effort AFTER the insert, so a leak there must stop the call here.
+            try ToolCallMarkupGuard.check(content, field: "content")
+            try ToolCallMarkupGuard.checkInlineEntities(ctx.params.string("entities"))
 
             let now = nowMs()
             let createdAt = ctx.params.int("createdAt").map { Int64($0) } ?? now
@@ -855,6 +859,7 @@ let memoryActions: [SonataAction] = [
             if let t = ctx.params.string("type"), !validMemoryTypesForActions.contains(t) {
                 throw ActionError.invalidParam("type", "Invalid memory type '\(t)'")
             }
+            try ToolCallMarkupGuard.check(ctx.params.string("content"), field: "content")
 
             let now = nowMs()
             var setClauses: [String] = ["updatedAt = ?"]
@@ -987,6 +992,7 @@ let memoryActions: [SonataAction] = [
         handler: { ctx in
             let originalId = try ctx.params.requireAny(["originalId", "id"])
             let content = try ctx.params.requireTextBody("content", pathKey: "contentPath")
+            try ToolCallMarkupGuard.check(content, field: "content")
 
             let original: MemoryRow?
             do {

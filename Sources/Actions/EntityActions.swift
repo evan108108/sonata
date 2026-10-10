@@ -101,6 +101,7 @@ let entityActions: [SonataAction] = [
             let name = try ctx.params.require("name")
             let type = try ctx.params.require("type")
             let description = try ctx.params.require("description")
+            try ToolCallMarkupGuard.check(description, field: "description")
             let attributesJSON: String? = ctx.params.object("attributes").flatMap { encodeAnyJSON($0) }
             let targetId = ctx.params.string("id").flatMap { $0.isEmpty ? nil : $0 }
 
@@ -428,6 +429,7 @@ let entityActions: [SonataAction] = [
         ],
         handler: { ctx in
             let id = try ctx.params.require("id")
+            try ToolCallMarkupGuard.check(ctx.params.string("description"), field: "description")
             let now = nowMs()
             var setClauses: [String] = ["updatedAt = ?"]
             var args: [any DatabaseValueConvertible] = [now]
