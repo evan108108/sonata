@@ -1522,5 +1522,25 @@ extension DatabaseMigrator {
         registerMigration("v44_worker_model") { db in
             do { try db.execute(sql: "ALTER TABLE workers ADD COLUMN model TEXT") } catch { /* column exists */ }
         }
+
+        // v45: per-event delivery bookkeeping, so a session handed an event a
+        // second time is told so (see WorkerEventDelivery). The backfill
+        // treats every row that was ever assigned and is still open as
+        // delivered once: those rows were pushed by a pusher whose record of
+        // it lived only in memory, and the relaunch that runs this migration
+        // is exactly the moment they get pushed again. Overcounting costs a
+        // session one extra verification pass; undercounting is the silent
+        // redelivery this column exists to end.
+        registerMigration("v45_worker_event_deliveries") { db in
+            do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN deliveryCount INTEGER NOT NULL DEFAULT 0") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN firstDeliveredAt INTEGER") } catch { /* column exists */ }
+            do { try db.execute(sql: "ALTER TABLE workerEvents ADD COLUMN lastDeliveredToSession TEXT") } catch { /* column exists */ }
+            try db.execute(sql: """
+                UPDATE workerEvents
+                SET deliveryCount = 1, firstDeliveredAt = assignedAt, lastDeliveredToSession = assignedTo
+                WHERE deliveryCount = 0 AND assignedAt IS NOT NULL
+                  AND status IN ('assigned', 'pending')
+            """)
+        }
     }
 }

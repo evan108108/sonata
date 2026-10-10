@@ -1178,6 +1178,11 @@ let workerEventActions: [SonataAction] = [
                         WHERE workerId = ?
                     """, arguments: [row.id, now, workerId])
 
+                    // A claim hands the event to the poller, so it counts as a
+                    // delivery; keeps deliveryCount honest for the SSE pusher.
+                    try WorkerEventDelivery.recordDelivered(
+                        db, eventId: row.id, sessionKey: workerId, at: now)
+
                     return try WorkerEventRow.fetchOne(db,
                         sql: "SELECT * FROM workerEvents WHERE id = ?",
                         arguments: [row.id])

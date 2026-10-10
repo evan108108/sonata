@@ -27,6 +27,24 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
         createdAt: Int64,
         content: String
     ) async -> Bool {
+        let message = Self.workerEventMessage(
+            eventId: eventId, eventType: eventType, priority: priority,
+            createdAt: createdAt, content: content
+        )
+        return await pushChannel(
+            sessionKey: sessionKey, content: message.content, meta: message.meta
+        )
+    }
+
+    /// The exact channel frame body a worker session receives for an event.
+    /// Pure, so the pusher can build it once and tests can read it.
+    static func workerEventMessage(
+        eventId: String,
+        eventType: String,
+        priority: Int,
+        createdAt: Int64,
+        content: String
+    ) -> (content: String, meta: [String: String]) {
         let meta: [String: String] = [
             "event_id": eventId,
             "event_type": eventType,
@@ -34,11 +52,7 @@ final class MCPNotificationDispatcher: @unchecked Sendable {
             "timestamp": ISO8601DateFormatter().string(
                 from: Date(timeIntervalSince1970: TimeInterval(createdAt) / 1000.0)),
         ]
-        return await pushChannel(
-            sessionKey: sessionKey,
-            content: "[\(eventType.uppercased())] \(content)",
-            meta: meta
-        )
+        return (content: "[\(eventType.uppercased())] \(content)", meta: meta)
     }
 
     @discardableResult

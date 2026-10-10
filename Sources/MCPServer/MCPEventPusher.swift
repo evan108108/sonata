@@ -10,9 +10,25 @@ actor MCPEventPusher {
     private var task: Task<Void, Never>?
     private let pollInterval: TimeInterval = 1.0
 
-    init(dbPool: DatabasePool, logger: Logger) {
+    /// Sends one `notifications/claude/channel` frame to a session; true if a
+    /// live SSE writer took it. Injected so tests can observe exactly what a
+    /// worker session would receive.
+    typealias ChannelPush = @Sendable (
+        _ sessionKey: String, _ content: String, _ meta: [String: String]
+    ) async -> Bool
+    private let pushChannel: ChannelPush
+
+    init(
+        dbPool: DatabasePool,
+        logger: Logger,
+        pushChannel: @escaping ChannelPush = { sessionKey, content, meta in
+            await MCPNotificationDispatcher.shared.pushChannel(
+                sessionKey: sessionKey, content: content, meta: meta)
+        }
+    ) {
         self.dbPool = dbPool
         self.logger = logger
+        self.pushChannel = pushChannel
     }
 
     func start() {
@@ -298,7 +314,7 @@ actor MCPEventPusher {
         let createdAt: Int64
     }
 
-    private func pushPendingWorkerEvents() async {
+    func pushPendingWorkerEvents() async {
         let rows: [PendingWorkerEvent]
         do {
             rows = try await dbPool.read { db -> [PendingWorkerEvent] in
@@ -355,17 +371,34 @@ actor MCPEventPusher {
                 }
                 return baseContent
             }()
-            let delivered = await MCPNotificationDispatcher.shared.pushWorkerEvent(
-                sessionKey: evt.assignedTo,
+            let message = MCPNotificationDispatcher.workerEventMessage(
                 eventId: evt.id,
                 eventType: evt.type,
                 priority: evt.priority,
                 createdAt: evt.createdAt,
                 content: content
             )
+            // Mark a second-or-later delivery (relaunch, reclaim) so the
+            // receiving session knows a prior one may have done part of it.
+            // A failed stamp read must not block delivery: fall back to an
+            // unmarked push, the pre-v45 behavior.
+            let stamp: WorkerEventDeliveryStamp? = try? await dbPool.read { [id = evt.id] db in
+                try WorkerEventDelivery.nextStamp(db, eventId: id)
+            }
+            let framed = stamp.map {
+                WorkerEventDelivery.decorate(content: message.content, meta: message.meta, stamp: $0)
+            } ?? message
+            let delivered = await pushChannel(evt.assignedTo, framed.content, framed.meta)
             if !delivered {
                 knownWorkerEventIds.remove(evt.id)
                 continue
+            }
+            do {
+                try await dbPool.write { [id = evt.id, key = evt.assignedTo] db in
+                    try WorkerEventDelivery.recordDelivered(db, eventId: id, sessionKey: key, at: nowMs())
+                }
+            } catch {
+                logger.warning("EventPusher: failed to record delivery of \(evt.id): \(error)")
             }
             // Notification-type events auto-complete on push. Their recipients
             // have no completion path — either by design (memory_request's
