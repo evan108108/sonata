@@ -184,6 +184,34 @@ mv "$RESOURCE_BUNDLE" "$TMP_BUNDLE"
 codesign --force --sign - "$APP"
 mv "$TMP_BUNDLE" "$RESOURCE_BUNDLE"
 
+# Deploy record: which commits this binary shipped. A deploy ships EVERY
+# commit since the last one, not just the change that prompted it, and the
+# MCP fingerprint monitor attaches this record to a tool-definition alert so
+# the change can be traced to its commits (2026-10-09: 13 commits shipped,
+# 3 tool definitions flagged, triaged by hand).
+DEPLOY_RECORD="/Users/evan/memory/claude/runtime/last-sonata-deploy.json"
+# Every step here is best-effort: a missing record or git hiccup must never
+# abort a deploy (set -e applies to failing command substitutions).
+DEPLOY_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+PREV_SHA="$( (sed -n 's/.*"sha": *"\([0-9a-f]*\)".*/\1/p' "$DEPLOY_RECORD" 2>/dev/null || true) | head -1)"
+if [ -n "$PREV_SHA" ] && git -C "$REPO" cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+  SHIPPED="$(git -C "$REPO" log --format='%h %s' "${PREV_SHA}..${DEPLOY_SHA}" 2>/dev/null || true)"
+else
+  # No usable previous record: list what isn't on origin/main yet.
+  SHIPPED="$(git -C "$REPO" log --format='%h %s' "origin/main..${DEPLOY_SHA}" 2>/dev/null || true)"
+fi
+mkdir -p "$(dirname "$DEPLOY_RECORD")"
+printf '%s\n' "$SHIPPED" | node -e '
+  const lines = require("fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
+  const [sha, prev, file] = process.argv.slice(1);
+  require("fs").writeFileSync(file, JSON.stringify({
+    deployedAt: new Date().toISOString(), deployedAtMs: Date.now(),
+    sha, previousSha: prev || null, commits: lines,
+  }, null, 2) + "\n");
+' "$DEPLOY_SHA" "$PREV_SHA" "$DEPLOY_RECORD" \
+  && echo "==> deploy record: ${DEPLOY_SHA:0:9} ($(printf '%s\n' "$SHIPPED" | grep -c .) commits) → $DEPLOY_RECORD" \
+  || echo "==> WARN: could not write deploy record" >&2
+
 if [ "$LAUNCH" -eq 0 ]; then
   echo "==> binary swapped (--no-launch); not relaunching"
   echo "==> deploy-local done"
