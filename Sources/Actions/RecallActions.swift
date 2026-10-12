@@ -375,9 +375,14 @@ private struct RecallResponseAction: Encodable, OrderedJSONResponse {
 }
 
 private struct FetchFullResponse: Encodable {
-    let memories: [RecallMemoryAction]
+    // Declared before `memories` so a truncated view still shows them. A
+    // mistyped id used to drop out silently: found 5 of 6, nobody noticed, and
+    // a brief missed a decision (2026-10-07). nil when every id was found.
+    let warning: String?
+    let missing: [String]?
     let requested: Int
     let found: Int
+    let memories: [RecallMemoryAction]
 }
 
 // MARK: - Internal scored memory container
@@ -1541,10 +1546,14 @@ let recallActions: [SonataAction] = [
                     tier: "full", includeContent: true
                 ))
             }
+            let missing = ids.filter { byId[$0] == nil }
             return FetchFullResponse(
-                memories: memories,
+                warning: missing.isEmpty ? nil
+                    : "\(missing.count) of \(ids.count) ids not found. Check each id was copied from a tool output, not typed.",
+                missing: missing.isEmpty ? nil : missing,
                 requested: ids.count,
-                found: memories.count
+                found: memories.count,
+                memories: memories
             )
         }
     ),
