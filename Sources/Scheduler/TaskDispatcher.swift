@@ -16,6 +16,12 @@ actor TaskDispatcher {
     private var isRunning = false
     private var activeTasks: Set<String> = []  // task IDs currently being executed
 
+    /// Extra pending tasks read past the idle-worker count each poll. A task
+    /// that excludes the only idle workers (`DispatchExclusion`) fails to
+    /// dispatch and stays pending; without look-ahead it would hold its slot
+    /// every tick and starve the tasks queued behind it.
+    private static let dispatchLookahead = 8
+
     init(dbPool: DatabasePool) {
         self.dbPool = dbPool
         self.channelServer = SonataChannelServer(dbPool: dbPool)
@@ -185,7 +191,7 @@ actor TaskDispatcher {
                     END,
                     t.createdAt ASC
                 LIMIT ?
-            """, arguments: [slotsAvailable])
+            """, arguments: [slotsAvailable + Self.dispatchLookahead])
         }
 
         // One cycle id per poll tick, shared by every task dispatched in this
@@ -195,13 +201,17 @@ actor TaskDispatcher {
         // instead of being locked out until midnight.
         let dispatchCycle = String(Int64(Date().timeIntervalSince1970 * 1000))
 
+        // Stop once every idle slot is filled: the look-ahead rows exist only
+        // to stand in for tasks that could not take any idle worker.
+        var dispatched = 0
         for task in tasks {
+            guard dispatched < slotsAvailable else { break }
             guard !activeTasks.contains(task.id) else { continue }
-            await dispatch(task, dispatchCycle: dispatchCycle)
+            if await dispatch(task, dispatchCycle: dispatchCycle) { dispatched += 1 }
         }
     }
 
-    private func dispatch(_ task: DispatcherTaskRow, dispatchCycle: String) async {
+    private func dispatch(_ task: DispatcherTaskRow, dispatchCycle: String) async -> Bool {
         let taskId = task.id
         let title = task.title
         let prompt = task.prompt ?? task.title
@@ -214,7 +224,8 @@ actor TaskDispatcher {
             title: title,
             prompt: prompt,
             priority: priorityToInt(task.priority),
-            dispatchCycle: dispatchCycle
+            dispatchCycle: dispatchCycle,
+            excludeSessionIds: DispatchExclusion.ids(fromTaskMetadata: task.metadata)
         ) {
             // Dispatch succeeded — NOW mark active
             activeTasks.insert(taskId)
@@ -254,13 +265,14 @@ actor TaskDispatcher {
                     }
                 }
             }
-            return
+            return true
         }
 
         // Channel dispatch failed (no idle worker claimed the event in time).
         // Leave the task `pending` — the next poll cycle will retry once a
         // worker frees up. Bridge-only model: no `claude -p` fallback.
         logger.info("Channel dispatch missed for \"\(title)\" — leaving pending for next poll cycle")
+        return false
     }
 
     private func priorityToInt(_ priority: String) -> Int {
@@ -326,6 +338,7 @@ private struct DispatcherTaskRow: FetchableRecord, Codable {
     let workingDir: String?
     let priority: String
     let blockedBy: String?
+    let metadata: String?
 
     static let databaseTableName = "tasks"
 }

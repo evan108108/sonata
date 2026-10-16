@@ -60,7 +60,13 @@ actor SonataChannelServer {
     /// long-lived non-pool session — a sidecar — would be the top candidate the
     /// moment it registered, and `dispatchToChannel` would feed it arbitrary
     /// tasks.
-    func findIdleWorker() async -> String? {
+    ///
+    /// `excluding` names sessions that must not get this task (see
+    /// `DispatchExclusion`). When every idle worker is excluded this returns
+    /// nil and the task waits for the next poll, exactly as with no idle worker.
+    func findIdleWorker(excluding excludedIds: [String] = []) async -> String? {
+        let exclusion = DispatchExclusion.workerPredicate(excluding: excludedIds)
+        let arguments = StatementArguments([nowMs() - 30_000]) + exclusion.arguments
         do {
             return try await dbPool.read { db in
                 try String.fetchOne(db, sql: """
@@ -68,9 +74,10 @@ actor SonataChannelServer {
                     WHERE status = 'idle'
                     AND lastHeartbeat > ?
                     AND \(poolSlotSQLPredicate)
+                    AND \(exclusion.sql)
                     ORDER BY lastHeartbeat DESC
                     LIMIT 1
-                """, arguments: [nowMs() - 30_000])
+                """, arguments: arguments)
             }
         } catch {
             logger.error("Error finding idle worker: \(error.localizedDescription)")
@@ -88,10 +95,15 @@ actor SonataChannelServer {
         title: String,
         prompt: String,
         priority: Int = 5,
-        dispatchCycle: String
+        dispatchCycle: String,
+        excludeSessionIds: [String] = []
     ) async -> String? {
-        guard let workerId = await findIdleWorker() else {
-            logger.info("No idle channel workers for task \(taskId)")
+        guard let workerId = await findIdleWorker(excluding: excludeSessionIds) else {
+            if excludeSessionIds.isEmpty {
+                logger.info("No idle channel workers for task \(taskId)")
+            } else {
+                logger.info("No eligible idle channel worker for task \(taskId) (excluding \(excludeSessionIds.joined(separator: ", ")))")
+            }
             return nil
         }
 
@@ -114,12 +126,19 @@ actor SonataChannelServer {
         // to `pending` retries in 10 seconds, and a task that legitimately
         // COMPLETED can be re-run the same day. A nonce would have made every
         // key unique and quietly turned the dedup guard off.
-        let payload: [String: Any] = [
+        var payloadFields: [String: Any] = [
             "task_id": taskId,
             "title": title,
             "prompt": prompt,
             "dispatch_cycle": dispatchCycle,
         ]
+        // Carried on the event so the exclusion survives a HealthMonitor
+        // re-enqueue, when the claim endpoint or the SSE pusher picks the
+        // next worker instead of findIdleWorker.
+        if !excludeSessionIds.isEmpty {
+            payloadFields[DispatchExclusion.eventPayloadKey] = excludeSessionIds
+        }
+        let payload = payloadFields
         let payloadJSON: String
         if let data = try? JSONSerialization.data(withJSONObject: payload),
            let str = String(data: data, encoding: .utf8) {

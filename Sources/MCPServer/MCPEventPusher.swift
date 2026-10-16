@@ -125,7 +125,7 @@ actor MCPEventPusher {
                 try await dbPool.write { db in
                     // Re-verify state (may have changed since read).
                     let workerRow = try Row.fetchOne(db, sql: """
-                        SELECT status, currentEventId FROM workers WHERE workerId = ?
+                        SELECT status, currentEventId, sessionId, sessionLabel FROM workers WHERE workerId = ?
                     """, arguments: [workerId])
                     guard let workerRow else { return }
                     let status = workerRow["status"] as? String ?? ""
@@ -140,12 +140,21 @@ actor MCPEventPusher {
                         .map { _ in "?" }.joined(separator: ",")
                     var args: [DatabaseValueConvertible] = []
                     args.append(contentsOf: MCPEventPusher.notificationTypes.map { $0 as DatabaseValueConvertible })
+                    // Skip events that exclude this worker (DispatchExclusion):
+                    // a stranded live_review re-enqueued here must not land on
+                    // its own fixer.
+                    let exclusion = DispatchExclusion.eventPredicate(
+                        workerId: workerId,
+                        sessionId: workerRow["sessionId"] as? String,
+                        sessionLabel: workerRow["sessionLabel"] as? String)
+                    let pickArgs = StatementArguments(args.map { $0 as (any DatabaseValueConvertible)? }) + exclusion.arguments
                     guard let evtId = try String.fetchOne(db, sql: """
                         SELECT id FROM workerEvents
                         WHERE status = 'pending'
                           AND type NOT IN (\(notifiablePlaceholders))
+                          AND \(exclusion.sql)
                         ORDER BY priority DESC, createdAt ASC LIMIT 1
-                    """, arguments: StatementArguments(args)) else { return }
+                    """, arguments: pickArgs) else { return }
 
                     let now = nowMs()
                     let workerSessionId = try String.fetchOne(db, sql:

@@ -1080,7 +1080,7 @@ let workerEventActions: [SonataAction] = [
                     // expected shape — bridge launched outside SonataApp produced
                     // sessionLabel="worker" stragglers (2026-04-28 incident).
                     let workerRow = try Row.fetchOne(db, sql: """
-                        SELECT currentEventId, status, sessionLabel FROM workers WHERE workerId = ?
+                        SELECT currentEventId, status, sessionLabel, sessionId FROM workers WHERE workerId = ?
                     """, arguments: [workerId])
                     if let workerRow {
                         let status = workerRow["status"] as? String ?? ""
@@ -1092,15 +1092,26 @@ let workerEventActions: [SonataAction] = [
                         if !isValidLabel { return nil }
                     }
 
-                    // Find event: pre-assigned to this worker first, then any pending
+                    // Find event: pre-assigned to this worker first, then any
+                    // pending one that does not exclude this worker
+                    // (DispatchExclusion: a re-enqueued live_review must not
+                    // reach its own fixer).
+                    let exclusion = DispatchExclusion.eventPredicate(
+                        workerId: workerId,
+                        sessionId: workerRow?["sessionId"] as? String,
+                        sessionLabel: workerRow?["sessionLabel"] as? String)
+                    var claimArgs: StatementArguments = [workerId]
+                    claimArgs += exclusion.arguments
+                    claimArgs += [workerId]
                     guard let row = try WorkerEventRow.fetchOne(db, sql: """
                         SELECT * FROM workerEvents
-                        WHERE (status = 'assigned' AND assignedTo = ?) OR status = 'pending'
+                        WHERE (status = 'assigned' AND assignedTo = ?)
+                           OR (status = 'pending' AND \(exclusion.sql))
                         ORDER BY
                             CASE WHEN status = 'assigned' AND assignedTo = ? THEN 0 ELSE 1 END,
                             priority DESC, createdAt ASC
                         LIMIT 1
-                    """, arguments: [workerId, workerId]) else {
+                    """, arguments: claimArgs) else {
                         return nil
                     }
 
