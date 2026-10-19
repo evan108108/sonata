@@ -910,12 +910,20 @@ let memoryActions: [SonataAction] = [
             // would force an unwrap here for no benefit.
             let finalArgs = StatementArguments(args.map(\.databaseValue))
 
+            // A typed or truncated id matches no row. Without this check the
+            // UPDATE is a silent no-op and the caller is told success: true
+            // (10/19: a patch on the 8-char prefix "3b307bd9" reported success).
+            let changed: Int
             do {
-                try await ctx.dbPool.write { db in
+                changed = try await ctx.dbPool.write { db in
                     try db.execute(sql: sql, arguments: finalArgs)
+                    return db.changesCount
                 }
             } catch {
                 throw ActionError.database(error.localizedDescription)
+            }
+            if changed == 0 {
+                throw ActionError.notFound("No memory with id \(id)")
             }
 
             return PatchResponse(id: id)
