@@ -380,9 +380,26 @@ private struct FetchFullResponse: Encodable {
     // a brief missed a decision (2026-10-07). nil when every id was found.
     let warning: String?
     let missing: [String]?
+    /// prefix → full id, for a missing id that is a unique memory-id prefix.
+    let resolvedPrefixes: [String: String]?
+    /// prefix → the ids it matched (up to 3) when it matched 2+. Those stay in `missing`.
+    let ambiguousPrefixes: [String: [String]]?
     let requested: Int
     let found: Int
     let memories: [RecallMemoryAction]
+}
+
+/// Shortest id prefix mem_fetch_full will resolve. Below 8 hex chars a prefix
+/// is too likely to hit the wrong memory as the table grows.
+let fetchFullMinPrefixLength = 8
+/// Memory ids are 32 lowercase hex chars; a 32-char miss is a wrong id, not a prefix.
+let fetchFullMaxPrefixLength = 31
+
+/// True when `id` may be resolved as a memory-id prefix: 8–31 lowercase hex
+/// chars. Restricting to hex also keeps LIKE wildcards (`%`, `_`) out.
+func fetchFullIsResolvablePrefix(_ id: String) -> Bool {
+    (fetchFullMinPrefixLength...fetchFullMaxPrefixLength).contains(id.count)
+        && id.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
 }
 
 // MARK: - Internal scored memory container
@@ -1516,7 +1533,7 @@ let recallActions: [SonataAction] = [
     // summary, then expands them in one round-trip.
     SonataAction(
         name: "mem_fetch_full",
-        description: "Fetch full memory bodies by id list. No ranking, no search — pure batch read. Pair with tier=l0 mem_recall: get summaries, pick ids, expand them here.",
+        description: "Fetch full memory bodies by id list. No ranking, no search — pure batch read. Pair with tier=l0 mem_recall: get summaries, pick ids, expand them here. A missing id of 8–31 lowercase hex chars is tried as a prefix: one match is returned and listed in `resolvedPrefixes`; 2+ matches stay in `missing` and are listed in `ambiguousPrefixes`.",
         group: "/api/recall",
         path: "/fetch",
         method: .get,
@@ -1537,20 +1554,55 @@ let recallActions: [SonataAction] = [
                 )
             }
             let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+
+            // Prefix fallback (2026-10-25): l0 scans and summaries show 8-char
+            // ids, and passing one returned "not found" for a memory that
+            // exists. A missing id that is a unique prefix resolves; one that
+            // matches 2+ memories stays missing and names its matches.
+            let prefixes = Array(Set(ids.filter { byId[$0] == nil && fetchFullIsResolvablePrefix($0) }))
+            var resolvedPrefixes: [String: String] = [:]
+            var ambiguousPrefixes: [String: [String]] = [:]
+            var resolvedRows: [String: MemoryRow] = [:]
+            if !prefixes.isEmpty {
+                let matches: [(String, [String], MemoryRow?)] = try await dbPool.read { db in
+                    try prefixes.map { prefix in
+                        let hits = try String.fetchAll(
+                            db,
+                            sql: "SELECT id FROM memories WHERE id LIKE ? || '%' LIMIT 3",
+                            arguments: [prefix]
+                        )
+                        let row = hits.count == 1
+                            ? try MemoryRow.fetchOne(db, sql: "SELECT * FROM memories WHERE id = ?", arguments: [hits[0]])
+                            : nil
+                        return (prefix, hits, row)
+                    }
+                }
+                for (prefix, hits, row) in matches {
+                    if let row {
+                        resolvedPrefixes[prefix] = row.id
+                        resolvedRows[prefix] = row
+                    } else if hits.count > 1 {
+                        ambiguousPrefixes[prefix] = hits
+                    }
+                }
+            }
+
             var memories: [RecallMemoryAction] = []
             for id in ids {
-                guard let mem = byId[id] else { continue }
+                guard let mem = byId[id] ?? resolvedRows[id] else { continue }
                 let tags = parseTags(mem.tagsJSON)
                 memories.append(recallMakeRecallMemory(
                     mem, tags: tags, searchRank: 0, rankScore: 0,
                     tier: "full", includeContent: true
                 ))
             }
-            let missing = ids.filter { byId[$0] == nil }
+            let missing = ids.filter { byId[$0] == nil && resolvedRows[$0] == nil }
             return FetchFullResponse(
                 warning: missing.isEmpty ? nil
                     : "\(missing.count) of \(ids.count) ids not found. Check each id was copied from a tool output, not typed.",
                 missing: missing.isEmpty ? nil : missing,
+                resolvedPrefixes: resolvedPrefixes.isEmpty ? nil : resolvedPrefixes,
+                ambiguousPrefixes: ambiguousPrefixes.isEmpty ? nil : ambiguousPrefixes,
                 requested: ids.count,
                 found: memories.count,
                 memories: memories
