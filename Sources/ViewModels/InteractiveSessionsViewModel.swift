@@ -320,8 +320,11 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
 
     func spawn() {
         switch kind {
-        case .sona: spawnSona()
-        case .terminal: spawnTerminal()
+        // forkpty children inherit an unflagged listener; wait for the gate.
+        case .sona:
+            ListenerCloexecGate.shared.afterOpen { self.spawnSona() }
+        case .terminal:
+            ListenerCloexecGate.shared.afterOpen { self.spawnTerminal() }
         case .webview: loadWeb()
         }
     }
@@ -485,6 +488,9 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         // --resume. Fresh tabs (or post-Restart fallbacks) get --session-id.
         if resume {
             args.append(contentsOf: ["--resume", sessionId])
+            // Ordering evidence for the spawn gate: in Sonata.log this must
+            // follow "set FD_CLOEXEC" (memory 9c94ba95).
+            sonataFileLog("Interactive session: spawning \"\(name)\" --resume \(sessionId)")
         } else {
             args.append(contentsOf: ["--session-id", sessionId])
         }

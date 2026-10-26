@@ -1151,6 +1151,13 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func startProcess(restartNudge: Bool = false, taskId: String? = nil, lastEventId: String? = nil) {
+        // forkpty children inherit an unflagged :3211 listener; wait for the gate.
+        ListenerCloexecGate.shared.afterOpen {
+            self.startProcessNow(restartNudge: restartNudge, taskId: taskId, lastEventId: lastEventId)
+        }
+    }
+
+    private func startProcessNow(restartNudge: Bool, taskId: String?, lastEventId: String?) {
         guard let view = terminalView else { return }
 
         let launch = WorkerCoordinator.buildLaunchEnv(

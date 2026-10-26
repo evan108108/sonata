@@ -25,6 +25,11 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     func startProcess() {
+        // forkpty children inherit an unflagged :3211 listener; wait for the gate.
+        ListenerCloexecGate.shared.afterOpen { self.startProcessNow() }
+    }
+
+    private func startProcessNow() {
         guard let view = terminalView else { return }
 
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()

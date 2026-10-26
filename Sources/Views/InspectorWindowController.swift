@@ -38,7 +38,8 @@ final class InspectorWindowController: NSObject, LocalProcessTerminalViewDelegat
         win.delegate = self
         self.window = win
 
-        startProcess(in: tv)
+        // forkpty children inherit an unflagged :3211 listener; wait for the gate.
+        ListenerCloexecGate.shared.afterOpen { self.startProcess(in: tv) }
     }
 
     private func startProcess(in view: LocalProcessTerminalView) {

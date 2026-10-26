@@ -913,15 +913,61 @@ func waitForPortFree(_ port: Int, attempts: Int = 10) async -> Bool {
                 Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
+        let bindErrno = errno
         close(sock)
         if bindResult == 0 {
             if attempt > 1 { sonataFileLog("HTTP port \(port) free after \(attempt) attempts") }
             return true
         }
         sonataFileLog("HTTP port \(port) busy, waiting... (attempt \(attempt)/\(attempts))")
+        // Name the holders on the first and last miss. A holder that is not
+        // Sonata itself is a child that inherited the listener (2026-10-25:
+        // three resumed sessions, found only by a manual lsof).
+        if bindErrno == EADDRINUSE, attempt == 1 || attempt == attempts {
+            sonataFileLog("HTTP port \(port) EADDRINUSE: \(describeListenPortHolders(port: port))")
+        }
         try? await Task.sleep(for: .seconds(1))
     }
     return false
+}
+
+/// Parse `lsof -F pc` output ("p<pid>" then "c<command>" per process).
+func parseLsofListenHolders(_ output: String) -> [(pid: Int32, command: String)] {
+    var holders: [(pid: Int32, command: String)] = []
+    for line in output.split(separator: "\n") {
+        guard let tag = line.first else { continue }
+        let value = String(line.dropFirst())
+        if tag == "p", let pid = Int32(value) {
+            holders.append((pid: pid, command: ""))
+        } else if tag == "c", !holders.isEmpty {
+            holders[holders.count - 1].command = value
+        }
+    }
+    return holders
+}
+
+/// One log-ready line naming every process with a TCP listener on `port`.
+func describeListenPortHolders(port: Int) -> String {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+    proc.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-F", "pc"]
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = FileHandle.nullDevice
+    do {
+        try proc.run()
+    } catch {
+        return "holders unknown (lsof failed: \(error))"
+    }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    proc.waitUntilExit()
+    let holders = parseLsofListenHolders(String(decoding: data, as: UTF8.self))
+    guard !holders.isEmpty else { return "no listener found by lsof" }
+    let me = getpid()
+    let names = holders.map { h in
+        "\(h.pid) \(h.command.isEmpty ? "?" : h.command)\(h.pid == me ? " (this Sonata)" : "")"
+    }
+    return "held by pid(s) " + names.joined(separator: ", ")
 }
 
 @discardableResult
@@ -963,7 +1009,9 @@ func raiseFileDescriptorLimit(to target: rlim_t) -> Bool {
 ///
 /// fcntl(F_SETFD) is idempotent, so this is harmless belt-and-suspenders if
 /// NIO already set the flag. Best-effort: failures are logged, never fatal.
-func setCloseOnExecOnListenSockets(port: Int) {
+/// Returns how many listen sockets it patched.
+@discardableResult
+func setCloseOnExecOnListenSockets(port: Int, log: Bool = true) -> Int {
     var lim = rlimit()
     let maxFD: Int32
     if getrlimit(RLIMIT_NOFILE, &lim) == 0, lim.rlim_cur != rlimInfinity {
@@ -1005,7 +1053,39 @@ func setCloseOnExecOnListenSockets(port: Int) {
         if flags >= 0 { _ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC) }
         patched += 1
     }
-    sonataFileLog("HTTP server: set FD_CLOEXEC on \(patched) listen socket(s) for port \(port)")
+    if log {
+        sonataFileLog("HTTP server: set FD_CLOEXEC on \(patched) listen socket(s) for port \(port)")
+    }
+    return patched
+}
+
+/// Make the freshly bound listener close-on-exec, then open the spawn gate.
+///
+/// Runs from Hummingbird's `onServerRunning`, i.e. right after bind, so the
+/// first sweep normally finds the socket. The poll only covers a sweep that
+/// comes up empty. If nothing turns up before `timeout`, the gate opens anyway
+/// with a warning: there is no listener to leak, and holding every session
+/// and worker back would be worse.
+func sealListenerAndOpenGate(
+    port: Int,
+    gate: ListenerCloexecGate = .shared,
+    pollInterval: Duration = .milliseconds(20),
+    timeout: Duration = .seconds(2)
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while true {
+        let patched = setCloseOnExecOnListenSockets(port: port, log: false)
+        if patched > 0 {
+            sonataFileLog("HTTP server: set FD_CLOEXEC on \(patched) listen socket(s) for port \(port)")
+            gate.open(reason: "listener on :\(port) is close-on-exec")
+            return
+        }
+        if clock.now >= deadline || Task.isCancelled { break }
+        try? await Task.sleep(for: pollInterval)
+    }
+    sonataFileLog("HTTP server: WARNING no listen socket on :\(port) to set FD_CLOEXEC on — opening the spawn gate anyway")
+    gate.open(reason: "no listener found on :\(port)")
 }
 
 @main
@@ -1390,19 +1470,23 @@ struct SonataApp: App {
                 // termination _exit()s from the willTerminate observer before we
                 // reach here, so a return we actually observe is the failure
                 // case → restart (unless our own task was cancelled).
+                // Safety net for the spawn gate: if the server hasn't bound
+                // within 30s there is no listener to leak, so let restored
+                // sessions and workers start rather than wait out the whole
+                // restart budget. A later bind still seals before it serves.
+                Task.detached {
+                    try? await Task.sleep(for: .seconds(30))
+                    if !ListenerCloexecGate.shared.isOpen {
+                        sonataFileLog("Spawn gate: HTTP listener not up after 30s")
+                        ListenerCloexecGate.shared.open(reason: "boot safety timeout")
+                    }
+                }
                 let serverTask = Task { [logger] in
                     let maxRestarts = 8
                     let healthyRunSeconds: TimeInterval = 60
                     var attempt = 0
                     while !Task.isCancelled {
                         let startedAt = Date()
-                        // After each (re)bind, strip the acceptor socket from
-                        // child-process inheritance so a later teardown can't
-                        // leave the port pinned in LISTEN (fd hygiene, fix #3).
-                        let cloexecSweep = Task {
-                            try? await Task.sleep(for: .milliseconds(500))
-                            setCloseOnExecOnListenSockets(port: port)
-                        }
                         do {
                             // Race the server against an active /api/ping probe.
                             // Whichever finishes first ends the group: normally
@@ -1412,10 +1496,20 @@ struct SonataApp: App {
                             // still works exactly as it did before.
                             try await withThrowingTaskGroup(of: Void.self) { group in
                                 group.addTask {
+                                    // After each (re)bind, strip the acceptor
+                                    // socket from child-process inheritance
+                                    // BEFORE any forkpty spawn may run, so a
+                                    // later teardown can't leave the port
+                                    // pinned in LISTEN. The old fixed 500ms
+                                    // sweep lost that race to session resume
+                                    // on 2026-10-25 (memory 9c94ba95).
                                     let app = Application(
                                         router: router,
                                         server: .http1(),
                                         configuration: .init(address: .hostname("127.0.0.1", port: port)),
+                                        onServerRunning: { _ in
+                                            await sealListenerAndOpenGate(port: port)
+                                        },
                                         logger: logger
                                     )
                                     try await app.runService()
@@ -1426,23 +1520,30 @@ struct SonataApp: App {
                                 try await group.next()
                                 group.cancelAll()
                             }
-                            cloexecSweep.cancel()
                             if Task.isCancelled { break }
                             sonataFileLog("HTTP server: runService returned unexpectedly — restarting")
                         } catch is CancellationError {
-                            cloexecSweep.cancel()
                             break
                         } catch {
-                            cloexecSweep.cancel()
                             if Task.isCancelled { break }
                             sonataFileLog("HTTP server: runService threw — \(error) — restarting")
+                            // NIO surfaces a failed bind as an IOError whose
+                            // description carries strerror(EADDRINUSE).
+                            if String(describing: error).contains("Address already in use") {
+                                sonataFileLog("HTTP port \(port) EADDRINUSE: \(describeListenPortHolders(port: port))")
+                            }
                         }
+                        // Hold forkpty spawns until the next listener is
+                        // close-on-exec too; onServerRunning reopens the gate.
+                        ListenerCloexecGate.shared.close(reason: "HTTP server restarting")
                         // A server that stayed up long enough counts as healthy;
                         // reset the budget so lifetime spikes don't accumulate.
                         if Date().timeIntervalSince(startedAt) >= healthyRunSeconds { attempt = 0 }
                         attempt += 1
                         if attempt > maxRestarts {
                             sonataFileLog("HTTP FATAL: HTTP server exceeded \(maxRestarts) restarts — giving up")
+                            // No listener left to leak; don't strand spawns.
+                            ListenerCloexecGate.shared.open(reason: "HTTP server gave up")
                             throw HTTPServerSupervisorError.restartBudgetExhausted(maxRestarts)
                         }
                         let backoff = min(Double(attempt), 5.0)
