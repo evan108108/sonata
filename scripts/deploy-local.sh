@@ -242,6 +242,29 @@ if ! bridge_up; then
 fi
 echo "==> Sonata bridge healthy"
 
+# Listener inheritance. Interactive sessions resumed before the listener gets
+# FD_CLOEXEC inherit :3211 (10/25: 3 sessions held it; a liveness restart then
+# hit EADDRINUSE 8 times and HTTP gave up, ~4 min fleet outage). Plugin
+# reinstalls are what tripped the liveness probe, so skip them while any other
+# process holds the listener. Remove once task 683a5829 (resume after CLOEXEC)
+# has shipped and this has stayed quiet for a few deploys.
+# Classify holders by command line: pgrep -f misses Sonata's pid when this
+# runs from a shell Sonata spawned (seen 10/26 from a worker).
+SONATA_PID=""
+HOLDERS=""
+for p in $(lsof -nP -iTCP:3211 -sTCP:LISTEN -t 2>/dev/null | sort -u); do
+  if [ "$(ps -o command= -p "$p")" = "$BIN_DST" ]; then SONATA_PID=$p; else HOLDERS="$HOLDERS $p"; fi
+done
+if [ -n "$HOLDERS" ]; then
+  echo "WARN: :3211 listener is also held by pid(s) other than Sonata (${SONATA_PID:-none}):" >&2
+  for p in $HOLDERS; do echo "     $p $(ps -o command= -p "$p" | cut -c1-100)" >&2; done
+  echo "     An HTTP restart now would hit EADDRINUSE. Skipping plugin reinstalls; SIGTERM those pids" >&2
+  echo "     (they are resumed sessions), then run deploy-plugin-local.sh for any drifted plugin." >&2
+  SKIP_PLUGINS=1
+else
+  echo "==> :3211 listener held only by Sonata ($SONATA_PID)"
+fi
+
 # Managed-plugin drift. Runs AFTER Sonata is confirmed healthy so
 # plugin_install has a live bridge to talk to. Default: rebuild + install
 # any plugin whose source is ahead of the installed release, so the
