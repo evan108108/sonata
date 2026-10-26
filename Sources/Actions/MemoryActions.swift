@@ -881,12 +881,31 @@ let memoryActions: [SonataAction] = [
             // from the new content. Old tiers describe stale text otherwise.
             // Fail-soft: leave l0/l1 untouched on pith error (the backfill task
             // will catch the inconsistency and refresh).
-            if let updatedContent = newContent, suppliedL0 == nil, suppliedL1 == nil,
-               let pith = await Pith.generateOrNil(content: updatedContent) {
-                setClauses.append("l0 = ?")
-                args.append(pith.l0)
-                setClauses.append("l1 = ?")
-                args.append(pith.l1)
+            // Exception: a feeling/reflection keeps its author's l0/l1. A slightly
+            // stale abstract after a one-clause edit beats a pith one that drops
+            // the negations (see Pith.authorAbstractTypes).
+            var abstractsKept = false
+            if let updatedContent = newContent, suppliedL0 == nil, suppliedL1 == nil {
+                let effectiveType: String?
+                if let t = ctx.params.string("type") {
+                    effectiveType = t
+                } else {
+                    do {
+                        effectiveType = try await ctx.dbPool.read { db in
+                            try String.fetchOne(db, sql: "SELECT type FROM memories WHERE id = ?", arguments: [id])
+                        }
+                    } catch {
+                        throw ActionError.database(error.localizedDescription)
+                    }
+                }
+                if let t = effectiveType, Pith.authorAbstractTypes.contains(t) {
+                    abstractsKept = true
+                } else if let pith = await Pith.generateOrNil(content: updatedContent) {
+                    setClauses.append("l0 = ?")
+                    args.append(pith.l0)
+                    setClauses.append("l1 = ?")
+                    args.append(pith.l1)
+                }
             }
             if let v = ctx.params.string("status")       { setClauses.append("status = ?");       args.append(v) }
             if let v = ctx.params.string("supersededBy") { setClauses.append("supersededBy = ?"); args.append(v) }
@@ -926,6 +945,9 @@ let memoryActions: [SonataAction] = [
                 throw ActionError.notFound("No memory with id \(id)")
             }
 
+            if abstractsKept {
+                return PatchResponse(id: id, abstractsKept: true, note: Pith.abstractsKeptNote)
+            }
             return PatchResponse(id: id)
         }
     ),
@@ -996,6 +1018,8 @@ let memoryActions: [SonataAction] = [
             ActionParam("revisionNote", .string, description: "Why this revision was made"),
             ActionParam("project", .string, description: "Project namespace"),
             ActionParam("topic", .string, description: "Topic namespace"),
+            ActionParam("l0", .string, description: "Pre-computed L0 (skips pith generation)"),
+            ActionParam("l1", .string, description: "Pre-computed L1 (skips pith generation)"),
         ],
         handler: { ctx in
             let originalId = try ctx.params.requireAny(["originalId", "id"])
@@ -1030,9 +1054,26 @@ let memoryActions: [SonataAction] = [
             // The revised memory has new content, so regenerate L0/L1 from that
             // content (don't carry over the original's tiers — they describe the
             // old text). Fail-soft: NULL l0/l1 on pith error.
-            let pith = await Pith.generateOrNil(content: content)
-            let l0 = pith?.l0
-            let l1 = pith?.l1
+            // Exceptions: caller-supplied l0/l1 are stored as given, and a
+            // feeling/reflection without them keeps the original's (see
+            // Pith.authorAbstractTypes).
+            let suppliedL0 = ctx.params.string("l0")
+            let suppliedL1 = ctx.params.string("l1")
+            let l0: String?
+            let l1: String?
+            var abstractsKept = false
+            if suppliedL0 != nil || suppliedL1 != nil {
+                l0 = suppliedL0
+                l1 = suppliedL1
+            } else if Pith.authorAbstractTypes.contains(newType) {
+                l0 = orig.l0
+                l1 = orig.l1
+                abstractsKept = true
+            } else {
+                let pith = await Pith.generateOrNil(content: content)
+                l0 = pith?.l0
+                l1 = pith?.l1
+            }
 
             do {
                 try await ctx.dbPool.write { db in
@@ -1074,6 +1115,9 @@ let memoryActions: [SonataAction] = [
             writeMemoryToArchive(archivedOrig)
             if let meili = ctx.search { await meili.indexArchivedMemory(archivedOrig) }
 
+            if abstractsKept {
+                return StoreResponse(id: newId, abstractsKept: true, note: Pith.abstractsKeptNote)
+            }
             return StoreResponse(id: newId)
         }
     ),

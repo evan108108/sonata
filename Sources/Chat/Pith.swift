@@ -87,11 +87,28 @@ enum Pith {
         return try parse(raw)
     }
 
+    /// Test seam for `generateOrNil`: when set for the current task, it stands
+    /// in for the chat server so store/patch paths can be tested without the
+    /// local model. Task-local, so parallel tests never see each other's stub.
+    @TaskLocal static var generateOverride: (@Sendable (String) async -> Result?)?
+
+    /// Types whose abstracts the author writes and pith must not overwrite on
+    /// an edit. They are made of negations ("not offense", "I don't mind the
+    /// fence"), and pith drops them: on 10/19, 2 of 6 sampled feelings had
+    /// their l0 flipped to "I'm concerned about…". Authors pass their own
+    /// l0/l1 at store time, and until 10/26 mem_patch (content without l0/l1)
+    /// and mem_revise (always) re-ran pith over them (feeling aab518c1).
+    static let authorAbstractTypes: Set<String> = ["feeling", "reflection"]
+
+    static let abstractsKeptNote =
+        "content changed; l0/l1 kept from before. Pass l0/l1 if the edit changes the meaning."
+
     /// Fail-soft variant used by store/patch paths: returns nil on any error so
     /// the write itself never fails because of pith trouble (server down, parse
     /// failure, network blip). The backfill task picks up NULL rows later.
     /// Errors are logged at warn level for visibility.
     static func generateOrNil(content: String, logger: Logger? = nil) async -> Result? {
+        if let override = generateOverride { return await override(content) }
         do {
             return try await generate(content: content)
         } catch {

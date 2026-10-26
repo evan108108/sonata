@@ -13,6 +13,9 @@ struct HealthResponse: Encodable {
 struct StoreResponse: Encodable {
     let id: String
     let success = true
+    /// Set by mem_revise when a feeling/reflection kept its author's l0/l1.
+    var abstractsKept: Bool? = nil
+    var note: String? = nil
 }
 
 struct SuccessResponse: Encodable {
@@ -22,6 +25,9 @@ struct SuccessResponse: Encodable {
 struct PatchResponse: Encodable {
     let id: String
     let success = true
+    /// Set by mem_patch when a feeling/reflection kept its author's l0/l1.
+    var abstractsKept: Bool? = nil
+    var note: String? = nil
 }
 
 struct TouchResponse: Encodable {
