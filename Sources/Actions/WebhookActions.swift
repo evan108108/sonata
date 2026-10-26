@@ -146,27 +146,61 @@ private func sha256Hex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
-/// Evaluate a dispatch filter of the shape `<json.path>=<v1>|<v2>|...` against
-/// the payload. Returns nil on a match (dispatch proceeds) or a human-readable
-/// reason when the filter blocks dispatch (audited on the delivery row).
+/// Evaluate a dispatch filter against the payload. Returns nil on a match
+/// (dispatch proceeds) or a human-readable reason when the filter blocks
+/// dispatch (audited on the delivery row).
 ///
-/// A malformed filter (no `=`, empty allowlist) is treated as no-filter to
-/// keep the audit trail sane; the misconfiguration would be too easy to hit
-/// silently otherwise.
-private func evaluateDispatchFilter(_ filter: String, payload: [String: Any]) -> String? {
-    guard let eqIdx = filter.firstIndex(of: "=") else { return nil }
-    let path = String(filter[..<eqIdx]).trimmingCharacters(in: .whitespaces)
-    let rhs = String(filter[filter.index(after: eqIdx)...])
-    let allowed = rhs.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-    guard !path.isEmpty, !allowed.isEmpty else { return nil }
+/// Grammar, loosest-binding first:
+///   filter := group ( "||" group )*      any group matching dispatches
+///   group  := clause ( "&&" clause )*    every clause must match
+///   clause := <json.path>=<v1>|<v2>|...  value must be one of the list
+///           | <json.path>!=<v1>|<v2>|... value must be none of the list
+/// A value ending in `*` matches by prefix (`github:*`). The single-clause
+/// form `<path>=<v1>|<v2>` is the original grammar and behaves as before.
+///
+/// `!=` exists for actor exclusion: the Evenflow routes must drop events a
+/// Sona session or GitHub automation caused, and an allowlist can't name
+/// "every human" (2026-10-26, AE-151: PR #785's auto-move dispatched two
+/// workers onto a ticket its author was still holding).
+///
+/// A missing path renders empty: `=` then misses and `!=` passes. A malformed
+/// clause (no `=`, empty path or value list) counts as matching, so a typo
+/// never silently drops a route's deliveries.
+func evaluateDispatchFilter(_ filter: String, payload: [String: Any]) -> String? {
+    var misses: [String] = []
+    for group in filter.components(separatedBy: "||") {
+        let failed = group.components(separatedBy: "&&").lazy
+            .compactMap { evaluateDispatchClause($0, payload: payload) }
+            .first
+        guard let failed else { return nil }
+        misses.append(failed)
+    }
+    return "filter miss: " + misses.joined(separator: "; ")
+}
+
+/// One `path=values` or `path!=values` clause. Nil on match, else the reason.
+private func evaluateDispatchClause(_ clause: String, payload: [String: Any]) -> String? {
+    guard let eqIdx = clause.firstIndex(of: "=") else { return nil }
+    var lhs = clause[..<eqIdx]
+    let negated = lhs.hasSuffix("!")
+    if negated { lhs = lhs.dropLast() }
+    let path = lhs.trimmingCharacters(in: .whitespaces)
+    let values = clause[clause.index(after: eqIdx)...]
+        .split(separator: "|")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+    guard !path.isEmpty, !values.isEmpty else { return nil }
 
     // Reuse the template renderer's resolution logic via a single-expression
-    // template. Warnings are ignored — a missing path renders empty, which
-    // just means the filter fails (which is the correct behavior).
+    // template. Warnings are ignored — a missing path renders empty.
     let render = renderTemplate("{{ \(path) }}", payload: payload)
     let actual = render.rendered.trimmingCharacters(in: .whitespaces)
-    if allowed.contains(actual) { return nil }
-    return "filter miss: path='\(path)' value='\(actual)' expected=[\(allowed.joined(separator: "|"))]"
+    let hit = values.contains { value in
+        value.hasSuffix("*") ? actual.hasPrefix(value.dropLast()) : actual == value
+    }
+    if hit != negated { return nil }
+    let op = negated ? "!=" : "="
+    return "path='\(path)' value='\(actual)' expected \(op)[\(values.joined(separator: "|"))]"
 }
 
 /// Encode a handler's `any Encodable` result for the audit row, truncated so
@@ -235,7 +269,7 @@ func makeWebhookActions(registry: ActionRegistry) -> [SonataAction] {
             ActionParam("authHeaderName", .string, description: "Header carrying the signature/bearer (required for hmacSha256)"),
             ActionParam("promptTemplate", .string, description: "For destKind='worker': template rendered against payload; result becomes the worker's prompt. Supports {{ path.to.value }} substitutions, plus {{ payload }} for the whole envelope. Null → raw workerEvents enqueue (backward compat)."),
             ActionParam("workerPool", .string, description: "For destKind='worker': optional pool hint the dispatched task should target."),
-            ActionParam("dispatchFilter", .string, description: "Optional filter: '<json.path>=<v1>|<v2>|...'. Dispatch only when the resolved payload value matches one of the allowed values. Example: 'body.action=opened|synchronize|reopened' for GitHub PRs."),
+            ActionParam("dispatchFilter", .string, description: "Optional filter: '<json.path>=<v1>|<v2>|...'. Dispatch only when the resolved payload value matches one of the allowed values. Example: 'body.action=opened|synchronize|reopened' for GitHub PRs. Also: '!=' (value must match none), a trailing '*' on a value (prefix match), '&&' (all clauses) and '||' (any group; binds looser than '&&'). Example: 'body.kind=issue.transitioned && body.payload.actor_pubkey!=github:*'."),
             ActionParam("actionParams", .string, description: "For destKind='action': JSON template rendered against payload, parsed, and spread into the target action's ActionParams. Supports {{ path.to.value }}. Example for prstar_review: {\"pr\":\"{{ body.pull_request.number }}\",\"repo\":\"{{ body.repository.full_name }}\"}. Null → pass the raw envelope (backward compat)."),
             ActionParam("enabled", .boolean, description: "Route enabled (default true)"),
         ],
