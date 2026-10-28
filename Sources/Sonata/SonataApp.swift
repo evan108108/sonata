@@ -685,13 +685,21 @@ func installSonataStdoutRedirect() {
     close(fd)
 }
 
+/// True inside a test process (the XCTest framework is loaded). Tests drive
+/// the same code paths that log, and their lines must not land in the live
+/// app's log: on 2026-10-28 `swift test` wrote "HTTP liveness: /api/ping
+/// unanswered (3/3)" and "Signal: SIGTERM from pid N (this Sonata)" into
+/// Sonata.log, which read as a real outage and a real self-signal.
+let sonataFileLogIsTestProcess = NSClassFromString("XCTestCase") != nil
+
 /// Append a line to ~/Library/Logs/Sonata.log so errors are visible when the
-/// app is launched from the Finder (where stderr is discarded).
+/// app is launched from the Finder (where stderr is discarded). A test
+/// process writes to Sonata-tests.log instead.
 func sonataFileLog(_ line: String) {
     let logsDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs")
     try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
-    let logURL = logsDir.appendingPathComponent("Sonata.log")
+    let logURL = logsDir.appendingPathComponent(sonataFileLogIsTestProcess ? "Sonata-tests.log" : "Sonata.log")
     let ts = ISO8601DateFormatter().string(from: Date())
     let entry = "[\(ts)] \(line)\n"
     if let data = entry.data(using: .utf8) {
