@@ -87,13 +87,33 @@ source_head_sha() {
     /usr/bin/git -C "$1" rev-parse HEAD 2>/dev/null || printf ''
 }
 
-# source_is_dirty <source-dir> → prints 1 if working tree has uncommitted changes, else 0
+# source_is_dirty <source-dir> → prints 1 if the plugin's own directory has
+# uncommitted changes, else 0. Scoped with `-- .`: a plugin often lives inside
+# a bigger repo (sonata-studio in Sonata, lead-tracker in adaptengine-monorepo),
+# and an unscoped `git status` flagged it dirty for anyone's work anywhere in
+# that repo (2026-10-28: lead-tracker reinstalled on every deploy-local).
 source_is_dirty() {
     local src="$1"
-    if [ -n "$(/usr/bin/git -C "$src" status --porcelain 2>/dev/null)" ]; then
+    if [ -n "$(/usr/bin/git -C "$src" status --porcelain -- . 2>/dev/null)" ]; then
         printf '1'
     else
         printf '0'
+    fi
+}
+
+# source_changed_since <source-dir> <deployed-sha> → prints 1 if the plugin's
+# own directory differs between <deployed-sha> and HEAD, else 0. A marker git
+# can't resolve (a `-dirty-<ts>` marker, or a commit no longer present) counts
+# as changed. Comparing the directory, not the repo HEAD, keeps a commit that
+# never touched the plugin from flagging it as drifted.
+source_changed_since() {
+    local src="$1" sha="$2"
+    if [ -z "$sha" ] || ! /usr/bin/git -C "$src" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+        printf '1'
+    elif /usr/bin/git -C "$src" diff --quiet "$sha" HEAD -- . 2>/dev/null; then
+        printf '0'
+    else
+        printf '1'
     fi
 }
 

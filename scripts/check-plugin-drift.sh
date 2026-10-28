@@ -14,9 +14,10 @@
 #   ./scripts/check-plugin-drift.sh --quiet      # suppress "clean" plugins in report
 #
 # Drift is defined as:
-#   • Source repo HEAD sha != ~/.sonata/plugins/<name>/.deployed-sha
-#     (missing .deployed-sha counts as drift — "never deployed via this flow")
-#   • OR the source repo has uncommitted changes in the working tree
+#   • The plugin's source directory differs between ~/.sonata/plugins/<name>/.deployed-sha
+#     and HEAD (missing or unresolvable .deployed-sha counts as drift — "never
+#     deployed via this flow"). Commits elsewhere in the repo don't count.
+#   • OR the plugin's source directory has uncommitted changes
 #     (compilation would pick these up, so the installed release is stale
 #     even if HEAD sha matches).
 
@@ -72,7 +73,7 @@ for name in $(managed_plugins); do
     if [ -z "$deployed_sha" ]; then
         is_drift=1
         reasons+=("no .deployed-sha (never deployed via drift-aware flow)")
-    elif [ "$head_sha" != "$deployed_sha" ]; then
+    elif [ "$head_sha" != "$deployed_sha" ] && [ "$(source_changed_since "$src" "$deployed_sha")" = "1" ]; then
         is_drift=1
         reasons+=("source HEAD=$short_head, deployed=$short_deployed")
     fi
