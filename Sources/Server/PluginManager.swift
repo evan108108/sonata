@@ -1104,18 +1104,12 @@ final class PluginManager: @unchecked Sendable {
     /// Kill any process listening on the given port. Needed for compiled Bun
     /// binaries where `bin/<name> stop` is a no-op — without this, the old
     /// process keeps holding the port and the new spawn crashes immediately.
-    /// PIDs currently holding the given TCP port (via lsof).
+    /// PIDs LISTENING on the given TCP port, never Sonata itself. A client
+    /// end doesn't count: Sonata's own connection to the plugin it is about
+    /// to respawn made the old `lsof -ti :<port>` SIGTERM Sonata (see
+    /// tcpListenerPIDs).
     private func pidsOnPort(_ port: Int) -> [Int32] {
-        let lsof = Process()
-        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        lsof.arguments = ["-ti", ":\(port)"]
-        let pipe = Pipe()
-        lsof.standardOutput = pipe
-        lsof.standardError = Pipe()
-        try? lsof.run()
-        lsof.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+        tcpListenerPIDs(port: port)
     }
 
     /// Reclaim a port held by a stale plugin process before spawning a fresh one.

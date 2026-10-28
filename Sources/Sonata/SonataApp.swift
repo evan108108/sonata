@@ -1111,6 +1111,10 @@ struct SonataApp: App {
         // under the kernel's per-process cap. See raiseFileDescriptorLimit.
         raiseFileDescriptorLimit(to: 10240)
 
+        // Record who sends SIGTERM/SIGINT before any plugin or worker can.
+        // A stray one used to surface only as an HTTP restart (10/27).
+        SignalProvenance.install()
+
         // Singleton guard, part 1: another *bundled* Sonata is already running.
         // Bring it to front and stand down. This is the double-click case.
         let runningApps = NSRunningApplication.runningApplications(
@@ -1512,7 +1516,14 @@ struct SonataApp: App {
                                         },
                                         logger: logger
                                     )
-                                    try await app.runService()
+                                    // No graceful-shutdown signals: Sonata owns
+                                    // its lifecycle (NSApplication quit, or the
+                                    // SIGTERM sources below that cancel this
+                                    // supervisor first). With the default, any
+                                    // SIGTERM — including Sonata signalling
+                                    // itself from killProcessOnPort — tore
+                                    // down only the HTTP server.
+                                    try await app.runService(gracefulShutdownSignals: [])
                                 }
                                 group.addTask {
                                     try await httpLivenessWatchdog(port: port)
@@ -1521,7 +1532,10 @@ struct SonataApp: App {
                                 group.cancelAll()
                             }
                             if Task.isCancelled { break }
-                            sonataFileLog("HTTP server: runService returned unexpectedly — restarting")
+                            let lastSignal = SignalProvenance.lastRecord().map {
+                                "; last signal: \(SignalProvenance.describe($0)) at \(ISO8601DateFormatter().string(from: $0.at))"
+                            } ?? "; no signal recorded"
+                            sonataFileLog("HTTP server: runService returned unexpectedly\(lastSignal) — restarting")
                         } catch is CancellationError {
                             break
                         } catch {
@@ -1804,16 +1818,17 @@ struct SonataApp: App {
                     logger.info("Sonata shutdown complete")
                 }
 
-                // Listen for termination signals to shut down gracefully
+                // Listen for termination signals to shut down gracefully.
+                // No signal(SIG_IGN) here: SignalProvenance's handler already
+                // replaced the default action (and would be clobbered by
+                // SIG_IGN); kqueue delivers to these sources either way.
                 let sigTermSource = DispatchSource.makeSignalSource(signal: SIGTERM)
-                signal(SIGTERM, SIG_IGN)
                 sigTermSource.setEventHandler {
                     Task { await shutdownHandler() }
                 }
                 sigTermSource.resume()
 
                 let sigIntSource = DispatchSource.makeSignalSource(signal: SIGINT)
-                signal(SIGINT, SIG_IGN)
                 sigIntSource.setEventHandler {
                     Task { await shutdownHandler() }
                 }
