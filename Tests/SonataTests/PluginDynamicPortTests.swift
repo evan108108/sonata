@@ -144,4 +144,64 @@ final class PluginDynamicPortTests: XCTestCase {
     func testExecutablePathOfAMissingPidIsNil() {
         XCTAssertNil(executablePath(of: 999_999))
     }
+
+    func testProcArgs2EnvironmentSkipsExecPathAndArgv() {
+        var bytes: [UInt8] = []
+        withUnsafeBytes(of: Int32(2)) { bytes += $0 }
+        bytes += Array("/opt/homebrew/bin/node".utf8) + [0, 0, 0]
+        bytes += Array("node".utf8) + [0] + Array("/x/server.js".utf8) + [0]
+        bytes += Array("PORT=4100".utf8) + [0]
+        bytes += Array("SONATA_PLUGIN_DATA_DIR=/Users/x/.sonata/plugins/prstar".utf8) + [0]
+        bytes += Array("EMPTY=".utf8) + [0, 0]
+        bytes += Array("ptr_munge=ignored".utf8) + [0]
+        let env = parseProcArgs2Environment(bytes)
+        XCTAssertEqual(env?["PORT"], "4100")
+        XCTAssertEqual(env?["SONATA_PLUGIN_DATA_DIR"], "/Users/x/.sonata/plugins/prstar")
+        XCTAssertEqual(env?["EMPTY"], "")
+        XCTAssertNil(env?["ptr_munge"])
+        XCTAssertNil(env?["node"])
+    }
+
+    func testProcArgs2EnvironmentRejectsTruncatedArgv() {
+        var bytes: [UInt8] = []
+        withUnsafeBytes(of: Int32(3)) { bytes += $0 }
+        bytes += Array("/bin/x".utf8) + [0] + Array("x".utf8) + [0]
+        XCTAssertNil(parseProcArgs2Environment(bytes))
+        XCTAssertNil(parseProcArgs2Environment([1, 0]))
+    }
+
+    func testSameDirectoryIgnoresTrailingSlash() {
+        XCTAssertTrue(isSameDirectory("/Users/x/.sonata/plugins/prstar/", "/Users/x/.sonata/plugins/prstar"))
+        XCTAssertFalse(isSameDirectory("/Users/x/.sonata/plugins/prstar-old", "/Users/x/.sonata/plugins/prstar"))
+    }
+    /// 10/29: prstar and lead-tracker run under Homebrew/nvm node, outside
+    /// their plugin dirs. The env marker Sonata sets on spawn is what
+    /// identifies them as the plugin's own stale processes.
+    func testProcessBelongsToPluginByEnvMarker() {
+        let plugin = "/Users/x/.sonata/plugins/prstar"
+        let exes: [pid_t: String] = [
+            1: "/Users/x/.sonata/plugins/sonar/erts-16.3.1/bin/beam.smp",
+            2: "/opt/homebrew/Cellar/node/25.2.1/bin/node",
+            3: "/opt/homebrew/Cellar/node/25.2.1/bin/node",
+            4: "/opt/homebrew/Cellar/node/25.2.1/bin/node",
+        ]
+        let envs: [pid_t: [String: String]] = [
+            2: ["SONATA_PLUGIN_DATA_DIR": plugin + "/"],
+            3: ["SONATA_PLUGIN_DATA_DIR": "/Users/x/.sonata/plugins/lead-tracker"],
+            4: ["PATH": "/usr/bin"],
+        ]
+        let belongs = { (pid: pid_t, path: String) in
+            processBelongsToPlugin(pid, pluginPath: path, executable: { exes[$0] }, environment: { envs[$0] })
+        }
+        XCTAssertTrue(belongs(1, "/Users/x/.sonata/plugins/sonar"))   // release binary in its dir
+        XCTAssertTrue(belongs(2, plugin))                             // node, marked for this plugin
+        XCTAssertFalse(belongs(3, plugin))                            // node, another plugin's
+        XCTAssertFalse(belongs(4, plugin))                            // node, unmarked
+        XCTAssertFalse(belongs(5, plugin))                            // unreadable (root's nxd)
+    }
+
+    func testProcessEnvironmentReadsALiveProcess() {
+        XCTAssertNotNil(processEnvironment(of: getpid())?["PATH"])
+        XCTAssertNil(processEnvironment(of: 999_999))
+    }
 }

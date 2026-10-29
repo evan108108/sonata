@@ -1214,7 +1214,7 @@ final class PluginManager: @unchecked Sendable {
 
     /// Stale processes of THIS plugin that must die before a fresh spawn:
     /// the pid recorded on the plugins row plus every listener on `ports`,
-    /// kept only when its executable lives under `pluginPath`.
+    /// kept only when processBelongsToPlugin says it's this plugin's.
     ///
     /// Needed for compiled Bun binaries where `bin/<name> stop` is a no-op —
     /// without it the old process keeps holding the port and the new spawn
@@ -1224,6 +1224,11 @@ final class PluginManager: @unchecked Sendable {
     /// unrelated same-user daemon that happens to sit on a plugin's port. A
     /// foreign holder is now logged and left alone; a dynamic-port plugin
     /// simply binds elsewhere.
+    ///
+    /// The executable-path test alone missed every node plugin: on the 10/29
+    /// relaunch it called prstar's and lead-tracker's own boot-time node
+    /// processes foreign, left them on :4100 and :4110, and both fresh spawns
+    /// died with EADDRINUSE.
     private func stalePluginPIDs(pluginPath: String, recordedPID: Int?, ports: [Int], logForeign: Bool = false) -> [pid_t] {
         var candidates = Set(ports.flatMap { tcpListenerPIDs(port: $0) })
         if let recordedPID, recordedPID > 0, recordedPID != Int(getpid()) {
@@ -1231,7 +1236,7 @@ final class PluginManager: @unchecked Sendable {
         }
         return candidates.filter { pid in
             guard let exe = executablePath(of: pid) else { return false }
-            if isPath(exe, inside: pluginPath) { return true }
+            if processBelongsToPlugin(pid, pluginPath: pluginPath) { return true }
             if logForeign, pid != pid_t(recordedPID ?? 0) {
                 sonataFileLog("Plugin port: pid \(pid) (\(exe)) holds a plugin port but isn't the plugin — leaving it")
             }
