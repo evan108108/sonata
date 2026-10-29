@@ -14,14 +14,28 @@ final class FTSQueryTests: XCTestCase {
 
     // MARK: - Pure escaping behavior
 
-    func testHyphenAndBarewordOperatorsAreQuotedAsLiterals() {
-        // The exact input from the bug report. Each token must be double-quoted
-        // (literal phrase) with a trailing `*`, ANDed together — including the
-        // bareword "OR", which becomes a literal, not an FTS5 operator.
+    func testHyphenTermsAreQuotedAndBarewordOrStaysAnOperator() {
+        // The exact input from the 5/21 bug report. Each term is double-quoted
+        // (literal phrase) with a trailing `*`; the bareword "OR" between them stays
+        // the FTS5 union operator (since 10/29; it used to be a literal "OR"* term).
         XCTAssertEqual(
             ftsEscape("world-watch OR strategic-signal"),
-            "\"world-watch\"* \"OR\"* \"strategic-signal\"*"
+            "\"world-watch\"* OR \"strategic-signal\"*"
         )
+    }
+
+    func testBarewordAndIsDroppedAndStrayOrsAreTrimmed() {
+        XCTAssertEqual(ftsEscape("alpha AND beta"), "\"alpha\"* \"beta\"*")
+        XCTAssertEqual(ftsEscape("OR alpha OR OR beta OR"), "\"alpha\"* OR \"beta\"*")
+        XCTAssertEqual(ftsEscape("OR"), "")
+        XCTAssertEqual(ftsEscape("AND OR"), "")
+        // Lowercase "or" and NOT stay literal terms.
+        XCTAssertEqual(ftsEscape("this or that"), "\"this\"* \"or\"* \"that\"*")
+        XCTAssertEqual(ftsEscape("alpha NOT beta"), "\"alpha\"* \"NOT\"* \"beta\"*")
+    }
+
+    func testEscapeORDropsBarewordOperators() {
+        XCTAssertEqual(ftsEscapeOR("alpha OR beta AND gamma"), "\"alpha\"* OR \"beta\"* OR \"gamma\"*")
     }
 
     func testMultiWordIsImplicitAndOfPrefixMatches() {
@@ -87,8 +101,7 @@ final class FTSQueryTests: XCTestCase {
 
     func testEscapedBarewordOrQueryDoesNotThrow() throws {
         let pool = try makeFTSPool()
-        // The literal bug input. Must not throw; AND-of-["world-watch","OR","strategic-signal"]
-        // simply matches nothing (no row contains the literal "or"), which is fine.
+        // The literal 5/21 bug input must not throw.
         let escaped = ftsEscape("world-watch OR strategic-signal")
         XCTAssertNoThrow(
             try pool.read { db in
@@ -96,5 +109,16 @@ final class FTSQueryTests: XCTestCase {
                                  arguments: [escaped])
             }
         )
+    }
+
+    func testBarewordOrIsAUnionWhenOneSideHasNoMatch() throws {
+        // 10/28: "toolWatch OR impeccable" returned only rows holding BOTH words, so an
+        // OR-joined dedup check read as "no duplicate". One side matching must be enough.
+        let pool = try makeFTSPool()
+        let rows = try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT body FROM docs_fts WHERE docs_fts MATCH ?",
+                             arguments: [ftsEscape("unrelated OR zzqxnotaword")])
+        }
+        XCTAssertEqual(rows.map { $0["body"] as String }, ["unrelated content"])
     }
 }
