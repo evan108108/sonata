@@ -39,6 +39,23 @@ struct PluginManifest: Codable {
     /// silently missing from every session's tool surface until the operator
     /// toggled it in the UI.
     let healthTimeoutSeconds: Double?
+    /// `"dynamic"` lets the plugin bind any free port in `portRange` instead
+    /// of exactly `port`. PluginManager picks the port (sticky across
+    /// restarts), passes it as PORT plus `<NAME>_PORT_RANGE`, learns the bound
+    /// port from `<plugin-dir>/<name>.port`, and requires `GET /api/health`
+    /// to answer `app == <name>` before adopting it. Callers resolve the URL
+    /// through PluginEndpointRegistry. Omit for a fixed port. A plugin whose
+    /// clients hardcode its URL (prstar on 4100) must stay fixed.
+    let portPolicy: String?
+    /// `[lo, hi]`, inclusive. Required when `portPolicy == "dynamic"`.
+    let portRange: [Int]?
+
+    /// The port range when this plugin opted into dynamic ports, else nil.
+    var dynamicPortRange: ClosedRange<Int>? {
+        guard portPolicy == "dynamic", let r = portRange, r.count == 2,
+              r[0] > 0, r[0] <= r[1], r[1] <= 65_535 else { return nil }
+        return r[0]...r[1]
+    }
 
     enum CodingKeys: String, CodingKey {
         case name, version, description, author, port, arch, actions
@@ -49,6 +66,8 @@ struct PluginManifest: Codable {
         case configSchema = "config_schema"
         case capabilities, skills
         case healthTimeoutSeconds = "health_timeout_seconds"
+        case portPolicy = "port_policy"
+        case portRange = "port_range"
     }
 }
 
@@ -118,7 +137,9 @@ final class PluginRuntime: @unchecked Sendable {
     let name: String
     let manifest: PluginManifest
     let mode: String           // "managed" or "external"
-    let baseURL: String        // e.g., "http://127.0.0.1:4000"
+    /// e.g. "http://127.0.0.1:4001". For a dynamic-port plugin this starts as
+    /// the assigned port and is corrected from its port file in waitForHealthy.
+    var baseURL: String
     var process: Process?      // nil for external mode
     var status: String         // installed/enabled/starting/running/failed/disabled
     var discoveredActions: [DiscoveredAction] = []
@@ -277,6 +298,7 @@ final class PluginManager: @unchecked Sendable {
 
             let healthy = await waitForHealthy(runtime)
             if healthy {
+                await publishEndpoint(runtime)
                 await discoverAndRegisterActions(runtime)
                 subscribeToEventsChannel(runtime)
                 runtime.status = "running"
@@ -315,10 +337,38 @@ final class PluginManager: @unchecked Sendable {
             return
         }
 
-        let path: String? = try? await dbPool.read { db in
-            try String.fetchOne(db, sql: "SELECT path FROM plugins WHERE name = ?", arguments: [runtime.name])
+        let row: (path: String, port: Int?, pid: Int?)? = try? await dbPool.read { db in
+            guard let r = try Row.fetchOne(db, sql: "SELECT path, port, pid FROM plugins WHERE name = ?",
+                                           arguments: [runtime.name]) else { return nil }
+            return (path: r["path"], port: r["port"], pid: r["pid"])
         }
-        guard let pluginPath = path else { return }
+        guard let row else { return }
+        let pluginPath = row.path
+
+        // Stop any stale daemon from a previous run before picking a port, so
+        // a dynamic plugin's own old listener frees its sticky port first.
+        stopPluginDaemon(pluginPath: pluginPath, executable: executable)
+        reclaimStalePluginProcesses(
+            name: runtime.name,
+            pluginPath: pluginPath,
+            recordedPID: row.pid,
+            ports: Array(Set([manifest.port] + (row.port.map { [$0] } ?? [])))
+        )
+
+        // A dynamic-port plugin gets the first free port in its range,
+        // preferring the one it had last time. A fixed-port plugin gets its
+        // manifest port, held or not, exactly as before.
+        var port = manifest.port
+        if let range = manifest.dynamicPortRange {
+            guard let picked = pickPluginPort(preferred: row.port, range: range) else {
+                sonataFileLog("Plugin \(runtime.name): every port in \(range.lowerBound)-\(range.upperBound) is held — not spawning")
+                return
+            }
+            port = picked
+            runtime.baseURL = "http://127.0.0.1:\(picked)"
+            try? FileManager.default.removeItem(atPath: portFilePath(name: runtime.name, pluginPath: pluginPath))
+            sonataFileLog("Plugin \(runtime.name): assigned port \(picked) (range \(range.lowerBound)-\(range.upperBound))")
+        }
 
         let execPath = (pluginPath as NSString).appendingPathComponent(executable)
         let args = Array(parts.dropFirst())
@@ -329,7 +379,7 @@ final class PluginManager: @unchecked Sendable {
         process.currentDirectoryURL = URL(fileURLWithPath: pluginPath)
 
         var env = ProcessInfo.processInfo.environment
-        env["PORT"] = String(manifest.port)
+        env["PORT"] = String(port)
         env["SONATA_PLUGIN_DATA_DIR"] = pluginPath
         env["SONATA_HOST"] = "http://127.0.0.1:\(sonataPort)"
 
@@ -342,6 +392,9 @@ final class PluginManager: @unchecked Sendable {
         }
 
         let prefix = runtime.name.uppercased()
+        if let range = manifest.dynamicPortRange {
+            env["\(prefix)_PORT_RANGE"] = "\(range.lowerBound)-\(range.upperBound)"
+        }
         if let configData = configJson.data(using: .utf8),
            let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] {
             for (key, value) in config {
@@ -351,10 +404,6 @@ final class PluginManager: @unchecked Sendable {
         }
 
         process.environment = env
-
-        // Kill any stale daemon from a previous run before starting
-        stopPluginDaemon(pluginPath: pluginPath, executable: executable)
-        killProcessOnPort(manifest.port)
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -384,18 +433,27 @@ final class PluginManager: @unchecked Sendable {
 
     // MARK: - Health Checking
 
-    /// Poll GET /api/actions until 200 or timeout. Returns true if healthy.
+    /// Poll until the plugin answers or the budget runs out. Returns true if healthy.
+    ///
+    /// A fixed-port plugin is healthy on a 200 from GET /api/actions. A
+    /// dynamic-port plugin must also prove it is the plugin: its port file
+    /// names the port, and GET /api/health must answer `app == <name>`. A
+    /// squatter on the port (NoMachine on :4000) is never adopted.
     func waitForHealthy(_ runtime: PluginRuntime) async -> Bool {
         // Per-plugin override lets slow-boot plugins (studio boots ~52s
         // via 4a SSE handshakes) declare a larger budget in their manifest
         // so their actions don't get dropped from the registry every deploy.
         let budget = runtime.manifest.healthTimeoutSeconds ?? healthTimeout
         let deadline = Date().addingTimeInterval(budget)
-        let url = URL(string: "\(runtime.baseURL)/api/actions")!
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2
         let session = URLSession(configuration: config)
 
+        if runtime.manifest.dynamicPortRange != nil {
+            return await waitForDynamicPortHealthy(runtime, session: session, deadline: deadline)
+        }
+
+        let url = URL(string: "\(runtime.baseURL)/api/actions")!
         while Date() < deadline {
             do {
                 let (_, response) = try await session.data(from: url)
@@ -408,6 +466,49 @@ final class PluginManager: @unchecked Sendable {
             try? await Task.sleep(for: .milliseconds(Int(healthPollInterval * 1000)))
         }
         return false
+    }
+
+    private func waitForDynamicPortHealthy(_ runtime: PluginRuntime, session: URLSession, deadline: Date) async -> Bool {
+        let pluginPath: String? = runtime.mode == "managed"
+            ? (try? await dbPool.read { db in
+                try String.fetchOne(db, sql: "SELECT path FROM plugins WHERE name = ?", arguments: [runtime.name])
+            }) ?? nil
+            : nil
+
+        while Date() < deadline {
+            if let pluginPath, let bound = readPortFile(name: runtime.name, pluginPath: pluginPath) {
+                runtime.baseURL = "http://127.0.0.1:\(bound)"
+            }
+            if let url = URL(string: "\(runtime.baseURL)/api/health"),
+               let (data, response) = try? await session.data(from: url),
+               let http = response as? HTTPURLResponse, http.statusCode == 200,
+               pluginIdentityMatches(healthBody: data, name: runtime.name) {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(Int(healthPollInterval * 1000)))
+        }
+        sonataFileLog("Plugin \(runtime.name): no healthy `app == \(runtime.name)` answer at \(runtime.baseURL)")
+        return false
+    }
+
+    private func readPortFile(name: String, pluginPath: String) -> Int? {
+        guard let text = try? String(contentsOfFile: portFilePath(name: name, pluginPath: pluginPath), encoding: .utf8),
+              let port = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...65_535).contains(port) else { return nil }
+        return port
+    }
+
+    /// Once a plugin is healthy, record where it actually is: the plugins row's
+    /// port (so the next spawn prefers it) and PluginEndpointRegistry (so
+    /// callers like SonarPluginEndpoint reach it).
+    func publishEndpoint(_ runtime: PluginRuntime) async {
+        PluginEndpointRegistry.publish(runtime.name, baseURL: runtime.baseURL)
+        guard runtime.manifest.dynamicPortRange != nil,
+              let port = URLComponents(string: runtime.baseURL)?.port else { return }
+        try? await dbPool.write { db in
+            try db.execute(sql: "UPDATE plugins SET port = ? WHERE name = ?", arguments: [port, runtime.name])
+        }
+        sonataFileLog("Plugin \(runtime.name): bound port \(port) published")
     }
 
     // MARK: - Action Discovery
@@ -629,6 +730,7 @@ final class PluginManager: @unchecked Sendable {
 
         let healthy = await waitForHealthy(runtime)
         if healthy {
+            await publishEndpoint(runtime)
             await discoverAndRegisterActions(runtime)
             subscribeToEventsChannel(runtime)
             runtime.status = "running"
@@ -921,7 +1023,9 @@ final class PluginManager: @unchecked Sendable {
                 eventsChannel: nil, eventsTopic: nil,
                 configSchema: nil, actions: nil, capabilities: nil,
                 skills: nil,
-                healthTimeoutSeconds: nil
+                healthTimeoutSeconds: nil,
+                portPolicy: nil,
+                portRange: nil
             ),
             mode: "external",
             baseURL: url,
@@ -932,6 +1036,7 @@ final class PluginManager: @unchecked Sendable {
 
         let healthy = await waitForHealthy(runtime)
         if healthy {
+            await publishEndpoint(runtime)
             await discoverAndRegisterActions(runtime)
             await registerWhatHappenedCapability(runtime)
             runtime.status = "running"
@@ -960,7 +1065,9 @@ final class PluginManager: @unchecked Sendable {
         let argsData = (try? JSONEncoder().encode(args)) ?? Data("[]".utf8)
         let argsJSON = String(data: argsData, encoding: .utf8) ?? "[]"
         let method = (cap.method?.isEmpty == false ? cap.method! : "get").lowercased()
-        let port = runtime.manifest.port
+        // The bound port, not the manifest one: a dynamic-port plugin may sit
+        // anywhere in its range.
+        let port = URLComponents(string: runtime.baseURL)?.port ?? runtime.manifest.port
         let name = runtime.name
         // Domain slug — manifest override wins, plugin name is the fallback.
         // Trim + non-empty guard so a whitespace-only override doesn't create
@@ -1033,7 +1140,9 @@ final class PluginManager: @unchecked Sendable {
                 eventsChannel: nil, eventsTopic: nil,
                 configSchema: nil, actions: nil, capabilities: nil,
                 skills: nil,
-                healthTimeoutSeconds: nil
+                healthTimeoutSeconds: nil,
+                portPolicy: nil,
+                portRange: nil
             ),
             mode: row.mode,
             baseURL: baseURL,
@@ -1050,6 +1159,7 @@ final class PluginManager: @unchecked Sendable {
 
         let healthy = await waitForHealthy(runtime)
         if healthy {
+            await publishEndpoint(runtime)
             await discoverAndRegisterActions(runtime)
             subscribeToEventsChannel(runtime)
             await registerWhatHappenedCapability(runtime)
@@ -1097,52 +1207,78 @@ final class PluginManager: @unchecked Sendable {
             runtime.process = nil
             runtime.status = "disabled"
         }
+        PluginEndpointRegistry.remove(name)
 
         await updateStatus(name: name, status: "disabled")
     }
 
-    /// Kill any process listening on the given port. Needed for compiled Bun
-    /// binaries where `bin/<name> stop` is a no-op — without this, the old
-    /// process keeps holding the port and the new spawn crashes immediately.
-    /// PIDs LISTENING on the given TCP port, never Sonata itself. A client
-    /// end doesn't count: Sonata's own connection to the plugin it is about
-    /// to respawn made the old `lsof -ti :<port>` SIGTERM Sonata (see
-    /// tcpListenerPIDs).
-    private func pidsOnPort(_ port: Int) -> [Int32] {
-        tcpListenerPIDs(port: port)
+    /// Stale processes of THIS plugin that must die before a fresh spawn:
+    /// the pid recorded on the plugins row plus every listener on `ports`,
+    /// kept only when its executable lives under `pluginPath`.
+    ///
+    /// Needed for compiled Bun binaries where `bin/<name> stop` is a no-op —
+    /// without it the old process keeps holding the port and the new spawn
+    /// crashes immediately. The path filter is new (10/29): this used to
+    /// signal every listener on the manifest port, which would have killed
+    /// NoMachine's nxd on :4000 had it been visible to us, and could kill any
+    /// unrelated same-user daemon that happens to sit on a plugin's port. A
+    /// foreign holder is now logged and left alone; a dynamic-port plugin
+    /// simply binds elsewhere.
+    private func stalePluginPIDs(pluginPath: String, recordedPID: Int?, ports: [Int], logForeign: Bool = false) -> [pid_t] {
+        var candidates = Set(ports.flatMap { tcpListenerPIDs(port: $0) })
+        if let recordedPID, recordedPID > 0, recordedPID != Int(getpid()) {
+            candidates.insert(pid_t(recordedPID))
+        }
+        return candidates.filter { pid in
+            guard let exe = executablePath(of: pid) else { return false }
+            if isPath(exe, inside: pluginPath) { return true }
+            if logForeign, pid != pid_t(recordedPID ?? 0) {
+                sonataFileLog("Plugin port: pid \(pid) (\(exe)) holds a plugin port but isn't the plugin — leaving it")
+            }
+            return false
+        }.sorted()
     }
 
-    /// Reclaim a port held by a stale plugin process before spawning a fresh one.
-    /// SIGTERM first; if the holder ignores it (e.g. a hung graceful-shutdown that waits on
-    /// keep-alive connections), escalate to SIGKILL, and don't return until the port is
-    /// verifiably free (or a hard deadline). A boots-then-dies crash loop is almost always
-    /// EADDRINUSE: the new process can't bind because the old one never released the port,
-    /// so spawning before the port frees just reproduces the loop (#27 fix).
-    private func killProcessOnPort(_ port: Int) {
-        guard !pidsOnPort(port).isEmpty else { return }
-        for pid in pidsOnPort(port) { kill(pid, SIGTERM) }
+    /// Reclaim ports held by this plugin's own stale processes before spawning
+    /// a fresh one. SIGTERM first; if a holder ignores it (e.g. a hung
+    /// graceful-shutdown waiting on keep-alive connections), escalate to
+    /// SIGKILL, and don't return until they're gone (or a hard deadline). A
+    /// boots-then-dies crash loop is almost always EADDRINUSE: the new process
+    /// can't bind because the old one never released the port, so spawning
+    /// before the port frees just reproduces the loop (#27 fix).
+    private func reclaimStalePluginProcesses(name: String, pluginPath: String, recordedPID: Int?, ports: [Int]) {
+        let stale = { self.stalePluginPIDs(pluginPath: pluginPath, recordedPID: recordedPID, ports: ports) }
+        let initial = stalePluginPIDs(pluginPath: pluginPath, recordedPID: recordedPID, ports: ports, logForeign: true)
+        guard !initial.isEmpty else { return }
+        for pid in initial { kill(pid, SIGTERM) }
 
-        // Poll for graceful exit; escalate to SIGKILL if still held after the grace period.
+        // Poll for graceful exit; escalate to SIGKILL if still alive after the grace period.
         let graceDeadline = Date().addingTimeInterval(2.5)
         while Date() < graceDeadline {
-            if pidsOnPort(port).isEmpty { return }
+            if stale().isEmpty { return }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        let stubborn = pidsOnPort(port)
+        let stubborn = stale()
         if !stubborn.isEmpty {
-            sonataFileLog("Port \(port): \(stubborn.count) process(es) ignored SIGTERM after 2.5s — sending SIGKILL")
+            sonataFileLog("Plugin \(name): \(stubborn.count) stale process(es) ignored SIGTERM after 2.5s — sending SIGKILL")
             for pid in stubborn { kill(pid, SIGKILL) }
         }
 
-        // Wait for the port to actually free so the fresh spawn can bind.
+        // Wait for them to actually go so the fresh spawn can bind.
         let killDeadline = Date().addingTimeInterval(2.5)
         while Date() < killDeadline {
-            if pidsOnPort(port).isEmpty { return }
+            if stale().isEmpty { return }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        if !pidsOnPort(port).isEmpty {
-            sonataFileLog("Port \(port): still held after SIGKILL + ~5s — spawn may fail with EADDRINUSE")
+        if !stale().isEmpty {
+            sonataFileLog("Plugin \(name): stale process still alive after SIGKILL + ~5s — spawn may fail with EADDRINUSE")
         }
+    }
+
+    /// `<plugin-dir>/<name>.port`, where a dynamic-port plugin publishes the
+    /// port it actually bound.
+    private func portFilePath(name: String, pluginPath: String) -> String {
+        (pluginPath as NSString).appendingPathComponent("\(name).port")
     }
 
     /// Run the plugin's stop command to cleanly shut down any daemon process.

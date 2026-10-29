@@ -1584,11 +1584,12 @@ struct SonataApp: App {
                 // Start all enabled plugins — blocks until all are running or failed.
                 // Must complete before workers spawn so plugin MCP tools are available.
                 //
-                // Plugin daemons bind fixed ports (sonar on 4000, …) and Sonata
-                // kills whatever already holds those ports before spawning its
-                // own. From a secondary instance that means killing the primary's
-                // live daemons and adopting them — how the sonar bridge died on
-                // 2026-07-13. A secondary runs pluginless.
+                // Plugin daemons bind manifest ports (sonar takes the first free
+                // one in 4001-4020) and Sonata reclaims its own stale plugin
+                // processes before spawning. From a secondary instance that means
+                // killing the primary's live daemons (same plugin dir) and
+                // adopting them — how the sonar bridge died on 2026-07-13. A
+                // secondary runs pluginless.
                 if SonataInstance.isPrimary {
                     await pluginManager.startEnabledPlugins()
                     sonataFileLog("Plugin system: initialization complete")
