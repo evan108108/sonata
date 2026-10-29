@@ -86,17 +86,25 @@ enum DMTargetResolver {
     }
 }
 
-/// One source of truth for the sonar plugin's HTTP endpoints. If the plugin
-/// ever moves off port 4000 or gains a socket path, this is the only place
-/// to update. All sonar-plugin callers in this module (and DMActionHelpers)
-/// go through here rather than hardcoding the URL.
+/// One source of truth for the sonar plugin's HTTP endpoints. All
+/// sonar-plugin callers in this module (and DMActionHelpers) go through here
+/// rather than hardcoding the URL.
+///
+/// Sonar binds the first free port in its manifest range, so the base comes
+/// from PluginEndpointRegistry. This was a hardcoded :4000 until 10/29:
+/// scout-cloud runs sonar on 4001 (Hostmyapple's NoMachine holds 4000), so
+/// its Sonata probed NoMachine and reported every peer DM as sonar_offline
+/// from ~9/16. The :4000 fallback is for the window before the plugin has
+/// come up, and matches the old behaviour.
 enum SonarPluginEndpoint {
-    private static let base = "http://127.0.0.1:4000"
+    static let fallbackBase = "http://127.0.0.1:4000"
 
-    static let peers = URL(string: "\(base)/api/peers")!
-    static let cardJSON = URL(string: "\(base)/.well-known/sonar/card.json")!
-    static let messagesSend = URL(string: "\(base)/api/messages/send")!
-    static let messagesAckForward = URL(string: "\(base)/api/messages/ack_forward")!
+    static var base: String { PluginEndpointRegistry.baseURL("sonar") ?? fallbackBase }
+
+    static var peers: URL { URL(string: "\(base)/api/peers")! }
+    static var cardJSON: URL { URL(string: "\(base)/.well-known/sonar/card.json")! }
+    static var messagesSend: URL { URL(string: "\(base)/api/messages/send")! }
+    static var messagesAckForward: URL { URL(string: "\(base)/api/messages/ack_forward")! }
 }
 
 enum SonarPeerLookup {

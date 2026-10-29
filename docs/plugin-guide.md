@@ -67,7 +67,9 @@ Every plugin ships a single manifest file named `<plugin-name>.plugin.json` at t
   "description": "Peer-to-peer agent communication relay",
   "author": "evan108108",
   "sonata_version": ">= 3.0",
-  "port": 4000,
+  "port": 4001,
+  "port_policy": "dynamic",
+  "port_range": [4001, 4020],
   "arch": "arm64",
   "start_command": "bin/sonar start",
   "events_channel": "/socket/websocket",
@@ -101,6 +103,8 @@ Every plugin ships a single manifest file named `<plugin-name>.plugin.json` at t
 | `author` | no | String. Shown in the dashboard. |
 | `sonata_version` | no | Minimum Sonata version (e.g. `">= 3.0"`). Informational in v1; not enforced yet. |
 | `port` | yes | Default port. Sonata will pass this to your process via the `PORT` env var. Pick something unlikely to clash with common services — see [port conventions](#port-assignment-conventions). |
+| `port_policy` | no | `"dynamic"` to bind any free port in `port_range` instead of exactly `port`. See [dynamic ports](#dynamic-ports). Omit for a fixed port. |
+| `port_range` | with `port_policy` | `[lo, hi]`, inclusive. The ports a dynamic plugin may be given. |
 | `arch` | no | Target architecture for pre-compiled binaries (`arm64`, `x86_64`, or omit for runtime-dependent plugins). Informational. |
 | `start_command` | yes | Command Sonata spawns from the plugin directory. Space-separated. First token is the executable path **relative to the plugin dir**. See [start_command and the stop arg](#start_command-and-the-stop-arg). |
 | `events_channel` | no | Phoenix/WebSocket path to subscribe to. Only needed if you push events. |
@@ -150,7 +154,7 @@ Rules:
 
 Sonata calls this endpoint:
 1. **At boot / enable** — to register your actions as MCP tools.
-2. **As the health check** — if `GET /api/actions` returns 200 within 15 seconds, your plugin is healthy.
+2. **As the health check** — if `GET /api/actions` returns 200 within 15 seconds, your plugin is healthy. A [dynamic-port](#dynamic-ports) plugin is checked on `GET /api/health` instead, which must answer `{"app": "<name>"}`.
 3. **After a crash restart** — to re-register the tool set.
 
 ### How actions become HTTP calls
@@ -158,7 +162,7 @@ Sonata calls this endpoint:
 When an agent (or dashboard user, or cron job) invokes MCP tool `sonar_send`, Sonata:
 
 1. Looks up the registered proxy action for `sonar_send`.
-2. Builds a request: `POST http://127.0.0.1:4000/api/messages/send` with the tool args as the JSON body.
+2. Builds a request: `POST http://127.0.0.1:<port>/api/messages/send`, where `<port>` is the port the plugin actually bound, with the tool args as the JSON body.
 3. Substitutes any path parameters (`:message_id` in the path, etc.) using named params from the tool call.
 4. Awaits your response with a 30s timeout.
 5. Returns your JSON body as the MCP tool result.
@@ -173,11 +177,22 @@ Pick a port that's unlikely to clash. Informal reservations used in the wild:
 
 | Plugin | Port |
 |---|---|
-| Sonar | 4000 |
+| Sonar | 4001–4020 (dynamic) |
 | PRStar | 4100 |
 | (Your plugin) | 4200+ |
 
 Sonata itself uses 3211. MeiliSearch uses 7700. Stay out of 3000–3099 (Node/React dev servers) and 8000–9000 (common app servers). Users can't override your port today; pick carefully and document it.
+
+### Dynamic ports
+
+A fixed port fails the moment something else holds it: NoMachine binds `*:4000` as root at boot, and on 10/29 that took sonar down until it moved. Set `"port_policy": "dynamic"` and a `port_range` and Sonata will:
+
+1. Pick the first free port in the range by actually binding it, preferring the port the plugin bound last time so it stays put across restarts.
+2. Pass it as `PORT`, and the range as `<NAME>_PORT_RANGE` (e.g. `SONAR_PORT_RANGE=4001-4020`), so the plugin can walk the range itself if the port is taken between the pick and its bind.
+3. Wait for `<plugin-dir>/<name>.port` — the plugin must write the port it bound there (atomically) once its listener is up — and require `GET /api/health` to answer `{"app": "<name>"}` before adopting it.
+4. Record the bound port on the plugins row and publish the base URL to `PluginEndpointRegistry`, which in-process callers read instead of assuming a port.
+
+Only opt in if nothing outside Sonata hardcodes your URL. PRStar stays fixed on 4100 because skills POST to it directly.
 
 ### `start_command` and the stop arg
 
