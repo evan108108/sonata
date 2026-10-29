@@ -86,12 +86,84 @@ func executablePath(of pid: pid_t) -> String? {
     return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 
+/// `pid`'s environment as launched, or nil if it can't be read (gone, or
+/// owned by another user: KERN_PROCARGS2 is denied across users, so root's
+/// nxd stays unreadable).
+func processEnvironment(of pid: pid_t) -> [String: String]? {
+    var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+    var size = 0
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+    var buffer = [UInt8](repeating: 0, count: size)
+    guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
+    return parseProcArgs2Environment(Array(buffer.prefix(size)))
+}
+
+/// The environment out of a KERN_PROCARGS2 buffer: an Int32 argc, the exec
+/// path, NUL padding, argc NUL-terminated args, then NUL-terminated
+/// `KEY=value` strings up to the first empty one.
+func parseProcArgs2Environment(_ bytes: [UInt8]) -> [String: String]? {
+    let argcSize = MemoryLayout<Int32>.size
+    guard bytes.count >= argcSize else { return nil }
+    let argc = bytes.withUnsafeBytes { Int($0.loadUnaligned(as: Int32.self)) }
+    var i = argcSize
+    while i < bytes.count, bytes[i] != 0 { i += 1 }   // exec path
+    while i < bytes.count, bytes[i] == 0 { i += 1 }   // padding
+    var skipped = 0
+    while i < bytes.count, skipped < argc {           // argv
+        while i < bytes.count, bytes[i] != 0 { i += 1 }
+        i += 1
+        skipped += 1
+    }
+    guard skipped == argc else { return nil }
+    var env: [String: String] = [:]
+    while i < bytes.count, bytes[i] != 0 {
+        let start = i
+        while i < bytes.count, bytes[i] != 0 { i += 1 }
+        let entry = String(decoding: bytes[start..<i], as: UTF8.self)
+        if let eq = entry.firstIndex(of: "=") {
+            env[String(entry[..<eq])] = String(entry[entry.index(after: eq)...])
+        }
+        i += 1
+    }
+    return env
+}
+
 /// True when `path` is inside `directory` (both standardized, symlinks
 /// resolved), so `/plugins/sonar-old/bin` never matches `/plugins/sonar`.
 func isPath(_ path: String, inside directory: String) -> Bool {
     let dir = URL(fileURLWithPath: directory).resolvingSymlinksInPath().standardizedFileURL.path
     let file = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     return file.hasPrefix(dir.hasSuffix("/") ? dir : dir + "/")
+}
+
+/// True when `a` and `b` name the same directory (standardized, symlinks resolved).
+func isSameDirectory(_ a: String, _ b: String) -> Bool {
+    let norm = { (p: String) -> String in
+        let s = URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL.path
+        return s.count > 1 && s.hasSuffix("/") ? String(s.dropLast()) : s
+    }
+    return norm(a) == norm(b)
+}
+
+/// True when `pid` is a process Sonata spawned for the plugin at
+/// `pluginPath`: its executable lives in the plugin dir (a release or
+/// compiled binary), or it carries the `SONATA_PLUGIN_DATA_DIR` Sonata sets
+/// on every plugin spawn. The env marker is what catches interpreter-run
+/// plugins — prstar and lead-tracker exec `node`, whose executable is under
+/// Homebrew or nvm, and prstar's script isn't even in its plugin dir.
+/// macOS hides a platform binary's environment (/bin/sleep, /bin/bash), so
+/// the marker only works for processes like node, which is what plugins run.
+func processBelongsToPlugin(
+    _ pid: pid_t,
+    pluginPath: String,
+    executable: (pid_t) -> String? = executablePath,
+    environment: (pid_t) -> [String: String]? = processEnvironment
+) -> Bool {
+    if let exe = executable(pid), isPath(exe, inside: pluginPath) { return true }
+    if let dataDir = environment(pid)?["SONATA_PLUGIN_DATA_DIR"] {
+        return isSameDirectory(dataDir, pluginPath)
+    }
+    return false
 }
 
 /// True when a plugin's GET /api/health body names it: `{"app": "<name>", …}`.
