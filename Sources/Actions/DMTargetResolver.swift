@@ -6,6 +6,9 @@ enum DMTargetKind: String, Codable, Sendable {
     case session
     case supervisor
     case peer
+    case peerSession  // cross-peer session targeting — caller supplied an
+                      // explicit peerId plus a session label/id. The receiving
+                      // peer resolves the label against its own session roster.
     case selfPeer   // resolver sentinel — never a real routing target;
                     // dm_send maps this to {status:not_found, reason:"self_peer"}
 }
@@ -18,10 +21,31 @@ struct DMResolvedTarget: Sendable {
 }
 
 enum DMTargetResolver {
-    static func resolve(_ input: String, dbPool: DatabasePool) async -> DMResolvedTarget? {
+    /// Resolve a DM target identifier against the local roster.
+    ///
+    /// When `peerIdHint` is supplied, the caller is explicitly targeting a
+    /// session on a remote peer by its sidebar label/id — skip the local
+    /// resolution chain and return a `.peerSession` target with `input` as
+    /// the raw label. The receiving peer resolves it against its own roster
+    /// in `routePeerInbound`.
+    static func resolve(
+        _ input: String,
+        peerIdHint: String? = nil,
+        dbPool: DatabasePool
+    ) async -> DMResolvedTarget? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let ci = trimmed.lowercased()
+
+        if let hint = peerIdHint?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !hint.isEmpty {
+            return DMResolvedTarget(
+                sessionKey: trimmed,
+                kind: .peerSession,
+                peerId: hint,
+                sessionId: trimmed
+            )
+        }
 
         // 1 & 2: workers table.
         if let workerId: String = try? await dbPool.read({ db -> String? in
