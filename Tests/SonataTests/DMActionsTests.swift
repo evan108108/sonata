@@ -416,11 +416,9 @@ final class DMActionsTests: XCTestCase {
     //      local session but has no live SSE connection also falls through
     //      to pool dispatch (no silent drop).
     //
-    // The happy-path "match + live SSE push" case needs MCPConnections to
-    // report hasLive=true for the resolved key, which requires either a
-    // live SSE connection or an injectable mock — out of scope for a unit
-    // test. The federated test file (Tests/federated/sonar-dm.test.ts)
-    // covers end-to-end round-trip when both peers are upgraded.
+    // The happy path ("match + live SSE push") is covered further down by
+    // attaching a real MCPSSEWriter to MCPConnections.shared under the
+    // resolved key: label vs exact-key control, for sessions and workers.
 
     func testResolverPeerIdHintFastPathReturnsPeerSession() async throws {
         let (pool, path) = try TestDatabase.makePool()
@@ -513,6 +511,88 @@ final class DMActionsTests: XCTestCase {
         let latest = try XCTUnwrap(try fetchLatestSonarDMEvent(pool: pool))
         XCTAssertEqual(latest.status, "pending")
         XCTAssertNil(latest.assignedTo)
+    }
+
+    // MARK: Receiver resolves target_session_id: label and exact key alike
+    //
+    // The receiving peer resolves target_session_id through DMTargetResolver,
+    // so a sidebar label ("Session 3") and the exact sessionKey must land on
+    // the same live session. The exact-key case is the control: it has to keep
+    // working while the label case starts working (2026-10-31).
+
+    private func seedLiveInteractiveSession(
+        pool: DatabasePool, name: String
+    ) async throws -> (sessionKey: String, writer: MCPSSEWriter) {
+        let sid = UUID().uuidString.lowercased()
+        try await pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO interactiveSessions (id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt)
+                VALUES (?, ?, ?, '/tmp', 0, 0, 'terminal', 0, 0)
+            """, arguments: [UUID().uuidString, sid, name])
+        }
+        let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
+        let writer = MCPSSEWriter()
+        await MCPConnections.shared.attach(key, writer: writer)
+        addTeardownBlock { await MCPConnections.shared.detach(key, writer: writer) }
+        return (key, writer)
+    }
+
+    private func inboundDeliveredAt(pool: DatabasePool, messageId: String) throws -> Int64? {
+        try pool.read { db in
+            try Int64.fetchOne(db, sql: """
+                SELECT deliveredAtMs FROM dm_messages
+                WHERE messageId = ? AND direction = 'inbound'
+            """, arguments: [messageId])
+        }
+    }
+
+    func testInboundTargetBySidebarLabelPushesToLiveSession() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        _ = try await seedLiveInteractiveSession(pool: pool, name: "Session 3")
+        let mid = "label-\(UUID().uuidString)"
+        var payload = inboundSonarDMPayload(body: "routing test", messageIdOverride: mid)
+        payload["target_session_id"] = "Session 3"
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool), "label resolved; must not fall to the pool")
+        XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
+    }
+
+    func testInboundTargetByExactSessionKeyPushesToLiveSession() async throws {
+        // Control for the label test above: the exact sessionKey still resolves.
+        let pool = try makePoolWithWorkerEvents()
+        let (key, _) = try await seedLiveInteractiveSession(pool: pool, name: "Session 4")
+        let mid = "key-\(UUID().uuidString)"
+        var payload = inboundSonarDMPayload(body: "routing test", messageIdOverride: mid)
+        payload["target_session_id"] = key
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool), "exact key resolved; must not fall to the pool")
+        XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
+    }
+
+    func testInboundTargetByWorkerLabelPushesToLiveWorker() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        let workerId = "worker-label-\(UUID().uuidString.prefix(8))"
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, ?, 'Scout Coord', ?, 'idle', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, workerId, UUID().uuidString, now, now])
+        }
+        let writer = MCPSSEWriter()
+        await MCPConnections.shared.attach(workerId, writer: writer)
+        addTeardownBlock { await MCPConnections.shared.detach(workerId, writer: writer) }
+
+        let mid = "wlabel-\(UUID().uuidString)"
+        var payload = inboundSonarDMPayload(body: "routing test", messageIdOverride: mid)
+        payload["target_session_id"] = "scout coord"
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool))
+        XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
     }
 
 }
