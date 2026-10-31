@@ -48,6 +48,8 @@ let package = Package(
             dependencies: [
                 "Sonata",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],
             path: "Tests/SonataTests",
             resources: [

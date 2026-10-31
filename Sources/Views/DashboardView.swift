@@ -745,15 +745,7 @@ private struct LiveWorkersSection: View {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 200,
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let status = obj["status"] as? String {
-                let reason = obj["reason"] as? String
-                let suffix = reason.map { " (\($0))" } ?? ""
-                return "Sent to \(target) — \(status)\(suffix)"
-            }
-            let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
-            return "Failed (HTTP \(code)) — \(snippet)"
+            return dmSendResultText(target: target, httpCode: code, data: data)
         } catch {
             return "Failed — \(error.localizedDescription)"
         }

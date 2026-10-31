@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import Hummingbird
 import SQLite3
 
 // Sonata-side DM routing.
@@ -573,6 +574,104 @@ func dmMessagesCleanupOld(dbPool: DatabasePool, ttlMs: Int64 = 7 * 24 * 60 * 60 
     }
 }
 
+// MARK: - dm_send
+
+/// dm_send's HTTP result: the same JSON body as DMSendResponse, with
+/// not_found → 404 and not_live → 409 so a `curl -f` caller fails on an
+/// undelivered DM instead of reading 200 as success (learning 417af3a3).
+/// MCP ignores the status and returns the body as a normal result.
+struct DMSendHTTPResult: Encodable, Sendable, HTTPStatusCarrying {
+    let response: DMSendResponse
+
+    func encode(to encoder: Encoder) throws {
+        try response.encode(to: encoder)
+    }
+
+    var httpStatus: HTTPResponse.Status {
+        switch response.status {
+        case "not_found": return .notFound
+        case "not_live": return .conflict
+        default: return .ok
+        }
+    }
+}
+
+private func dmSendHandler(_ ctx: ActionContext) async throws -> DMSendResponse {
+    let target = try ctx.params.require("target")
+    let body = try ctx.params.require("body")
+    let senderKey = try ctx.params.require("fromSessionId")
+    let context = ctx.params.string("context")
+    let peerIdHint = ctx.params.string("peerId")
+
+    guard body.utf8.count <= 256 * 1024 else {
+        throw ActionError.custom("body_too_large", .unprocessableContent)
+    }
+    guard !body.isEmpty else {
+        throw ActionError.custom("body_empty", .unprocessableContent)
+    }
+
+    guard let resolved = await DMTargetResolver.resolve(target, peerIdHint: peerIdHint, dbPool: ctx.dbPool) else {
+        // Distinguish "typo / no such target" from "sonar offline"
+        // via a fast probe on the peer plugin.
+        let reason: String
+        if await SonarPeerLookup.pluginReachable() {
+            reason = "no_such_target"
+        } else {
+            reason = "sonar_offline"
+        }
+        let now = nowMs()
+        try? await ctx.dbPool.write { db in
+            try DMAudit.insert(DMAuditRow(
+                messageId: newUUID(),
+                target: target,
+                resolvedSessionKey: nil,
+                resolvedKind: nil,
+                senderSessionKey: senderKey,
+                senderPeerName: nil,
+                body: body,
+                context: context,
+                sentAtMs: now,
+                inReplyToMessageId: nil,
+                direction: "outbound",
+                initialStatus: "not_found",
+                failureReason: reason
+            ), db: db)
+        }
+        return DMSendResponse(status: "not_found", messageId: nil, reason: reason)
+    }
+    if resolved.kind == .selfPeer {
+        let now = nowMs()
+        try? await ctx.dbPool.write { db in
+            try DMAudit.insert(DMAuditRow(
+                messageId: newUUID(),
+                target: target,
+                resolvedSessionKey: nil,
+                resolvedKind: "selfPeer",
+                senderSessionKey: senderKey,
+                senderPeerName: nil,
+                body: body,
+                context: context,
+                sentAtMs: now,
+                inReplyToMessageId: nil,
+                direction: "outbound",
+                initialStatus: "not_found",
+                failureReason: "self_peer"
+            ), db: db)
+        }
+        return DMSendResponse(status: "not_found", messageId: nil, reason: "self_peer")
+    }
+
+    return await sendResolved(
+        target: target,
+        resolved: resolved,
+        body: body,
+        context: context,
+        senderKey: senderKey,
+        inReplyToMessageId: nil,
+        dbPool: ctx.dbPool
+    )
+}
+
 // MARK: - Public action list
 
 let dmActions: [SonataAction] = [
@@ -580,7 +679,7 @@ let dmActions: [SonataAction] = [
     // POST /api/dm/send — open a new DM thread.
     SonataAction(
         name: "dm_send",
-        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). To target a session on a remote peer by its sidebar label, pass that label as `target` plus the peer's id as `peerId`. Returns immediately with sent | not_live | not_found and an optional reason. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
+        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). To target a session on a remote peer by its sidebar label, pass that label as `target` plus the peer's id as `peerId`. Returns immediately with sent | not_live | not_found and an optional reason. Over HTTP, not_found is a 404 and not_live a 409, each with the same JSON body. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
         group: "/api/dm",
         path: "/send",
         method: .post,
@@ -592,79 +691,7 @@ let dmActions: [SonataAction] = [
             ActionParam("peerId", .string, required: false, description: "Sonar peer id for cross-peer session targeting. When supplied, `target` is treated as a session label/id on that peer and resolved by the receiver, not locally."),
         ],
         handler: { ctx in
-            let target = try ctx.params.require("target")
-            let body = try ctx.params.require("body")
-            let senderKey = try ctx.params.require("fromSessionId")
-            let context = ctx.params.string("context")
-            let peerIdHint = ctx.params.string("peerId")
-
-            guard body.utf8.count <= 256 * 1024 else {
-                throw ActionError.custom("body_too_large", .unprocessableContent)
-            }
-            guard !body.isEmpty else {
-                throw ActionError.custom("body_empty", .unprocessableContent)
-            }
-
-            guard let resolved = await DMTargetResolver.resolve(target, peerIdHint: peerIdHint, dbPool: ctx.dbPool) else {
-                // Distinguish "typo / no such target" from "sonar offline"
-                // via a fast probe on the peer plugin.
-                let reason: String
-                if await SonarPeerLookup.pluginReachable() {
-                    reason = "no_such_target"
-                } else {
-                    reason = "sonar_offline"
-                }
-                let now = nowMs()
-                try? await ctx.dbPool.write { db in
-                    try DMAudit.insert(DMAuditRow(
-                        messageId: newUUID(),
-                        target: target,
-                        resolvedSessionKey: nil,
-                        resolvedKind: nil,
-                        senderSessionKey: senderKey,
-                        senderPeerName: nil,
-                        body: body,
-                        context: context,
-                        sentAtMs: now,
-                        inReplyToMessageId: nil,
-                        direction: "outbound",
-                        initialStatus: "not_found",
-                        failureReason: reason
-                    ), db: db)
-                }
-                return DMSendResponse(status: "not_found", messageId: nil, reason: reason)
-            }
-            if resolved.kind == .selfPeer {
-                let now = nowMs()
-                try? await ctx.dbPool.write { db in
-                    try DMAudit.insert(DMAuditRow(
-                        messageId: newUUID(),
-                        target: target,
-                        resolvedSessionKey: nil,
-                        resolvedKind: "selfPeer",
-                        senderSessionKey: senderKey,
-                        senderPeerName: nil,
-                        body: body,
-                        context: context,
-                        sentAtMs: now,
-                        inReplyToMessageId: nil,
-                        direction: "outbound",
-                        initialStatus: "not_found",
-                        failureReason: "self_peer"
-                    ), db: db)
-                }
-                return DMSendResponse(status: "not_found", messageId: nil, reason: "self_peer")
-            }
-
-            return await sendResolved(
-                target: target,
-                resolved: resolved,
-                body: body,
-                context: context,
-                senderKey: senderKey,
-                inReplyToMessageId: nil,
-                dbPool: ctx.dbPool
-            )
+            DMSendHTTPResult(response: try await dmSendHandler(ctx))
         }
     ),
 

@@ -313,6 +313,19 @@ enum ActionError: Error, LocalizedError {
     }
 }
 
+// MARK: - HTTP Status Override
+
+/// A handler result that sets its own HTTP status while keeping its JSON body.
+/// Only the HTTP route reads it; an MCP call stays a normal (non-error) result.
+protocol HTTPStatusCarrying {
+    var httpStatus: HTTPResponse.Status { get }
+}
+
+/// HTTP status for a handler result: its own when it carries one, else 200.
+func httpStatus(for result: any Encodable) -> HTTPResponse.Status {
+    (result as? HTTPStatusCarrying)?.httpStatus ?? .ok
+}
+
 // MARK: - HTTP Method
 
 enum ActionMethod: String, Codable {

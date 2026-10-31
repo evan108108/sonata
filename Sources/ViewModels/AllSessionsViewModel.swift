@@ -439,15 +439,7 @@ final class AllSessionsViewModel: ObservableObject {
             let (data, response) = try await URLSession.shared.data(for: req)
             let http = response as? HTTPURLResponse
             let code = http?.statusCode ?? 0
-            if code == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let status = obj["status"] as? String {
-                let reason = obj["reason"] as? String
-                let suffix = reason.map { " (\($0))" } ?? ""
-                self.dmResult = "Sent to \(target) — \(status)\(suffix)"
-            } else {
-                let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
-                self.dmResult = "Failed (HTTP \(code)) — \(snippet)"
-            }
+            self.dmResult = dmSendResultText(target: target, httpCode: code, data: data)
         } catch {
             self.dmResult = "Failed — \(error.localizedDescription)"
         }
@@ -489,4 +481,20 @@ final class AllSessionsViewModel: ObservableObject {
             self.dmResult = "Broadcast failed — \(error.localizedDescription)"
         }
     }
+}
+
+/// Dashboard copy for a `/api/dm/send` response. Only status "sent" reads as
+/// sent. not_found / not_live come back as 404 / 409 with the same JSON body,
+/// so the body is read whatever the HTTP code (learning 417af3a3).
+func dmSendResultText(target: String, httpCode: Int, data: Data) -> String {
+    if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let status = obj["status"] as? String {
+        if status == "sent" {
+            return "Sent to \(target) — \(status)"
+        }
+        let reason = (obj["reason"] as? String).map { " (\($0))" } ?? ""
+        return "Not delivered to \(target) — \(status)\(reason)"
+    }
+    let snippet = String(data: data, encoding: .utf8)?.prefix(120) ?? ""
+    return "Failed (HTTP \(httpCode)) — \(snippet)"
 }

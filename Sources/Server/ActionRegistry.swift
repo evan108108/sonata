@@ -166,7 +166,7 @@ final class ActionRegistry: @unchecked Sendable {
                     requestHeaders: Self.headerDict(request)
                 )
                 let result = try await action.handler(ctx)
-                return jsonResponse(AnyEncodable(result))
+                return jsonResponse(AnyEncodable(result), status: httpStatus(for: result))
             } catch let error as ActionError {
                 return errorResponse(error.localizedDescription, status: error.httpStatus)
             } catch {
@@ -280,7 +280,7 @@ final class ActionRegistry: @unchecked Sendable {
                     requestHeaders: Self.headerDict(request)
                 )
                 let result = try await action.handler(ctx)
-                return jsonResponse(AnyEncodable(result))
+                return jsonResponse(AnyEncodable(result), status: httpStatus(for: result))
             } catch let error as ActionError {
                 return errorResponse(error.localizedDescription, status: error.httpStatus)
             } catch {
