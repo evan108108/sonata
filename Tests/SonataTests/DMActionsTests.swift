@@ -402,6 +402,199 @@ final class DMActionsTests: XCTestCase {
         XCTAssertEqual(siblingMessageIds(payloadJSON: latest.payload), ["prior-by-name"])
     }
 
+    // MARK: - Cross-peer session targeting (label routing)
+    //
+    // Regression harness for the 2026-10-30 label-routing fix. Three
+    // behaviors matter:
+    //   1. DMTargetResolver.resolve(_, peerIdHint:) returns a .peerSession
+    //      target without consulting the local roster. This is what lets a
+    //      sender hand the receiving peer a raw sidebar label.
+    //   2. routePeerInbound with a payload.target_session_id that does NOT
+    //      resolve on the receiving side falls through to pool dispatch —
+    //      preserves the pre-fix behavior for safe partial rollouts.
+    //   3. routePeerInbound with a payload.target_session_id that matches a
+    //      local session but has no live SSE connection also falls through
+    //      to pool dispatch (no silent drop).
+    //
+    // The happy path ("match + live SSE push") is covered further down by
+    // attaching a real MCPSSEWriter to MCPConnections.shared under the
+    // resolved key: label vs exact-key control, for sessions and workers.
+
+    func testResolverPeerIdHintFastPathReturnsPeerSession() async throws {
+        let (pool, path) = try TestDatabase.makePool()
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        let maybe = await DMTargetResolver.resolve(
+            "Session 3", peerIdHint: "peer-abc-123", dbPool: pool
+        )
+        let resolved = try XCTUnwrap(maybe)
+        XCTAssertEqual(resolved.kind, .peerSession)
+        XCTAssertEqual(resolved.peerId, "peer-abc-123")
+        XCTAssertEqual(resolved.sessionId, "Session 3")
+        XCTAssertEqual(resolved.sessionKey, "Session 3")
+    }
+
+    func testResolverPeerIdHintSkipsLocalWorkerMatch() async throws {
+        // Even when the label matches a live local worker, an explicit
+        // peerIdHint routes to the remote peer instead. The hint is the
+        // caller's assertion that the target lives on the named peer.
+        let (pool, path) = try TestDatabase.makePool()
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, 'sona-worker-9', 'collision-label', ?, 'idle', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, UUID().uuidString, now, now])
+        }
+        let maybe = await DMTargetResolver.resolve(
+            "collision-label", peerIdHint: "peer-xyz", dbPool: pool
+        )
+        let resolved = try XCTUnwrap(maybe)
+        XCTAssertEqual(resolved.kind, .peerSession)
+        XCTAssertEqual(resolved.peerId, "peer-xyz")
+    }
+
+    func testResolverEmptyPeerIdHintFallsThroughToLocal() async throws {
+        // Whitespace-only hint is equivalent to no hint — the resolver uses
+        // the normal local chain. Guards against callers that forward
+        // optional query params as empty strings.
+        let (pool, path) = try TestDatabase.makePool()
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, 'sona-worker-5', 'local-label', ?, 'idle', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, UUID().uuidString, now, now])
+        }
+        let maybe = await DMTargetResolver.resolve(
+            "local-label", peerIdHint: "   ", dbPool: pool
+        )
+        let resolved = try XCTUnwrap(maybe)
+        XCTAssertEqual(resolved.kind, .worker)
+        XCTAssertEqual(resolved.sessionKey, "sona-worker-5")
+    }
+
+    func testInboundSonarDMWithUnknownTargetSessionIdFallsThroughToPool() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        var payload = inboundSonarDMPayload(body: "label routing test")
+        payload["target_session_id"] = "no-such-label-here"
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        // Unknown target_session_id — must land as pending for the pool,
+        // not swallowed. Preserves the pre-fix behavior for an upgraded
+        // sender talking to a receiver that doesn't recognize the label.
+        let latest = try XCTUnwrap(try fetchLatestSonarDMEvent(pool: pool))
+        XCTAssertEqual(latest.status, "pending")
+        XCTAssertNil(latest.assignedTo)
+    }
+
+    func testInboundSonarDMWithLocalMatchButNoLiveSSEFallsThroughToPool() async throws {
+        // Resolver matches locally (worker row exists) but MCPConnections
+        // has no live SSE for it, so push returns false. The handler must
+        // fall through to pool dispatch rather than silently dropping.
+        let pool = try makePoolWithWorkerEvents()
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, 'sona-worker-7', 'test-label', ?, 'idle', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, UUID().uuidString, now, now])
+        }
+        var payload = inboundSonarDMPayload(body: "label with no SSE")
+        payload["target_session_id"] = "test-label"
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        let latest = try XCTUnwrap(try fetchLatestSonarDMEvent(pool: pool))
+        XCTAssertEqual(latest.status, "pending")
+        XCTAssertNil(latest.assignedTo)
+    }
+
+    // MARK: Receiver resolves target_session_id: label and exact key alike
+    //
+    // The receiving peer resolves target_session_id through DMTargetResolver,
+    // so a sidebar label ("Session 3") and the exact sessionKey must land on
+    // the same live session. The exact-key case is the control: it has to keep
+    // working while the label case starts working (2026-10-31).
+
+    private func seedLiveInteractiveSession(
+        pool: DatabasePool, name: String
+    ) async throws -> (sessionKey: String, writer: MCPSSEWriter) {
+        let sid = UUID().uuidString.lowercased()
+        try await pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO interactiveSessions (id, sessionId, name, cwd, position, wasActive, kind, createdAt, updatedAt)
+                VALUES (?, ?, ?, '/tmp', 0, 0, 'terminal', 0, 0)
+            """, arguments: [UUID().uuidString, sid, name])
+        }
+        let key = "session-" + sid.replacingOccurrences(of: "-", with: "").prefix(16)
+        let writer = MCPSSEWriter()
+        await MCPConnections.shared.attach(key, writer: writer)
+        addTeardownBlock { await MCPConnections.shared.detach(key, writer: writer) }
+        return (key, writer)
+    }
+
+    private func inboundDeliveredAt(pool: DatabasePool, messageId: String) throws -> Int64? {
+        try pool.read { db in
+            try Int64.fetchOne(db, sql: """
+                SELECT deliveredAtMs FROM dm_messages
+                WHERE messageId = ? AND direction = 'inbound'
+            """, arguments: [messageId])
+        }
+    }
+
+    func testInboundTargetBySidebarLabelPushesToLiveSession() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        _ = try await seedLiveInteractiveSession(pool: pool, name: "Session 3")
+        let mid = "label-\(UUID().uuidString)"
+        var payload = inboundSonarDMPayload(body: "routing test", messageIdOverride: mid)
+        payload["target_session_id"] = "Session 3"
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool), "label resolved; must not fall to the pool")
+        XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
+    }
+
+    func testInboundTargetByExactSessionKeyPushesToLiveSession() async throws {
+        // Control for the label test above: the exact sessionKey still resolves.
+        let pool = try makePoolWithWorkerEvents()
+        let (key, _) = try await seedLiveInteractiveSession(pool: pool, name: "Session 4")
+        let mid = "key-\(UUID().uuidString)"
+        var payload = inboundSonarDMPayload(body: "routing test", messageIdOverride: mid)
+        payload["target_session_id"] = key
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool), "exact key resolved; must not fall to the pool")
+        XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
+    }
+
+    func testInboundTargetByWorkerLabelPushesToLiveWorker() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        let workerId = "worker-label-\(UUID().uuidString.prefix(8))"
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, ?, 'Scout Coord', ?, 'idle', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, workerId, UUID().uuidString, now, now])
+        }
+        let writer = MCPSSEWriter()
+        await MCPConnections.shared.attach(workerId, writer: writer)
+        addTeardownBlock { await MCPConnections.shared.detach(workerId, writer: writer) }
+
+        let mid = "wlabel-\(UUID().uuidString)"
+        var payload = inboundSonarDMPayload(body: "routing test", messageIdOverride: mid)
+        payload["target_session_id"] = "scout coord"
+        await DMActionsInbound.routePeerInbound(payload: payload, dbPool: pool)
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool))
+        XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
+    }
+
 }
 
 // Type-erased Encodable shim so XCTest can JSONEncode `any Encodable` results

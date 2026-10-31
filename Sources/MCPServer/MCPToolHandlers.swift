@@ -20,8 +20,9 @@ enum MCPToolHandlers {
         case "sonar_dm_send", "dm_send":
             // Both names route to the same action. sonar_dm_send is legacy; dm_send
             // is the new canonical name. Args mapped: targetSessionId → target,
-            // fromSessionId, body, peerId (ignored — peers resolve by name now),
-            // context → context.
+            // fromSessionId defaults to sessionKey, body, context, and peerId
+            // (preserved as a hint to dm_send for cross-peer session targeting
+            // — when supplied, `target` is a session label/id on that peer).
             var normalizedArgs = args
             if let t = args["targetSessionId"] as? String, args["target"] == nil {
                 normalizedArgs["target"] = t
@@ -35,8 +36,11 @@ enum MCPToolHandlers {
             if normalizedArgs["fromSessionId"] == nil {
                 normalizedArgs["fromSessionId"] = sessionKey
             }
-            // Ignore peerId — target resolution is unified now.
-            normalizedArgs["peerId"] = nil
+            // Legacy sonar_dm_send schema declares peer_id; dm_send accepts peerId.
+            // Preserve either as peerId so cross-peer session targeting works.
+            if let p = args["peer_id"] as? String, normalizedArgs["peerId"] == nil {
+                normalizedArgs["peerId"] = p
+            }
             return await actionRegistry.executeMCPTool(
                 name: "dm_send", args: normalizedArgs, dbPool: dbPool
             )
@@ -514,9 +518,9 @@ enum MCPToolSchemas {
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "target_session_id": ["type": "string", "description": "Target bridge session id (1-128 chars, [A-Za-z0-9_-])"],
+                    "target_session_id": ["type": "string", "description": "Any identifier the receiver recognizes — a worker id or sessionLabel, an interactive session's id or sidebar name, 'supervisor', or a peer name. When `peer_id` is also supplied, this is treated as a session label/id on that remote peer and resolved by the receiver."],
                     "body": ["type": "string", "description": "Message body, ≤ 256 KB"],
-                    "peer_id": ["type": "string", "description": "Sonar peer id (omit for local targets)"],
+                    "peer_id": ["type": "string", "description": "Sonar peer id. Supply with `target_session_id` to address a specific session on a remote peer; omit for local targets or bulk peer sends by name."],
                     "context": ["type": "string", "description": "Optional context string"],
                     "meta": ["type": "object", "description": "Optional ≤4KB JSON metadata blob"],
                 ],
@@ -539,7 +543,7 @@ enum MCPToolSchemas {
         ],
         [
             "name": "dm_send",
-            "description": "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), 'supervisor', or a sonar peer (by name). Returns immediately with sent | not_live | not_found. ACK arrives async as dm_ack notification.",
+            "description": "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), 'supervisor', or a sonar peer (by name). To address a specific session on a remote peer by its sidebar label, pass that label as `target` plus the peer's id as `peerId`. Returns immediately with sent | not_live | not_found. ACK arrives async as dm_ack notification.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -547,6 +551,7 @@ enum MCPToolSchemas {
                     "body": ["type": "string", "description": "Message body, ≤ 256 KB."],
                     "fromSessionId": ["type": "string", "description": "Sender's sessionKey."],
                     "context": ["type": "string", "description": "Optional context string."],
+                    "peerId": ["type": "string", "description": "Sonar peer id for cross-peer session targeting. When supplied, `target` is a session label/id on that peer and resolved by the receiver."],
                 ],
                 "required": ["target", "body", "fromSessionId"],
             ],

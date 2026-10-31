@@ -135,13 +135,19 @@ enum SonarForwardOutcome {
 /// signing, and network transport. `inReplyToMessageId` tells the receiving
 /// peer this is a chain-continuation — they'll route directly to the
 /// original endpoint instead of creating a workerEvent.
+///
+/// `targetSessionId`, when supplied, carries a specific session identifier
+/// (label or id) that the receiving peer should resolve against its own
+/// session roster — enables cross-peer session targeting. Omit for a
+/// pool-dispatched DM where any worker on the receiving peer may claim.
 func sonarPushToPeer(
     peerId: String,
     messageId: String,
     body: String,
     context: String?,
     fromSessionId: String,
-    inReplyToMessageId: String? = nil
+    inReplyToMessageId: String? = nil,
+    targetSessionId: String? = nil
 ) async -> SonarForwardOutcome {
     var req = URLRequest(url: SonarPluginEndpoint.messagesSend)
     req.httpMethod = "POST"
@@ -156,6 +162,9 @@ func sonarPushToPeer(
     ]
     if let context { payload["context"] = context }
     if let inReplyToMessageId { payload["in_reply_to"] = inReplyToMessageId }
+    if let targetSessionId, !targetSessionId.isEmpty {
+        payload["target_session_id"] = targetSessionId
+    }
 
     do {
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)

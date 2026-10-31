@@ -623,3 +623,50 @@ if (!SONAR_DM_FEDERATED) {
     expect(SONAR_DM_FEDERATED).toBe(false);
   });
 }
+
+// ── Cross-peer session targeting (label routing) ───────────────────────────
+//
+// Added 2026-10-30 for the DM label-routing fix. The sender hands the
+// receiving peer a session label (not a UUID), and the receiver resolves
+// that label against its own session roster — direct SSE push on match,
+// pool dispatch on miss. This acceptance gate requires:
+//
+//   1. Both peers running Sonata built from this branch (sendResolved
+//      threads targetSessionId into the sonar payload; routePeerInbound
+//      reads it and dispatches locally before falling through).
+//   2. A live, SSE-attached interactive session on Sonata-B whose sidebar
+//      name is a known label (default: "LabelTargetB").
+//   3. The same operator-setup prereqs as the main round-trip test (both
+//      Sonatas up, Sonar plugins paired).
+//
+// Why this is still a `test.skip` placeholder:
+//   • The main round-trip test polls Sonata-B via `/api/dm/inbox`, which
+//     was removed in the fire-and-observe refactor and has not been
+//     restored. The whole federated file is effectively a documentation
+//     artifact until that endpoint comes back OR the harness learns to
+//     attach as a real SSE consumer and read the pushed notification.
+//   • Writing an endpoint-less variant of this test would need a bespoke
+//     SSE consumer loop, which is a separate scope. Logging the shape
+//     here so the test can be lifted with a one-liner once the harness
+//     catches up.
+//
+// Acceptance when enabled:
+//   POST Sonata-A /api/dm/send {
+//     target: "LabelTargetB",
+//     peerId: <peer-B id on sonar-A>,
+//     fromSessionId: <sender key>,
+//     body: "label routing ping"
+//   }
+//   → status "sent"
+//   Sonata-B's dm_messages table shows an inbound row with
+//     resolvedKind='session' (NOT null), target='LabelTargetB',
+//     direction='inbound', failureReason=null — proof the receiver
+//     resolved the label locally and pushed directly rather than
+//     materializing a pool-pickup workerEvent.
+test.skip(
+  "sonar-dm v0 cross-peer label routing (acceptance gate — awaiting SSE-aware harness)",
+  () => {
+    // See block comment above for the acceptance criteria and why this
+    // test is placeholder-only today.
+  },
+);

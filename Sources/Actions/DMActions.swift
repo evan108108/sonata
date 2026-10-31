@@ -111,6 +111,38 @@ enum DMActionsInbound {
             ), db: db)
         }
 
+        // Cross-peer session targeting (2026-10-30): if the sender named a
+        // specific session via `target_session_id` AND this is a thread
+        // initiation (no in_reply_to), resolve the label locally and push
+        // directly to that session's SSE. On miss, fall through to pool
+        // dispatch so this stays safe to deploy on only one side of a peer
+        // pair — an upgraded sender targeting an un-upgraded receiver still
+        // works, it just lands on the pool.
+        let targetSessionId = (payload["target_session_id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if inReplyTo == nil, !targetSessionId.isEmpty {
+            if let resolved = await DMTargetResolver.resolve(targetSessionId, dbPool: dbPool),
+               (resolved.kind == .worker || resolved.kind == .session || resolved.kind == .supervisor) {
+                let frame = DMFrames.sonarDMNotification(
+                    messageId: messageId,
+                    body: body,
+                    context: context,
+                    sender: senderPeerName,
+                    inReplyToMessageId: nil
+                )
+                let pushed = await MCPConnections.shared.push(resolved.sessionKey, jsonRPC: frame)
+                if pushed {
+                    try? await dbPool.write { db in
+                        try DMAudit.markDelivered(messageId: messageId, at: now, db: db)
+                    }
+                    return
+                }
+                sonataFileLog("DMActionsInbound: target_session_id=\(targetSessionId) resolved locally but no live SSE — falling back to pool dispatch for \(messageId)")
+            } else {
+                sonataFileLog("DMActionsInbound: target_session_id=\(targetSessionId) did not resolve locally — falling back to pool dispatch for \(messageId)")
+            }
+        }
+
         if let inReplyTo {
             // Chain-continuation: route DIRECTLY to the original endpoint.
             // Look up the original outbound row and push to its senderSessionKey.
@@ -447,7 +479,7 @@ func sendResolved(
     }
 
     switch resolved.kind {
-    case .peer:
+    case .peer, .peerSession:
         guard let peerId = resolved.peerId else {
             try? await dbPool.write { db in
                 try DMAudit.markNotLive(messageId: messageId, reason: "peer_offline", db: db)
@@ -463,13 +495,20 @@ func sendResolved(
         // selfName (sonar unreachable) also leaves the body untouched — no
         // silent behavior change beyond what the caller wrote.
         let bodyToSend = await bodyWithSelfPeerPreamble(body: body)
+        // For .peerSession, hand the receiving peer the raw label so it can
+        // resolve against its own roster. .peer (bulk peer send) does not
+        // carry a target session.
+        let targetSessionForSonar: String? = resolved.kind == .peerSession
+            ? resolved.sessionId
+            : nil
         let outcome = await sonarPushToPeer(
             peerId: peerId,
             messageId: messageId,
             body: bodyToSend,
             context: context,
             fromSessionId: senderKey,
-            inReplyToMessageId: inReplyToMessageId
+            inReplyToMessageId: inReplyToMessageId,
+            targetSessionId: targetSessionForSonar
         )
         switch outcome {
         case .ok:
@@ -541,7 +580,7 @@ let dmActions: [SonataAction] = [
     // POST /api/dm/send — open a new DM thread.
     SonataAction(
         name: "dm_send",
-        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). Returns immediately with sent | not_live | not_found and an optional reason. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
+        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). To target a session on a remote peer by its sidebar label, pass that label as `target` plus the peer's id as `peerId`. Returns immediately with sent | not_live | not_found and an optional reason. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
         group: "/api/dm",
         path: "/send",
         method: .post,
@@ -550,12 +589,14 @@ let dmActions: [SonataAction] = [
             ActionParam("body", .string, required: true, description: "Message body, ≤ 256 KB."),
             ActionParam("fromSessionId", .string, required: true, description: "Sender's sessionKey."),
             ActionParam("context", .string, required: false, description: "Optional context string, passed through to the receiver."),
+            ActionParam("peerId", .string, required: false, description: "Sonar peer id for cross-peer session targeting. When supplied, `target` is treated as a session label/id on that peer and resolved by the receiver, not locally."),
         ],
         handler: { ctx in
             let target = try ctx.params.require("target")
             let body = try ctx.params.require("body")
             let senderKey = try ctx.params.require("fromSessionId")
             let context = ctx.params.string("context")
+            let peerIdHint = ctx.params.string("peerId")
 
             guard body.utf8.count <= 256 * 1024 else {
                 throw ActionError.custom("body_too_large", .unprocessableContent)
@@ -564,7 +605,7 @@ let dmActions: [SonataAction] = [
                 throw ActionError.custom("body_empty", .unprocessableContent)
             }
 
-            guard let resolved = await DMTargetResolver.resolve(target, dbPool: ctx.dbPool) else {
+            guard let resolved = await DMTargetResolver.resolve(target, peerIdHint: peerIdHint, dbPool: ctx.dbPool) else {
                 // Distinguish "typo / no such target" from "sonar offline"
                 // via a fast probe on the peer plugin.
                 let reason: String
