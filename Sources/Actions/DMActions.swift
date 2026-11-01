@@ -28,6 +28,9 @@ struct DMSendResponse: Encodable, Sendable {
     let status: String       // "sent" | "not_live" | "not_found"
     let messageId: String?
     let reason: String?
+    /// Optional guidance for the caller on a miss. Omitted from the JSON when
+    /// nil, so existing consumers see the same three-field shape.
+    var hint: String? = nil
 }
 
 struct DMBroadcastResponse: Encodable, Sendable {
@@ -611,10 +614,19 @@ private func dmSendHandler(_ ctx: ActionContext) async throws -> DMSendResponse 
     }
 
     guard let resolved = await DMTargetResolver.resolve(target, peerIdHint: peerIdHint, dbPool: ctx.dbPool) else {
+        // A remote-looking id with no peerId can never resolve here: the
+        // resolver only knows the LOCAL roster. Say so, and say which peer if
+        // we've heard from that session. Still not_found (404 over HTTP), never
+        // auto-routed — a miss stays loud (learning 0ff29347).
+        let remoteHint = (peerIdHint?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            ? await DMRemoteTargetHint.hint(for: target, dbPool: ctx.dbPool)
+            : nil
         // Distinguish "typo / no such target" from "sonar offline"
         // via a fast probe on the peer plugin.
         let reason: String
-        if await SonarPeerLookup.pluginReachable() {
+        if remoteHint != nil {
+            reason = DMRemoteTargetHint.reason
+        } else if await SonarPeerLookup.pluginReachable() {
             reason = "no_such_target"
         } else {
             reason = "sonar_offline"
@@ -637,7 +649,7 @@ private func dmSendHandler(_ ctx: ActionContext) async throws -> DMSendResponse 
                 failureReason: reason
             ), db: db)
         }
-        return DMSendResponse(status: "not_found", messageId: nil, reason: reason)
+        return DMSendResponse(status: "not_found", messageId: nil, reason: reason, hint: remoteHint)
     }
     if resolved.kind == .selfPeer {
         let now = nowMs()
@@ -672,6 +684,50 @@ private func dmSendHandler(_ ctx: ActionContext) async throws -> DMSendResponse 
     )
 }
 
+/// Caller guidance for a dm_send miss on an id that looks like a session on
+/// another Sonata. On 10/31 a calendar prompt sent dm_send to Scout coord's
+/// `session-2e246c6d406e4deb` with no peerId. It resolved only against the
+/// local roster and came back as a bare no_such_target, so the miss carried
+/// no clue that peerId was the missing piece (learnings 45c029b1, 3c34da86).
+enum DMRemoteTargetHint {
+    static let reason = "no_such_target_local"
+    static let genericHint = "no local session; if remote, pass peerId"
+
+    /// The derived MCP session key shape: `session-` + 16 lowercase hex.
+    static func looksLikeSessionKey(_ s: String) -> Bool {
+        s.range(of: #"^session-[0-9a-f]{16}$"#, options: .regularExpression) != nil
+    }
+
+    /// Hint for a target that failed local resolution, or nil when the target
+    /// doesn't look remote (a plain typo keeps the old no_such_target).
+    /// Remote-looking means a peer has DMed us from that session id (an
+    /// inbound dm_messages row, written by routePeerInbound for every sonar
+    /// new_message), or the id has the session-<16hex> shape.
+    static func hint(for target: String, dbPool: DatabasePool) async -> String? {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let peerName: String? = try? await dbPool.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT senderPeerName FROM dm_messages
+                WHERE direction = 'inbound' AND senderSessionKey = ?
+                  AND senderPeerName IS NOT NULL AND senderPeerName NOT IN ('', 'unknown')
+                ORDER BY sentAtMs DESC
+                LIMIT 1
+            """, arguments: [trimmed])
+        } ?? nil
+        if let peerName {
+            // routePeerInbound stores the peer NAME when it has one, else the
+            // peer id. sonar wants the id, so look it up; leave it out rather
+            // than guess when the lookup fails.
+            if let peer = await SonarPeerLookup.byName(peerName.lowercased()) {
+                return "target matches a session on peer '\(peer.name)' (\(peer.id)); pass peerId"
+            }
+            return "target matches a session on peer '\(peerName)'; pass peerId (its id is in sonar_peers)"
+        }
+        return looksLikeSessionKey(trimmed) ? genericHint : nil
+    }
+}
+
 // MARK: - Public action list
 
 let dmActions: [SonataAction] = [
@@ -679,7 +735,7 @@ let dmActions: [SonataAction] = [
     // POST /api/dm/send — open a new DM thread.
     SonataAction(
         name: "dm_send",
-        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). To target a session on a remote peer by its sidebar label, pass that label as `target` plus the peer's id as `peerId`. Returns immediately with sent | not_live | not_found and an optional reason. Over HTTP, not_found is a 404 and not_live a 409, each with the same JSON body. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
+        description: "Send a DM to any target the system knows about — a worker (by workerId or sessionLabel), an interactive session (by sessionId or tab name), the literal 'supervisor', or a sonar peer (by name). To target a session on a remote peer by its sidebar label, pass that label as `target` plus the peer's id as `peerId`. Returns immediately with sent | not_live | not_found and an optional reason. Without peerId, only the LOCAL roster is searched: a session id that looks remote returns not_found with reason no_such_target_local and a `hint` (naming the peer when that session has DMed us). Over HTTP, not_found is a 404 and not_live a 409, each with the same JSON body. ACK arrives asynchronously as a dm_ack notification on the sender's SSE stream. For replies to an existing thread, use dm_reply instead.",
         group: "/api/dm",
         path: "/send",
         method: .post,

@@ -595,6 +595,64 @@ final class DMActionsTests: XCTestCase {
         XCTAssertNotNil(try inboundDeliveredAt(pool: pool, messageId: mid))
     }
 
+    // MARK: dm_send — remote-looking target with no peerId (10/31, 73435feb CHECK 3)
+    //
+    // Without peerId, dm_send resolves only against the local roster. A
+    // session id that lives on a sonar peer must still come back not_found
+    // (never auto-routed), but with reason no_such_target_local and a hint
+    // naming the missing peerId.
+
+    private func dmSendJSON(pool: DatabasePool, target: String) async throws -> [String: Any] {
+        let action = dmActions.first { $0.name == "dm_send" }!
+        let ctx = ActionContext(
+            params: ActionParams([
+                "target": target,
+                "fromSessionId": "alice",
+                "body": "hello",
+            ]),
+            dbPool: pool
+        )
+        let response = try await action.handler(ctx)
+        let data = try JSONEncoder().encode(EncodableShim(value: response))
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    func testDmSendSessionSeenFromPeerReturnsNotFoundWithPeerHint() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        let scoutSession = "session-2e246c6d406e4deb"
+        // Seed through the real inbound path so the test reads what
+        // routePeerInbound actually writes.
+        await DMActionsInbound.routePeerInbound(
+            payload: inboundSonarDMPayload(sessionId: scoutSession, body: "hi from scout coord"),
+            dbPool: pool
+        )
+
+        let json = try await dmSendJSON(pool: pool, target: scoutSession)
+        XCTAssertEqual(json["status"] as? String, "not_found", "must stay a loud miss, not auto-route; got \(json)")
+        XCTAssertEqual(json["reason"] as? String, "no_such_target_local")
+        let hint = try XCTUnwrap(json["hint"] as? String, "expected a peer hint; got \(json)")
+        XCTAssertTrue(hint.contains("peer 'scout'"), "hint must name the peer; got \(hint)")
+        XCTAssertTrue(hint.contains("pass peerId"), "hint must name the missing param; got \(hint)")
+    }
+
+    func testDmSendUnknownSessionShapedIdReturnsNotFoundWithGenericHint() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        let json = try await dmSendJSON(pool: pool, target: "session-0123456789abcdef")
+        XCTAssertEqual(json["status"] as? String, "not_found")
+        XCTAssertEqual(json["reason"] as? String, "no_such_target_local")
+        XCTAssertEqual(json["hint"] as? String, DMRemoteTargetHint.genericHint)
+    }
+
+    func testDmSendPlainTypoKeepsOldShapeWithoutHint() async throws {
+        // Control: a target that looks neither remote nor seen-from-a-peer
+        // keeps the pre-change response exactly — no hint key at all.
+        let pool = try makePoolWithWorkerEvents()
+        let json = try await dmSendJSON(pool: pool, target: "nobody")
+        XCTAssertEqual(json["status"] as? String, "not_found")
+        XCTAssertNotEqual(json["reason"] as? String, "no_such_target_local")
+        XCTAssertNil(json["hint"], "hint must be omitted when nil, for backward compat; got \(json)")
+    }
+
 }
 
 // Type-erased Encodable shim so XCTest can JSONEncode `any Encodable` results
