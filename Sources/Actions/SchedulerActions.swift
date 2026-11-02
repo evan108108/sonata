@@ -111,6 +111,11 @@ let schedulerActions: [SonataAction] = [
             // job never fires and a disabled one keeps firing until something
             // else happens to reload. calendar_* already does this.
             await ctx.scheduler?.reload()
+            // Warn, don't reject: the supervisor text-nudge rows are the
+            // intended use, and a rejection would break their upserts.
+            if let warning = NotifyTargetSemantics.scheduledJobWarning(notifyTarget: notifyTarget) {
+                return SuccessResponse(warnings: [warning])
+            }
             return SuccessResponse()
         }
     ),

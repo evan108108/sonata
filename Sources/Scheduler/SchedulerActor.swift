@@ -518,7 +518,8 @@ public actor SchedulerActor {
                 switch outcome {
                 case .sent(let messageId):
                     dmSucceeded = true
-                    resultText = "notified \(target) (dm \(messageId))"
+                    resultText = NotifyTargetSemantics.notifiedResult(
+                        target: target, messageId: messageId, payload: entry.payload)
                     logger.info("Job \(entry.id): DMed notifyTarget=\(target) instead of spawning worker")
                 case .fellBackNotLive(let reason):
                     logger.warning("Job \(entry.id): notifyTarget=\(target) not live at fire (\(reason)) — falling back to worker spawn")

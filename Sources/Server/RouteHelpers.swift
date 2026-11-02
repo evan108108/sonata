@@ -16,10 +16,14 @@ struct StoreResponse: Encodable {
     /// Set by mem_revise when a feeling/reflection kept its author's l0/l1.
     var abstractsKept: Bool? = nil
     var note: String? = nil
+    /// Caller-facing caveats (e.g. notifyTarget replaces execution). Omitted when nil.
+    var warnings: [String]? = nil
 }
 
 struct SuccessResponse: Encodable {
     let success = true
+    /// Caller-facing caveats (e.g. notifyTarget replaces execution). Omitted when nil.
+    var warnings: [String]? = nil
 }
 
 struct PatchResponse: Encodable {
@@ -28,6 +32,8 @@ struct PatchResponse: Encodable {
     /// Set by mem_patch when a feeling/reflection kept its author's l0/l1.
     var abstractsKept: Bool? = nil
     var note: String? = nil
+    /// Caller-facing caveats (e.g. notifyTarget replaces execution). Omitted when nil.
+    var warnings: [String]? = nil
 }
 
 struct TouchResponse: Encodable {

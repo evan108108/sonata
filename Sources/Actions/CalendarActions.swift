@@ -201,6 +201,9 @@ let calendarActions: [SonataAction] = [
                 throw ActionError.database(error.localizedDescription)
             }
             await ctx.scheduler?.reload()
+            if let warning = NotifyTargetSemantics.calendarEventWarning(notifyTarget: notifyTarget, taskType: taskType) {
+                return StoreResponse(id: id, warnings: [warning])
+            }
             return StoreResponse(id: id)
         }
     ),
@@ -263,6 +266,28 @@ let calendarActions: [SonataAction] = [
                 throw ActionError.database(error.localizedDescription)
             }
             await ctx.scheduler?.reload()
+            // Warn when this update decides what the row does at fire time
+            // (notifyTarget, prompt or taskType) and the resulting row will
+            // be DMed instead of run. An unrelated edit (enable, reschedule)
+            // of an existing notify row stays quiet.
+            let touchesFireBehaviour = ["notifyTarget", "prompt", "taskType"]
+                .contains { ctx.params.string($0) != nil }
+            if touchesFireBehaviour {
+                let stored: (notifyTarget: String?, taskType: String?)?
+                do {
+                    stored = try await ctx.dbPool.read { db in
+                        try Row.fetchOne(db, sql: "SELECT notifyTarget, taskType FROM calendarEvents WHERE id = ?", arguments: [id])
+                            .map { (notifyTarget: $0["notifyTarget"] as String?, taskType: $0["taskType"] as String?) }
+                    }
+                } catch {
+                    throw ActionError.database(error.localizedDescription)
+                }
+                if let stored,
+                   let warning = NotifyTargetSemantics.calendarEventWarning(
+                       notifyTarget: stored.notifyTarget, taskType: stored.taskType) {
+                    return PatchResponse(id: id, warnings: [warning])
+                }
+            }
             return PatchResponse(id: id)
         }
     ),
