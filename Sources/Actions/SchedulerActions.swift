@@ -113,10 +113,15 @@ let schedulerActions: [SonataAction] = [
             await ctx.scheduler?.reload()
             // Warn, don't reject: the supervisor text-nudge rows are the
             // intended use, and a rejection would break their upserts.
+            var warnings: [String] = []
             if let warning = NotifyTargetSemantics.scheduledJobWarning(notifyTarget: notifyTarget) {
-                return SuccessResponse(warnings: [warning])
+                warnings.append(warning)
             }
-            return SuccessResponse()
+            // Same posture: `| tail` without pipefail records tail's exit code.
+            if let warning = TailPipeSemantics.scheduledJobWarning(command: command) {
+                warnings.append(warning)
+            }
+            return warnings.isEmpty ? SuccessResponse() : SuccessResponse(warnings: warnings)
         }
     ),
 
