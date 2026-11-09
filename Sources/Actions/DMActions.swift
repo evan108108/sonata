@@ -81,10 +81,38 @@ enum DMActionsInbound {
     ///     continuation). No workerEvent.
     ///   • absent  → create a sonar_dm workerEvent for a local worker to
     ///     pick up (thread initiation). Same shape as inbound email.
+    static func isOwnOutboundMessage(_ messageId: String, dbPool: DatabasePool) async -> Bool {
+        guard !messageId.isEmpty else { return false }
+        let hit: Bool? = try? await dbPool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM dm_messages
+                    WHERE messageId = ? AND direction = 'outbound'
+                )
+            """, arguments: [messageId])
+        } ?? false
+        return hit ?? false
+    }
+
     static func routePeerInbound(
         payload: [String: Any],
         dbPool: DatabasePool
     ) async {
+        // Self-echo guard. Sonar joins paired peers into one Erlang cluster,
+        // and a sonar older than evan108108/sonar fix/pubsub-local-broadcast
+        // announces every received DM with a cluster-wide PubSub broadcast.
+        // So the RECEIVING peer's `new_message` for a DM we sent also lands
+        // here, carrying our own outbound message id. Routing it would hand
+        // our own DM to a local worker as if the peer had sent it (6f4406fe,
+        // 2026-11-09), and that worker's dm_ack would stamp our outbound row
+        // as acked. A genuine inbound DM carries the origin peer's id, which
+        // never matches one of our outbound rows.
+        if let echoedId = payload["message_id"] as? String,
+           await isOwnOutboundMessage(echoedId, dbPool: dbPool) {
+            sonataFileLog("DMActionsInbound: dropped self-echo of our outbound DM \(echoedId) (from_peer_name=\(payload["from_peer_name"] as? String ?? "?"))")
+            return
+        }
+
         let messageId = (payload["message_id"] as? String) ?? newUUID()
         let fromPeerName = payload["from_peer_name"] as? String
         let fromPeerId = payload["from_peer_id"] as? String

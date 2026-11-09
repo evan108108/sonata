@@ -325,6 +325,73 @@ final class DMActionsTests: XCTestCase {
         XCTAssertEqual(siblingMessageIds(payloadJSON: latest.payload), [])
     }
 
+    // 2026-11-09, message 6f4406fe: a DM we sent to peer "scout" came back as
+    // the receiving peer's cluster-wide `new_message` broadcast and became a
+    // sonar_dm workerEvent on one of OUR workers. An inbound whose message_id
+    // is one of our own outbound rows is an echo and must be dropped.
+    func testInboundEchoOfOwnOutboundDMIsDropped() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        let ourId = "6f4406feb52d440091084af00e6238fa"
+        try await pool.write { db in
+            try DMAudit.insert(DMAuditRow(
+                messageId: ourId,
+                target: "scout",
+                resolvedSessionKey: "peer-scout",
+                resolvedKind: "peer",
+                senderSessionKey: "worker-5807796288",
+                senderPeerName: nil,
+                body: "Scout, a small diagnostic gap",
+                context: "score-hybrid-failure-stage",
+                sentAtMs: 1,
+                inReplyToMessageId: nil,
+                direction: "outbound",
+                initialStatus: "sent",
+                failureReason: nil
+            ), db: db)
+        }
+
+        // What the receiving peer broadcast: its name for us, our sender
+        // session, and OUR message id.
+        await DMActionsInbound.routePeerInbound(
+            payload: inboundSonarDMPayload(
+                peerName: "sona", peerId: "d1f7b68eb72de285b0aeeb32898e2ac6",
+                sessionId: "worker-5807796288",
+                body: "Scout, a small diagnostic gap",
+                messageIdOverride: ourId
+            ),
+            dbPool: pool
+        )
+
+        XCTAssertNil(try fetchLatestSonarDMEvent(pool: pool), "self-echo must not become a sonar_dm workerEvent")
+        let directions: [String] = try await pool.read { db in
+            try String.fetchAll(db, sql: "SELECT direction FROM dm_messages WHERE messageId = ?", arguments: [ourId])
+        }
+        XCTAssertEqual(directions, ["outbound"])
+    }
+
+    // Control for the guard above: a genuine inbound DM (the peer's own id)
+    // still becomes a workerEvent even when we have unrelated outbound rows.
+    func testInboundGenuinePeerDMStillRoutesWhenWeHaveOutboundRows() async throws {
+        let pool = try makePoolWithWorkerEvents()
+        try await pool.write { db in
+            try DMAudit.insert(DMAuditRow(
+                messageId: "our-outbound-1", target: "scout",
+                resolvedSessionKey: "peer-scout", resolvedKind: "peer",
+                senderSessionKey: "worker-1", senderPeerName: nil,
+                body: "x", context: nil, sentAtMs: 1, inReplyToMessageId: nil,
+                direction: "outbound", initialStatus: "sent", failureReason: nil
+            ), db: db)
+        }
+
+        await DMActionsInbound.routePeerInbound(
+            payload: inboundSonarDMPayload(body: "real question", messageIdOverride: "scout-origin-1"),
+            dbPool: pool
+        )
+
+        let latest = try XCTUnwrap(try fetchLatestSonarDMEvent(pool: pool))
+        XCTAssertEqual(latest.status, "pending")
+    }
+
     func testInboundSonarDMDoesNotPreAssignWhenSiblingHasCompleted() async throws {
         let pool = try makePoolWithWorkerEvents()
 
