@@ -222,15 +222,37 @@ actor SelfInstanceIdCache {
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 return ""
             }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let id = json["instance_id"] as? String else { return "" }
-            return id
+            return SonarCardIdentity.instanceId(fromCardJSON: data)
         } catch {
             return ""
         }
     }
 }
 
+/// Reads this instance's identity out of sonar's `/.well-known/sonar/card.json`.
+/// The card nests identity under `agent` (`{"agent": {"instance_id", "name", …},
+/// "transport", …}`); nothing sits at the top level. The old reader looked
+/// only at `json["instance_id"]`, so it always got "" and `isSelf` was always
+/// false, which left the resolver's self-federation guard dead.
+enum SonarCardIdentity {
+    static func instanceId(fromCardJSON data: Data) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        if let agent = json["agent"] as? [String: Any],
+           let id = agent["instance_id"] as? String, !id.isEmpty {
+            return id
+        }
+        // Older card shape, kept so a peer on an old sonar still resolves.
+        return (json["instance_id"] as? String) ?? ""
+    }
+}
+
+// NOTE (2026-11-10): this reads the card's top-level `name`, which the card
+// doesn't have, so selfName() is always "" and no `[from <name>]` preamble is
+// ever added. Do NOT just switch it to `agent.name`. On evan-mac that is
+// "MacBookPro", while scout-cloud's peer row names us "sona", so the preamble
+// would create the body-vs-from_peer_name mismatch it exists to prevent. The
+// name a peer registered for us isn't available locally; that needs a design
+// call (a configured sonar display name, or the card's name set to match).
 actor SelfPeerNameCache {
     private var cached: String = ""
 
