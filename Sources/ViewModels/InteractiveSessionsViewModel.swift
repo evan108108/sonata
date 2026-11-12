@@ -621,6 +621,20 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
 
     // MARK: - WKNavigationDelegate (web sessions)
 
+    /// WebKit private delegate methods: hand WebKit the WebCrypto master key
+    /// so it never reads it from the keychain. An ad-hoc deploy's new cdhash
+    /// is missing from that keychain item's ACL, so a keychain read raises a
+    /// dialog and freezes the main actor (see WebCryptoMasterKey).
+    @objc(_webCryptoMasterKeyForWebView:)
+    nonisolated func webCryptoMasterKey(for webView: WKWebView) -> Data? {
+        WebCryptoMasterKey.data
+    }
+
+    @objc(_webCryptoMasterKeyForWebView:completionHandler:)
+    nonisolated func webCryptoMasterKey(for webView: WKWebView, completionHandler: @escaping (Data?) -> Void) {
+        completionHandler(WebCryptoMasterKey.data)
+    }
+
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor [weak self] in
             guard let self else { return }
