@@ -292,6 +292,18 @@ private struct PrivateMarkdownWebView: NSViewRepresentable {
     }
 
     class Coordinator: NSObject, WKNavigationDelegate {
+        // WebKit private: supply the WebCrypto master key so WebKit never
+        // reads the keychain (see WebCryptoMasterKey).
+        @objc(_webCryptoMasterKeyForWebView:)
+        func webCryptoMasterKey(for webView: WKWebView) -> Data? {
+            WebCryptoMasterKey.data
+        }
+
+        @objc(_webCryptoMasterKeyForWebView:completionHandler:)
+        func webCryptoMasterKey(for webView: WKWebView, completionHandler: @escaping (Data?) -> Void) {
+            completionHandler(WebCryptoMasterKey.data)
+        }
+
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.navigationType == .other {
                 decisionHandler(.allow)
