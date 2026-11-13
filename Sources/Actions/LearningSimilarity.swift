@@ -195,11 +195,18 @@ enum LearningSimilarity {
             arguments: [query, memoryId, project, createdAt - windowMs, createdAt, candidatePoolSize]
         )
 
+        return gate(rows, terms: terms)
+    }
+
+    /// Keep FTS hits (columns id, content, rank; already in bm25 order) that
+    /// contain at least `minSharedTerms` of `terms`, at most `maxResults`.
+    /// Shared by DecisionOverturn so both checks mean the same thing by "looks like".
+    static func gate(_ rows: [Row], terms: [String], minShared: Int = minSharedTerms) -> [Match] {
         var matches: [Match] = []
         for row in rows {
             let candidateTokens = Set(tokens(row["content"] as String? ?? ""))
             let shared = terms.filter { candidateTokens.contains($0) }
-            guard shared.count >= minSharedTerms else { continue }
+            guard shared.count >= minShared else { continue }
             matches.append(Match(id: row["id"], sharedTerms: shared, rank: row["rank"]))
             if matches.count == maxResults { break }
         }

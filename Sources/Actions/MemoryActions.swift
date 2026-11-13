@@ -161,6 +161,10 @@ struct MemoryStoreResponse: Encodable {
     /// Set only for `type: learning` when recent same-project learnings look
     /// like the same thing. The same ids also appear in a `warnings` line.
     var similarRecentLearnings: SimilarLearningsWarning? = nil
+    /// Set only for `type: decision` when recent instructions at similar or
+    /// higher importance look like what the decision is about. The same ids
+    /// also appear in a `warnings` line.
+    var possiblyOverturned: PossiblyOverturnedWarning? = nil
 }
 
 /// Parse the inline `entities` and `relations` JSON params on `mem_store`
@@ -418,6 +422,8 @@ let memoryActions: [SonataAction] = [
 
             For type=learning, the store also checks same-project learnings from the last 7 days (NULL project is its own bucket). If up to 3 of them share at least 4 of this memory's 8 most distinctive terms, `warnings` names them by full id and `similarRecentLearnings` carries {kind, ids, hint}. The write is never blocked. If they describe the same technique, update the shared doc (e.g. TECHNIQUES.md) or supersede the older memory rather than adding another.
 
+            For type=decision, the store also checks active learning/decision/fact memories from the last 30 days (any project) with importance at least the decision's minus 1. If up to 3 of them share at least 5 of the decision's 16 most distinctive terms, `warnings` names them by full id and `possiblyOverturned` carries {kind, ids, hint}. Recall ranks by importance, not date, so an instruction this decision reverses will outrank it until edited: mem_patch/mem_revise it with a revisionNote citing the decision. The write is never blocked.
+
             Memories with entity edges get a `structural` boost in mem_recall's ranking blend, so annotated memories are discoverable via graph proximity beyond lexical match.
 
             Skip annotation for ephemeral content: status updates, chat snapshots, subagent-stop-hook notes with importance < 7.
@@ -560,6 +566,24 @@ let memoryActions: [SonataAction] = [
                 }
             }
 
+            // POSSIBLY-OVERTURNED GUARD — on 2026-11-12 a no-rotation decision
+            // (c9e931e1, imp 7) was filed beside a runbook (a564073f, imp 8) that
+            // still said to rotate, and recall ranks the louder runbook first. A
+            // decision that changes an instruction should edit it, so name the
+            // recent lookalikes at write time. Advisory only, like the guard above.
+            var overturned: PossiblyOverturnedWarning?
+            if type == "decision" {
+                let matches = (try? await ctx.dbPool.read { db in
+                    try DecisionOverturn.findPossiblyOverturned(
+                        db, memoryId: id, content: content, importance: importance, createdAt: createdAt
+                    )
+                }) ?? []
+                if !matches.isEmpty {
+                    warnings.append(DecisionOverturn.warning(for: matches))
+                    overturned = PossiblyOverturnedWarning(ids: matches.map(\.id), hint: DecisionOverturn.hint)
+                }
+            }
+
             // The memory row is stored either way — annotation is additive and
             // must never cost content. But a store whose annotation landed on a
             // row other than the one named has to SAY so; `success: true` alone
@@ -567,7 +591,8 @@ let memoryActions: [SonataAction] = [
             return MemoryStoreResponse(
                 id: id,
                 warnings: warnings.isEmpty ? nil : warnings,
-                similarRecentLearnings: similar
+                similarRecentLearnings: similar,
+                possiblyOverturned: overturned
             )
         }
     ),
