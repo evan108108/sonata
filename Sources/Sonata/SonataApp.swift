@@ -480,6 +480,19 @@ func ensureBundledHooks() {
             timeoutSeconds: 5,
             matcher: "CronCreate|ScheduleWakeup"
         ),
+        // Blocks the two zsh traps that bite bash habits in worker shells:
+        // an unbraced `$VAR:` before a letter (zsh reads a history modifier,
+        // `"$SHA:tests/a"` -> `abc123ests/a` at exit 0) and an unquoted
+        // `=word` passed to echo/printf (`echo ====` -> "=== not found").
+        // Workers only (SONA_WORKER=1) and only under zsh. Over 7 days of
+        // worker transcripts (11/08-11/15) it flagged 37 of 2,474 Bash
+        // commands, and all 37 were real traps (task e57af007).
+        HookInstall(
+            filename: "pre-tool-use-zsh-trap-guardrail.js",
+            event: "PreToolUse",
+            timeoutSeconds: 5,
+            matcher: "Bash"
+        ),
     ]
 
     // Hooks we've shipped in the past and now want removed from users'
