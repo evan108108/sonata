@@ -145,13 +145,14 @@ actor BinaryProvisioner {
         let data = try Data(contentsOf: tempURL)
 
         // Checksum: enforce when pinned; otherwise log the computed hash to pin later.
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        if let expected = source.sha256?.lowercased() {
-            guard digest == expected else {
-                logger.error("\(spec.name): checksum mismatch (expected \(expected), got \(digest))")
-                throw ProvisionError.checksumMismatch
-            }
-        } else {
+        let digest = Self.sha256Hex(of: data)
+        do {
+            try Self.verifyChecksum(digest: digest, expected: source.sha256)
+        } catch {
+            logger.error("\(spec.name): checksum mismatch (expected \(source.sha256 ?? "-"), got \(digest))")
+            throw error
+        }
+        if source.sha256 == nil {
             logger.info("\(spec.name): unpinned download — sha256=\(digest) (pin this in the spec)")
         }
 
@@ -188,6 +189,18 @@ actor BinaryProvisioner {
         stripQuarantine(finalURL.path)
         cleanStaleVersions(spec: spec, keeping: finalURL.lastPathComponent)
         return finalURL.path
+    }
+
+    /// Lowercase hex SHA-256 of `data`.
+    static func sha256Hex(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Throws `checksumMismatch` unless `digest` equals the pinned `expected`
+    /// (case-insensitive). A nil `expected` is an unpinned source and passes.
+    static func verifyChecksum(digest: String, expected: String?) throws {
+        guard let expected = expected?.lowercased() else { return }
+        guard digest.lowercased() == expected else { throw ProvisionError.checksumMismatch }
     }
 
     /// Extract an entire archive into `dir` (vs plucking one binary).
@@ -313,12 +326,12 @@ extension ManagedBinary {
         sources: [
             .arm64: .init(
                 url: URL(string: "https://github.com/ggml-org/llama.cpp/releases/download/b9286/llama-b9286-bin-macos-arm64-kleidiai.tar.gz")!,
-                sha256: nil,
+                sha256: "f681c98828dedf86cc53b7ffa762fa906a18bdf58a996d51699072d852374ad9",
                 packaging: .archiveDir(binaryName: "llama-server")
             ),
             .x86_64: .init(
                 url: URL(string: "https://github.com/ggml-org/llama.cpp/releases/download/b9286/llama-b9286-bin-macos-x64.tar.gz")!,
-                sha256: nil,
+                sha256: "85f0ac2c5c4dd4491df6e10cb8b942e5f6d3ffbacb06b02831b138fcfd9e655f",
                 packaging: .archiveDir(binaryName: "llama-server")
             ),
         ]
@@ -331,8 +344,13 @@ extension ManagedBinary {
         version: "Q8_0",
         systemPaths: [],
         sources: {
-            let url = URL(string: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf")!
-            let src = ManagedBinary.Source(url: url, sha256: nil, packaging: .rawBinary)
+            // Pinned to a repo commit, not the mutable `resolve/main`.
+            let url = URL(string: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/0188c9bf409793f810680a5a431e7b899c46104c/nomic-embed-text-v1.5.Q8_0.gguf")!
+            let src = ManagedBinary.Source(
+                url: url,
+                sha256: "3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7",
+                packaging: .rawBinary
+            )
             return [.arm64: src, .x86_64: src]
         }()
     )
@@ -347,8 +365,13 @@ extension ManagedBinary {
         version: "Q8_0",
         systemPaths: [],
         sources: {
-            let url = URL(string: "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf")!
-            let src = ManagedBinary.Source(url: url, sha256: nil, packaging: .rawBinary)
+            // Pinned to a repo commit, not the mutable `resolve/main`.
+            let url = URL(string: "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/0f741b5a6585bd53aeb15cd1372c56f2a0f65e12/embeddinggemma-300M-Q8_0.gguf")!
+            let src = ManagedBinary.Source(
+                url: url,
+                sha256: "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+                packaging: .rawBinary
+            )
             return [.arm64: src, .x86_64: src]
         }()
     )
