@@ -26,10 +26,11 @@ The protocol below is the same in both cases.
 
 1. **Learn your routing id.** Call `mcp__sonata-bridge__sonata_whoami` (or the `mcp__memory__` variant). It returns `{ routingId, sessionKey, role, ... }`. Use `routingId` — it's the stable handle EmailHandler routes against.
 
-2. **Mark yourself AFK locally** so you remember on later turns:
+2. **Mark yourself AFK locally** so you remember on later turns (and after a context compaction):
    ```bash
-   echo "$ROUTING_ID" > /tmp/sona-afk-token
+   touch "/tmp/sona-afk-$ROUTING_ID"
    ```
+   This is a per-session reminder file, not a token: no Sonata code or hook reads it and routing never depends on it. It is named per session because a shared marker would put every other session on the machine into AFK mode too.
 
 3. **Send a "going afk" email** so the user has a thread to reply on. Use `mcp__sonata-bridge__email_send`:
    - to: `evan108108@gmail.com`
@@ -40,7 +41,7 @@ The protocol below is the same in both cases.
 
 ## Asking questions while AFK (replaces AskUserQuestion)
 
-While `/tmp/sona-afk-token` exists, **NEVER** use `AskUserQuestion`. Instead:
+While `/tmp/sona-afk-<your routingId>` exists, **NEVER** use `AskUserQuestion`. Instead:
 
 1. Send the question via `mcp__sonata-bridge__email_send`:
    - subject: `<one-line summary>` — no tag, Sonata adds it.
@@ -56,7 +57,7 @@ To keep multi-turn threads tidy, use `mcp__sonata-bridge__email_reply` (pass the
 On `/back` or a "back" reply, or on a `global_afk_directive` channel event with `action=exit`:
 
 ```bash
-rm -f /tmp/sona-afk-token
+rm -f "/tmp/sona-afk-$ROUTING_ID"
 ```
 
 Tell the user "Welcome back! Resuming normal communication." Switch back to `AskUserQuestion` for any further questions.
