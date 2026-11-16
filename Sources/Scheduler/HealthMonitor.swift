@@ -1069,18 +1069,19 @@ actor HealthMonitor {
 
         struct StuckWorker {
             let workerId: String
-            let sessionId: String
-            let sessionLabel: String
             let currentEventId: String
         }
 
+        // Preselect only. WorkerNudgeGate re-reads both rows per candidate
+        // and has the final say (see its docstring for the 11/15–11/16
+        // incidents this guards against).
         let candidates: [StuckWorker]
         do {
             candidates = try await dbPool.read { db in
                 try Row.fetchAll(
                     db,
                     sql: """
-                        SELECT workerId, sessionId, sessionLabel, currentEventId
+                        SELECT workerId, currentEventId
                         FROM workers
                         WHERE status = 'busy'
                           AND lastHeartbeat >= ?
@@ -1093,11 +1094,8 @@ actor HealthMonitor {
                     arguments: [aliveSinceMs, stuckBeforeMs]
                 ).compactMap { row -> StuckWorker? in
                     guard let workerId = row["workerId"] as? String,
-                          let sessionId = row["sessionId"] as? String,
-                          let sessionLabel = row["sessionLabel"] as? String,
                           let eventId = row["currentEventId"] as? String else { return nil }
-                    return StuckWorker(workerId: workerId, sessionId: sessionId,
-                                       sessionLabel: sessionLabel, currentEventId: eventId)
+                    return StuckWorker(workerId: workerId, currentEventId: eventId)
                 }
             }
         } catch {
@@ -1112,33 +1110,68 @@ actor HealthMonitor {
                now.timeIntervalSince(last) < workerNudgeCooldown {
                 continue
             }
-            lastWorkerNudgeAt[c.workerId] = now
-            await sendContinueNudge(to: c.sessionId, workerLabel: c.sessionLabel, eventId: c.currentEventId)
+            let outcome = await gateAndPersistNudge(
+                workerId: c.workerId, eventId: c.currentEventId,
+                aliveSinceMs: aliveSinceMs, stuckBeforeMs: stuckBeforeMs)
+            switch outcome {
+            case .sent(let targetSessionId, let messageId, let body, let context):
+                lastWorkerNudgeAt[c.workerId] = now
+                let frame = DMFrames.sonarDMNotification(
+                    messageId: messageId, body: body, context: context,
+                    sender: Self.nudgeSenderId, inReplyToMessageId: nil)
+                _ = await MCPConnections.shared.pushToWorker(
+                    identifier: targetSessionId, jsonRPC: frame, dbPool: dbPool)
+            case .decided(.possiblyStranded(let sessionId, let assignedAt, let lastProgressAt)):
+                // Flag, don't nudge: the holder never took a model turn after
+                // the hand-off, so it most likely never got the push.
+                // reclaimStrandedEvents re-enqueues it once it ages past
+                // workerStuckThreshold. Cooldown keeps this to one line per
+                // worker per window.
+                lastWorkerNudgeAt[c.workerId] = now
+                logger.warning("nudgeStuckWorkers: event \(c.currentEventId) possibly stranded on \(c.workerId) (session \(sessionId)): assignedAt=\(assignedAt) lastProgressAt=\(lastProgressAt.map(String.init) ?? "nil"); claim committed, push likely not delivered. Not nudging; reclaimStrandedEvents owns recovery.")
+            case .decided(let decision):
+                logger.info("nudgeStuckWorkers: skipped \(c.workerId) / event \(c.currentEventId): \(String(describing: decision))")
+            case .failed(let error):
+                logger.warning("nudgeStuckWorkers: gate/insert failed for \(c.workerId): \(error)")
+            }
         }
     }
 
-    /// DM a worker that appears finished with an open event. Persists to the
-    /// durable inbox AND tries the live SSE push, matching what the regular
-    /// dm_send path does.
+    static let nudgeSenderId = "sonata-health-monitor"
+
+    enum NudgeOutcome: Sendable {
+        case sent(targetSessionId: String, messageId: String, body: String, context: String)
+        case decided(WorkerNudgeGate.Decision)
+        case failed(String)
+    }
+
+    /// Re-read the worker and event rows, decide, and — only on `.nudge` —
+    /// persist the DM to the durable inbox, all in ONE write transaction, so
+    /// a reassignment can't land between the check and the insert. The live
+    /// SSE push happens after commit (it is not a DB operation).
     ///
-    /// Wording follows Evan's proven manual-nudge pattern (2026-08-11): calling
-    /// the worker by label and stating the observation ("status busy but not
-    /// doing anything") reliably triggers the "oh, I forgot to call
-    /// complete_event, closing out" self-correction. Generic "Continue" DMs
-    /// sometimes got read as "keep working" instead of "close out."
-    private func sendContinueNudge(to targetSessionId: String, workerLabel: String, eventId: String) async {
-        let messageId = UUID().uuidString
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let body = """
-        You are \(workerLabel) and your status is busy but you don't appear to be doing anything. If your work on event \(eventId) is complete, call complete_event({event_id: "\(eventId)"}) to close out. If you are still working, ignore this — no reply needed.
-        """
-        let context = "health-monitor-nudge:\(eventId)"
-        let fromSessionId = "sonata-health-monitor"
-
-        logger.info("nudging stuck worker '\(workerLabel)' (session \(targetSessionId), event \(eventId))")
-
+    /// Wording follows Evan's proven manual-nudge pattern (2026-08-11):
+    /// stating the observation ("status busy but not doing anything")
+    /// reliably triggers the "oh, I forgot to call complete_event" close-out.
+    /// The workerId is named alongside the label because labels are reused
+    /// across a registry reset; the workerId is not.
+    func gateAndPersistNudge(
+        workerId: String, eventId: String, aliveSinceMs: Int64, stuckBeforeMs: Int64
+    ) async -> NudgeOutcome {
         do {
-            try await dbPool.write { db in
+            return try await dbPool.write { db -> NudgeOutcome in
+                let (w, e) = try WorkerNudgeGate.snapshot(db, workerId: workerId, eventId: eventId)
+                let decision = WorkerNudgeGate.decide(
+                    eventId: eventId, worker: w, event: e,
+                    aliveSinceMs: aliveSinceMs, stuckBeforeMs: stuckBeforeMs)
+                guard case .nudge(let target) = decision, let w else { return .decided(decision) }
+
+                let messageId = UUID().uuidString
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                let body = """
+                You are \(w.sessionLabel) (worker \(w.workerId)) and your status is busy but you don't appear to be doing anything. If your work on event \(eventId) is complete, call complete_event({event_id: "\(eventId)"}) to close out. If you are still working, ignore this — no reply needed.
+                """
+                let context = "health-monitor-nudge:\(eventId)"
                 try db.execute(
                     sql: """
                         INSERT OR IGNORE INTO dm_messages (
@@ -1146,22 +1179,13 @@ actor HealthMonitor {
                             body, context, metaJson, sentAtMs, receivedAtMs, deliveryStatus
                         ) VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?, 'queued')
                         """,
-                    arguments: [messageId, targetSessionId, fromSessionId, body, context, nowMs, nowMs]
+                    arguments: [messageId, target, Self.nudgeSenderId, body, context, nowMs, nowMs]
                 )
+                return .sent(targetSessionId: target, messageId: messageId, body: body, context: context)
             }
         } catch {
-            logger.warning("nudgeStuckWorkers: dm_messages insert failed for \(targetSessionId): \(error)")
-            return
+            return .failed(String(describing: error))
         }
-
-        let frame = DMFrames.sonarDMNotification(
-            messageId: messageId,
-            body: body,
-            context: context,
-            sender: fromSessionId,
-            inReplyToMessageId: nil
-        )
-        _ = await MCPConnections.shared.pushToWorker(identifier: targetSessionId, jsonRPC: frame, dbPool: dbPool)
     }
 
     /// Reclaim events stranded on a worker that never received them.
@@ -1877,5 +1901,12 @@ actor HealthMonitor {
     /// Test-only invoker for the deterministic timeout reaper (private otherwise).
     func reapOverdueTasksForTesting() async {
         await reapOverdueTasks()
+    }
+}
+
+extension HealthMonitor {
+    /// Test-only invoker for the "busy but idle" nudge sweep (private otherwise).
+    func nudgeStuckWorkersForTesting() async {
+        await nudgeStuckWorkers()
     }
 }
