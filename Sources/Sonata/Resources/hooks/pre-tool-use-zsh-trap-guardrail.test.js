@@ -101,6 +101,11 @@ test("hook: interactive session (no SONA_WORKER) passes", async () => {
   const r = await runHook(bash("echo ===="), { SHELL: "/bin/zsh" });
   assert(r.stdout === "", "should pass");
 });
+test("hook: worker with SHELL unset (how Sonata launches workers) blocks", async () => {
+  const r = await runHook(bash("echo ===="), { SONA_WORKER: "1" });
+  assert(r.stdout !== "", "expected a deny with SHELL unset");
+  assert(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision === "deny", "not deny");
+});
 test("hook: bash shell passes", async () => {
   const r = await runHook(bash("echo ===="), { SONA_WORKER: "1", SHELL: "/bin/bash" });
   assert(r.stdout === "", "should pass");

@@ -24,8 +24,13 @@
  *     so `echo "a =b"` and `cat <<EOF` data never match.
  *   `${…}` forms never match (a) because the regex needs a letter right after `$`.
  *
- * SCOPE. Workers only (SONA_WORKER=1), and only when $SHELL is zsh. Interactive
- * sessions pass silently, as the spec for task e57af007 asked.
+ * SCOPE. Workers only (SONA_WORKER=1). Interactive sessions pass silently, as
+ * the spec for task e57af007 asked. A worker passes only when $SHELL is SET to
+ * something other than zsh. Sonata launches worker `claude` processes with no
+ * SHELL in their environment, and their Bash tool still runs zsh (macOS
+ * default), so an unset SHELL means zsh. Gating on SHELL=…zsh made the hook a
+ * silent no-op in every real worker (found 2026-11-16: `echo ====` ran unblocked
+ * in a fresh worker session while a direct invocation with SHELL set denied it).
  *
  * ESCAPE HATCHES
  *   CLAUDE_ALLOW_ZSH_TRAP=1        per-session bypass (logged to stderr)
@@ -202,7 +207,8 @@ function main(raw) {
   }
   if (payload.tool_name !== "Bash") return pass();
   if (process.env.SONA_WORKER !== "1") return pass();
-  if (!/zsh$/.test(process.env.SHELL || "")) return pass();
+  const shell = process.env.SHELL || "";
+  if (shell && !/zsh$/.test(shell)) return pass();
 
   const cmd = payload.tool_input && payload.tool_input.command;
   if (typeof cmd !== "string") return pass();
