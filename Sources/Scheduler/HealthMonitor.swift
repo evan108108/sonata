@@ -376,6 +376,12 @@ actor HealthMonitor {
             // cycle instead of waiting for the 30/75-min supervisor pass.
             await reclaimStrandedEvents()
 
+            // Free 'idle' workers still holding a dead event (terminal or
+            // missing). The claim refuses any worker with a currentEventId, so
+            // such a row is unclaimable while still counting as idle; see
+            // releaseIdleWorkersHoldingDeadEvents (scout-cloud stall, 11/16).
+            await releaseIdleWorkersHoldingDeadEvents()
+
             // Ghost worker process sweep. `pgrep -f mcp-cfg/worker-*.json`
             // enumerates every claude worker process on the host;
             // cross-referenced with the workers table, anything unregistered
@@ -565,7 +571,10 @@ actor HealthMonitor {
             results.append(poolResult)
         }
 
-        // 6. Search-index + embedding coverage reconcile. Heavier (scans dirs,
+        // 6. Dispatch stall: dispatchable work waiting while workers idle.
+        results.append(await checkDispatchStall(at: now))
+
+        // 7. Search-index + embedding coverage reconcile. Heavier (scans dirs,
         // may re-backfill), so only every Nth tick. This is the standing guard
         // against the silent-drift class — embeddings not generating, a Meili
         // index falling behind its source — that previously went unnoticed for
@@ -1901,6 +1910,125 @@ actor HealthMonitor {
     /// Test-only invoker for the deterministic timeout reaper (private otherwise).
     func reapOverdueTasksForTesting() async {
         await reapOverdueTasks()
+    }
+
+    func releaseIdleWorkersHoldingDeadEventsForTesting() async {
+        await releaseIdleWorkersHoldingDeadEvents()
+    }
+
+    func checkDispatchStallForTesting(at time: Date = Date()) async -> CheckResult {
+        await checkDispatchStall(at: time)
+    }
+
+    // MARK: - Dispatch stall (2026-11-16)
+
+    /// How long a dispatchable pending task may wait while an eligible worker
+    /// sits idle before `checkDispatchStall` reports unhealthy. The dispatcher
+    /// polls every 10s, so 30 min is ~180 missed chances, never normal queueing.
+    static let dispatchStallThresholdMs: Int64 = 30 * 60 * 1000
+
+    /// Clear currentEventId on pool workers that are `idle` but still point at
+    /// an event that is terminal or gone.
+    ///
+    /// The dispatch claim (`SonataChannelServer.dispatchToChannel`) only takes
+    /// a worker whose currentEventId is empty, so such a row can never receive
+    /// work, yet it still counts as idle. On scout-cloud, event 44bd0a33 was
+    /// cancelled 11/14 08:57Z without clearing worker-6400434031's pointer; the
+    /// row stayed idle-but-unclaimable and stalled nightly dispatch ~2 days.
+    /// An event that is still live (pending/assigned) is left alone: that is
+    /// the AFK/DM case where a worker is idle by design while its event stays open.
+    private func releaseIdleWorkersHoldingDeadEvents() async {
+        struct Held { let workerId: String; let eventId: String; let eventStatus: String }
+        let held: [Held]
+        do {
+            held = try await dbPool.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT w.workerId AS workerId, w.currentEventId AS eventId,
+                           COALESCE(e.status, 'missing') AS eventStatus
+                    FROM workers w
+                    LEFT JOIN workerEvents e ON e.id = w.currentEventId
+                    WHERE w.status = 'idle'
+                      AND w.currentEventId IS NOT NULL AND w.currentEventId != ''
+                      AND (e.id IS NULL OR e.status NOT IN ('pending', 'assigned'))
+                    """)
+                    .compactMap { row -> Held? in
+                        guard let wid = row["workerId"] as? String,
+                              let eid = row["eventId"] as? String,
+                              let st = row["eventStatus"] as? String else { return nil }
+                        return Held(workerId: wid, eventId: eid, eventStatus: st)
+                    }
+            }
+        } catch {
+            logger.warning("releaseIdleWorkersHoldingDeadEvents: query failed: \(error)")
+            return
+        }
+        guard !held.isEmpty else { return }
+
+        for h in held {
+            do {
+                try await dbPool.write { db in
+                    // Guarded on the exact pointer and status we read, so a
+                    // claim that landed in between is never clobbered.
+                    try db.execute(sql: """
+                        UPDATE workers SET
+                            currentEventId = NULL, currentEventTokens = NULL, currentSlug = NULL,
+                            currentCacheReadTokens = NULL, currentInputTokens = NULL,
+                            currentPromptHash = NULL, currentSessionLabel = NULL,
+                            currentCwdBasename = NULL
+                        WHERE workerId = ? AND status = 'idle' AND currentEventId = ?
+                    """, arguments: [h.workerId, h.eventId])
+                }
+                logger.warning("releaseIdleWorkersHoldingDeadEvents: cleared \(h.eventStatus) event \(h.eventId) from idle worker \(h.workerId) (it was unclaimable for dispatch)")
+            } catch {
+                logger.warning("releaseIdleWorkersHoldingDeadEvents: release failed for \(h.workerId): \(error)")
+            }
+        }
+    }
+
+    /// Unhealthy when a dispatchable task (the dispatcher's own predicate:
+    /// pending, scheduler/unassigned, unblocked, leaf) has waited longer than
+    /// `dispatchStallThresholdMs` while at least one pool worker is free to
+    /// claim it (idle, fresh heartbeat, no currentEventId). Rides the standard
+    /// 3-strike alert path to email + the supervisor.
+    ///
+    /// Counting pending EVENTS would miss this class: on the 11/16 scout-cloud
+    /// stall no event was ever created, so pendingEvents stayed 0 throughout.
+    /// Known benign trigger: a task whose DispatchExclusion excludes every idle
+    /// worker; the message names the oldest task so that is quick to rule out.
+    private func checkDispatchStall(at time: Date) async -> CheckResult {
+        let now = Int64(time.timeIntervalSince1970 * 1000)
+        do {
+            let (freeWorkers, waiting, oldestId, oldestAt): (Int, Int, String?, Int64?) = try await dbPool.read { db in
+                let free = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM workers
+                    WHERE status = 'idle' AND lastHeartbeat >= ?
+                      AND (currentEventId IS NULL OR currentEventId = '')
+                      AND \(poolSlotSQLPredicate)
+                """, arguments: [now - 30_000]) ?? 0
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT t.id AS id, t.createdAt AS createdAt FROM tasks t
+                    WHERE t.status = 'pending'
+                      AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL OR t.assignedTo = '')
+                      AND (t.blockedBy IS NULL OR t.blockedBy = '[]' OR t.blockedBy = '')
+                      AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parentTask = t.id)
+                      AND t.createdAt < ?
+                    ORDER BY t.createdAt ASC
+                """, arguments: [now - Self.dispatchStallThresholdMs])
+                return (free, rows.count, rows.first?["id"] as String?, rows.first?["createdAt"] as Int64?)
+            }
+            guard freeWorkers > 0, waiting > 0 else {
+                return CheckResult(name: "dispatchStall", healthy: true, message: "OK", timestamp: time)
+            }
+            let ageMin = oldestAt.map { (now - $0) / 60_000 } ?? 0
+            return CheckResult(
+                name: "dispatchStall",
+                healthy: false,
+                message: "\(waiting) dispatchable task(s) pending >30m while \(freeWorkers) worker(s) idle; oldest \(oldestId ?? "?") waiting \(ageMin)m. Check the dispatcher log for repeated 'no longer idle at claim time' or 'Channel dispatch missed'.",
+                timestamp: time
+            )
+        } catch {
+            return CheckResult(name: "dispatchStall", healthy: true, message: "OK (query failed: \(error.localizedDescription))", timestamp: time)
+        }
     }
 }
 

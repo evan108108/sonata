@@ -160,10 +160,13 @@ actor TaskDispatcher {
         // only (`poolSlotSQLPredicate`) — a non-pool session holding a
         // `workers` row, such as a sidecar, would otherwise inflate the count
         // and let the dispatcher release one more task than the pool can take.
+        // Same "free" test as the claim (no currentEventId): an idle row still
+        // holding an event can't be claimed, so it is not an open slot.
         let idleWorkerCount: Int = (try? await dbPool.read { db in
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM workers
                 WHERE status = 'idle' AND lastHeartbeat >= ?
+                  AND (currentEventId IS NULL OR currentEventId = '')
                   AND \(poolSlotSQLPredicate)
             """, arguments: [Int64(Date().timeIntervalSince1970 * 1000) - 30_000]) ?? 0
         }) ?? 0

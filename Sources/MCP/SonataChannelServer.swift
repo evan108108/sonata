@@ -64,6 +64,14 @@ actor SonataChannelServer {
     /// `excluding` names sessions that must not get this task (see
     /// `DispatchExclusion`). When every idle worker is excluded this returns
     /// nil and the task waits for the next poll, exactly as with no idle worker.
+    ///
+    /// Uses the SAME "free" predicate as the claim UPDATE in dispatchToChannel
+    /// (status idle AND no currentEventId). Before 2026-11-16 this checked
+    /// status only, so a row left 'idle' with a stale currentEventId was picked
+    /// on every poll and refused by the claim every time ("no longer idle at
+    /// claim time"). On scout-cloud one such row (worker-6400434031, holding an
+    /// event cancelled 11/14 08:57Z) stalled nightly dispatch for ~2 days:
+    /// 138,126 refused claims while the other idle workers were never tried.
     func findIdleWorker(excluding excludedIds: [String] = []) async -> String? {
         let exclusion = DispatchExclusion.workerPredicate(excluding: excludedIds)
         let arguments = StatementArguments([nowMs() - 30_000]) + exclusion.arguments
@@ -72,6 +80,7 @@ actor SonataChannelServer {
                 try String.fetchOne(db, sql: """
                     SELECT workerId FROM workers
                     WHERE status = 'idle'
+                    AND (currentEventId IS NULL OR currentEventId = '')
                     AND lastHeartbeat > ?
                     AND \(poolSlotSQLPredicate)
                     AND \(exclusion.sql)
@@ -85,6 +94,10 @@ actor SonataChannelServer {
         }
     }
 
+    /// How many more workers dispatchToChannel tries after a refused claim
+    /// before leaving the task for the next poll.
+    static let claimRetryLimit = 3
+
     /// Dispatch a task to an idle worker via the channel.
     ///
     /// Creates a workerEvent that the channel server will pick up on its next poll.
@@ -96,9 +109,13 @@ actor SonataChannelServer {
         prompt: String,
         priority: Int = 5,
         dispatchCycle: String,
-        excludeSessionIds: [String] = []
+        excludeSessionIds: [String] = [],
+        skipWorkerIds: [String] = []
     ) async -> String? {
-        guard let workerId = await findIdleWorker(excluding: excludeSessionIds) else {
+        // `skipWorkerIds` are workers whose claim was refused earlier in THIS
+        // call (see .workerTaken). They narrow the search only; unlike
+        // `excludeSessionIds` they are never written to the event payload.
+        guard let workerId = await findIdleWorker(excluding: excludeSessionIds + skipWorkerIds) else {
             if excludeSessionIds.isEmpty {
                 logger.info("No idle channel workers for task \(taskId)")
             } else {
@@ -229,9 +246,20 @@ actor SonataChannelServer {
                 return nil
             case .workerTaken:
                 // Worker was taken between findIdleWorker() and the claim.
-                // Treat like "no idle workers" — the task stays pending and the
-                // dispatcher retries on its next poll.
-                logger.info("Worker \(workerId) no longer idle at claim time for task \(taskId); skipping dispatch")
+                // Try the next free worker rather than giving up on the task:
+                // before 2026-11-16, one unclaimable row that findIdleWorker
+                // kept returning stalled every dispatch on scout-cloud for ~2
+                // days while other workers sat idle. Bounded, so a burst of
+                // real races still falls back to the next poll.
+                if skipWorkerIds.count < Self.claimRetryLimit {
+                    logger.info("Worker \(workerId) no longer idle at claim time for task \(taskId); trying the next idle worker")
+                    return await dispatchToChannel(
+                        taskId: taskId, title: title, prompt: prompt, priority: priority,
+                        dispatchCycle: dispatchCycle, excludeSessionIds: excludeSessionIds,
+                        skipWorkerIds: skipWorkerIds + [workerId]
+                    )
+                }
+                logger.info("Worker \(workerId) no longer idle at claim time for task \(taskId); skipping dispatch after \(skipWorkerIds.count + 1) refused claims")
                 return nil
             case .dispatched:
                 logger.info("Dispatched task \"\(title)\" to worker \(workerId) via channel (event: \(eventId))")
