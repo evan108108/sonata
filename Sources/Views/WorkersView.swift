@@ -1456,20 +1456,9 @@ class WorkerCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
-        let commonPaths = [
-            "\(home)/.local/bin",
-            "\(home)/.bun/bin",
-            "\(home)/.nvm/versions/node/v25.8.1/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        let currentPath = ProcessInfo.processInfo.environment["PATH"] ?? commonPaths.joined(separator: ":")
-        let mergedPath = commonPaths.filter { !currentPath.contains($0) }.joined(separator: ":")
-        env.append("PATH=\(mergedPath.isEmpty ? currentPath : "\(mergedPath):\(currentPath)")")
+        // PATH (Homebrew etc. merged in) and SHELL. Workers had no SHELL= before
+        // 11/16, so the zsh-trap hook's $SHELL gate never fired in any worker.
+        env.append(contentsOf: SpawnEnvironment.pathAndShellEntries(home: home))
 
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=1")

@@ -36,18 +36,7 @@ final class SupervisorCoordinator: NSObject, LocalProcessTerminalViewDelegate {
         let claudeBinary = ClaudeBinary.resolvedPath()
 
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
-        let commonPaths = [
-            "\(home)/.local/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        let currentPath = ProcessInfo.processInfo.environment["PATH"] ?? commonPaths.joined(separator: ":")
-        let mergedPath = commonPaths.filter { !currentPath.contains($0) }.joined(separator: ":")
-        env.append("PATH=\(mergedPath.isEmpty ? currentPath : "\(mergedPath):\(currentPath)")")
+        env.append(contentsOf: SpawnEnvironment.pathAndShellEntries(home: home))
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=1")
 

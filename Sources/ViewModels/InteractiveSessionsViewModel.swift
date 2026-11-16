@@ -353,7 +353,7 @@ final class InteractiveSessionTab: NSObject, ObservableObject, Identifiable, Loc
         // omitLegacyRole: true — SONATA_ROLE=session is meaningless for a bare
         // shell and we don't want it leaking into the user's environment.
         let env = InteractiveSessionTab.buildEnvironment(sessionId: sessionId, omitLegacyRole: true)
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let shell = SpawnEnvironment.shell()
 
         termView.getTerminal().resetToInitialState()
         termView.getTerminal().changeScrollback(5000)  // keep more history than the 500 default
@@ -735,20 +735,7 @@ extension InteractiveSessionTab {
         let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
-        let commonPaths = [
-            "\(home)/.local/bin",
-            "\(home)/.bun/bin",
-            "\(home)/.nvm/versions/node/v25.8.1/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        let currentPath = ProcessInfo.processInfo.environment["PATH"] ?? commonPaths.joined(separator: ":")
-        let mergedPath = commonPaths.filter { !currentPath.contains($0) }.joined(separator: ":")
-        env.append("PATH=\(mergedPath.isEmpty ? currentPath : "\(mergedPath):\(currentPath)")")
+        env.append(contentsOf: SpawnEnvironment.pathAndShellEntries(home: home))
 
         env.append("HOME=\(home)")
         env.append("SONA_WORKER=0")

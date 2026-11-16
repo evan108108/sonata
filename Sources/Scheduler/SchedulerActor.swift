@@ -799,12 +799,21 @@ public actor SchedulerActor {
     /// job writing more than the 64KB pipe buffer would block forever waiting to write.
     /// Internal rather than private so the deadlock/large-output regression tests can
     /// drive it directly (see SchedulerShellCommandTests).
-    static func runShellCommand(_ command: String) async throws -> String {
+    ///
+    /// The job's environment is `baseEnvironment` (Sonata's own, by default) with
+    /// PATH and SHELL from SpawnEnvironment. Sonata's own PATH is launchd's bare
+    /// one, so without the merge `node` and `gh` were "command not found" (exit
+    /// 127) in every job that didn't use an absolute path (11/16).
+    static func runShellCommand(
+        _ command: String,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let state = ShellRunState()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-c", command]
+            process.environment = SpawnEnvironment.processEnvironment(base: baseEnvironment)
 
             let pipe = Pipe()
             process.standardOutput = pipe
