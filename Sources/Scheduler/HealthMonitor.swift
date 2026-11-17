@@ -40,6 +40,22 @@ actor HealthMonitor {
     private var monitorTask: Task<Void, Never>?
     private var isRunning = false
 
+    /// Step-by-step progress of the monitor loop, read by the stall watchdog.
+    nonisolated let progress = HealthCycleProgress()
+    private var watchdogTask: Task<Void, Never>?
+    /// The loop the watchdog restarts on a stall: monitorLoop in production,
+    /// a stand-in under test (the real loop's GhostWorkerReaper would SIGTERM
+    /// the host's live workers).
+    private var loopBody: (@Sendable (HealthMonitor, Int) async -> Void)?
+    /// Stalls the watchdog recovered from, oldest first.
+    private(set) var stallRecoveries: [HealthCycleProgress.Stall] = []
+
+    /// A cycle running longer than this is treated as stalled. A normal cycle
+    /// takes seconds; the heaviest step, the 10-minutely search reconcile with
+    /// a backfill, finishes well inside a minute.
+    static let monitorStallThreshold: TimeInterval = 10 * 60
+    private let watchdogInterval: TimeInterval = 60
+
     /// Search backend, for the index-drift reconcile check (nil = skip it).
     private let search: (any SearchService)?
     /// Wall-clock gate for the heavier search-index reconcile (scans dirs + may
@@ -267,17 +283,72 @@ actor HealthMonitor {
         loadAlertStates()
         logger.info("HealthMonitor started (interval: \(Int(checkInterval))s)")
 
-        monitorTask = Task { [weak self] in
-            await self?.monitorLoop()
-        }
+        loopBody = { monitor, gen in await monitor.monitorLoop(generation: gen) }
+        startLoop()
+        startWatchdog(interval: watchdogInterval, threshold: Self.monitorStallThreshold)
     }
 
     /// Stop health monitoring.
     func shutdown() {
         logger.info("HealthMonitor shutting down")
+        watchdogTask?.cancel()
+        watchdogTask = nil
         monitorTask?.cancel()
         monitorTask = nil
         isRunning = false
+    }
+
+    /// Run `loopBody` under a fresh progress generation.
+    private func startLoop() {
+        guard let body = loopBody else { return }
+        let gen = progress.newGeneration()
+        monitorTask = Task { [weak self] in
+            guard let self else { return }
+            await body(self, gen)
+        }
+    }
+
+    /// Detached from the actor: it reads `progress` (lock-protected) and logs
+    /// before it ever awaits the actor, so the stall is recorded even if the
+    /// actor itself is what's wedged. Holds the monitor strongly (it lives for
+    /// the app's lifetime); `shutdown()` cancels the task, which releases it.
+    private func startWatchdog(interval: TimeInterval, threshold: TimeInterval) {
+        watchdogTask?.cancel()
+        let progress = self.progress
+        let logger = self.logger
+        watchdogTask = Task.detached { [self] in
+            await HealthLoopWatchdog.run(progress: progress, interval: interval, threshold: threshold) { stall in
+                logger.error("HealthMonitor watchdog: cycle stalled \(stall.cycleSeconds / 60)m in step '\(stall.step)' (step running \(stall.stepSeconds / 60)m); restarting the monitor loop")
+                await self.recoverFromStall(stall)
+            }
+        }
+    }
+
+    /// Abandon the stalled loop and start a fresh one, then alert. The old
+    /// loop is cancelled, but a suspended await can't be forced to return; if
+    /// it ever wakes, its generation is stale and it exits at its next sleep.
+    private func recoverFromStall(_ stall: HealthCycleProgress.Stall) async {
+        // A stale report (the loop was already replaced) must not restart the new one.
+        guard stall.generation == progress.currentGeneration else { return }
+        stallRecoveries.append(stall)
+        monitorTask?.cancel()
+        startLoop()
+        await deliverAlert(
+            check: "healthMonitorStall",
+            message: "HealthMonitor's cycle was stuck \(stall.cycleSeconds / 60)m in step '\(stall.step)' (that step had run \(stall.stepSeconds / 60)m). The monitor loop has been restarted. While it was stuck, no per-cycle sweep ran: stranded-event reclaim, the timeout reaper, dispatchStall, supervisor check pushes. The stuck step names where to look."
+        )
+    }
+
+    /// Test-only: run `loop` in place of monitorLoop under the real
+    /// generation + watchdog machinery, with short timings.
+    func superviseForTesting(
+        loop: @escaping @Sendable (HealthMonitor, Int) async -> Void,
+        watchdogInterval: TimeInterval,
+        stallThreshold: TimeInterval
+    ) {
+        loopBody = loop
+        startLoop()
+        startWatchdog(interval: watchdogInterval, threshold: stallThreshold)
     }
 
     /// Record a session outcome for tracking.
@@ -319,15 +390,20 @@ actor HealthMonitor {
 
     // MARK: - Monitor Loop
 
-    private func monitorLoop() async {
+    private func monitorLoop(generation gen: Int) async {
+        // Each `step(...)` names the await that follows it, so a stalled cycle
+        // reports where it is stuck (see HealthCycleProgress).
+        let step: (String) -> Void = { [progress] name in progress.mark(gen, name) }
         while !Task.isCancelled {
-            let checks = await runAllChecks()
+            progress.begin(gen)
+            let checks = await runAllChecks(mark: { step("check:\($0)") })
 
             for check in checks {
                 if check.healthy {
                     // Reset consecutive failures on success, and emit a one-shot
                     // all-clear if we had been alerting on this check.
                     consecutiveFailures[check.name] = 0
+                    step("noteRecovery:\(check.name)")
                     await noteRecovery(check: check.name)
                 } else {
                     let count = (consecutiveFailures[check.name] ?? 0) + 1
@@ -339,6 +415,7 @@ actor HealthMonitor {
                         // Pass the underlying check message as the dedup
                         // signature — NOT the string above, whose embedded
                         // count changes every cycle and would defeat dedup.
+                        step("sendAlert:\(check.name)")
                         await sendAlert(
                             check: check.name,
                             message: "Health check '\(check.name)' has failed \(count) consecutive times: \(check.message)",
@@ -367,6 +444,7 @@ actor HealthMonitor {
             // on, so the "worker finished, forgot complete_event, sits busy
             // forever" pattern self-heals via one DM instead of needing a human
             // to notice.
+            step("nudgeStuckWorkers")
             await nudgeStuckWorkers()
 
             // Self-heal stranded events every cycle (always on, unlike the
@@ -374,12 +452,14 @@ actor HealthMonitor {
             // never completes it, and no heartbeat-based sweep catches it
             // (the bridge keeps heartbeating). Reclaim it within one monitor
             // cycle instead of waiting for the 30/75-min supervisor pass.
+            step("reclaimStrandedEvents")
             await reclaimStrandedEvents()
 
             // Free 'idle' workers still holding a dead event (terminal or
             // missing). The claim refuses any worker with a currentEventId, so
             // such a row is unclaimable while still counting as idle; see
             // releaseIdleWorkersHoldingDeadEvents (scout-cloud stall, 11/16).
+            step("releaseIdleWorkersHoldingDeadEvents")
             await releaseIdleWorkersHoldingDeadEvents()
 
             // Ghost worker process sweep. `pgrep -f mcp-cfg/worker-*.json`
@@ -389,6 +469,7 @@ actor HealthMonitor {
             // restart survivors, (b) processes leaked by removeWorker's
             // nil-shellPid failure mode (weak var terminalView collapses
             // when SwiftUI releases the view — kill path silently no-ops).
+            step("ghostWorkerReaper")
             _ = await GhostWorkerReaper.reap(dbPool: dbPool, logger: logger, source: "monitor")
 
             // Orphan-event sweep. When sweepStaleWorkersForActions was
@@ -402,6 +483,7 @@ actor HealthMonitor {
             // predecessor-cleanup's `SET status='pending'` release path —
             // "phantom tasks" pinning new workers. This sweep cancels those
             // orphans within one monitor cycle.
+            step("sweepOrphanedEvents")
             await sweepOrphanedEvents()
 
             // Close sonar_dm workerEvents that have sat `assigned` past the TTL
@@ -411,6 +493,7 @@ actor HealthMonitor {
             // Backstops the dm_reply auto-complete for DMs that are handled
             // without a reply, whose worker died, or where the auto-complete
             // missed (2026-07-17).
+            step("sweepStaleDMEvents")
             await sweepStaleDMEvents()
 
             // Sidecar hint TTL. Rows in `sidecarHints` are advisory: the memory
@@ -419,6 +502,7 @@ actor HealthMonitor {
             // never submits again — closed terminal, hard kill, or long idle —
             // leaves rows behind. 30-min TTL: hints stale past that would
             // reference context the session has moved on from anyway.
+            step("sweepStaleSidecarHints")
             await sweepStaleSidecarHints()
 
             // Webhook delivery audit retention: 7 days, matching the DO-side
@@ -426,6 +510,7 @@ actor HealthMonitor {
             // (bodyHash, verified flag, handler result) — dedup only needs
             // wrapEventId uniqueness inside the replay window, which is far
             // shorter than a week.
+            step("sweepOldWebhookDeliveries")
             await sweepOldWebhookDeliveries()
 
             // Offline escalation ladder. sweepStaleWorkersForActions now only
@@ -436,6 +521,7 @@ actor HealthMonitor {
             // "busy worker briefly quiet → tasks re-enqueued → duplicate
             // dispatch" class that produced the wiki-compilation dupe
             // 2026-07-07.
+            step("escalateOfflineWorkers")
             await escalateOfflineWorkers()
 
             // Deterministic wall-clock timeout enforcement — fail any active
@@ -444,19 +530,23 @@ actor HealthMonitor {
             // liveness, so an overnight gap with no live session can't let a
             // task overrun for hours before a waking session batch-kills the
             // whole backlog at once with inconsistent error text.
+            step("reapOverdueTasks")
             await reapOverdueTasks()
 
             // Push a periodic check event to the supervisor, driven by
             // the configurable day/night schedule in supervisorConfig.
+            step("loadSupervisorSchedule")
             let schedule = await loadSupervisorSchedule()
             if schedule.enabled {
                 let interval = currentSupervisorInterval(schedule: schedule)
                 if lastSupervisorCheckPushedAt.map({ Date().timeIntervalSince($0) >= interval }) ?? true {
+                    step("pushSupervisorCheck")
                     await pushSupervisorCheck()
                     lastSupervisorCheckPushedAt = Date()
                 }
             }
 
+            progress.end(gen)
             do {
                 try await Task.sleep(for: .seconds(checkInterval))
             } catch {
@@ -549,17 +639,20 @@ actor HealthMonitor {
 
     // MARK: - Health Checks
 
-    private func runAllChecks() async -> [CheckResult] {
+    private func runAllChecks(mark: (String) -> Void = { _ in }) async -> [CheckResult] {
         let now = Date()
         var results: [CheckResult] = []
 
         // 1. SQLite database accessible
+        mark("database")
         results.append(await checkDatabase(at: now))
 
         // 2. HTTP server responding
+        mark("httpServer")
         results.append(await checkHTTPServer(at: now))
 
         // 3. Scheduler running
+        mark("scheduler")
         results.append(await checkScheduler(at: now))
 
         // 4. Disk space
@@ -567,14 +660,17 @@ actor HealthMonitor {
 
         // 5. Worker pool size (backstop for 2026-05-18 auto-spawn flake).
         // Skipped silently when no provider is configured (test harnesses).
+        mark("workerPool")
         if let poolResult = await checkWorkerPool(at: now) {
             results.append(poolResult)
         }
 
         // 6. Dispatch stall: dispatchable work waiting while workers idle.
+        mark("dispatchStall")
         results.append(await checkDispatchStall(at: now))
 
         // 7. Orphaned assignee: pending work pinned to an owner nothing serves.
+        mark("orphanedAssignee")
         results.append(await checkOrphanedAssignee(at: now))
 
         // 8. Search-index + embedding coverage reconcile. Heavier (scans dirs,
@@ -584,6 +680,7 @@ actor HealthMonitor {
         // weeks (vector dark 5/18→6/12; docs index drifting with no watcher).
         if search != nil, now.timeIntervalSince(lastSearchCheckAt) >= searchCheckInterval {
             lastSearchCheckAt = now
+            mark("searchAndEmbeddings")
             results.append(contentsOf: await checkSearchAndEmbeddings(at: now))
         }
 
