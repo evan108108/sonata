@@ -22,6 +22,15 @@ actor TaskDispatcher {
     /// every tick and starve the tasks queued behind it.
     private static let dispatchLookahead = 8
 
+    /// The only `assignedTo` values this dispatcher serves, as a SQL predicate
+    /// over a `tasks` row aliased `t`. There is no per-worker or named-pool
+    /// routing: `dispatchToChannel` picks its own idle worker, so any other
+    /// value (a worker's sessionLabel, a webhook `workerPool`) is never polled
+    /// and the task stays pending forever. Shared with HealthMonitor's
+    /// dispatchStall and orphanedAssignee checks so the alarms can't drift
+    /// from what poll() actually selects.
+    static let routableAssigneeSQL = "(t.assignedTo = 'scheduler' OR t.assignedTo IS NULL OR t.assignedTo = '')"
+
     init(dbPool: DatabasePool) {
         self.dbPool = dbPool
         self.channelServer = SonataChannelServer(dbPool: dbPool)
@@ -181,7 +190,7 @@ actor TaskDispatcher {
             try DispatcherTaskRow.fetchAll(db, sql: """
                 SELECT * FROM tasks t
                 WHERE t.status = 'pending'
-                AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL OR t.assignedTo = '')
+                AND \(Self.routableAssigneeSQL)
                 AND (t.blockedBy IS NULL OR t.blockedBy = '[]' OR t.blockedBy = '')
                 AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parentTask = t.id)
                 ORDER BY

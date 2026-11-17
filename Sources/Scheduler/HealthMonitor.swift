@@ -574,7 +574,10 @@ actor HealthMonitor {
         // 6. Dispatch stall: dispatchable work waiting while workers idle.
         results.append(await checkDispatchStall(at: now))
 
-        // 7. Search-index + embedding coverage reconcile. Heavier (scans dirs,
+        // 7. Orphaned assignee: pending work pinned to an owner nothing serves.
+        results.append(await checkOrphanedAssignee(at: now))
+
+        // 8. Search-index + embedding coverage reconcile. Heavier (scans dirs,
         // may re-backfill), so only every Nth tick. This is the standing guard
         // against the silent-drift class — embeddings not generating, a Meili
         // index falling behind its source — that previously went unnoticed for
@@ -2008,7 +2011,7 @@ actor HealthMonitor {
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT t.id AS id, t.createdAt AS createdAt FROM tasks t
                     WHERE t.status = 'pending'
-                      AND (t.assignedTo = 'scheduler' OR t.assignedTo IS NULL OR t.assignedTo = '')
+                      AND \(TaskDispatcher.routableAssigneeSQL)
                       AND (t.blockedBy IS NULL OR t.blockedBy = '[]' OR t.blockedBy = '')
                       AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parentTask = t.id)
                       AND t.createdAt < ?
@@ -2028,6 +2031,57 @@ actor HealthMonitor {
             )
         } catch {
             return CheckResult(name: "dispatchStall", healthy: true, message: "OK (query failed: \(error.localizedDescription))", timestamp: time)
+        }
+    }
+
+    // MARK: - Orphaned assignee (2026-11-17)
+
+    /// How long a pending task pinned to an unserved assignee may wait before
+    /// `checkOrphanedAssignee` reports unhealthy.
+    static let orphanedAssigneeThresholdMs: Int64 = 6 * 60 * 60 * 1000
+
+    func checkOrphanedAssigneeForTesting(at time: Date = Date()) async -> CheckResult {
+        await checkOrphanedAssignee(at: time)
+    }
+
+    /// Unhealthy when a pending, unblocked leaf task has waited longer than
+    /// `orphanedAssigneeThresholdMs` with an `assignedTo` that nothing serves:
+    /// outside `TaskDispatcher.routableAssigneeSQL` (the dispatcher's only
+    /// pool) and matching no `workers.workerId`. Such a task is invisible to
+    /// poll() and never fails, so without this it sits pending silently; it
+    /// bit at least twice (a sessionLabel `sona-worker-N` on 7/30, an
+    /// invented "scout" pool before that). dispatchStall can't see it because
+    /// it only counts routable tasks. A sessionLabel is not a workerId, so
+    /// `sona-worker-1` counts as orphaned. Container tasks (with subtasks) are
+    /// skipped, as poll() skips them. Rides the standard 3-strike alert path.
+    private func checkOrphanedAssignee(at time: Date) async -> CheckResult {
+        let now = Int64(time.timeIntervalSince1970 * 1000)
+        do {
+            let (count, oldestId, oldestAssignee, oldestAt): (Int, String?, String?, Int64?) = try await dbPool.read { db in
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT t.id AS id, t.assignedTo AS assignedTo, t.createdAt AS createdAt FROM tasks t
+                    WHERE t.status = 'pending'
+                      AND NOT \(TaskDispatcher.routableAssigneeSQL)
+                      AND NOT EXISTS (SELECT 1 FROM workers w WHERE w.workerId = t.assignedTo)
+                      AND (t.blockedBy IS NULL OR t.blockedBy = '[]' OR t.blockedBy = '')
+                      AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parentTask = t.id)
+                      AND t.createdAt < ?
+                    ORDER BY t.createdAt ASC
+                """, arguments: [now - Self.orphanedAssigneeThresholdMs])
+                return (rows.count, rows.first?["id"] as String?, rows.first?["assignedTo"] as String?, rows.first?["createdAt"] as Int64?)
+            }
+            guard count > 0 else {
+                return CheckResult(name: "orphanedAssignee", healthy: true, message: "OK", timestamp: time)
+            }
+            let age = oldestAt.map { Self.humanDuration(TimeInterval(now - $0) / 1000) } ?? "?"
+            return CheckResult(
+                name: "orphanedAssignee",
+                healthy: false,
+                message: "\(count) pending task(s) >6h assigned to an owner the dispatcher never serves (no workers.workerId, not 'scheduler'/empty); oldest \(oldestId ?? "?") assignedTo='\(oldestAssignee ?? "?")' waiting \(age). Patch assignedTo to 'scheduler' to release it, or cancel it.",
+                timestamp: time
+            )
+        } catch {
+            return CheckResult(name: "orphanedAssignee", healthy: true, message: "OK (query failed: \(error.localizedDescription))", timestamp: time)
         }
     }
 }
