@@ -297,7 +297,8 @@ actor FriendRelay {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let body = String(data: data, encoding: .utf8) ?? ""
+            // Lossy decode, so a body with one bad byte still reaches the log.
+            let body = String(decoding: data, as: UTF8.self)
             logger.error("FriendRelay: \(friend.provider) API error \(statusCode): \(body.prefix(200))")
             return nil
         }

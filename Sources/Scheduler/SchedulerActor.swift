@@ -923,7 +923,12 @@ private final class ShellRunState: @unchecked Sendable {
     private func readyLocked() -> (status: Int32, String)? {
         guard eofSeen, let status = exitStatus, !completed else { return nil }
         completed = true
-        return (status, String(data: data, encoding: .utf8) ?? "")
+        // Lossy decode: invalid bytes become U+FFFD. The failable
+        // String(data:encoding:) returned nil for ANY invalid byte, and `?? ""` then
+        // recorded a successful run with no output. `cmd 2>&1 | tail -c N` hits this
+        // whenever the byte cut lands inside a multibyte character (11/18: the
+        // unowned-branch report began at 0x94, the middle of an em dash).
+        return (status, String(decoding: data, as: UTF8.self))
     }
 }
 

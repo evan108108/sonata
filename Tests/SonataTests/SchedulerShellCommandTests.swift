@@ -99,6 +99,35 @@ final class SchedulerShellCommandTests: XCTestCase {
         }
     }
 
+    /// Output that is not valid UTF-8 must still come back. The failable
+    /// String(data:encoding:) returned nil here, and `?? ""` recorded a successful run
+    /// with an empty lastResult. 0x94 is a lone continuation byte: where
+    /// `tail -c N` lands when it cuts an em dash (E2 80 94) after its first two bytes.
+    func testOutputStartingWithLoneContinuationByteIsNotDropped() async throws {
+        let output = try await SchedulerActor.runShellCommand(#"printf '\x94 hello\n'"#)
+        XCTAssertFalse(output.isEmpty, "invalid UTF-8 must not decode to an empty result")
+        XCTAssertTrue(output.contains("hello"), "output was: \(output)")
+        XCTAssertTrue(output.contains("\u{FFFD}"), "the bad byte should become U+FFFD, output was: \(output)")
+    }
+
+    /// The real-world shape: a byte-count tail that starts inside a multibyte character.
+    func testByteCountTailSplittingMultibyteCharacterKeepsOutput() async throws {
+        // "a—b" is 61 E2 80 94 62; `tail -c 2` keeps 94 62, starting mid-character.
+        let output = try await SchedulerActor.runShellCommand(#"printf 'a\xe2\x80\x94b' | tail -c 2"#)
+        XCTAssertTrue(output.hasSuffix("b"), "output was: \(output.unicodeScalars.map { String($0.value, radix: 16) })")
+    }
+
+    /// The failure path decodes the same bytes: the thrown output must keep its text too.
+    func testFailingCommandWithInvalidUTF8KeepsOutput() async throws {
+        do {
+            _ = try await SchedulerActor.runShellCommand(#"printf '\x94 oops\n'; exit 3"#)
+            XCTFail("expected shellFailed")
+        } catch let SchedulerError.shellFailed(exitCode, output) {
+            XCTAssertEqual(exitCode, 3)
+            XCTAssertTrue(output.contains("oops"), "output was: \(output)")
+        }
+    }
+
     /// stderr is merged into the same pipe; a job that only writes to stderr must not
     /// come back blank.
     func testStderrIsCaptured() async throws {
