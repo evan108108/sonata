@@ -366,6 +366,23 @@ case "${1:-help}" in
     _get "/api/stats" | jq -r '"## System: \(.totalMemories) memories, \(.entityCount) entities"'
     ;;
 
+  # ── Secrets (names only) ──
+  # Deliberately list-only: values stay behind the mem_secret_get MCP tool, so nothing
+  # piped from this CLI (logs, sweep scripts) can carry one. A failed request exits
+  # non-zero instead of printing an empty list.
+
+  secret)
+    shift
+    case "${1:-list}" in
+      list)
+        _check_api
+        resp=$(_get "/api/secrets/") || { echo "Error: GET /api/secrets/ failed" >&2; exit 1; }
+        printf '%s\n' "$resp" | jq -er '.[] | .name'
+        ;;
+      *) echo "Usage: mem secret list"; exit 1;;
+    esac
+    ;;
+
   # ── Private ──
 
   private)
@@ -398,6 +415,7 @@ case "${1:-help}" in
     echo "Core:        core list/get/set"
     echo "Docs:        doc search <q>"
     echo "Lifecycle:   handoff <letter> | wake | private [read]"
+    echo "Secrets:     secret list   (names only, never values)"
     echo "System:      health | stats | status"
     ;;
 
