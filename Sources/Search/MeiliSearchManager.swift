@@ -201,7 +201,11 @@ actor MeiliSearchManager: SearchService {
         ])
         await updateSettings(index: "sessions", settings: [
             "searchableAttributes": ["text", "project", "sessionId"],
-            "displayedAttributes": ["id", "sessionId", "project", "chunk", "text", "mtimeMs"]
+            "displayedAttributes": ["id", "sessionId", "project", "chunk", "text", "mtimeMs"],
+            // Lets removeSessionChunks(sessionId:) delete by filter. Meili runs
+            // an index's tasks in order, so a filter delete enqueued after this
+            // settings task never runs before the attribute is filterable.
+            "filterableAttributes": ["sessionId"]
         ])
     }
 
@@ -324,6 +328,52 @@ actor MeiliSearchManager: SearchService {
     func removeSessionChunks(ids: [String]) async {
         guard !ids.isEmpty else { return }
         let _ = await post(path: "/indexes/sessions/documents/delete-batch", body: ids)
+    }
+
+    func removeSessionChunks(sessionId: String) async {
+        guard !sessionId.isEmpty else { return }
+        let escaped = sessionId
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let _ = await post(path: "/indexes/sessions/documents/delete",
+                           body: ["filter": "sessionId = \"\(escaped)\""])
+    }
+
+    func removeAllSessionChunks() async {
+        let _ = await delete(path: "/indexes/sessions/documents")
+    }
+
+    /// Pages /documents/fetch with only the id fields, so it never pulls text.
+    /// Returns nil unless every page parsed and the total matched.
+    func listSessionChunkRefs() async -> [SessionChunkRef]? {
+        let pageSize = 1000
+        var out: [SessionChunkRef] = []
+        var offset = 0
+        var total = Int.max
+        while offset < total {
+            guard let data = await post(path: "/indexes/sessions/documents/fetch",
+                                        body: ["fields": ["id", "sessionId", "chunk"],
+                                               "limit": pageSize, "offset": offset] as [String: Any]),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let results = json["results"] as? [[String: Any]],
+                  let t = json["total"] as? Int else { return nil }
+            total = t
+            for r in results {
+                guard let id = r["id"] as? String, let sid = r["sessionId"] as? String else { return nil }
+                let chunk = (r["chunk"] as? String).flatMap(Int.init) ?? (r["chunk"] as? Int) ?? -1
+                out.append(SessionChunkRef(id: id, sessionId: sid, chunk: chunk))
+            }
+            if results.isEmpty { break }
+            offset += results.count
+        }
+        return out.count == total ? out : nil
+    }
+
+    func pendingTaskCount(index: String) async -> Int {
+        guard let data = await get(path: "/tasks?indexUids=\(index)&statuses=enqueued,processing&limit=1"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let total = json["total"] as? Int else { return -1 }
+        return total
     }
 
     func searchSessions(query: String, limit: Int = 5) async -> [SearchResult] {

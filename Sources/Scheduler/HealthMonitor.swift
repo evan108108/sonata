@@ -68,6 +68,27 @@ actor HealthMonitor {
     /// Consecutive failure counts by check name.
     private var consecutiveFailures: [String: Int] = [:]
 
+    /// Reports whether ConversationIndexer is mid-rebuild (a sweep or the
+    /// launch pass is running, or a backlog is draining). Nil in harnesses.
+    private let sessionsIndexRebuilding: (@Sendable () async -> Bool)?
+    /// Consecutive search checks the index_sessions verdict has been held for.
+    private var sessionsIndexHeldStreak = 0
+    /// Cap on consecutive holds: 6 search checks, about 60 min. A rebuild that
+    /// is still out of tolerance after that is treated as a wedged writer, so
+    /// a hold can delay the alarm but never hide one.
+    static let sessionsIndexMaxHeldChecks = 6
+
+    /// Drift tolerance shared by the index checks and ConversationIndexer's
+    /// launch pass: 5% of the source count, minimum 5.
+    static func indexDriftTolerance(source: Int) -> Int { max(5, source / 20) }
+
+    /// Hold (neither pass nor strike) an out-of-tolerance index_sessions
+    /// reading while the writer is legitimately mid-rebuild, up to the cap.
+    static func shouldHoldSessionsVerdict(drift: Int, tolerance: Int, rebuilding: Bool,
+                                          heldStreak: Int) -> Bool {
+        drift > tolerance && rebuilding && heldStreak < sessionsIndexMaxHeldChecks
+    }
+
     /// Session outcome tracking: label → (successes, failures).
     private var sessionOutcomes: [String: (successes: Int, failures: Int)] = [:]
 
@@ -257,9 +278,11 @@ actor HealthMonitor {
         cycleStuckWorkers: (@Sendable ([String]) async -> Void)? = nil,
         emailProvider: EmailProvider = AgentMailProvider(),
         search: (any SearchService)? = nil,
+        sessionsIndexRebuilding: (@Sendable () async -> Bool)? = nil,
         logger: Logger? = nil
     ) {
         self.dbPool = dbPool
+        self.sessionsIndexRebuilding = sessionsIndexRebuilding
         self.emailProvider = emailProvider
         self.serverURL = "http://127.0.0.1:\(port)/api/ping"
         self.schedulerStatus = schedulerStatus
@@ -695,7 +718,7 @@ actor HealthMonitor {
     /// documents dir, unlike wiki/private). Everything reports drift into the
     /// existing consecutive-failure alert → supervisor path, so a wedged
     /// sweeper or watcher pages within minutes instead of going unnoticed.
-    private func checkSearchAndEmbeddings(at time: Date) async -> [CheckResult] {
+    func checkSearchAndEmbeddings(at time: Date) async -> [CheckResult] {
         guard let search else { return [] }
         var out: [CheckResult] = []
 
@@ -764,7 +787,29 @@ actor HealthMonitor {
             // Drift in EITHER direction: under-count = missing docs, over-count
             // = orphans (deleted sources never pruned). Alarm beyond tolerance.
             let drift = abs(c.source - indexed)
-            let tolerance = max(5, c.source / 20)  // 5%, min 5
+            let tolerance = Self.indexDriftTolerance(source: c.source)
+            if c.name == "sessions" {
+                // Mid-rebuild the index legitimately runs ahead of (or, while
+                // Meili's queue drains, behind) SUM(chunkCount). Hold the
+                // verdict, emitting no result so the strike count neither
+                // grows nor resets, while the indexer or Meili reports work
+                // in flight, up to the cap.
+                var rebuilding = await sessionsIndexRebuilding?() ?? false
+                if !rebuilding, drift > tolerance {
+                    rebuilding = await search.pendingTaskCount(index: "sessions") > 0
+                }
+                if Self.shouldHoldSessionsVerdict(drift: drift, tolerance: tolerance,
+                                                  rebuilding: rebuilding,
+                                                  heldStreak: sessionsIndexHeldStreak) {
+                    sessionsIndexHeldStreak += 1
+                    logger.info("search index 'sessions' \(indexed)/\(c.source) while rebuilding — verdict held (\(sessionsIndexHeldStreak)/\(Self.sessionsIndexMaxHeldChecks))")
+                    continue
+                }
+                // Reset only on a reading that needs no hold. Past the cap a
+                // still-rebuilding drift keeps its streak, so it strikes every
+                // cycle and reaches the alert instead of earning a fresh 6.
+                if !(drift > tolerance && rebuilding) { sessionsIndexHeldStreak = 0 }
+            }
             if drift > tolerance, let heal = c.heal {
                 logger.warning("search index '\(c.name)' drift \(indexed) vs source \(c.source) — reconciling")
                 await heal()

@@ -39,8 +39,20 @@ protocol SearchService: Sendable {
     func searchEmails(query: String, limit: Int) async -> [SearchResult]
     func indexSessionChunks(_ docs: [[String: String]]) async
     func removeSessionChunks(ids: [String]) async
+    /// Delete every chunk of one session by filter (`sessionId = X`), not by
+    /// id range. A range built from a recorded chunkCount misses any doc above
+    /// it, and those docs then leak forever.
+    func removeSessionChunks(sessionId: String) async
+    /// Delete every document in the sessions index (full reset).
+    func removeAllSessionChunks() async
+    /// (id, sessionId, chunk) of every sessions doc, or nil if Meili is
+    /// unreachable or the read is incomplete.
+    func listSessionChunkRefs() async -> [SessionChunkRef]?
     func searchSessions(query: String, limit: Int) async -> [SearchResult]
     func documentCount(index: String) async -> Int
+    /// Enqueued + processing engine tasks for one index; -1 if unreachable.
+    /// A count read while writes are still queued is not a drift signal.
+    func pendingTaskCount(index: String) async -> Int
 
     // MARK: - Unified
     func search(query: String, limit: Int) async -> [SearchResult]
@@ -51,6 +63,13 @@ protocol SearchService: Sendable {
     func pruneArchiveOrphans(dbPool: DatabasePool) async -> Int
     func backfillDocs() async
     func backfillPrivate() async
+}
+
+/// Identity of one doc in the sessions index, without its text.
+struct SessionChunkRef: Sendable, Equatable {
+    let id: String
+    let sessionId: String
+    let chunk: Int
 }
 
 /// A single search result from any index.

@@ -1304,9 +1304,10 @@ struct SonataApp: App {
                 // interrupt) can never be recovered by the normal 5-min
                 // tick, which skips files whose size/mtime is unchanged.
                 // `backfillMissing` prunes rows whose source .jsonl is gone
-                // and resets the rest so the next sweep re-indexes them.
-                // Detached so it doesn't block boot. Motivating incident:
-                // scout-cloud 2026-09-16 (Scout thread f7b23883).
+                // and resets the rest only when the settled index is short of
+                // SUM(chunkCount) (lost writes); otherwise it prunes orphan docs
+                // by session. Detached so it doesn't block boot. Motivating
+                // incident: scout-cloud 2026-09-16 (Scout thread f7b23883).
                 Task {
                     _ = await conversationIndexer.backfillMissing()
                 }
@@ -1685,7 +1686,10 @@ struct SonataApp: App {
                     // Enables the periodic search-index + embedding-coverage
                     // reconcile (self-heals docs drift, alarms on any index or
                     // vector gap) — the standing guard against silent drift.
-                    search: meili
+                    search: meili,
+                    // index_sessions holds its verdict while the indexer is
+                    // mid-rebuild instead of striking on an in-flight count.
+                    sessionsIndexRebuilding: { await conversationIndexer.isRebuilding }
                 )
                 await healthMonitor.start()
 

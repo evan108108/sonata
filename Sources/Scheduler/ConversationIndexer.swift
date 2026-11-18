@@ -38,11 +38,35 @@ actor ConversationIndexer {
     /// Exposed for the recall health block.
     private(set) var lastTranscriptSweepMs: Int64 = 0
 
-    init(dbPool: DatabasePool, search: any SearchService, logger: Logger) {
+    /// A transcript sweep is running. indexTranscript posts a file's chunks in
+    /// batches and records chunkCount only at the end, so mid-sweep the index
+    /// can run ahead of SUM(chunkCount) with nothing wrong.
+    private var sweepInProgress = false
+    /// The launch convergence pass (prune / reset) is running. Sweeps stand
+    /// down meanwhile, because the prune reads the index and the state table
+    /// together and a half-written file would look like an over-count.
+    private var maintenanceInProgress = false
+    /// Work is known to be outstanding: set by a full reset or by a sweep that
+    /// stopped at its time budget, cleared by a sweep that finishes within it.
+    private var backlogPending = false
+
+    private let projectsRoot: String
+
+    init(dbPool: DatabasePool, search: any SearchService, logger: Logger,
+         projectsRoot: String = NSHomeDirectory() + "/.claude/projects",
+         settleTimeoutSeconds: TimeInterval = 120) {
         self.dbPool = dbPool
         self.search = search
         self.logger = logger
+        self.projectsRoot = projectsRoot
+        self.settleTimeoutSeconds = settleTimeoutSeconds
     }
+
+    /// True while the sessions index is legitimately out of step with
+    /// SUM(chunkCount): a sweep or the launch pass is running, or a backlog is
+    /// still draining. HealthMonitor's index_sessions check holds its strike
+    /// count while this is true.
+    var isRebuilding: Bool { sweepInProgress || maintenanceInProgress || backlogPending }
 
     func start() {
         task?.cancel()
@@ -56,29 +80,68 @@ actor ConversationIndexer {
 
     func stop() { task?.cancel(); task = nil }
 
-    /// Convergence pass: prune transcriptIndexState rows whose .jsonl file
-    /// is gone (nothing to re-chunk), and reset every surviving row so the
-    /// next transcript sweep re-reads it from offset 0. Meili doc ids are
-    /// stable (`<sessionId>_<chunkIndex>`), so re-indexing is an upsert —
-    /// idempotent. Also removes any existing chunks for the reset rows to
-    /// avoid stale duplicates when a prior chunkCount was over-reported.
+    /// What the launch convergence pass did, for logging and tests.
+    struct BackfillOutcome: Sendable, Equatable {
+        /// State rows dropped because their .jsonl is gone.
+        var purgedRows = 0
+        /// True when lost writes forced the full reset (the 9/16 recovery path).
+        var fullReset = false
+        var resetRows = 0
+        /// Docs deleted because no state row accounts for them.
+        var prunedDocs = 0
+        /// The pass couldn't read a settled index, so it decided nothing.
+        var skippedUnsettled = false
+    }
+
+    /// How long the launch pass waits for Meili's queue for `sessions` to
+    /// drain before it decides anything from the doc count.
+    private let settleTimeoutSeconds: TimeInterval
+
+    /// Launch convergence pass for the `sessions` index. It runs once per
+    /// launch, from a detached Task so it never blocks boot.
     ///
-    /// Motivating incident: 2026-09-16 the .17→scout-cloud SQLite migration
-    /// hit a corruption storm (12:01-12:21 local) mid-write into
-    /// transcriptIndexState — 785 rows / 9,031 chunks were recorded but the
-    /// corresponding Meili writes were lost. The normal 5-tick sweep skips
-    /// any file whose size/mtime is unchanged, so that backlog could never
-    /// drain without an explicit reset. Runs once per launch, right after
-    /// `start()`, from a detached Task so it never blocks boot.
+    /// Until 11/18 this reset EVERY state row on every launch: it deleted all
+    /// chunks and re-indexed all ~310 transcripts from offset 0, multi-GB per
+    /// relaunch (one transcript is 743 MB). Mid-rebuild the index runs ahead of
+    /// SUM(chunkCount), because chunkCount is saved only when a file finishes,
+    /// so two relaunches 15 min apart tripped index_sessions 3 times. Now:
     ///
-    /// Returns the counts for logging.
+    /// 1. Wait for a running sweep, then hold sweeps off.
+    /// 2. Drop state rows whose .jsonl is gone, deleting their docs by session.
+    /// 3. If the index is settled (no queued writes) and holds FEWER docs than
+    ///    SUM(chunkCount) beyond the index_sessions tolerance, writes were
+    ///    lost: full reset. This is the 9/16 recovery path. The 2026-09-16
+    ///    .17→scout-cloud migration hit a SQLite corruption storm mid-write, so
+    ///    785 rows / 9,031 chunks were recorded but never reached Meili. The
+    ///    5-tick sweep skips unchanged files, so only a reset drains that.
+    /// 4. Otherwise prune by session: docs whose session has no state row, and
+    ///    docs at or above their session's chunkCount. Deletes by id range
+    ///    0..<chunkCount can never reach those, so they used to leak forever.
+    /// 5. Kick a sweep so any reset or backlog starts draining now.
     @discardableResult
-    func backfillMissing() async -> (purged: Int, reset: Int, chunks: Int) {
-        struct StateRow {
-            let path: String
-            let sessionId: String
-            let chunkCount: Int
+    func backfillMissing() async -> BackfillOutcome {
+        while sweepInProgress {
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
+        // No await between the check above and this line, so no sweep can
+        // start in between (sweepTranscripts checks this flag first).
+        maintenanceInProgress = true
+        let outcome = await converge()
+        maintenanceInProgress = false
+
+        await sweepTranscripts()
+        lastTranscriptSweepMs = nowMs()
+        return outcome
+    }
+
+    private struct StateRow {
+        let path: String
+        let sessionId: String
+        let chunkCount: Int
+    }
+
+    private func converge() async -> BackfillOutcome {
+        var outcome = BackfillOutcome()
         let rows: [StateRow]
         do {
             rows = try await dbPool.read { db in
@@ -91,9 +154,8 @@ actor ConversationIndexer {
             }
         } catch {
             logger.error("conversation index: backfill state read failed: \(error)")
-            return (0, 0, 0)
+            return outcome
         }
-        guard !rows.isEmpty else { return (0, 0, 0) }
 
         let fm = FileManager.default
         var orphans: [StateRow] = []
@@ -102,12 +164,13 @@ actor ConversationIndexer {
             if fm.fileExists(atPath: r.path) { live.append(r) } else { orphans.append(r) }
         }
 
-        // 1. Purge orphan rows + their Meili chunks (source file gone; can
-        //    never be re-chunked).
+        // 1. Drop orphan rows (source file gone; can never be re-chunked) and
+        //    their docs. By session, not by id range, so docs above a stale
+        //    chunkCount go too. Skip a session a live row still shares.
         if !orphans.isEmpty {
-            for o in orphans where o.chunkCount > 0 {
-                let ids = (0..<o.chunkCount).map { "\(o.sessionId)_\($0)" }
-                await search.removeSessionChunks(ids: ids)
+            let liveSessions = Set(live.map(\.sessionId))
+            for sid in Set(orphans.map(\.sessionId)) where !liveSessions.contains(sid) {
+                await search.removeSessionChunks(sessionId: sid)
             }
             let orphanPaths = orphans.map { $0.path }
             do {
@@ -120,51 +183,88 @@ actor ConversationIndexer {
                             arguments: StatementArguments(slice))
                     }
                 }
+                outcome.purgedRows = orphans.count
                 logger.info("conversation index: pruned \(orphans.count) orphan transcript rows (source file missing)")
             } catch {
                 logger.error("conversation index: orphan prune failed: \(error)")
             }
         }
 
-        // 2. Reset live rows: remove any existing Meili chunks, zero the state.
-        //    Next sweep re-indexes from offset 0 via the normal indexTranscript path.
-        var chunksRemoved = 0
-        for r in live where r.chunkCount > 0 {
-            let ids = (0..<r.chunkCount).map { "\(r.sessionId)_\($0)" }
-            await search.removeSessionChunks(ids: ids)
-            chunksRemoved += ids.count
+        // 2. Read the index only once its queue is empty. A count taken while
+        //    writes are queued says nothing about lost writes.
+        let deadline = Date().addingTimeInterval(settleTimeoutSeconds)
+        var pending = await search.pendingTaskCount(index: "sessions")
+        while pending > 0 && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            pending = await search.pendingTaskCount(index: "sessions")
         }
-        do {
-            try await dbPool.write { db in
-                try db.execute(sql: """
-                    UPDATE transcriptIndexState
-                    SET lastSize = 0, lastMtimeMs = 0, lastOffset = 0, chunkCount = 0
-                    """)
+        let indexed = await search.documentCount(index: "sessions")
+        guard pending == 0, indexed >= 0 else {
+            outcome.skippedUnsettled = true
+            logger.warning("conversation index: sessions index not settled (pending \(pending), count \(indexed)); skipping reset/prune this launch")
+            return outcome
+        }
+
+        // 3. Lost writes → full reset (the 9/16 path).
+        let source = live.reduce(0) { $0 + $1.chunkCount }
+        if source - indexed > HealthMonitor.indexDriftTolerance(source: source) {
+            await search.removeAllSessionChunks()
+            do {
+                try await dbPool.write { db in
+                    try db.execute(sql: """
+                        UPDATE transcriptIndexState
+                        SET lastSize = 0, lastMtimeMs = 0, lastOffset = 0, chunkCount = 0
+                        """)
+                }
+            } catch {
+                logger.error("conversation index: state reset failed: \(error)")
+                return outcome
             }
-        } catch {
-            logger.error("conversation index: state reset failed: \(error)")
-            return (orphans.count, 0, chunksRemoved)
-        }
-        if !live.isEmpty {
-            logger.info("conversation index: reset \(live.count) transcript rows for backfill (\(chunksRemoved) stale chunks removed); next sweep will re-index")
+            backlogPending = true
+            outcome.fullReset = true
+            outcome.resetRows = live.count
+            logger.warning("conversation index: sessions index has \(indexed) docs but state records \(source) — lost writes; reset \(live.count) transcript rows for a full re-index")
+            return outcome
         }
 
-        // 3. Kick a sweep now so the backfill actually drains — otherwise
-        //    the user waits for the next tick (up to 5 minutes) to see any
-        //    progress. sweepTranscripts respects its own 55s budget and the
-        //    remainder falls to subsequent ticks.
-        await sweepTranscripts()
-        lastTranscriptSweepMs = nowMs()
-
-        return (orphans.count, live.count, chunksRemoved)
+        // 4. Prune docs no state row accounts for.
+        guard let refs = await search.listSessionChunkRefs() else {
+            logger.warning("conversation index: could not list sessions docs; orphan prune skipped")
+            return outcome
+        }
+        var recorded: [String: Int] = [:]
+        for r in live { recorded[r.sessionId] = max(recorded[r.sessionId] ?? 0, r.chunkCount) }
+        var unknownSessions: [String: Int] = [:]
+        var overCount: [String] = []
+        for ref in refs {
+            if let count = recorded[ref.sessionId] {
+                if ref.chunk < 0 || ref.chunk >= count { overCount.append(ref.id) }
+            } else {
+                unknownSessions[ref.sessionId, default: 0] += 1
+            }
+        }
+        for (sid, _) in unknownSessions {
+            await search.removeSessionChunks(sessionId: sid)
+        }
+        if !overCount.isEmpty {
+            await search.removeSessionChunks(ids: overCount)
+        }
+        outcome.prunedDocs = overCount.count + unknownSessions.values.reduce(0, +)
+        if outcome.prunedDocs > 0 {
+            logger.info("conversation index: pruned \(outcome.prunedDocs) orphan session docs (\(unknownSessions.count) sessions with no state row, \(overCount.count) above their chunkCount)")
+        }
+        return outcome
     }
 
-    func healthSnapshot() async -> (lastSweepMs: Int64, filesIndexed: Int) {
+    func healthSnapshot() async -> (lastSweepMs: Int64, filesIndexed: Int, rebuilding: Bool) {
         let files = (try? await dbPool.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcriptIndexState") ?? 0
         }) ?? 0
-        return (lastTranscriptSweepMs, files)
+        return (lastTranscriptSweepMs, files, isRebuilding)
     }
+
+    /// Test seam: one transcript sweep, as tick() runs it.
+    func sweepForTesting() async { await sweepTranscripts() }
 
     private func tick() async {
         tickCount += 1
@@ -248,7 +348,10 @@ actor ConversationIndexer {
     }
 
     private func sweepTranscripts() async {
-        let projectsRoot = NSHomeDirectory() + "/.claude/projects"
+        // One sweep at a time, and none during the launch pass.
+        guard !maintenanceInProgress, !sweepInProgress else { return }
+        sweepInProgress = true
+        defer { sweepInProgress = false }
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(atPath: projectsRoot) else { return }
 
@@ -260,8 +363,10 @@ actor ConversationIndexer {
         let deadline = Date().addingTimeInterval(Self.sweepBudgetSeconds)
         var filesTouched = 0
         var chunksWritten = 0
+        var hitBudget = false
         for path in paths {
             if Date() > deadline {
+                hitBudget = true
                 logger.info("conversation index: sweep budget reached after \(filesTouched) files; resuming next sweep")
                 break
             }
@@ -275,6 +380,9 @@ actor ConversationIndexer {
         if chunksWritten > 0 {
             logger.info("conversation index: \(chunksWritten) session chunks from \(filesTouched) files")
         }
+        // A sweep that reached every file has drained any backlog; one that
+        // stopped at its budget leaves work for the next.
+        backlogPending = hitBudget
     }
 
     /// Returns the number of chunks written (0 = file unchanged).
@@ -306,8 +414,10 @@ actor ConversationIndexer {
                 chunkIndex = s.chunkCount
             } else {
                 // File shrank: rewritten (e.g. resumed session rewrote history).
-                // Drop its docs and re-index from scratch.
-                await search.removeSessionChunks(ids: (0..<s.chunkCount).map { "\(sessionId)_\($0)" })
+                // Drop ALL its docs and re-index from scratch. By session, not
+                // by 0..<chunkCount: a recorded count below the real one (a run
+                // that died mid-file) would leave the docs above it forever.
+                await search.removeSessionChunks(sessionId: sessionId)
             }
         }
 
