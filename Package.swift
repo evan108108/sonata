@@ -28,6 +28,7 @@ let package = Package(
                 .product(name: "P256K", package: "swift-secp256k1"),
                 .product(name: "SwiftMail", package: "SwiftMail"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
+                "SonataSpawn",
             ],
             path: "Sources",
             resources: [
@@ -43,10 +44,18 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // Sonata's own forkpty: SwiftTerm's terminal children close every
+        // descriptor above stderr before exec (CSources/SonataSpawn/SonataSpawn.c).
+        .target(
+            name: "SonataSpawn",
+            path: "CSources/SonataSpawn"
+        ),
         .testTarget(
             name: "SonataTests",
             dependencies: [
                 "Sonata",
+                "SonataSpawn",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdTesting", package: "hummingbird"),

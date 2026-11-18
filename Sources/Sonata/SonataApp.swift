@@ -5,6 +5,7 @@ import HummingbirdWebSocket
 import GRDB
 import Logging
 import SwiftTerm
+import SonataSpawn
 
 // MARK: - Studio dbPool environment key (impl-spec §10 Diff E)
 
@@ -1131,6 +1132,13 @@ struct SonataApp: App {
         // server down permanently). 10240 is well above steady-state usage and
         // under the kernel's per-process cap. See raiseFileDescriptorLimit.
         raiseFileDescriptorLimit(to: 10240)
+
+        // Terminal children (workers, sessions, supervisor, sidecars) are forked
+        // through Sonata's own forkpty, which closes descriptors above stderr
+        // before exec (CSources/SonataSpawn). Logged so a deploy can confirm it.
+        if sonata_forkpty_closes_inherited_fds() == 1 {
+            sonataFileLog("Sonata init: forkpty override active — terminal children close inherited fds above 2")
+        }
 
         // Record who sends SIGTERM/SIGINT before any plugin or worker can.
         // A stray one used to surface only as an HTTP restart (10/27).
