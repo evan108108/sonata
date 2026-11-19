@@ -64,10 +64,65 @@ done
 # needs the bridge up so plugin_install can be called, and putting it
 # after the swap+relaunch means it always has a running Sonata to talk to.
 
+# The new binary is staged next to the old one (same dir = same volume, so the
+# final `mv` is an atomic rename). 2026-11-19: a plain `cp` onto $BIN_DST was
+# SIGKILLed mid-write and left a 36 MiB half-binary macOS refused to open.
+BIN_STAGE="$APP/Contents/MacOS/.Sonata.deploy-new"
+DEPLOY_LOCAL_EXIT_MARKER="==> deploy-local exit"
+
 # Always restore the resource bundle to the app root, even if signing aborts,
-# so a failed run never leaves the .app structurally broken.
+# so a failed run never leaves the .app structurally broken. A leftover stage
+# file in Contents/MacOS would break the next codesign seal, so drop it too.
 restore_bundle() { [ -d "$TMP_BUNDLE" ] && mv "$TMP_BUNDLE" "$RESOURCE_BUNDLE" 2>/dev/null || true; }
-trap restore_bundle EXIT
+on_exit() {
+  local rc=$?
+  restore_bundle
+  rm -f "$BIN_STAGE"
+  # The non-detached caller polls the log for this line to learn our exit code.
+  if [ -n "${DEPLOY_LOCAL_DETACHED:-}" ]; then echo "$DEPLOY_LOCAL_EXIT_MARKER $rc"; fi
+}
+trap on_exit EXIT
+
+# Run from a shell Sonata spawned (a worker, a Sonata terminal tab), this
+# script quits its own ancestor: Sonata SIGTERMs its sessions, the session's
+# claude SIGKILLs its in-flight Bash child, and the deploy dies wherever it is
+# (2026-11-19 08:25, worker 786ee775: exit 137 mid-swap). So under Sonata we
+# re-launch ourselves fully detached — perl fork + setsid + exec reparents the
+# deploy to launchd, out of reach of both process-group kills and descendant
+# tree walks — and just follow its log. If quitting Sonata kills this caller,
+# the detached deploy carries on; its log path is printed first.
+under_sonata() {
+  local p=$$
+  while [ "$p" -gt 1 ]; do
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    [ -n "$p" ] || return 1
+    [ "$(ps -o command= -p "$p" 2>/dev/null)" = "$BIN_DST" ] && return 0
+  done
+  return 1
+}
+
+if [ -z "${DEPLOY_LOCAL_DETACHED:-}" ] && under_sonata; then
+  SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  DLOG="/tmp/sonata-deploy-local.$$.log"; : > "$DLOG"
+  DEPLOY_LOCAL_DETACHED=1 /usr/bin/perl -MPOSIX=setsid -e '
+    defined(my $pid = fork) or die "fork: $!";
+    exit 0 if $pid;
+    setsid() or die "setsid: $!";
+    exec @ARGV or die "exec: $!";
+  ' "$SELF" "$@" >> "$DLOG" 2>&1 < /dev/null
+  echo "==> running under Sonata — deploy detached so quitting Sonata can't kill it"
+  echo "==> log: $DLOG"
+  tail -n +1 -f "$DLOG" &
+  TAIL_PID=$!
+  rc=""
+  while [ -z "$rc" ]; do
+    sleep 1
+    rc=$(sed -n "s/^${DEPLOY_LOCAL_EXIT_MARKER} \([0-9][0-9]*\)$/\1/p" "$DLOG" | tail -1)
+  done
+  sleep 1; kill "$TAIL_PID" 2>/dev/null || true
+  trap - EXIT
+  exit "$rc"
+fi
 
 port_3211_bound() { lsof -nP -iTCP:3211 -sTCP:LISTEN >/dev/null 2>&1; }
 
@@ -83,10 +138,13 @@ bridge_up() {
   [ -n "$code" ] && [ "$code" != "000" ]
 }
 
+# Anchored to Sonata's own command line: an unanchored `pkill -KILL -f "$BIN_DST"`
+# also matches any shell whose command line merely mentions the binary path.
+SONATA_CMD_RE="^${BIN_DST}( |\$)"
 quit_app() {
   osascript -e 'tell application "Sonata" to quit' 2>/dev/null || true
-  for _ in $(seq 1 15); do pgrep -f "$BIN_DST" >/dev/null || break; sleep 1; done
-  pkill -KILL -f "$BIN_DST" 2>/dev/null || true
+  for _ in $(seq 1 15); do pgrep -f "$SONATA_CMD_RE" >/dev/null || break; sleep 1; done
+  pkill -KILL -f "$SONATA_CMD_RE" 2>/dev/null || true
   for _ in $(seq 1 20); do port_3211_bound || break; sleep 1; done
 }
 
@@ -137,11 +195,17 @@ fi
 echo "==> HEAD: $(git -C "$REPO" log -1 --format='%h %s')"
 [ -f "$BIN_DST" ] && cp "$BIN_DST" "/tmp/Sonata.binary.backup.$$" 2>/dev/null || true
 
+# Stage + verify BEFORE quitting: if the copy fails, Sonata is still running
+# its old binary and nothing in the .app has changed.
+echo "==> staging binary ($(stat -f '%z' "$BIN_SRC") bytes) → $BIN_STAGE"
+cp "$BIN_SRC" "$BIN_STAGE"
+cmp -s "$BIN_SRC" "$BIN_STAGE" || { echo "ERROR: staged binary doesn't match $BIN_SRC — Sonata left untouched" >&2; exit 1; }
+
 echo "==> quitting Sonata.app (and waiting for :3211 to free)"
 quit_app
 
-echo "==> swapping binary ($(stat -f '%z' "$BIN_SRC") bytes)"
-cp "$BIN_SRC" "$BIN_DST"
+echo "==> swapping binary (atomic rename)"
+mv -f "$BIN_STAGE" "$BIN_DST"
 
 # Resources go into BOTH bundle paths — Bundle.main.resourcePath resolves to
 # Contents/Resources/ (web assets), Bundle.module resolves to Sonata_Sonata.bundle/
