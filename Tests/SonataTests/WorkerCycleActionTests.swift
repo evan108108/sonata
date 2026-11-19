@@ -163,6 +163,38 @@ final class WorkerCycleActionTests: XCTestCase {
         XCTAssertNil(resp.requeuedEventId)
     }
 
+    // MARK: - cycleSkipReason (what cycleWorkerById skips)
+
+    func testDrainedWorkerIsCyclable() {
+        // The unwedge procedure drains first (worker_drain), and pollHealth
+        // copies the DB's 'draining' into Worker.status. That alone must not
+        // block the cycle, or a drained slot can never be recovered. This
+        // failed live on 11/19: drain sona-worker-10, wait one poll,
+        // worker_cycle → "already draining".
+        XCTAssertNil(cycleSkipReason(status: .draining, retiring: false))
+    }
+
+    func testInFlightCycleIsSkipped() {
+        XCTAssertEqual(cycleSkipReason(status: .draining, retiring: true), "already draining")
+        XCTAssertEqual(cycleSkipReason(status: .idle, retiring: true), "already draining")
+    }
+
+    func testRestartingAndStartingAreSkipped() {
+        XCTAssertEqual(cycleSkipReason(status: .restarting, retiring: false), "already restarting")
+        XCTAssertEqual(cycleSkipReason(status: .starting, retiring: false), "already starting")
+    }
+
+    func testUntrackedIsSkipped() {
+        XCTAssertEqual(cycleSkipReason(status: nil, retiring: false), "not tracked")
+    }
+
+    func testIdleBusyOfflineAreCyclable() {
+        // Offline stays cyclable: the offline-escalation reap relies on it.
+        XCTAssertNil(cycleSkipReason(status: .idle, retiring: false))
+        XCTAssertNil(cycleSkipReason(status: .busy, retiring: false))
+        XCTAssertNil(cycleSkipReason(status: .offline, retiring: false))
+    }
+
     // MARK: - Registration (no handler call: it would use the live cycler)
 
     func testActionIsRegisteredAsPostCycle() {

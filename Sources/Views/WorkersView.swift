@@ -131,6 +131,12 @@ class WorkerManager: ObservableObject {
     private var healthTimer: Timer?
     private let cycleStrategy: CycleStrategy = TaskCountStrategy()
     private var cycleFailureCount: [String: Int] = [:]  // worker label → consecutive failures
+    /// Workers with a cycle or removal in flight (cycleWorker / removeWorker
+    /// started and has not finished or aborted). This, not worker.status, is
+    /// what makes cycleWorkerById skip: pollHealth copies the DB's 'draining'
+    /// into worker.status every 5s, so a worker someone drained with
+    /// worker_drain would otherwise never be cyclable.
+    private var retiringWorkerIds = Set<String>()
     private var statusObservers: [String: AnyCancellable] = [:]  // worker.id → status sub
     private var workersArraySub: AnyCancellable?
 
@@ -727,6 +733,7 @@ class WorkerManager: ObservableObject {
         // Freeze the coordinator: no auto-restart, no future ops on this row.
         worker.coordinator?.autoRestartEnabled = false
         worker.status = .draining
+        await MainActor.run { _ = self.retiringWorkerIds.insert(worker.id) }
 
         print("[remove] term-sent: \(slotLabel) pid=\(shellPid) source=\(source)")
 
@@ -803,6 +810,7 @@ class WorkerManager: ObservableObject {
             // vanish only after the kill/cleanup sequence completes.
             DispatchQueue.main.async {
                 manager.workers.removeAll { $0.id == workerId }
+                manager.retiringWorkerIds.remove(workerId)
                 if manager.selectedWorkerId == workerId {
                     manager.selectedWorkerId = manager.workers.first?.id
                 }
@@ -843,28 +851,18 @@ class WorkerManager: ObservableObject {
     /// Look up a live worker by DB workerId and cycle it. Called by the
     /// HealthMonitor reaper when a task times out so the wedged claude PTY
     /// gets replaced instead of quietly re-dispatched. Skips workers that are
-    /// already gone or mid-transition (`.draining`, `.restarting`, `.starting`,
-    /// `.offline`) so a burst of reaps for related tasks doesn't try to cycle
-    /// the same slot twice.
+    /// already gone or mid-transition (a cycle/removal in flight, or
+    /// `.restarting` / `.starting`) so a burst of reaps for related tasks
+    /// doesn't try to cycle the same slot twice. See cycleSkipReason.
     @discardableResult
     func cycleWorkerById(_ workerId: String) -> WorkerCycleOutcome {
-        guard let worker = workers.first(where: { $0.id == workerId }) else {
-            print("[reap-cycle] worker \(workerId) no longer tracked — skipping")
-            return .skipped(reason: "not tracked")
+        let worker = workers.first(where: { $0.id == workerId })
+        if let reason = cycleSkipReason(status: worker?.status,
+                                        retiring: retiringWorkerIds.contains(workerId)) {
+            print("[reap-cycle] worker \(worker?.label ?? workerId) \(reason) — skipping")
+            return .skipped(reason: reason)
         }
-        switch worker.status {
-        case .draining, .restarting, .starting:
-            // Already being cycled — skip. Offline is NOT skipped: the
-            // offline-escalation reap in HealthMonitor invokes us against
-            // workers whose sweep has already flipped them to 'offline'.
-            // Those still need SIGTERM+respawn (the process may be alive
-            // but quiet; if truly dead SIGTERM is a no-op and spawn goes
-            // through).
-            print("[reap-cycle] worker \(worker.label) already \(worker.status) — skipping")
-            return .skipped(reason: "already \(worker.status.rawValue.lowercased())")
-        default:
-            break
-        }
+        guard let worker else { return .skipped(reason: "not tracked") }
         print("[reap-cycle] cycling stuck worker \(worker.label) (\(worker.status)) after reap")
         cycleWorker(worker)
         return .cycled(label: worker.label)
@@ -881,6 +879,7 @@ class WorkerManager: ObservableObject {
         // to helpfully respawn it — that would resurrect a worker we just intentionally
         // retired and put it back into the rotation.
         oldWorker.status = .draining
+        retiringWorkerIds.insert(oldWorker.id)
         oldWorker.coordinator?.autoRestartEnabled = false
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
         Task {
@@ -932,6 +931,7 @@ class WorkerManager: ObservableObject {
 
         // Un-drain the old worker — restore both DB status and auto-restart so it
         // continues serving (cycleWorker disabled auto-restart preemptively).
+        retiringWorkerIds.remove(oldWorker.id)
         oldWorker.status = .idle
         oldWorker.coordinator?.autoRestartEnabled = true
         let port = Int(ProcessInfo.processInfo.environment["SONATA_PORT"] ?? "") ?? 3211
@@ -976,6 +976,7 @@ class WorkerManager: ObservableObject {
                 }
                 print("[cycle] exit-observed: \(slotLabel)")
                 self.workers.removeAll { $0.id == worker.id }
+                self.retiringWorkerIds.remove(worker.id)
                 // Select the replacement if nothing selected
                 if self.selectedWorkerId == worker.id {
                     self.selectedWorkerId = self.workers.first?.id
@@ -2090,3 +2091,21 @@ struct PromptCacheStatsPanel: View {
     }
 }
 
+/// Why cycleWorkerById must NOT cycle a worker, or nil when it should.
+///
+/// A cycle or removal already in flight (`retiring`) and `.restarting` /
+/// `.starting` are skipped so a burst of reaps can't cycle one slot twice.
+/// `.draining` alone is NOT a skip: pollHealth mirrors the DB's 'draining'
+/// into Worker.status, so before 11/19 a worker drained with worker_drain
+/// (the documented unwedge step) answered every cycle with "already
+/// draining" and stayed a dead slot. `.offline` is not skipped either: the
+/// offline-escalation reap calls in for workers its sweep already flipped
+/// offline, and those still need SIGTERM + respawn.
+func cycleSkipReason(status: Worker.WorkerStatus?, retiring: Bool) -> String? {
+    guard let status else { return "not tracked" }
+    if retiring { return "already draining" }
+    switch status {
+    case .restarting, .starting: return "already \(status.rawValue.lowercased())"
+    default: return nil
+    }
+}
