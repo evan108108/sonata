@@ -34,6 +34,118 @@ func clearCurrentEventShouldProceed(held: String?, expected: String?, force: Boo
     return held == expected
 }
 
+/// Returned when worker_set_status(clearCurrentEvent) found the held event still
+/// 'assigned' to this worker, so it left the worker 'draining' instead of
+/// setting the status the caller asked for.
+struct ClearDrainedResponse: Encodable {
+    let success = true
+    let cleared = true
+    let drainedInstead = true
+    let status = "draining"
+    let workerId: String
+    let requestedStatus: String
+    let closedEventId: String
+    let message: String
+
+    init(workerId: String, requestedStatus: String, closedEventId: String) {
+        self.workerId = workerId
+        self.requestedStatus = requestedStatus
+        self.closedEventId = closedEventId
+        message = "Event \(closedEventId) was still 'assigned' to \(workerId), so this cleared live work rather than a stale pointer. "
+            + "The event is closed as 'completed' (its task is not touched; retry the task if its work did not land). "
+            + "The worker was left 'draining' instead of '\(requestedStatus)': a session holding assigned work usually has a stuck model loop, "
+            + "and its bridge keeps heartbeating, so idle would make it routable. Heartbeats preserve draining. "
+            + "Next: worker_cycle(workerId: \"\(workerId)\") to respawn it."
+    }
+}
+
+/// What worker_set_status's write transaction did.
+struct SetWorkerStatusOutcome {
+    /// False only when the clearCurrentEvent CAS refused.
+    let cleared: Bool
+    /// The event id the slot held when the transaction read it.
+    let held: String?
+    /// Set when the held event was still 'assigned' to this worker and got closed.
+    let closedLiveEventId: String?
+    /// True when the worker was set to 'draining' in place of the requested status.
+    let drainedInstead: Bool
+}
+
+/// The worker_set_status write transaction, pulled out so tests drive it on a
+/// real schema.
+///
+/// clearCurrentEvent on a still-'assigned' event is abandoning live work, and the
+/// session holding it usually has a stuck model loop whose bridge keeps
+/// heartbeating. Setting it idle made it routable again: Scout's 11/16 Verona
+/// Carpenter task reached worker-1698379606 10s after its pointer was cleared, and
+/// the 7200s watchdog killed it at 120 min. So that case leaves the worker
+/// 'draining' (heartbeats preserve it) for the caller to worker_cycle. A stale
+/// pointer to an already-terminal or missing event, the legitimate use after a
+/// complete_event no-op or a dm_reply, keeps the requested status. `force` only
+/// bypasses the CAS, never this.
+func applySetWorkerStatus(
+    workerId: String, status: String, clearCurrent: Bool,
+    expectedEventId: String?, force: Bool, in db: Database
+) throws -> SetWorkerStatusOutcome {
+    guard clearCurrent else {
+        try db.execute(
+            sql: "UPDATE workers SET status = ? WHERE workerId = ?",
+            arguments: [status, workerId]
+        )
+        return SetWorkerStatusOutcome(cleared: true, held: nil, closedLiveEventId: nil, drainedInstead: false)
+    }
+
+    // Capture the event this worker points at BEFORE nulling it, then close
+    // that dangling workerEvent too. Otherwise the worker frees but its event
+    // stays `assigned` forever — a leak that (for sonar_dm) shadows the
+    // dm_reply auto-complete and re-strands the next DM (2026-07-17). Only
+    // close an event still `assigned` to THIS worker.
+    let heldEventId = try String.fetchOne(db,
+        sql: "SELECT currentEventId FROM workers WHERE workerId = ?",
+        arguments: [workerId])
+    let held = (heldEventId?.isEmpty == false) ? heldEventId : nil
+
+    // Compare-and-swap. Refuse when the slot holds something other than what
+    // the caller expected — including when it is already empty, which means
+    // someone else got here first and whatever we would clear next is not ours.
+    guard clearCurrentEventShouldProceed(held: held, expected: expectedEventId, force: force) else {
+        return SetWorkerStatusOutcome(cleared: false, held: held, closedLiveEventId: nil, drainedInstead: false)
+    }
+
+    // The close's own predicate decides "live work": it changes a row only when
+    // the event is still 'assigned' to this worker.
+    var closedLive: String?
+    if let held {
+        try db.execute(sql: """
+            UPDATE workerEvents SET status = 'completed', completedAt = ?,
+                result = 'closed via worker_set_status(clearCurrentEvent)',
+                idempotencyKey = NULL
+            WHERE id = ? AND status = 'assigned' AND assignedTo = ?
+        """, arguments: [nowMs(), held, workerId])
+        if db.changesCount > 0 { closedLive = held }
+    }
+    let effectiveStatus = closedLive != nil ? "draining" : status
+
+    try db.execute(sql: """
+        UPDATE workers SET
+            status = ?,
+            currentEventId = NULL,
+            currentEventTokens = NULL,
+            currentSlug = NULL,
+            currentCacheReadTokens = NULL,
+            currentInputTokens = NULL,
+            currentPromptHash = NULL,
+            currentSessionLabel = NULL,
+            currentCwdBasename = NULL
+        WHERE workerId = ?
+    """, arguments: [effectiveStatus, workerId])
+
+    return SetWorkerStatusOutcome(
+        cleared: true, held: held, closedLiveEventId: closedLive,
+        drainedInstead: closedLive != nil && status != "draining"
+    )
+}
+
 // MARK: - Stuck-busy reconcile (Path #1 root fix)
 
 /// Free any worker still pinned (currentEventId == eventId) to an event that is
@@ -806,7 +918,7 @@ let workerActions: [SonataAction] = [
         params: [
             ActionParam("workerId", .string, required: true, description: "Worker identifier"),
             ActionParam("status", .string, required: true, description: "Target status: idle, busy, draining, offline"),
-            ActionParam("clearCurrentEvent", .boolean, description: "If true, also NULL out currentEventId and live-monitoring fields"),
+            ActionParam("clearCurrentEvent", .boolean, description: "If true, also NULL out currentEventId and live-monitoring fields, and close the held event if it is still assigned to this worker. When it was still assigned (live work abandoned, usually a stuck session), the worker is left draining instead of the requested status and the response has drainedInstead:true; run worker_cycle next."),
             ActionParam("expectedEventId", .string, description: "Required when clearCurrentEvent is true: the event id the caller believes the worker holds (worker_inspect reports it). The clear no-ops (success:false) if currentEventId has moved on."),
             ActionParam("force", .boolean, description: "Clear currentEventId without an expectedEventId match. Logged at warning level — genuine mismatched-state repair only."),
         ],
@@ -838,58 +950,11 @@ let workerActions: [SonataAction] = [
                 )
             }
             do {
-                let outcome = try await ctx.dbPool.write { db -> (cleared: Bool, held: String?) in
-                    if clearCurrent {
-                        // Capture the event this worker points at BEFORE nulling
-                        // it, then close that dangling workerEvent too. Otherwise
-                        // the worker frees but its event stays `assigned` forever
-                        // — a leak that (for sonar_dm) shadows the dm_reply
-                        // auto-complete and re-strands the next DM (2026-07-17).
-                        // Only close an event still `assigned` to THIS worker.
-                        let heldEventId = try String.fetchOne(db,
-                            sql: "SELECT currentEventId FROM workers WHERE workerId = ?",
-                            arguments: [workerId])
-                        let held = (heldEventId?.isEmpty == false) ? heldEventId : nil
-
-                        // Compare-and-swap. Refuse when the slot holds something
-                        // other than what the caller expected — including when it
-                        // is already empty, which means someone else got here
-                        // first and whatever we would clear next is not ours.
-                        guard clearCurrentEventShouldProceed(
-                            held: held, expected: expectedEventId, force: force
-                        ) else {
-                            return (cleared: false, held: held)
-                        }
-
-                        try db.execute(sql: """
-                            UPDATE workers SET
-                                status = ?,
-                                currentEventId = NULL,
-                                currentEventTokens = NULL,
-                                currentSlug = NULL,
-                                currentCacheReadTokens = NULL,
-                                currentInputTokens = NULL,
-                                currentPromptHash = NULL,
-                                currentSessionLabel = NULL,
-                                currentCwdBasename = NULL
-                            WHERE workerId = ?
-                        """, arguments: [status, workerId])
-                        if let held {
-                            try db.execute(sql: """
-                                UPDATE workerEvents SET status = 'completed', completedAt = ?,
-                                    result = 'closed via worker_set_status(clearCurrentEvent)',
-                                    idempotencyKey = NULL
-                                WHERE id = ? AND status = 'assigned' AND assignedTo = ?
-                            """, arguments: [nowMs(), held, workerId])
-                        }
-                        return (cleared: true, held: held)
-                    } else {
-                        try db.execute(
-                            sql: "UPDATE workers SET status = ? WHERE workerId = ?",
-                            arguments: [status, workerId]
-                        )
-                        return (cleared: true, held: nil)
-                    }
+                let outcome = try await ctx.dbPool.write { db in
+                    try applySetWorkerStatus(
+                        workerId: workerId, status: status, clearCurrent: clearCurrent,
+                        expectedEventId: expectedEventId, force: force, in: db
+                    )
                 }
                 if clearCurrent && !outcome.cleared {
                     // Visible refusal, not a silent no-op. A caller that believes
@@ -904,6 +969,14 @@ let workerActions: [SonataAction] = [
                 if clearCurrent && force && expectedEventId == nil {
                     workerLogger.warning(
                         "worker_set_status: FORCED unguarded clearCurrentEvent on \(workerId) — closed \(outcome.held ?? "nothing")"
+                    )
+                }
+                if outcome.drainedInstead, let closed = outcome.closedLiveEventId {
+                    workerLogger.warning(
+                        "worker_set_status: \(workerId) held still-assigned \(closed) — left draining instead of \(status)"
+                    )
+                    return ClearDrainedResponse(
+                        workerId: workerId, requestedStatus: status, closedEventId: closed
                     )
                 }
             } catch {
