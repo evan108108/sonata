@@ -952,20 +952,27 @@ class WorkerManager: ObservableObject {
     }
 
     private func teardownWorker(_ worker: Worker, sigtermGrace: TimeInterval, slotLabel: String) {
-        print("[cycle] term-sent: \(slotLabel) pid=\(worker.coordinator?.terminalView?.process?.shellPid ?? 0)")
+        // Read the pid BEFORE terminate(): the liveness check below and the
+        // reap both key on it, not on worker.status. SwiftTerm's terminate()
+        // sends SIGTERM and then cancels its own exit monitor, so its
+        // processTerminated callback (which would mark the slot .offline and
+        // waitpid the child) never runs for a cycled worker.
+        let pid = worker.coordinator?.terminalView?.process?.shellPid ?? 0
+        print("[cycle] term-sent: \(slotLabel) pid=\(pid)")
         worker.coordinator?.autoRestartEnabled = false
         worker.coordinator?.terminalView?.terminate()  // SIGTERM
 
         DispatchQueue.global().asyncAfter(deadline: .now() + sigtermGrace) { [weak self] in
             guard let self else { return }
             DispatchQueue.main.async {
-                if worker.status != .offline {
-                    // Still alive after grace — SIGKILL
+                if reapChildIfExited(pid) == .running {
+                    // Still alive after grace — SIGKILL, then reap.
                     print("[cycle] kill-required: \(slotLabel)")
-                    if let view = worker.coordinator?.terminalView, view.process?.shellPid ?? 0 > 0 {
-                        kill(view.process.shellPid, SIGKILL)
-                    }
+                    kill(pid, SIGKILL)
                     self.alertSupervisor(message: "Worker \(slotLabel) required SIGKILL — idle worker refused to exit after SIGTERM.")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                        print("[cycle] reap-after-kill: \(slotLabel) pid=\(pid) \(reapChildIfExited(pid))")
+                    }
                 }
                 print("[cycle] exit-observed: \(slotLabel)")
                 self.workers.removeAll { $0.id == worker.id }

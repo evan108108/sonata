@@ -1731,3 +1731,28 @@ func performWorkerCycle(
                                    skippedReason: reason, requeuedEventId: requeued)
     }
 }
+
+// MARK: - Child reaping for cycled workers
+
+enum ChildReapResult: Equatable, Sendable {
+    /// The child had exited and is now reaped (no zombie left).
+    case reaped
+    /// The child is still running.
+    case running
+    /// pid 0, already reaped, or not our child (ECHILD).
+    case notChild
+}
+
+/// Non-blocking waitpid for a worker's PTY child. teardownWorker needs this
+/// because SwiftTerm's LocalProcess.terminate() cancels its exit monitor
+/// right after SIGTERM, so nothing else reaps the child: before 11/19 every
+/// cycled worker stayed `<defunct>` until Sonata restarted (seen on
+/// sona-worker-11, pid 67116, the first live worker_cycle).
+func reapChildIfExited(_ pid: pid_t) -> ChildReapResult {
+    guard pid > 0 else { return .notChild }
+    var status: Int32 = 0
+    let r = waitpid(pid, &status, WNOHANG)
+    if r == pid { return .reaped }
+    if r == 0 { return .running }
+    return .notChild
+}
