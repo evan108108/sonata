@@ -732,6 +732,27 @@ let workerActions: [SonataAction] = [
         }
     ),
 
+    // POST /api/worker/cycle — drain, respawn under the same label, SIGTERM the old pid
+    SonataAction(
+        name: "worker_cycle",
+        description: "Cycle a worker: spawn a replacement under the same label, drain the old one and SIGTERM it (the path the task-timeout reap uses). Refuses with 409 while the worker's currentEvent is still 'assigned'; settle it with worker_event_fail/complete first, or pass requeue=true to re-pend it. Returns cycled, or skippedReason (not tracked / already draining|restarting|starting).",
+        group: "/api/worker",
+        path: "/cycle",
+        method: .post,
+        params: [
+            ActionParam("workerId", .string, required: true, description: "Worker identifier", source: .query),
+            ActionParam("requeue", .boolean, required: false, description: "Re-pend a still-'assigned' currentEvent (as worker_drain does) instead of refusing", source: .query),
+        ],
+        handler: { ctx in
+            let workerId = try ctx.params.require("workerId")
+            let requeue = ctx.params.bool("requeue") ?? false
+            return try await performWorkerCycle(
+                workerId: workerId, requeue: requeue,
+                dbPool: ctx.dbPool, cycler: liveWorkerCycler
+            )
+        }
+    ),
+
     // GET /api/prompt_cache_stats — aggregated cache hit-rate per prompt template
     SonataAction(
         name: "prompt_cache_stats",
@@ -1618,3 +1639,95 @@ let workerEventActions: [SonataAction] = [
         }
     ),
 ]
+
+// MARK: - worker_cycle
+
+/// What WorkerManager.cycleWorkerById did with a cycle request.
+enum WorkerCycleOutcome: Sendable, Equatable {
+    /// Drain + replacement spawn + SIGTERM started for the slot with this label.
+    case cycled(label: String)
+    /// Nothing was done: "not tracked" (no pool slot with this id, e.g. an
+    /// external bridge) or "already draining|restarting|starting".
+    case skipped(reason: String)
+}
+
+struct WorkerCycleResponse: Encodable {
+    let success = true
+    let workerId: String
+    /// true when the pool slot was handed to cycleWorker.
+    let cycled: Bool
+    let label: String?
+    /// Why nothing was cycled; nil when cycled.
+    let skippedReason: String?
+    /// The still-'assigned' event that requeue=true put back to 'pending'.
+    let requeuedEventId: String?
+}
+
+/// Default cycler: the same MainActor hop reapOverdueTasks uses through
+/// cycleStuckWorkers in SonataApp.swift.
+let liveWorkerCycler: @Sendable (String) async -> WorkerCycleOutcome = { workerId in
+    await MainActor.run { WorkerManager.shared.cycleWorkerById(workerId) }
+}
+
+/// Core of worker_cycle, kept out of the action so tests can pass a mock
+/// cycler. Tests must never reach WorkerManager: a real cycle SIGTERMs a live
+/// PTY, and booting the pool starts the GhostWorkerReaper.
+///
+/// Order matters. The event check and the requeue run in one write
+/// transaction, before the cycler, so a refusal changes nothing.
+func performWorkerCycle(
+    workerId: String,
+    requeue: Bool,
+    dbPool: DatabasePool,
+    cycler: @Sendable (String) async -> WorkerCycleOutcome
+) async throws -> WorkerCycleResponse {
+    enum Gate: Error { case notFound, assignedEvent(String) }
+    let requeued: String?
+    do {
+        requeued = try await dbPool.write { db -> String? in
+            guard let row = try Row.fetchOne(db, sql:
+                    "SELECT currentEventId FROM workers WHERE workerId = ?",
+                    arguments: [workerId]) else {
+                throw Gate.notFound
+            }
+            let evtId: String? = row["currentEventId"]
+            guard let evtId, !evtId.isEmpty else { return nil }
+            let status = try String.fetchOne(db, sql:
+                "SELECT status FROM workerEvents WHERE id = ?", arguments: [evtId])
+            guard status == "assigned" else { return nil }
+            guard requeue else { throw Gate.assignedEvent(evtId) }
+            // Same writes as worker_drain, in the same transaction: re-pend the
+            // event, clear the pointer, mark draining so nothing is routed here
+            // before cycleWorker's own drain call lands.
+            try db.execute(sql: """
+                UPDATE workerEvents SET assignedTo = NULL, status = 'pending'
+                WHERE id = ? AND status = 'assigned'
+            """, arguments: [evtId])
+            try db.execute(sql: """
+                UPDATE workers SET status = 'draining', currentEventId = NULL
+                WHERE workerId = ?
+            """, arguments: [workerId])
+            return evtId
+        }
+    } catch Gate.notFound {
+        throw ActionError.notFound("worker \(workerId)")
+    } catch Gate.assignedEvent(let evtId) {
+        throw ActionError.custom(
+            "worker \(workerId) still holds event \(evtId) in 'assigned'. A stuck worker's event can be weeks old: settle it first with worker_event_fail (or worker_event_complete if the work landed), then call worker_cycle again. Pass requeue=true only if the event should be re-dispatched to another worker.",
+            .conflict
+        )
+    } catch let error as ActionError {
+        throw error
+    } catch {
+        throw ActionError.database(error.localizedDescription)
+    }
+
+    switch await cycler(workerId) {
+    case .cycled(let label):
+        return WorkerCycleResponse(workerId: workerId, cycled: true, label: label,
+                                   skippedReason: nil, requeuedEventId: requeued)
+    case .skipped(let reason):
+        return WorkerCycleResponse(workerId: workerId, cycled: false, label: nil,
+                                   skippedReason: reason, requeuedEventId: requeued)
+    }
+}

@@ -846,10 +846,11 @@ class WorkerManager: ObservableObject {
     /// already gone or mid-transition (`.draining`, `.restarting`, `.starting`,
     /// `.offline`) so a burst of reaps for related tasks doesn't try to cycle
     /// the same slot twice.
-    func cycleWorkerById(_ workerId: String) {
+    @discardableResult
+    func cycleWorkerById(_ workerId: String) -> WorkerCycleOutcome {
         guard let worker = workers.first(where: { $0.id == workerId }) else {
             print("[reap-cycle] worker \(workerId) no longer tracked — skipping")
-            return
+            return .skipped(reason: "not tracked")
         }
         switch worker.status {
         case .draining, .restarting, .starting:
@@ -860,12 +861,13 @@ class WorkerManager: ObservableObject {
             // but quiet; if truly dead SIGTERM is a no-op and spawn goes
             // through).
             print("[reap-cycle] worker \(worker.label) already \(worker.status) — skipping")
-            return
+            return .skipped(reason: "already \(worker.status.rawValue.lowercased())")
         default:
             break
         }
         print("[reap-cycle] cycling stuck worker \(worker.label) (\(worker.status)) after reap")
         cycleWorker(worker)
+        return .cycled(label: worker.label)
     }
 
     /// Spawn replacement → drain old → SIGTERM → SIGKILL if needed.
