@@ -12,6 +12,8 @@
 #   control/merged-old      old commit, merged into main  → must NOT be reported
 #   control/picked-old      old commit, cherry-picked onto main (new sha, same
 #                           patch)                        → must NOT be reported
+# and runs the stalled-PR leg's recorded-fixture self-test
+# (fixtures/stalled-pr-fixtures.json), which must pass with ≥1 case flagged.
 # Then dismisses control/unowned-old and checks that the run reports
 # "0 unowned" with 1 dismissed and exits 0.
 #
@@ -98,8 +100,18 @@ CAL_ID="$(printf '%s\n' "$resp" | /usr/bin/jq -r '.id // empty')"
 [ -n "$CAL_ID" ] || { echo "setup: calendar create failed: $resp"; exit 2; }
 echo "setup: planted calendar event $CAL_ID naming control/owned-by-cal"
 
+# ---- PR leg: recorded fixtures (approved+green #867 at 30h must flag, at 24h−1m must not) ----
+set +e
+st_out="$("$NODE" "$CHECK" --pr-self-test 2>&1)"; st_rc=$?
+set -e
+printf '%s\n' "$st_out"
+[ "$st_rc" -eq 0 ] && printf '%s\n' "$st_out" | /usr/bin/grep -q '^pr-filter self-test: \([0-9]*\)/\1 cases passed ([1-9]' \
+    && pass "pr-filter self-test: all cases passed, at least one flagged" || fail "pr-filter self-test (exit $st_rc)"
+
 # ---- run 1: the planted unowned branch must be the only report ----
-export UNOWNED_BRANCH_REPOS="$R" UNOWNED_BRANCH_DISMISSED="$WORK/dismissed.json"
+# UNOWNED_BRANCH_PR_SLUGS="" keeps the branch runs off real GitHub; the PR
+# leg still runs its fixture self-test and prints a "0 stalled PR(s)" line.
+export UNOWNED_BRANCH_REPOS="$R" UNOWNED_BRANCH_DISMISSED="$WORK/dismissed.json" UNOWNED_BRANCH_PR_SLUGS=""
 set +e
 out="$("$NODE" "$CHECK" 2>&1)"; rc=$?
 set -e
@@ -113,6 +125,8 @@ done
 # stale unmerged = unowned-old + owned-by-task + owned-by-cal; 2 of them owned.
 printf '%s\n' "$out" | /usr/bin/grep -q '^1 unowned (3 stale unmerged across 1 repo(s); 2 owned, 0 dismissed' \
     && pass "summary: 1 unowned, 3 stale, 2 owned" || fail "summary counts wrong"
+printf '%s\n' "$out" | /usr/bin/grep -q '^0 stalled PR(s) (.*0 open across 0 GitHub repo(s).*self-test \([0-9]*\)/\1)' \
+    && pass "PR leg ran (self-test passed, no live slugs)" || fail "PR leg summary missing or wrong"
 
 # ---- run 2: dismiss the unowned one, expect a trusted "0 unowned" ----
 "$NODE" "$CHECK" --dismiss "$R" control/unowned-old --why "control test" >/dev/null

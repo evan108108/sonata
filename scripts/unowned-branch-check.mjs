@@ -58,12 +58,45 @@
  *
  * Owner lookup goes through Sonata's HTTP API (the same routes the `mem` CLI
  * and the mem_task_list / calendar_upcoming MCP tools use), never sqlite3.
+ *
+ * SECOND LEG: STALLED PRs. A PR that is approved, green and ready can still
+ * sit unmerged because nobody holds the merge. lead-discovery #40 sat 48h on
+ * 11/18–20 while Scout and Sona each left it to the other (reflection
+ * 10a94c60). The branch leg can't see that, because an open PR's branch is
+ * "someone's" by definition. This leg lists the open PRs in every GitHub
+ * remote of REPOS plus PR_EXTRA_SLUGS and flags one when ALL of these hold:
+ *   1. not a draft,
+ *   2. APPROVED: reviewDecision === "APPROVED", or the LAST "## Sona Review —
+ *      <verdict>" review (prStar posts these as COMMENTED on self-authored
+ *      PRs, so reviewDecision stays "") has verdict approve/approve_with_notes
+ *      AND was posted on the current head (a push after approval re-opens it),
+ *   3. GREEN: at least one check registered, every CheckRun COMPLETED with
+ *      SUCCESS, SKIPPED or NEUTRAL, every StatusContext SUCCESS, and at least
+ *      one SUCCESS. No checks registered is NOT green: CI may simply not have
+ *      registered yet (learning e14c3b8e, `gh pr checks` on an unregistered PR).
+ *      SKIPPED passes because adaptengine's CI always skips some jobs (#867:
+ *      16 SUCCESS + 3 SKIPPED), so "every check SUCCESS" would never fire there.
+ *   4. updatedAt older than PR_STALE_AFTER_HOURS.
+ * Likely merger: every agent PR is authored by the shared evan108108 login,
+ * so the login can't name the agent. The head branch can: scout… → Scout,
+ * sona/… → Sona. Otherwise a bot author is named, and anything else is Evan.
+ * KNOWN BLIND SPOT: #40 itself had no GitHub review (it was approved by email)
+ * and lead-discovery has no CI, so this leg would not have flagged it. An
+ * approval only counts here if it is posted on the PR.
+ *
+ * SELF-TEST: every run first evaluates the recorded fixtures in
+ * fixtures/stalled-pr-fixtures.json (#867 aged 30h must flag; at 24h−1m must
+ * not; no-checks, a failed check, a draft, an approve on an older head must
+ * not). If any case fails, the PR leg is skipped and the run exits 2, so a
+ * "0 stalled PR(s)" line always comes from a filter that just matched a known
+ * PR. `--pr-self-test` runs only that.
  */
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // --- constants ---------------------------------------------------------
 const REPOS = [
@@ -93,12 +126,39 @@ const LANDING_OWNER = {
 };
 const ABANDON_OWNER = `Evan: keep or delete (older than ${DECIDE_ABANDON_AFTER_DAYS}d, likely abandoned)`;
 
+// --- stalled-PR leg constants ------------------------------------------
+// Repos without a local checkout in REPOS, scanned by GitHub slug.
+const PR_EXTRA_SLUGS = ["enginable/lead-discovery", "enginable/adaptengine-monorepo"];
+const PR_STALE_AFTER_HOURS = 24;
+// gh pr list returns at most this many; a full page is a sample, so it errors.
+const PR_LIST_LIMIT = 100;
+const PR_FIELDS =
+  "number,title,author,reviewDecision,statusCheckRollup,isDraft,updatedAt,url,headRefName,headRefOid,reviews";
+const GH = existsSync("/opt/homebrew/bin/gh") ? "/opt/homebrew/bin/gh" : "gh";
+const GH_TIMEOUT_MS = 60_000;
+const PASSING_CONCLUSIONS = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+const PRSTAR_APPROVE_VERDICTS = new Set(["approve", "approve_with_notes"]);
+const PRSTAR_VERDICT_RE = /^##\s*Sona Review\s*[—–-]\s*([a-z_]+)/;
+const GITHUB_REMOTE_RE = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/;
+// Head-branch prefix → the agent who holds the merge (all agent PRs share one login).
+const AGENT_BRANCH = [
+  [/^scout[/-]/, "Scout"],
+  [/^sona\//, "Sona (a worker via pending mem_task)"],
+];
+const FIXTURES_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "stalled-pr-fixtures.json");
+
 const API = process.env.SONATA_API || "http://localhost:3211";
 const DISMISS_PATH =
   process.env.UNOWNED_BRANCH_DISMISSED || join(homedir(), ".sonata", "unowned-branch-dismissed.json");
 const repos = process.env.UNOWNED_BRANCH_REPOS
   ? process.env.UNOWNED_BRANCH_REPOS.split(":").filter(Boolean)
   : REPOS;
+// Tests set UNOWNED_BRANCH_PR_SLUGS (colon-separated; "" = scan no PRs) so a
+// control run never queries real GitHub.
+const prSlugOverride =
+  process.env.UNOWNED_BRANCH_PR_SLUGS === undefined
+    ? null
+    : process.env.UNOWNED_BRANCH_PR_SLUGS.split(":").filter(Boolean);
 
 // --- helpers -----------------------------------------------------------
 const git = (repo, args) =>
@@ -210,6 +270,134 @@ function scanRepo(repo, now) {
   return found;
 }
 
+// --- stalled-PR leg ----------------------------------------------------
+function ghSlug(repo) {
+  try {
+    const url = git(repo, ["remote", "get-url", "origin"]).trim();
+    return url.match(GITHUB_REMOTE_RE)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function prSlugs() {
+  if (prSlugOverride) return prSlugOverride;
+  const slugs = repos.filter((r) => existsSync(join(r, ".git"))).map(ghSlug).filter(Boolean);
+  return [...new Set([...slugs, ...PR_EXTRA_SLUGS])];
+}
+
+function listOpenPRs(slug) {
+  const out = execFileSync(
+    GH,
+    ["pr", "list", "-R", slug, "--state", "open", "--limit", String(PR_LIST_LIMIT), "--json", PR_FIELDS],
+    { encoding: "utf8", timeout: GH_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const prs = JSON.parse(out);
+  if (!Array.isArray(prs)) throw new Error(`gh pr list ${slug}: expected an array`);
+  if (prs.length >= PR_LIST_LIMIT) {
+    throw new Error(`gh pr list ${slug} returned ${prs.length} (= limit ${PR_LIST_LIMIT}); can't prove absence`);
+  }
+  return prs;
+}
+
+function isGreen(rollup) {
+  if (!Array.isArray(rollup) || rollup.length === 0) return { green: false, why: "no checks registered" };
+  let successes = 0;
+  for (const c of rollup) {
+    if (c.__typename === "StatusContext") {
+      if (c.state !== "SUCCESS") return { green: false, why: `status ${c.context ?? "?"} is ${c.state}` };
+      successes++;
+      continue;
+    }
+    if (c.status !== "COMPLETED") return { green: false, why: `check ${c.name ?? "?"} is ${c.status}` };
+    if (!PASSING_CONCLUSIONS.has(c.conclusion)) return { green: false, why: `check ${c.name ?? "?"} is ${c.conclusion}` };
+    if (c.conclusion === "SUCCESS") successes++;
+  }
+  if (successes === 0) return { green: false, why: "no check succeeded (all skipped/neutral)" };
+  return { green: true, why: `${successes}/${rollup.length} SUCCESS` };
+}
+
+function approval(pr) {
+  if (pr.reviewDecision === "APPROVED") return { approved: true, via: "reviewDecision APPROVED" };
+  const verdicts = (pr.reviews || [])
+    .map((r) => ({ verdict: (r.body || "").match(PRSTAR_VERDICT_RE)?.[1], oid: r.commit?.oid, at: r.submittedAt }))
+    .filter((r) => r.verdict);
+  const last = verdicts[verdicts.length - 1];
+  if (!last) return { approved: false, why: "no approval (reviewDecision empty, no prStar verdict)" };
+  if (!PRSTAR_APPROVE_VERDICTS.has(last.verdict)) return { approved: false, why: `last prStar verdict is ${last.verdict}` };
+  if (last.oid && pr.headRefOid && last.oid !== pr.headRefOid) {
+    return { approved: false, why: `prStar ${last.verdict} was on ${last.oid.slice(0, 8)}, head is ${pr.headRefOid.slice(0, 8)}` };
+  }
+  return { approved: true, via: `prStar ${last.verdict}` };
+}
+
+function mergerFor(pr) {
+  for (const [re, who] of AGENT_BRANCH) if (re.test(pr.headRefName || "")) return who;
+  if (pr.author?.is_bot) return pr.author.login;
+  return "Evan";
+}
+
+// → { stalled, stage, why, ageMs, merger }. stage names the first gate that
+// failed (draft | approval | checks | fresh), or "stalled". Pure: depends only
+// on the record and now.
+function evaluatePR(pr, now) {
+  const ageMs = now - Date.parse(pr.updatedAt);
+  const base = { ageMs, merger: mergerFor(pr), stalled: false };
+  if (pr.isDraft) return { ...base, stage: "draft", why: "draft" };
+  const a = approval(pr);
+  if (!a.approved) return { ...base, stage: "approval", why: a.why };
+  const g = isGreen(pr.statusCheckRollup);
+  if (!g.green) return { ...base, stage: "checks", why: g.why };
+  if (!(ageMs > PR_STALE_AFTER_HOURS * MS_PER_HOUR)) return { ...base, stage: "fresh", why: `updated ${formatAge(ageMs)} ago` };
+  return { ...base, stalled: true, stage: "stalled", why: `${a.via}; ${g.why}` };
+}
+
+// Runs the recorded fixtures through evaluatePR. Returns failure strings.
+function prSelfTest() {
+  const fx = JSON.parse(readFileSync(FIXTURES_PATH, "utf8"));
+  const failures = [];
+  let matched = 0;
+  for (const c of fx.cases) {
+    const pr = { ...fx.base, ...c.override };
+    const r = evaluatePR(pr, Date.parse(pr.updatedAt) + c.ageMs);
+    if (r.stalled !== c.expectStalled) failures.push(`${c.name}: expected stalled=${c.expectStalled}, got ${r.stalled} (${r.why})`);
+    if (c.expectMerger && r.merger !== c.expectMerger) failures.push(`${c.name}: expected merger ${c.expectMerger}, got ${r.merger}`);
+    if (r.stalled) matched++;
+  }
+  // The filter must have flagged something, or an all-false fixture set would pass vacuously.
+  if (matched === 0) failures.push("no fixture case was flagged as stalled");
+  return { failures, cases: fx.cases.length, matched };
+}
+
+function scanPRs(now, errors) {
+  const st = prSelfTest();
+  if (st.failures.length) {
+    for (const f of st.failures) errors.push(`pr-filter self-test: ${f}`);
+    return { ran: false, selfTest: st, stalled: [], open: 0, slugs: 0, notReady: {} };
+  }
+  const stalled = [];
+  const notReady = {};
+  let open = 0;
+  let slugs = 0;
+  for (const slug of prSlugs()) {
+    let prs;
+    try {
+      prs = listOpenPRs(slug);
+    } catch (e) {
+      errors.push(`${slug} PRs: ${(e.stderr || e.message || String(e)).toString().trim().slice(0, 300)}`);
+      continue;
+    }
+    slugs++;
+    open += prs.length;
+    for (const pr of prs) {
+      const r = evaluatePR(pr, now);
+      if (r.stalled) stalled.push({ slug, pr, ...r });
+      else notReady[r.stage] = (notReady[r.stage] || 0) + 1;
+    }
+  }
+  return { ran: true, selfTest: st, stalled, open, slugs, notReady };
+}
+
 async function sendEmail(subject, text) {
   const res = await fetch(`${API}/api/email/send`, {
     method: "POST",
@@ -224,6 +412,15 @@ async function sendEmail(subject, text) {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  if (args.includes("--pr-self-test")) {
+    const st = prSelfTest();
+    for (const f of st.failures) console.log(`FAIL ${f}`);
+    console.log(
+      `pr-filter self-test: ${st.cases - st.failures.length}/${st.cases} cases passed (${st.matched} flagged as stalled)`,
+    );
+    process.exit(st.failures.length ? 1 : 0);
+  }
 
   const di = args.indexOf("--dismiss");
   if (di !== -1) {
@@ -292,26 +489,67 @@ async function main() {
     `${unowned.length} unowned (${stale.length} stale unmerged across ${scanned} repo(s); ` +
     `${ownedCount} owned, ${dismissedCount} dismissed; checked ${owners.length} task/calendar owners)`;
   console.log(summary);
+
+  // --- stalled PRs ---
+  const pl = scanPRs(now, errors);
+  const prLines = pl.stalled.map((s) =>
+    [s.slug, `#${s.pr.number}`, formatAge(s.ageMs), s.pr.title, `merger: ${s.merger}`, s.pr.url].join("\t"),
+  );
+  for (const l of prLines) console.log(l);
+  if (pl.ran) {
+    const nr = Object.entries(pl.notReady)
+      .map(([k, v]) => `${v} ${k}`)
+      .join(", ");
+    console.log(
+      `${pl.stalled.length} stalled PR(s) (approved + green + not draft + idle >${PR_STALE_AFTER_HOURS}h; ` +
+        `${pl.open} open across ${pl.slugs} GitHub repo(s)${nr ? `; not ready: ${nr}` : ""}; ` +
+        `pr-filter self-test ${pl.selfTest.cases}/${pl.selfTest.cases})`,
+    );
+  } else {
+    console.log("stalled PRs: NOT SCANNED, the pr-filter self-test failed (see ERROR lines)");
+  }
   for (const e of errors) console.log(`ERROR ${e}`);
 
-  if (args.includes("--email") && unowned.length > 0) {
+  if (args.includes("--email") && (unowned.length > 0 || pl.stalled.length > 0)) {
+    const branchPart = unowned.length
+      ? [
+          `${unowned.length} pushed branch(es) are unmerged, older than ${STALE_AFTER_HOURS}h, and no pending/active task or upcoming calendar trigger names their sha or branch:`,
+          "",
+          ...unowned.map(
+            (b) =>
+              `• ${basename(b.repo)} ${b.branch} ${b.sha7} (${formatAge(b.ageMs)}) "${b.subject}"\n  suggested owner: ${b.suggested}`,
+          ),
+          "",
+          "To clear one, do any of:",
+          "  - file a pending mem_task whose prompt names the sha (it lands it), or",
+          "  - delete the remote branch (git push origin --delete <branch>), or",
+          `  - node ${process.argv[1]} --dismiss <repo-path> <branch> --why '...' (re-arms on a new push).`,
+          "",
+        ]
+      : [];
+    const prPart = pl.stalled.length
+      ? [
+          `${pl.stalled.length} open PR(s) are approved, green, not drafts, and untouched for over ${PR_STALE_AFTER_HOURS}h. Each needs one named hand to merge it:`,
+          "",
+          ...pl.stalled.map(
+            (s) => `• ${s.slug} #${s.pr.number} (${formatAge(s.ageMs)} idle) "${s.pr.title}"\n  likely merger: ${s.merger}; ${s.why}\n  ${s.pr.url}`,
+          ),
+          "",
+        ]
+      : [];
     const text = [
-      `${unowned.length} pushed branch(es) are unmerged, older than ${STALE_AFTER_HOURS}h, and no pending/active task or upcoming calendar trigger names their sha or branch:`,
-      "",
-      ...unowned.map(
-        (b) =>
-          `• ${basename(b.repo)} ${b.branch} ${b.sha7} (${formatAge(b.ageMs)}) "${b.subject}"\n  suggested owner: ${b.suggested}`,
-      ),
-      "",
-      "To clear one, do any of:",
-      "  - file a pending mem_task whose prompt names the sha (it lands it), or",
-      "  - delete the remote branch (git push origin --delete <branch>), or",
-      `  - node ${process.argv[1]} --dismiss <repo-path> <branch> --why '...' (re-arms on a new push).`,
-      ...(errors.length ? ["", "Also, the scan hit errors:", ...errors.map((e) => `  ${e}`)] : []),
-      "",
+      ...branchPart,
+      ...prPart,
+      ...(errors.length ? ["Also, the scan hit errors:", ...errors.map((e) => `  ${e}`), ""] : []),
       "— Sona (unowned-branch-check, daily)",
     ].join("\n");
-    await sendEmail(`Unowned branches: ${unowned.length}`, text);
+    const subject = [
+      unowned.length ? `Unowned branches: ${unowned.length}` : null,
+      pl.stalled.length ? `Stalled PRs: ${pl.stalled.length}` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    await sendEmail(subject, text);
     console.log(`emailed ${ALERT_TO}`);
   }
 

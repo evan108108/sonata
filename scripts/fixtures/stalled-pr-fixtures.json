@@ -1,0 +1,639 @@
+{
+  "_about": "Recorded from `gh pr view 867 -R enginable/adaptengine-monorepo --json number,title,author,reviewDecision,statusCheckRollup,isDraft,updatedAt,url,headRefName,headRefOid,reviews` on 2026-11-21 (review bodies cut to 240 chars, rollup cut to __typename/name/status/conclusion). #867 was approved by prStar at its head 119cd5a4 with 16 SUCCESS + 3 SKIPPED checks. Every case is that record, aged by ageMs from its updatedAt, with one field changed. The self-test in unowned-branch-check.mjs runs these on every invocation.",
+  "base": {
+    "author": {
+      "id": "MDQ6VXNlcjE5Nzk5NQ==",
+      "is_bot": false,
+      "login": "evan108108",
+      "name": "Evan Frohlich"
+    },
+    "headRefName": "autobump/claude-code-2.1.329",
+    "headRefOid": "119cd5a4942c8ae1f68163ed4bf555227ec240e0",
+    "isDraft": false,
+    "number": 867,
+    "reviewDecision": "",
+    "reviews": [
+      {
+        "id": "PRR_kwDORJl4Qc8AAAABZVgkPA",
+        "author": {
+          "login": "evan108108"
+        },
+        "authorAssociation": "MEMBER",
+        "body": "## Sona Review — approve\n\n### Summary\nThis is a routine AE-192 autobump of the claude-code pin, 2.1.328 → 2.1.329. It makes the same three deterministic rewrites as #864 and #860, and nothing else.\n\n### Vision Alignment\nIt's aligned. The Do",
+        "submittedAt": "2026-11-20T15:36:47Z",
+        "includesCreatedEdit": false,
+        "reactionGroups": [],
+        "state": "COMMENTED",
+        "commit": {
+          "oid": "119cd5a4942c8ae1f68163ed4bf555227ec240e0"
+        }
+      },
+      {
+        "id": "PRR_kwDORJl4Qc8AAAABZWBhZg",
+        "author": {
+          "login": "evan108108"
+        },
+        "authorAssociation": "MEMBER",
+        "body": "## Sona Review — approve\n\n### Summary\nThis is the routine AE-192 autobump of the claude-code pin from 2.1.328 to 2.1.329: the two Dockerfile pins plus the `SUPERVISOR_BUILD` marker. It is the same three-line shape as #864 (10a77ea25), which",
+        "submittedAt": "2026-11-20T16:15:09Z",
+        "includesCreatedEdit": false,
+        "reactionGroups": [],
+        "state": "COMMENTED",
+        "commit": {
+          "oid": "119cd5a4942c8ae1f68163ed4bf555227ec240e0"
+        }
+      }
+    ],
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "core-tests",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "assistant-intent-quality",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "worker-lint",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "dependency-audit",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "drift-gate",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "worker-test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "patch-verify",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "live-probe",
+        "status": "COMPLETED",
+        "conclusion": "SKIPPED"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "worker-typecheck",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "channels-probe",
+        "status": "COMPLETED",
+        "conclusion": "SKIPPED"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "worker-build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "mcp-qa",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "coach-manager-qa",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "marketing-qa",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "search-qa",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "tools-qa",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "worker-e2e-smoke",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "deploy-tenants-smoke",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "worker-nightly",
+        "status": "COMPLETED",
+        "conclusion": "SKIPPED"
+      }
+    ],
+    "title": "[AE-192 autobump] claude-code 2.1.328 → 2.1.329",
+    "updatedAt": "2026-11-20T16:16:18Z",
+    "url": "https://github.com/enginable/adaptengine-monorepo/pull/867"
+  },
+  "cases": [
+    {
+      "name": "approved-green-30h",
+      "expectStalled": true,
+      "ageMs": 108000000,
+      "override": {}
+    },
+    {
+      "name": "approved-green-24h-minus-1m",
+      "expectStalled": false,
+      "ageMs": 86340000,
+      "override": {}
+    },
+    {
+      "name": "no-checks-registered-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "statusCheckRollup": []
+      }
+    },
+    {
+      "name": "one-check-failed-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "statusCheckRollup": [
+          {
+            "__typename": "CheckRun",
+            "name": "core-tests",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "assistant-intent-quality",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-lint",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "dependency-audit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "drift-gate",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-test",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "patch-verify",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "live-probe",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-typecheck",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "channels-probe",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-build",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "mcp-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "coach-manager-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "marketing-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "search-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "tools-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-e2e-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "deploy-tenants-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-nightly",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          }
+        ]
+      }
+    },
+    {
+      "name": "one-check-still-running-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "statusCheckRollup": [
+          {
+            "__typename": "CheckRun",
+            "name": "core-tests",
+            "status": "IN_PROGRESS",
+            "conclusion": ""
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "assistant-intent-quality",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-lint",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "dependency-audit",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "drift-gate",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-test",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "patch-verify",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "live-probe",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-typecheck",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "channels-probe",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-build",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "mcp-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "coach-manager-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "marketing-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "search-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "tools-qa",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-e2e-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "deploy-tenants-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-nightly",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          }
+        ]
+      }
+    },
+    {
+      "name": "all-checks-skipped-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "statusCheckRollup": [
+          {
+            "__typename": "CheckRun",
+            "name": "core-tests",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "assistant-intent-quality",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-lint",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "dependency-audit",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "drift-gate",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-test",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "patch-verify",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "live-probe",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-typecheck",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "channels-probe",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-build",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "mcp-qa",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "coach-manager-qa",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "marketing-qa",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "search-qa",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "tools-qa",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-e2e-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "deploy-tenants-smoke",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          },
+          {
+            "__typename": "CheckRun",
+            "name": "worker-nightly",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED"
+          }
+        ]
+      }
+    },
+    {
+      "name": "draft-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "isDraft": true
+      }
+    },
+    {
+      "name": "prstar-approve-on-old-head-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "headRefOid": "0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "last-prstar-verdict-request-changes-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "reviews": [
+          {
+            "id": "PRR_kwDORJl4Qc8AAAABZVgkPA",
+            "author": {
+              "login": "evan108108"
+            },
+            "authorAssociation": "MEMBER",
+            "body": "## Sona Review — approve\n\n### Summary\nThis is a routine AE-192 autobump of the claude-code pin, 2.1.328 → 2.1.329. It makes the same three deterministic rewrites as #864 and #860, and nothing else.\n\n### Vision Alignment\nIt's aligned. The Do",
+            "submittedAt": "2026-11-20T15:36:47Z",
+            "includesCreatedEdit": false,
+            "reactionGroups": [],
+            "state": "COMMENTED",
+            "commit": {
+              "oid": "119cd5a4942c8ae1f68163ed4bf555227ec240e0"
+            }
+          },
+          {
+            "id": "PRR_kwDORJl4Qc8AAAABZWBhZg",
+            "author": {
+              "login": "evan108108"
+            },
+            "authorAssociation": "MEMBER",
+            "body": "## Sona Review — request_changes\n\n### Summary",
+            "submittedAt": "2026-11-20T16:15:09Z",
+            "includesCreatedEdit": false,
+            "reactionGroups": [],
+            "state": "COMMENTED",
+            "commit": {
+              "oid": "119cd5a4942c8ae1f68163ed4bf555227ec240e0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "no-review-at-all-30h",
+      "expectStalled": false,
+      "ageMs": 108000000,
+      "override": {
+        "reviews": []
+      }
+    },
+    {
+      "name": "native-reviewDecision-approved-no-prstar-30h",
+      "expectStalled": true,
+      "ageMs": 108000000,
+      "override": {
+        "reviews": [],
+        "reviewDecision": "APPROVED"
+      }
+    },
+    {
+      "name": "scout-branch-merger-30h",
+      "expectStalled": true,
+      "ageMs": 108000000,
+      "override": {
+        "headRefName": "scout/example-fix"
+      },
+      "expectMerger": "Scout"
+    }
+  ]
+}
