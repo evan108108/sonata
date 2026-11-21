@@ -26,6 +26,10 @@ struct StallDiagnosis: Sendable, Equatable {
     let securityAgentSince: Date?
     /// The keychain frame `sample` found on Sonata's stacks, when it found one.
     let sampleEvidence: String?
+    /// When the stalled step started waiting: the time the email names when no
+    /// fresh SecurityAgent dates the dialog. SecurityAgent can outlive one
+    /// dialog and draw the next (11/21: pid 26092 was still up after Sonata quit).
+    var blockedSince: Date? = nil
 
     static let notMainThread = StallDiagnosis(cause: .notMainThread, securityAgentSince: nil, sampleEvidence: nil)
 
@@ -34,7 +38,7 @@ struct StallDiagnosis: Sendable, Equatable {
     var humanAction: String {
         switch cause {
         case .keychainDialog:
-            let since = securityAgentSince.map(Self.describe) ?? "an unknown time"
+            let since = (securityAgentSince ?? blockedSince).map(Self.describe) ?? "an unknown time"
             return "A macOS keychain dialog from Sonata is waiting on your screen since \(since): enter your login password and click Always Allow. Root fix: fc30d09 on fix/webcrypto-master-key-delegate."
         case .mainThreadBlocked:
             return "Sonata's main thread is blocked and no keychain dialog explains it. Look at the screen for any modal dialog from Sonata; otherwise run `sample <Sonata pid> 1` and read the main thread's stack."
@@ -72,12 +76,21 @@ enum StallDiagnoser {
     static let keychainFrames = ["SecItemCopyMatching", "WebCryptoMasterKey", "SecKeychainItemCopyContent"]
 
     /// The production diagnosis.
-    static func diagnose() async -> StallDiagnosis {
+    static func diagnose(_ stall: HealthCycleProgress.Stall) async -> StallDiagnosis {
         let result = await BoundedAwait.value(within: diagnosisTimeout) {
             await diagnoseUnbounded()
         }
         // Timed out: the probes themselves hung, which only a blocked process does.
-        return result ?? StallDiagnosis(cause: .mainThreadBlocked, securityAgentSince: nil, sampleEvidence: nil)
+        var d = result ?? StallDiagnosis(cause: .mainThreadBlocked, securityAgentSince: nil, sampleEvidence: nil)
+        d.blockedSince = blockedSince(of: stall, now: Date())
+        return d
+    }
+
+    /// When the stalled step began waiting: the unresponsive stretch's start,
+    /// or the stuck step's start.
+    static func blockedSince(of stall: HealthCycleProgress.Stall, now: Date) -> Date {
+        let secs = stall.kind == .mainThreadUnresponsive ? stall.cycleSeconds : stall.stepSeconds
+        return now.addingTimeInterval(-TimeInterval(secs))
     }
 
     private static func diagnoseUnbounded() async -> StallDiagnosis {

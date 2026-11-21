@@ -311,7 +311,7 @@ actor HealthMonitor {
         logger: Logger? = nil
     ) {
         self.mainActorHopTimeout = mainActorHopTimeout
-        self.stallDiagnoser = stallDiagnoser ?? { _ in await StallDiagnoser.diagnose() }
+        self.stallDiagnoser = stallDiagnoser ?? { stall in await StallDiagnoser.diagnose(stall) }
         self.alertStatePathOverride = alertStatePath
         self.dbPool = dbPool
         self.sessionsIndexRebuilding = sessionsIndexRebuilding

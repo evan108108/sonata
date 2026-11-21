@@ -287,4 +287,21 @@ final class HealthStallEpisodeTests: XCTestCase {
         XCTAssertTrue(action.contains("enter your login password and click Always Allow"), action)
         XCTAssertEqual(StallDiagnosis.notMainThread.humanAction, "")
     }
+
+    /// SecurityAgent can outlive one dialog and draw the next, so its start
+    /// time may predate Sonata; the email then names when the wait began.
+    func testDialogTimeFallsBackToWhenTheWaitBegan() {
+        let now = Date(timeIntervalSince1970: 1_795_300_000)
+        let stretch = HealthCycleProgress.Stall(generation: 1, step: "check:workerPool", cycleSeconds: 660,
+                                                stepSeconds: 0, kind: .mainThreadUnresponsive)
+        XCTAssertEqual(StallDiagnoser.blockedSince(of: stretch, now: now), now.addingTimeInterval(-660))
+        let stuck = HealthCycleProgress.Stall(generation: 1, step: "reapOverdueTasks", cycleSeconds: 700, stepSeconds: 610)
+        XCTAssertEqual(StallDiagnoser.blockedSince(of: stuck, now: now), now.addingTimeInterval(-610))
+
+        var d = StallDiagnoser.classify(mainThreadResponds: false, securityAgentSince: nil, sampleEvidence: "SecItemCopyMatching")
+        XCTAssertTrue(d.humanAction.contains("since an unknown time"), "control: no time without a fallback")
+        d.blockedSince = now
+        XCTAssertFalse(d.humanAction.contains("unknown time"), d.humanAction)
+        XCTAssertTrue(d.humanAction.contains(StallDiagnosis.describe(now)), d.humanAction)
+    }
 }
