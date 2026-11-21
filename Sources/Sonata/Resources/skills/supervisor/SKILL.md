@@ -129,6 +129,8 @@ Always call `complete_event` as the final step.
 
 ## Common Patterns & Fixes
 
+**`healthMonitorStall` event** → the watchdog diagnosed a stalled HealthMonitor step and has already emailed Evan. Confirm the diagnosis, verify stranded events get reclaimed once cycles resume, `supervisor_report` once, `complete_event`. A **keychain dialog is human-only**: never click, dismiss or script it, and don't restart Sonata (it re-prompts). Full doctrine: `healthMonitorStall` in the supervisor CLAUDE.md.
+
 **"offline" worker with fresh heartbeat** → `worker_register` (resets status to "idle")
 
 **"draining" worker** → ignore, the sweep deletes it automatically when heartbeat goes stale

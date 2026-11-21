@@ -56,6 +56,30 @@ actor HealthMonitor {
     static let monitorStallThreshold: TimeInterval = 10 * 60
     private let watchdogInterval: TimeInterval = 60
 
+    /// Alert/AlertState key for monitor stalls. One stall EPISODE emails once:
+    /// a repeat in the same step is counted, not re-sent, and the first
+    /// completed cycle afterwards sends one RECOVERED notice (2026-11-21: a
+    /// keychain dialog held the main thread from 14:00Z and the old watchdog
+    /// emailed Evan every 10 min for the same step).
+    static let stallAlertCheck = "healthMonitorStall"
+    /// supervisorEvents.type for a diagnosed stall.
+    static let stallSupervisorEventType = "healthMonitorStall"
+
+    /// How long a MainActor hop inside a check may take before the check gives
+    /// up and reports the main thread unresponsive. A healthy hop takes
+    /// microseconds; a blocked main thread never answers, and an unbounded hop
+    /// would hold the whole cycle (and every sweep after it) behind it.
+    static let defaultMainActorHopTimeout: TimeInterval = 5
+    private let mainActorHopTimeout: TimeInterval
+
+    /// Diagnoses a stall from the watchdog path. Production: StallDiagnoser;
+    /// tests inject a stub (the real one samples this process).
+    private let stallDiagnoser: @Sendable (HealthCycleProgress.Stall) async -> StallDiagnosis
+
+    /// Every alert handed to deliverAlert, newest last, capped; read by tests.
+    private(set) var deliveredAlerts: [(check: String, message: String)] = []
+    private static let deliveredAlertsCap = 50
+
     /// Search backend, for the index-drift reconcile check (nil = skip it).
     private let search: (any SearchService)?
     /// Wall-clock gate for the heavier search-index reconcile (scans dirs + may
@@ -128,8 +152,10 @@ actor HealthMonitor {
     /// first healthy cycle after a restart finds the loaded state and sends the
     /// RECOVERED email the old process never got to send.
     private var alertStateFile: String {
-        "\(SonataInstance.dataDirectory)/health-alert-state.json"
+        alertStatePathOverride ?? "\(SonataInstance.dataDirectory)/health-alert-state.json"
     }
+    /// Tests point this at a temp file: the default is the LIVE app's state file.
+    private let alertStatePathOverride: String?
 
     /// Alert state older than this is dropped at load rather than resurrected.
     /// Guards against a machine that sat powered off for a week booting into a
@@ -279,8 +305,14 @@ actor HealthMonitor {
         emailProvider: EmailProvider = AgentMailProvider(),
         search: (any SearchService)? = nil,
         sessionsIndexRebuilding: (@Sendable () async -> Bool)? = nil,
+        mainActorHopTimeout: TimeInterval = HealthMonitor.defaultMainActorHopTimeout,
+        stallDiagnoser: (@Sendable (HealthCycleProgress.Stall) async -> StallDiagnosis)? = nil,
+        alertStatePath: String? = nil,
         logger: Logger? = nil
     ) {
+        self.mainActorHopTimeout = mainActorHopTimeout
+        self.stallDiagnoser = stallDiagnoser ?? { _ in await StallDiagnoser.diagnose() }
+        self.alertStatePathOverride = alertStatePath
         self.dbPool = dbPool
         self.sessionsIndexRebuilding = sessionsIndexRebuilding
         self.emailProvider = emailProvider
@@ -304,6 +336,11 @@ actor HealthMonitor {
         }
         isRunning = true
         loadAlertStates()
+        if alertStates[Self.stallAlertCheck] != nil {
+            // A stall alerted before this restart: the first cycle that
+            // completes here sends its RECOVERED notice.
+            progress.openRestoredStallEpisode()
+        }
         logger.info("HealthMonitor started (interval: \(Int(checkInterval))s)")
 
         loopBody = { monitor, gen in await monitor.monitorLoop(generation: gen) }
@@ -339,27 +376,149 @@ actor HealthMonitor {
         watchdogTask?.cancel()
         let progress = self.progress
         let logger = self.logger
+        let diagnose = self.stallDiagnoser
         watchdogTask = Task.detached { [self] in
-            await HealthLoopWatchdog.run(progress: progress, interval: interval, threshold: threshold) { stall in
-                logger.error("HealthMonitor watchdog: cycle stalled \(stall.cycleSeconds / 60)m in step '\(stall.step)' (step running \(stall.stepSeconds / 60)m); restarting the monitor loop")
-                await self.recoverFromStall(stall)
-            }
+            await HealthLoopWatchdog.run(
+                progress: progress, interval: interval, threshold: threshold,
+                onStall: { stall in
+                    switch stall.kind {
+                    case .cycleStuck:
+                        logger.error("HealthMonitor watchdog: cycle stalled \(stall.cycleSeconds / 60)m in step '\(stall.step)' (step running \(stall.stepSeconds / 60)m); restarting the monitor loop")
+                    case .mainThreadUnresponsive:
+                        logger.error("HealthMonitor watchdog: main thread unresponsive \(stall.cycleSeconds / 60)m, seen by step '\(stall.step)'; cycles continue")
+                    }
+                    // Diagnose here, off the actor and off the stalled loop.
+                    let diagnosis = await diagnose(stall)
+                    logger.error("HealthMonitor watchdog: diagnosis \(diagnosis.cause.rawValue)\(diagnosis.securityAgentSince.map { " (SecurityAgent since \(StallDiagnosis.describe($0)))" } ?? "")\(diagnosis.sampleEvidence.map { " (sample: \($0))" } ?? "")")
+                    await self.recoverFromStall(stall, diagnosis: diagnosis)
+                },
+                onRecovered: {
+                    await self.noteStallEpisodeRecovered()
+                }
+            )
         }
     }
 
-    /// Abandon the stalled loop and start a fresh one, then alert. The old
-    /// loop is cancelled, but a suspended await can't be forced to return; if
-    /// it ever wakes, its generation is stale and it exits at its next sleep.
-    private func recoverFromStall(_ stall: HealthCycleProgress.Stall) async {
+    /// Handle a stall the watchdog found. A stuck cycle is abandoned and a
+    /// fresh loop started (the old one is cancelled, but a suspended await
+    /// can't be forced to return; if it ever wakes, its generation is stale and
+    /// it exits at its next sleep). A main-thread stretch needs no restart: the
+    /// loop is still cycling. Then alert, once per episode.
+    private func recoverFromStall(_ stall: HealthCycleProgress.Stall, diagnosis: StallDiagnosis = .notMainThread) async {
         // A stale report (the loop was already replaced) must not restart the new one.
         guard stall.generation == progress.currentGeneration else { return }
         stallRecoveries.append(stall)
-        monitorTask?.cancel()
-        startLoop()
-        await deliverAlert(
-            check: "healthMonitorStall",
-            message: "HealthMonitor's cycle was stuck \(stall.cycleSeconds / 60)m in step '\(stall.step)' (that step had run \(stall.stepSeconds / 60)m). The monitor loop has been restarted. While it was stuck, no per-cycle sweep ran: stranded-event reclaim, the timeout reaper, dispatchStall, supervisor check pushes. The stuck step names where to look."
+        if stall.kind == .cycleStuck {
+            monitorTask?.cancel()
+            startLoop()
+        }
+        await reportStallEpisode(stall, diagnosis: diagnosis)
+    }
+
+    /// One alert per episode. Same step as the open episode: count the repeat
+    /// and stay quiet. No open episode, or a different step: alert now and tell
+    /// the supervisor.
+    private func reportStallEpisode(_ stall: HealthCycleProgress.Stall, diagnosis: StallDiagnosis) async {
+        let check = Self.stallAlertCheck
+        progress.openStallEpisode()
+        if var state = alertStates[check], state.signature == stall.step {
+            state.suppressedSinceLast += 1
+            alertStates[check] = state
+            logger.warning("HealthMonitor: stall in '\(stall.step)' repeated (\(state.suppressedSinceLast) repeat(s) since the alert at \(state.firstSentAt)); not re-alerting")
+            return
+        }
+        let now = Date()
+        alertStates[check] = AlertState(
+            signature: stall.step, firstSentAt: now, lastSentAt: now, sentCount: 1, suppressedSinceLast: 0
         )
+        let supervisorLive = await enqueueSupervisorStallEvent(stall, diagnosis: diagnosis)
+        await deliverAlert(check: check, message: Self.stallAlertMessage(stall, diagnosis: diagnosis,
+                                                                        supervisorLive: supervisorLive))
+    }
+
+    /// The watchdog saw a cycle complete, with the main thread answering, after
+    /// an alerted stall: send the one RECOVERED notice for the episode.
+    private func noteStallEpisodeRecovered() async {
+        progress.closeStallEpisode()
+        guard let state = alertStates.removeValue(forKey: Self.stallAlertCheck) else { return }
+        await deliverAlert(
+            check: Self.stallAlertCheck,
+            message: Self.stallRecoveredMessage(step: state.signature, repeats: state.suppressedSinceLast,
+                                                duration: Date().timeIntervalSince(state.firstSentAt))
+        )
+    }
+
+    static func stallAlertMessage(_ stall: HealthCycleProgress.Stall, diagnosis: StallDiagnosis,
+                                  supervisorLive: Bool = true) -> String {
+        let what: String
+        switch stall.kind {
+        case .cycleStuck:
+            what = "HealthMonitor's cycle was stuck \(stall.cycleSeconds / 60)m in step '\(stall.step)' (that step had run \(stall.stepSeconds / 60)m). The monitor loop has been restarted. While it was stuck, no per-cycle sweep ran: stranded-event reclaim, the timeout reaper, dispatchStall, supervisor check pushes."
+        case .mainThreadUnresponsive:
+            what = "Sonata's main thread has not answered for \(stall.cycleSeconds / 60)m (seen by step '\(stall.step)'). HealthMonitor's other sweeps keep running, but every webview tool and anything else on the main thread is frozen."
+        }
+        let cause: String
+        switch diagnosis.cause {
+        case .keychainDialog:
+            cause = diagnosis.humanAction
+                + (diagnosis.sampleEvidence.map { " (Sonata's stack shows \($0).)" } ?? "")
+                + " Restarting Sonata only brings the dialog back at the next WebCrypto page."
+                + (supervisorLive
+                    ? " The supervisor has been told; it will not touch the dialog."
+                    : " No supervisor session is running, so nothing else will act on this.")
+        case .mainThreadBlocked:
+            cause = "The main thread is blocked, cause not identified (no keychain dialog since Sonata launched). " + diagnosis.humanAction
+        case .notMainThread:
+            cause = "The main thread answers, so the step waits on something else. The stuck step names where to look."
+        }
+        return what + "\n\n" + cause + "\n\nThis is the only email for this episode: a repeat in the same step is counted, and one RECOVERED notice follows when cycles complete again."
+    }
+
+    static func stallRecoveredMessage(step: String, repeats: Int, duration: TimeInterval) -> String {
+        "RECOVERED: HealthMonitor cycles are completing again after \(humanDuration(duration)). The stall in step '\(step)' repeated \(repeats) more time(s) after the first alert; those repeats were not emailed."
+    }
+
+    /// Tell the supervisor, from the watchdog path (the stalled loop is the
+    /// thing that can't). Its doctrine: confirm the diagnosis, do the safe
+    /// parts once cycles run again, never touch a keychain dialog.
+    /// Returns whether a supervisor session is live to receive it (heartbeat in
+    /// the last 60s, the same test pushSupervisorCheck uses). The row is queued
+    /// either way; a supervisor that starts within 10 min still gets it.
+    @discardableResult
+    private func enqueueSupervisorStallEvent(_ stall: HealthCycleProgress.Stall, diagnosis: StallDiagnosis) async -> Bool {
+        var payload: [String: Any] = [
+            "step": stall.step,
+            "kind": stall.kind.rawValue,
+            "stalledSeconds": stall.cycleSeconds,
+            "diagnosis": diagnosis.cause.rawValue,
+            "humanAction": diagnosis.humanAction,
+            "humanOnly": diagnosis.cause == .keychainDialog,
+        ]
+        if let since = diagnosis.securityAgentSince {
+            payload["securityAgentSince"] = ISO8601DateFormatter().string(from: since)
+        }
+        if let ev = diagnosis.sampleEvidence { payload["sampleEvidence"] = ev }
+        let json = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        do {
+            try await dbPool.write { db in
+                try db.execute(sql: """
+                    INSERT INTO supervisorEvents (id, type, payload, createdAt)
+                    VALUES (?, ?, ?, ?)
+                """, arguments: [UUID().uuidString.lowercased(), Self.stallSupervisorEventType, json,
+                                 Int64(Date().timeIntervalSince1970 * 1000)])
+            }
+        } catch {
+            logger.warning("HealthMonitor: could not queue supervisor stall event: \(error)")
+            return false
+        }
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - 60_000
+        let live = (try? await dbPool.read { db in
+            try Bool.fetchOne(db, sql: "SELECT COUNT(*) > 0 FROM supervisorState WHERE lastHeartbeat >= ?",
+                              arguments: [cutoff])
+        }) ?? false
+        logger.info("HealthMonitor: queued supervisor event \(Self.stallSupervisorEventType) for step '\(stall.step)' (\(diagnosis.cause.rawValue)); supervisor live: \(live == true)")
+        return live == true
     }
 
     /// Test-only: run `loop` in place of monitorLoop under the real
@@ -372,6 +531,11 @@ actor HealthMonitor {
         loopBody = loop
         startLoop()
         startWatchdog(interval: watchdogInterval, threshold: stallThreshold)
+    }
+
+    /// Test-only: run every check once, marking `generation` like the loop does.
+    func runAllChecksForTesting(generation: Int? = nil) async -> [CheckResult] {
+        await runAllChecks(generation: generation)
     }
 
     /// Record a session outcome for tracking.
@@ -419,7 +583,7 @@ actor HealthMonitor {
         let step: (String) -> Void = { [progress] name in progress.mark(gen, name) }
         while !Task.isCancelled {
             progress.begin(gen)
-            let checks = await runAllChecks(mark: { step("check:\($0)") })
+            let checks = await runAllChecks(mark: { step("check:\($0)") }, generation: gen)
 
             for check in checks {
                 if check.healthy {
@@ -662,7 +826,9 @@ actor HealthMonitor {
 
     // MARK: - Health Checks
 
-    private func runAllChecks(mark: (String) -> Void = { _ in }) async -> [CheckResult] {
+    /// `generation` is the monitor loop's; nil for an /api/status snapshot,
+    /// whose observations don't feed the watchdog.
+    private func runAllChecks(mark: (String) -> Void = { _ in }, generation: Int? = nil) async -> [CheckResult] {
         let now = Date()
         var results: [CheckResult] = []
 
@@ -684,7 +850,7 @@ actor HealthMonitor {
         // 5. Worker pool size (backstop for 2026-05-18 auto-spawn flake).
         // Skipped silently when no provider is configured (test harnesses).
         mark("workerPool")
-        if let poolResult = await checkWorkerPool(at: now) {
+        if let poolResult = await checkWorkerPool(at: now, generation: generation) {
             results.append(poolResult)
         }
 
@@ -841,9 +1007,25 @@ actor HealthMonitor {
     /// Otherwise: healthy iff effective >= target OR effective < target for
     /// less than `poolUnderTargetGrace`. Unhealthy results feed the existing
     /// consecutive-failure alert path.
-    private func checkWorkerPool(at time: Date) async -> CheckResult? {
+    private func checkWorkerPool(at time: Date, generation: Int? = nil) async -> CheckResult? {
         guard let provider = workerPoolStatus else { return nil }
-        let snapshot = await provider()
+        // The provider hops to MainActor. Bounded: a blocked main thread
+        // (2026-11-21, a keychain dialog) held this await for hours and every
+        // sweep after it with it. On timeout the check reports "unknown" as
+        // healthy, because the watchdog owns this alert (one email per
+        // episode, diagnosed); a failing result here would add a second,
+        // repeating worker_pool alert for the same cause.
+        guard let snapshot = await BoundedAwait.value(within: mainActorHopTimeout, provider) else {
+            if let gen = generation { progress.noteMainThreadUnresponsive(gen, step: "check:workerPool") }
+            logger.warning("worker_pool check: main thread did not answer in \(Int(mainActorHopTimeout))s")
+            return CheckResult(
+                name: "worker_pool",
+                healthy: true,
+                message: "unknown: main thread unresponsive (no answer in \(Int(mainActorHopTimeout))s)",
+                timestamp: time
+            )
+        }
+        if let gen = generation { progress.noteMainThreadResponsive(gen) }
         if snapshot.effective >= snapshot.target {
             poolUnderTargetSince = nil
             return CheckResult(
@@ -879,8 +1061,8 @@ actor HealthMonitor {
     }
 
     /// Test-only invoker for `checkWorkerPool` (private otherwise).
-    func runWorkerPoolCheckForTesting(at time: Date = Date()) async -> CheckResult? {
-        await checkWorkerPool(at: time)
+    func runWorkerPoolCheckForTesting(at time: Date = Date(), generation: Int? = nil) async -> CheckResult? {
+        await checkWorkerPool(at: time, generation: generation)
     }
 
     /// Check that SQLite is accessible by running a simple query.
@@ -1150,6 +1332,8 @@ actor HealthMonitor {
     /// Send an alert email via AgentMail HTTP API.
     private func deliverAlert(check: String, message: String) async {
         logger.error("ALERT [\(check)]: \(message)")
+        deliveredAlerts.append((check: check, message: message))
+        if deliveredAlerts.count > Self.deliveredAlertsCap { deliveredAlerts.removeFirst() }
 
         // Resolve sender/recipient from DB on first use
         await resolveAlertEmails()
@@ -1905,9 +2089,22 @@ actor HealthMonitor {
         // idempotent for workers already in draining/starting/restarting.
         if let cycler = cycleStuckWorkers {
             logger.warning("escalation: cycling worker \(row.workerId) (\(row.sessionLabel))")
-            await cycler([row.workerId])
+            await cycleBounded(cycler, [row.workerId])
         } else {
             logger.warning("escalation: no cycler available for worker \(row.workerId) — skipping process cycle")
+        }
+    }
+
+    /// Hand workers to the pool's cycler without letting its MainActor hop hold
+    /// the cycle. On timeout the request stays queued and runs when the main
+    /// thread frees, which is still the right action: the task is already failed.
+    private func cycleBounded(_ cycler: @escaping @Sendable ([String]) async -> Void, _ ids: [String]) async {
+        let done: Bool? = await BoundedAwait.value(within: mainActorHopTimeout) {
+            await cycler(ids)
+            return true
+        }
+        if done == nil {
+            logger.warning("cycle of \(ids.joined(separator: ",")) queued behind an unresponsive main thread (no answer in \(Int(mainActorHopTimeout))s); it runs when the main thread frees")
         }
     }
 
@@ -2043,7 +2240,7 @@ actor HealthMonitor {
                     if !outcome.workerIds.isEmpty, let cycler = cycleStuckWorkers {
                         let joined = outcome.workerIds.joined(separator: ",")
                         logger.warning("reapOverdueTasks: cycling \(outcome.workerIds.count) worker(s) that held task \(t.id): \(joined)")
-                        await cycler(outcome.workerIds)
+                        await cycleBounded(cycler, outcome.workerIds)
                     }
                 }
             } catch {

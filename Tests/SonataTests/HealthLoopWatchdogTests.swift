@@ -71,6 +71,14 @@ final class HealthLoopWatchdogTests: XCTestCase {
         return pool
     }
 
+    /// A stub diagnoser and a temp alert-state file: the defaults would sample
+    /// this process and write the LIVE app's ~/.sonata/health-alert-state.json.
+    private func makeMonitor(_ pool: DatabasePool) -> HealthMonitor {
+        let path = NSTemporaryDirectory() + "health-alert-state-\(UUID().uuidString).json"
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        return HealthMonitor(dbPool: pool, stallDiagnoser: { _ in .notMainThread }, alertStatePath: path)
+    }
+
     /// Records which generations ran, and makes the first one hang forever on
     /// a continuation that is never resumed, ignoring cancellation, the way
     /// the 13:27Z cycle did.
@@ -80,7 +88,7 @@ final class HealthLoopWatchdogTests: XCTestCase {
     }
 
     func testWatchdogRestartsAStalledLoopAndNamesTheStep() async throws {
-        let monitor = HealthMonitor(dbPool: try makePool())
+        let monitor = makeMonitor(try makePool())
         let script = LoopScript()
         await monitor.superviseForTesting(loop: { m, gen in
             let hang = await script.run(gen)
@@ -108,7 +116,7 @@ final class HealthLoopWatchdogTests: XCTestCase {
     }
 
     func testWatchdogLeavesAHealthyLoopAlone() async throws {
-        let monitor = HealthMonitor(dbPool: try makePool())
+        let monitor = makeMonitor(try makePool())
         let script = LoopScript()
         await monitor.superviseForTesting(loop: { m, gen in
             _ = await script.run(gen)

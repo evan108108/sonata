@@ -615,8 +615,32 @@ actor MCPEventPusher {
                 return msg
             }
             return payload
+        case "healthMonitorStall":
+            return Self.renderStallEvent(payload: payload)
         default:
             return payload
         }
+    }
+
+    /// HealthMonitor's watchdog found a stall and diagnosed it (see
+    /// HealthMonitor.enqueueSupervisorStallEvent). The doctrine is in the
+    /// supervisor's CLAUDE.md under `healthMonitorStall`.
+    static func renderStallEvent(payload: String) -> String {
+        let obj = payload.data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let step = obj["step"] as? String ?? "unknown"
+        let diagnosis = obj["diagnosis"] as? String ?? "unknown"
+        let action = obj["humanAction"] as? String ?? ""
+        let humanOnly = obj["humanOnly"] as? Bool ?? false
+        var lines = [
+            "HealthMonitor stall in step '\(step)'. Diagnosis: \(diagnosis).",
+        ]
+        if !action.isEmpty { lines.append("Human action: \(action)") }
+        if humanOnly {
+            lines.append("HUMAN-ONLY: a keychain dialog is on Evan's screen. Never click, dismiss or script it, and do not restart Sonata (that only re-prompts). HealthMonitor already emailed Evan; do not email again.")
+        }
+        lines.append("Confirm the diagnosis, then on the next check events verify cycles resumed and stranded events were reclaimed. Follow the healthMonitorStall section of your doctrine.")
+        lines.append("Payload: \(payload)")
+        return lines.joined(separator: "\n")
     }
 }
