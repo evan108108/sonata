@@ -74,10 +74,19 @@ DEPLOY_LOCAL_EXIT_MARKER="==> deploy-local exit"
 # so a failed run never leaves the .app structurally broken. A leftover stage
 # file in Contents/MacOS would break the next codesign seal, so drop it too.
 restore_bundle() { [ -d "$TMP_BUNDLE" ] && mv "$TMP_BUNDLE" "$RESOURCE_BUNDLE" 2>/dev/null || true; }
+# Set once Sonata has been quit and cleared again right before the launch
+# loop: any failure in between (swap, rsync, codesign) would otherwise exit
+# with Sonata down. 2026-11-21 12:37: the 782cf62 deploy's `mv` failed after
+# the quit, exit 1, and Sonata stayed down ~45h until a manual launch.
+RELAUNCH_ON_FAIL=0
 on_exit() {
   local rc=$?
   restore_bundle
   rm -f "$BIN_STAGE"
+  if [ "$rc" -ne 0 ] && [ "$RELAUNCH_ON_FAIL" -eq 1 ]; then
+    echo "==> deploy failed after quitting Sonata — relaunching whatever binary is installed" >&2
+    open "$APP" || echo "ERROR: relaunch failed; Sonata is DOWN — open $APP by hand" >&2
+  fi
   # The non-detached caller polls the log for this line to learn our exit code.
   if [ -n "${DEPLOY_LOCAL_DETACHED:-}" ]; then echo "$DEPLOY_LOCAL_EXIT_MARKER $rc"; fi
 }
@@ -102,6 +111,12 @@ under_sonata() {
 }
 
 if [ -z "${DEPLOY_LOCAL_DETACHED:-}" ] && under_sonata; then
+  # This caller owns no cleanup: the detached run stages, swaps and cleans up.
+  # Disarm on_exit BEFORE forking. Bash runs an EXIT trap on SIGTERM/SIGHUP,
+  # so a caller killed by Sonata's quit ran `rm -f $BIN_STAGE` and deleted the
+  # detached run's staged binary between its cmp and its mv (2026-11-21 12:37,
+  # log /tmp/sonata-deploy-local.50355.log: "mv: rename ... No such file").
+  trap - EXIT
   SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   DLOG="/tmp/sonata-deploy-local.$$.log"; : > "$DLOG"
   DEPLOY_LOCAL_DETACHED=1 /usr/bin/perl -MPOSIX=setsid -e '
@@ -202,6 +217,7 @@ cp "$BIN_SRC" "$BIN_STAGE"
 cmp -s "$BIN_SRC" "$BIN_STAGE" || { echo "ERROR: staged binary doesn't match $BIN_SRC — Sonata left untouched" >&2; exit 1; }
 
 echo "==> quitting Sonata.app (and waiting for :3211 to free)"
+RELAUNCH_ON_FAIL=$LAUNCH
 quit_app
 
 echo "==> swapping binary (atomic rename)"
@@ -284,6 +300,7 @@ fi
 
 # Launch, then verify the bridge actually bound :3211. If not (port-bind race),
 # restart once. This is the failure that otherwise needs a manual restart.
+RELAUNCH_ON_FAIL=0  # the launch loop owns launching from here on
 for attempt in 1 2; do
   echo "==> launch attempt $attempt"
   open "$APP"
