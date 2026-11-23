@@ -34,26 +34,30 @@ enum WebCryptoMasterKey {
     /// thread-safe.
     static let data: Data? = loadOrCreate()
 
-    private static func loadOrCreate() -> Data? {
-        if let stored = SecretStore.get(secretName) {
+    static let secretDescription = "WebKit WebCrypto master key (base64, AES-128). Replaces the keychain item so ad-hoc deploys never raise a keychain dialog. Changing it orphans keys sites stored in IndexedDB."
+
+    /// The store and the random source are parameters so tests can run this
+    /// against an in-memory store instead of the live SecretStore.
+    static func loadOrCreate(
+        get: (String) -> String? = { SecretStore.get($0) },
+        set: (String, String) -> Void = { SecretStore.set(name: $0, value: $1, description: secretDescription) },
+        random: () -> Data? = randomKey
+    ) -> Data? {
+        if let stored = get(secretName) {
             if let decoded = Data(base64Encoded: stored), decoded.count == sizeInBytes {
                 return decoded
             }
             sonataFileLog("WebCryptoMasterKey: stored \(secretName) is not \(sizeInBytes) base64 bytes; replacing it")
         }
-        guard let fresh = randomKey() else {
-            sonataFileLog("WebCryptoMasterKey: SecRandomCopyBytes failed; WebKit gets no master key this run")
+        guard let fresh = random(), fresh.count == sizeInBytes else {
+            sonataFileLog("WebCryptoMasterKey: no \(sizeInBytes)-byte random key; WebKit gets no master key this run")
             return nil
         }
-        SecretStore.set(
-            name: secretName,
-            value: fresh.base64EncodedString(),
-            description: "WebKit WebCrypto master key (base64, AES-128). Replaces the keychain item so ad-hoc deploys never raise a keychain dialog. Changing it orphans keys sites stored in IndexedDB."
-        )
+        set(secretName, fresh.base64EncodedString())
         return fresh
     }
 
-    private static func randomKey() -> Data? {
+    static func randomKey() -> Data? {
         var bytes = [UInt8](repeating: 0, count: sizeInBytes)
         let status = SecRandomCopyBytes(kSecRandomDefault, sizeInBytes, &bytes)
         return status == errSecSuccess ? Data(bytes) : nil
