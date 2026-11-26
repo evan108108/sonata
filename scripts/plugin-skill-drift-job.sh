@@ -75,7 +75,8 @@ $report
 
 Steps:
 1. Re-run /Users/evan/memory/Sonata/scripts/check-plugin-drift.sh --skills-only. It may have been fixed since this task was filed. If it exits 0, complete this task saying so.
-2. For each drifted skill, run diff -r ~/.claude/skills/<slug> <plugin source>/skills/<slug>. The source paths are in ~/.sonata/scripts-config/plugin-sources.txt. Decide which side is newer:
+2. For each drifted plugin, run git -C <plugin source> branch --show-current FIRST. The check compares against the source's WORKING TREE, so a checkout on a feature branch can show drift that isn't there or hide drift that is, and deploy-plugin-local.sh would ship that branch's unmerged code to every session. If it isn't main, never reinstall from it. Compare the live copy against git -C <source> show origin/main:skills/<slug>/SKILL.md instead. To clear the check, merge origin/main into that local branch WITHOUT pushing it (11/26 prfix: 4014ecd on main + local merge f09cb43, no reinstall; learning 7d9f6dc3).
+   Then, for each drifted skill, run diff -r ~/.claude/skills/<slug> <plugin source>/skills/<slug>. The source paths are in ~/.sonata/scripts-config/plugin-sources.txt. Decide which side is newer:
    - The source is newer (a committed edit): reinstall with /Users/evan/memory/Sonata/scripts/deploy-plugin-local.sh <plugin>. For prstar, call prstar_active first and wait for in-flight runs to finish, because the reinstall restarts the plugin.
    - The LIVE copy has an edit the source lacks (someone edited the install): port that edit into the source and commit it BEFORE any reinstall, or the reinstall erases it (memory e0f7de31).
    - The source has UNCOMMITTED skill edits: don't ship someone's work in progress. Ask the plugin's owner.
