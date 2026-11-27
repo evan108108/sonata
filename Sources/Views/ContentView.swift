@@ -42,7 +42,7 @@ struct ContentView: View {
     @FocusState private var searchFocused: Bool
 
     private var navItems: [NavRailItem] {
-        [
+        NavRailCounts.visibleItems([
             NavRailItem(tab: .dashboard, label: "Dashboard", systemImage: "rectangle.grid.2x2.fill"),
             NavRailItem(tab: .sessions, label: "Sessions", systemImage: "bubble.left.and.bubble.right.fill"),
             NavRailItem(tab: .workers, label: "Workers", systemImage: "bolt.fill", badge: workerManager.busyWorkerCount),
@@ -57,7 +57,7 @@ struct ContentView: View {
             NavRailItem(tab: .watchers, label: "Watchers", systemImage: "eye.fill"),
             NavRailItem(tab: .plugins, label: "Plugins", systemImage: "puzzlepiece.extension.fill", badge: railCounts.failedPluginCount, badgeIsAlert: true),
             NavRailItem(tab: .settings, label: "Settings", systemImage: "gear"),
-        ]
+        ], studioPluginEnabled: railCounts.studioPluginEnabled)
     }
 
     var body: some View {
@@ -201,6 +201,14 @@ struct ContentView: View {
             guard newValue != nil else { return }
             if selectedTab != .studio {
                 selectedTab = .studio
+            }
+        }
+        // If the Studio plugin stops being live while the Studio tab is
+        // open, go back to Dashboard so the user isn't left on a view whose
+        // rail entry just disappeared.
+        .onChange(of: railCounts.studioPluginEnabled) { _, enabled in
+            if !enabled && selectedTab == .studio {
+                selectedTab = .dashboard
             }
         }
         }  // close VStack opened above to wrap the hairline + HStack
