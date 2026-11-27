@@ -47,15 +47,20 @@ enum DMTargetResolver {
             )
         }
 
-        // 1 & 2: workers table.
+        // 1, 2 & 2b: workers table — workerId, sessionLabel, or the worker's
+        // Claude session id. A worker that passed that UUID as fromSessionId
+        // has it recorded as senderSessionKey, and dm_reply re-resolves the
+        // reply target from it; without 2b the reply came back not_found
+        // while the worker was alive. Same two-column lookup as
+        // MCPConnections.pushToWorker. An exact workerId still wins.
         if let workerId: String = try? await dbPool.read({ db -> String? in
             try String.fetchOne(db, sql: """
                 SELECT workerId FROM workers
                 WHERE status != 'offline' AND
-                      (workerId = ? OR LOWER(sessionLabel) = ?)
+                      (workerId = ? OR LOWER(sessionLabel) = ? OR sessionId = ?)
                 ORDER BY CASE WHEN workerId = ? THEN 0 ELSE 1 END
                 LIMIT 1
-            """, arguments: [trimmed, ci, trimmed])
+            """, arguments: [trimmed, ci, trimmed, trimmed])
         }).flatMap({ $0 }) {
             return DMResolvedTarget(sessionKey: workerId, kind: .worker, peerId: nil, sessionId: nil)
         }

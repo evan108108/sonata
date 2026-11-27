@@ -544,6 +544,52 @@ final class DMActionsTests: XCTestCase {
         XCTAssertEqual(resolved.sessionKey, "sona-worker-5")
     }
 
+    // A worker that passes its Claude session UUID as `fromSessionId` gets
+    // that UUID recorded as `senderSessionKey`. When the recipient answers
+    // with dm_reply, the reply target is re-resolved from that UUID. The
+    // workers table holds it in `sessionId`, and `pushToWorker` already
+    // accepts either column; the resolver has to as well, or the reply comes
+    // back not_found ("reply_sender_no_longer_reachable") while the worker is
+    // alive (branch fix/dm-reply-fallback-resolution 3f6d62c, 2026-08-03).
+    func testResolverMatchesWorkerByClaudeSessionId() async throws {
+        let (pool, path) = try TestDatabase.makePool()
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        let claudeSessionId = UUID().uuidString.lowercased()
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, 'worker-4242', 'sona-worker-4', ?, 'busy', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, claudeSessionId, now, now])
+        }
+        let maybe = await DMTargetResolver.resolve(claudeSessionId, dbPool: pool)
+        let resolved = try XCTUnwrap(maybe, "a live worker's Claude session id must resolve to that worker")
+        XCTAssertEqual(resolved.kind, .worker)
+        XCTAssertEqual(resolved.sessionKey, "worker-4242")
+    }
+
+    // The new column must not outrank an exact workerId: a row whose
+    // sessionId happens to equal another worker's workerId loses to the
+    // exact match.
+    func testResolverPrefersExactWorkerIdOverSessionIdMatch() async throws {
+        let (pool, path) = try TestDatabase.makePool()
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        try await pool.write { db in
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            try db.execute(sql: """
+                INSERT INTO workers (id, workerId, sessionLabel, sessionId, status,
+                                     capabilities, lastHeartbeat, registeredAt)
+                VALUES (?, 'worker-1', 'label-a', 'worker-2', 'idle', '[]', ?, ?),
+                       (?, 'worker-2', 'label-b', ?, 'idle', '[]', ?, ?)
+            """, arguments: [UUID().uuidString, now, now,
+                             UUID().uuidString, UUID().uuidString, now, now])
+        }
+        let maybe = await DMTargetResolver.resolve("worker-2", dbPool: pool)
+        let resolved = try XCTUnwrap(maybe)
+        XCTAssertEqual(resolved.sessionKey, "worker-2")
+    }
+
     func testInboundSonarDMWithUnknownTargetSessionIdFallsThroughToPool() async throws {
         let pool = try makePoolWithWorkerEvents()
         var payload = inboundSonarDMPayload(body: "label routing test")
